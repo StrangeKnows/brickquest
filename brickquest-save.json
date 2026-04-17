@@ -1,8 +1,8 @@
 {
-  "savedAt": "2026-04-14T07:18:59.032Z",
+  "savedAt": "2026-04-17T17:07:53.976Z",
   "G": {
     "round": 1,
-    "phase": "setup",
+    "phase": "land",
     "activePlayerIdx": 0,
     "turnOrder": [
       "warrior",
@@ -13,7 +13,24 @@
       "beastcaller"
     ],
     "battle": null,
-    "activeEvent": null,
+    "activeEvent": {
+      "cls": "warrior",
+      "roll": "DM",
+      "zone": 2,
+      "resolved": true,
+      "evType": "gold",
+      "goldAmount": 1,
+      "brickColor": "gold",
+      "forced": true,
+      "goldVariant": "crack",
+      "goldMin": 1,
+      "goldMax": 3,
+      "goldResult": {
+        "amount": 2,
+        "wrongTap": true,
+        "totalPlaced": 3
+      }
+    },
     "pendingTrade": null,
     "enhancedMovement": {},
     "movementDebuffs": {},
@@ -36,153 +53,32 @@
     },
     "discoveredClues": [],
     "usedRiddleIdxs": [],
+    "usedBlueVariants": {},
+    "orangeSpaces": {},
+    "blueSpaces": {},
+    "yellowSpaces": {},
+    "greenSpaces": {},
     "allowBackward": false,
     "battleResult": null,
     "storeDisabled": false,
     "log": [
       {
-        "text": "Beastcaller registered as \"[TEST] Beastcaller\"",
-        "kind": "connect",
+        "text": "Warrior found the rat — -1 HP (rat bite)",
+        "kind": "damage",
         "round": 1,
-        "t": "2:07:34 AM"
+        "t": "12:04:39 PM"
       },
       {
-        "text": "Beastcaller connected",
-        "kind": "connect",
+        "text": "Warrior — forced gold: crack (1-3)",
+        "kind": "event",
         "round": 1,
-        "t": "2:07:34 AM"
+        "t": "12:04:34 PM"
       },
       {
-        "text": "Mender registered as \"[TEST] Mender\"",
-        "kind": "connect",
+        "text": "Warrior — DM forced event: gold",
+        "kind": "event",
         "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Mender connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Builder registered as \"[TEST] Builder\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Builder connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Scout registered as \"[TEST] Scout\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Scout connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Wizard registered as \"[TEST] Wizard\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Wizard connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Warrior registered as \"[TEST] Warrior\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Warrior connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:34 AM"
-      },
-      {
-        "text": "Wizard registered as \"[TEST] Wizard\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Wizard connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Builder registered as \"[TEST] Builder\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Builder connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Beastcaller registered as \"[TEST] Beastcaller\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Beastcaller connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Scout registered as \"[TEST] Scout\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Scout connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Mender registered as \"[TEST] Mender\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Mender connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Warrior registered as \"[TEST] Warrior\"",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
-      },
-      {
-        "text": "Warrior connected",
-        "kind": "connect",
-        "round": 1,
-        "t": "2:07:29 AM"
+        "t": "12:04:34 PM"
       }
     ],
     "players": {
@@ -191,10 +87,10 @@
         "icon": "⚔️",
         "color": "#993C1D",
         "name": "Warrior",
-        "hp": 12,
+        "hp": 11,
         "hpMax": 12,
         "armor": 0,
-        "gold": 3,
+        "gold": 5,
         "die": "d8",
         "space": 0,
         "alive": true,
@@ -214,7 +110,7 @@
         "statusEffects": [],
         "connected": false,
         "scavengeRolled": false,
-        "playerName": "[TEST] Warrior",
+        "playerName": "",
         "earnedClues": []
       },
       "wizard": {
@@ -245,7 +141,7 @@
         "statusEffects": [],
         "connected": false,
         "scavengeRolled": false,
-        "playerName": "[TEST] Wizard",
+        "playerName": "",
         "earnedClues": []
       },
       "scout": {
@@ -276,7 +172,7 @@
         "statusEffects": [],
         "connected": false,
         "scavengeRolled": false,
-        "playerName": "[TEST] Scout",
+        "playerName": "",
         "earnedClues": []
       },
       "builder": {
@@ -307,7 +203,7 @@
         "statusEffects": [],
         "connected": false,
         "scavengeRolled": false,
-        "playerName": "[TEST] Builder",
+        "playerName": "",
         "earnedClues": []
       },
       "mender": {
@@ -338,7 +234,7 @@
         "statusEffects": [],
         "connected": false,
         "scavengeRolled": false,
-        "playerName": "[TEST] Mender",
+        "playerName": "",
         "earnedClues": []
       },
       "beastcaller": {
@@ -369,7 +265,7 @@
         "statusEffects": [],
         "connected": false,
         "scavengeRolled": false,
-        "playerName": "[TEST] Beastcaller",
+        "playerName": "",
         "earnedClues": []
       }
     }

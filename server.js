@@ -45,6 +45,7 @@ function freshState() {
     usedBlueVariants: {},     // track used Category B variants per player per zone
     orangeSpaces: {},         // { spaceIdx: trapCount } — persistent traps
     blueSpaces: {},           // { spaceIdx: 1 } — unresolved blue events
+    yellowSpaces: {},          // { spaceIdx: true } — unclaimed yellow brick from expired riddle
     greenSpaces: {},          // { spaceIdx: 1 } — unresolved green events (future)
     allowBackward: false,     // DM toggle: allow players to move backward
     battleResult: null,       // { loot, combatants, resolvedBy } — shown post-battle
@@ -428,7 +429,10 @@ wss.on('connection', (ws, req) => {
     }
 
     if (type === 'landingRoll') {
-      const { cls, roll: r, zone } = P;
+      const { cls, roll: rClient, zone } = P;
+      const r = roll(6); // server-side roll
+      if (G.activeEvent && G.activeEvent.riddleActive) { broadcastState(); return; }
+      if (G.activeEvent && G.activeEvent.cls === cls && !G.activeEvent.resolved) { broadcastState(); return; }
       if (G.activeEvent && G.activeEvent.cls === cls && !G.activeEvent.resolved) {
         broadcastState(); return;
       }
@@ -443,6 +447,12 @@ wss.on('connection', (ws, req) => {
         const blueCount   = (G.blueSpaces   && G.blueSpaces[spaceIdx])   || 0;
         const greenCount  = (G.greenSpaces  && G.greenSpaces[spaceIdx])  || 0;
 
+        const yellowWaiting = (G.yellowSpaces && G.yellowSpaces[spaceIdx]) || false;
+        if (yellowWaiting) {
+          log(pName + ' lands on space with unclaimed yellow brick — riddle resumes', 'event');
+          G.activeEvent = { cls, roll:'SPACE', zone, resolved:false, evType:'riddle', forced:true };
+          broadcastState(); return;
+        }
         if (orangeCount > 0) {
           log(`${pName} lands on persisted trap space (${orangeCount} trap${orangeCount>1?'s':''})`, 'event');
           const evType = orangeCount >= 2 ? 'doubletrap' : 'trap';
@@ -574,6 +584,12 @@ wss.on('connection', (ws, req) => {
       // Auto-resolve after 30s if no answer
       setTimeout(function() {
         if (!G.activeEvent || !G.activeEvent.riddleActive || G.activeEvent.riddleWinner) return;
+        const expiredSpaceIdx = G.players[G.activeEvent.cls] ? G.players[G.activeEvent.cls].space : -1;
+        if (expiredSpaceIdx >= 0) {
+          if (!G.yellowSpaces) G.yellowSpaces = {};
+          G.yellowSpaces[expiredSpaceIdx] = true;
+          log('Yellow brick left on space ' + (expiredSpaceIdx+1) + ' — unclaimed','event');
+        }
         G.activeEvent = { ...G.activeEvent, riddleActive: false, riddleExpired: true };
         log('Riddle timed out — no winner','event');
         broadcastState();
@@ -599,17 +615,20 @@ wss.on('connection', (ws, req) => {
         }
         if (!G.usedRiddleIdxs) G.usedRiddleIdxs = [];
         G.usedRiddleIdxs.push(G.activeEvent.riddleIdx);
+        if (G.yellowSpaces) {
+          const solverSpace = G.players[cls] ? G.players[cls].space : -1;
+          if (solverSpace >= 0) delete G.yellowSpaces[solverSpace];
+        }
         G.activeEvent = { ...G.activeEvent, riddleActive:false, riddleWinner:cls,
           pendingClue: clueEntry, resolved:false };
         log(pNameR+' answered correctly — +1 yellow brick','reward');
         clients.forEach((info,cws)=>{ if(cws.readyState===1) cws.send(JSON.stringify({type:'rewardPopup',kind:'brick',color:'yellow',label:pNameR+' solved it! +1 Yellow Brick!',brickColor:'#F5D000'})); });
       } else {
-        // Wrong — mark this player as wrong so they can't try again
-        if (!G.activeEvent.riddleWrong) G.activeEvent = { ...G.activeEvent, riddleWrong:[] };
-        if (!G.activeEvent.riddleWrong.includes(cls)) {
-          G.activeEvent = { ...G.activeEvent, riddleWrong:[...G.activeEvent.riddleWrong, cls] };
-          log(cls+' answered wrong','event');
-        }
+        // Wrong — track attempt count per player (max 3)
+        const wrongCounts = { ...(G.activeEvent.riddleWrong||{}) };
+        wrongCounts[cls] = (wrongCounts[cls]||0) + 1;
+        G.activeEvent = { ...G.activeEvent, riddleWrong: wrongCounts };
+        log(cls+' answered wrong (attempt '+wrongCounts[cls]+'/3)','event');
       }
       broadcastState(); return;
     }
