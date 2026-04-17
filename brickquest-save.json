@@ -1,0 +1,377 @@
+{
+  "savedAt": "2026-04-14T07:18:59.032Z",
+  "G": {
+    "round": 1,
+    "phase": "setup",
+    "activePlayerIdx": 0,
+    "turnOrder": [
+      "warrior",
+      "wizard",
+      "scout",
+      "builder",
+      "mender",
+      "beastcaller"
+    ],
+    "battle": null,
+    "activeEvent": null,
+    "pendingTrade": null,
+    "enhancedMovement": {},
+    "movementDebuffs": {},
+    "cursedPlayers": {},
+    "blackBrickSpaces": [],
+    "fortressBricks": 12,
+    "villagersRescued": 0,
+    "gates": {
+      "z1z2": "locked",
+      "z2z3": "locked",
+      "z3z4": "locked",
+      "z4z5": "locked",
+      "z5boss": "locked"
+    },
+    "magicKeys": {
+      "blue": null,
+      "red": null,
+      "green": null,
+      "yellow": null
+    },
+    "discoveredClues": [],
+    "usedRiddleIdxs": [],
+    "allowBackward": false,
+    "battleResult": null,
+    "storeDisabled": false,
+    "log": [
+      {
+        "text": "Beastcaller registered as \"[TEST] Beastcaller\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Beastcaller connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Mender registered as \"[TEST] Mender\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Mender connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Builder registered as \"[TEST] Builder\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Builder connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Scout registered as \"[TEST] Scout\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Scout connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Wizard registered as \"[TEST] Wizard\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Wizard connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Warrior registered as \"[TEST] Warrior\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Warrior connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:34 AM"
+      },
+      {
+        "text": "Wizard registered as \"[TEST] Wizard\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Wizard connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Builder registered as \"[TEST] Builder\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Builder connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Beastcaller registered as \"[TEST] Beastcaller\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Beastcaller connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Scout registered as \"[TEST] Scout\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Scout connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Mender registered as \"[TEST] Mender\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Mender connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Warrior registered as \"[TEST] Warrior\"",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      },
+      {
+        "text": "Warrior connected",
+        "kind": "connect",
+        "round": 1,
+        "t": "2:07:29 AM"
+      }
+    ],
+    "players": {
+      "warrior": {
+        "cls": "warrior",
+        "icon": "⚔️",
+        "color": "#993C1D",
+        "name": "Warrior",
+        "hp": 12,
+        "hpMax": 12,
+        "armor": 0,
+        "gold": 3,
+        "die": "d8",
+        "space": 0,
+        "alive": true,
+        "bricks": {
+          "red": 3,
+          "blue": 0,
+          "green": 0,
+          "white": 1,
+          "gray": 2,
+          "purple": 0,
+          "yellow": 0,
+          "orange": 0,
+          "black": 0
+        },
+        "skills": {},
+        "tamed": null,
+        "statusEffects": [],
+        "connected": false,
+        "scavengeRolled": false,
+        "playerName": "[TEST] Warrior",
+        "earnedClues": []
+      },
+      "wizard": {
+        "cls": "wizard",
+        "icon": "🔮",
+        "color": "#3C3489",
+        "name": "Wizard",
+        "hp": 8,
+        "hpMax": 8,
+        "armor": 0,
+        "gold": 3,
+        "die": "d6",
+        "space": 0,
+        "alive": true,
+        "bricks": {
+          "red": 0,
+          "blue": 4,
+          "green": 0,
+          "white": 0,
+          "gray": 0,
+          "purple": 1,
+          "yellow": 1,
+          "orange": 0,
+          "black": 0
+        },
+        "skills": {},
+        "tamed": null,
+        "statusEffects": [],
+        "connected": false,
+        "scavengeRolled": false,
+        "playerName": "[TEST] Wizard",
+        "earnedClues": []
+      },
+      "scout": {
+        "cls": "scout",
+        "icon": "🏃",
+        "color": "#085041",
+        "name": "Scout",
+        "hp": 10,
+        "hpMax": 10,
+        "armor": 0,
+        "gold": 3,
+        "die": "d6",
+        "space": 0,
+        "alive": true,
+        "bricks": {
+          "red": 2,
+          "blue": 0,
+          "green": 0,
+          "white": 0,
+          "gray": 1,
+          "purple": 0,
+          "yellow": 2,
+          "orange": 1,
+          "black": 0
+        },
+        "skills": {},
+        "tamed": null,
+        "statusEffects": [],
+        "connected": false,
+        "scavengeRolled": false,
+        "playerName": "[TEST] Scout",
+        "earnedClues": []
+      },
+      "builder": {
+        "cls": "builder",
+        "icon": "🔧",
+        "color": "#854F0B",
+        "name": "Builder",
+        "hp": 10,
+        "hpMax": 10,
+        "armor": 0,
+        "gold": 3,
+        "die": "d6",
+        "space": 0,
+        "alive": true,
+        "bricks": {
+          "red": 0,
+          "blue": 0,
+          "green": 2,
+          "white": 1,
+          "gray": 2,
+          "purple": 1,
+          "yellow": 0,
+          "orange": 0,
+          "black": 0
+        },
+        "skills": {},
+        "tamed": null,
+        "statusEffects": [],
+        "connected": false,
+        "scavengeRolled": false,
+        "playerName": "[TEST] Builder",
+        "earnedClues": []
+      },
+      "mender": {
+        "cls": "mender",
+        "icon": "💊",
+        "color": "#72243E",
+        "name": "Mender",
+        "hp": 10,
+        "hpMax": 10,
+        "armor": 0,
+        "gold": 3,
+        "die": "d4",
+        "space": 0,
+        "alive": true,
+        "bricks": {
+          "red": 0,
+          "blue": 0,
+          "green": 0,
+          "white": 4,
+          "gray": 0,
+          "purple": 2,
+          "yellow": 1,
+          "orange": 0,
+          "black": 0
+        },
+        "skills": {},
+        "tamed": null,
+        "statusEffects": [],
+        "connected": false,
+        "scavengeRolled": false,
+        "playerName": "[TEST] Mender",
+        "earnedClues": []
+      },
+      "beastcaller": {
+        "cls": "beastcaller",
+        "icon": "🐾",
+        "color": "#27500A",
+        "name": "Beastcaller",
+        "hp": 10,
+        "hpMax": 10,
+        "armor": 0,
+        "gold": 3,
+        "die": "d6",
+        "space": 0,
+        "alive": true,
+        "bricks": {
+          "red": 0,
+          "blue": 0,
+          "green": 4,
+          "white": 0,
+          "gray": 1,
+          "purple": 0,
+          "yellow": 2,
+          "orange": 1,
+          "black": 0
+        },
+        "skills": {},
+        "tamed": null,
+        "statusEffects": [],
+        "connected": false,
+        "scavengeRolled": false,
+        "playerName": "[TEST] Beastcaller",
+        "earnedClues": []
+      }
+    }
+  }
+}

@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Brick Quest — DM Screen</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Crimson+Pro:wght@400;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:#0a0a0f;--surface:#111118;--surface2:#1a1a24;--surface3:#22222e;
+  --border:#2a2a3a;--text:#d8d8e8;--dim:#666;--faint:#333;
+  --gold:#F5D000;--green:#1D9E75;--red:#E24B4A;--orange:#F57C00;--purple:#7B2FBE;
+}
+html,body{height:100%;font-family:'Crimson Pro',Georgia,serif;background:var(--bg);color:var(--text);font-size:14px;font-weight:600;overflow-y:auto;overflow-x:hidden;}
+.layout{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:auto 1fr;height:100vh;overflow:hidden;max-width:100%;box-sizing:border-box;}
+.topbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:8px 16px;background:#060610;border-bottom:1px solid var(--border);flex-wrap:wrap;}
+.topbar h1{font-family:'Cinzel',serif;font-size:16px;color:var(--gold);letter-spacing:.05em;}
+.phase-badge{padding:3px 12px;border-radius:10px;font-size:11px;font-family:'Cinzel',serif;background:#1a1a30;color:#8888cc;border:1px solid #333;}
+.round-info{font-size:12px;color:var(--dim);}
+.conn-row{display:flex;gap:8px;flex-wrap:wrap;}
+.conn-dot{font-size:11px;display:flex;align-items:center;gap:4px;}
+.dot{width:7px;height:7px;border-radius:50%;}
+.dot.on{background:var(--green);box-shadow:0 0 6px var(--green);}
+.dot.off{background:#333;}
+.topbar-btn{padding:4px 12px;border-radius:6px;border:1px solid #333;background:var(--surface2);cursor:pointer;color:var(--dim);font-size:11px;}
+.topbar-btn:hover{border-color:#555;}
+.topbar-btn.danger{border-color:#5a1a1a;color:var(--red);}
+.col{overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px;border-right:1px solid var(--border);}
+.col:last-child{border-right:none;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px;}
+.card-title{font-family:'Cinzel',serif;font-size:10px;letter-spacing:.08em;color:var(--dim);text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;}
+.p-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+.p-card{background:var(--surface2);border-radius:8px;padding:8px;border:1px solid var(--border);}
+.p-card.active-p{border-color:var(--gold);}
+.p-card.ko-p{opacity:.5;}
+.p-name{font-family:'Cinzel',serif;font-size:12px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:5px;flex-wrap:wrap;}
+.p-hpbar{height:5px;border-radius:3px;background:#1a1a1a;overflow:hidden;margin-bottom:4px;}
+.p-hpfill{height:100%;border-radius:3px;transition:width .4s;}
+.p-stats{font-size:10px;color:var(--dim);display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px;}
+.p-bricks{display:flex;flex-wrap:wrap;gap:2px;margin-top:3px;}
+.mini-brick{width:10px;height:10px;border-radius:2px;display:inline-block;}
+.adj{padding:2px 7px;font-size:12px;border-radius:5px;border:1px solid var(--border);background:var(--surface3);cursor:pointer;color:var(--text);}
+.adj:hover{border-color:#555;}
+.btn{display:block;width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);cursor:pointer;color:var(--text);font-family:'Crimson Pro',serif;font-size:13px;font-weight:600;text-align:left;margin-bottom:5px;transition:all .15s;}
+.btn:hover{border-color:#555;}
+.btn.P{background:#1a1a30;border-color:#3C3489;color:#8888ee;}
+.btn.G{background:#051a0f;border-color:var(--green);color:var(--green);}
+.btn.D{background:#1a0505;border-color:var(--red);color:var(--red);}
+.btn.W{background:#1a1000;border-color:var(--orange);color:var(--orange);}
+.btn-row{display:flex;gap:5px;margin-bottom:5px;}
+.btn-row .btn{margin-bottom:0;}
+.btn-sm{padding:4px 10px;font-size:11px;border-radius:6px;display:inline-block;width:auto;margin-bottom:0;}
+.board-scroll{overflow-x:auto;padding-bottom:6px;}
+.board-inner{display:flex;gap:2px;min-width:max-content;}
+.zone-col{display:flex;flex-direction:column;gap:2px;}
+.zone-hdr{border-radius:6px;padding:4px 6px;text-align:center;font-size:10px;font-family:'Cinzel',serif;min-width:70px;}
+.space{border-radius:5px;border:1px solid var(--border);padding:3px;text-align:center;min-height:30px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;background:var(--surface2);}
+.space:hover{border-color:#555;}
+.space.has-players{border-color:#555;background:var(--surface3);}
+.space.trapped{border-color:var(--orange);}
+.p-token{width:13px;height:13px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:7px;}
+.space-num{font-size:8px;color:var(--faint);}
+.gate-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;background:var(--surface2);border:1px solid var(--border);margin-bottom:4px;}
+.gate-status{font-size:10px;font-weight:700;padding:2px 7px;border-radius:8px;}
+.gate-status.locked{background:#1a0505;color:var(--red);}
+.gate-status.open{background:#051a0f;color:var(--green);}
+.mon-card{border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;background:var(--surface2);}
+.mon-card.dead{opacity:.4;}
+.mon-brick{width:11px;height:11px;border-radius:2px;cursor:pointer;display:inline-block;}
+.mon-brick.gone{opacity:.1;}
+.log-scroll{max-height:200px;overflow-y:auto;}
+.log-item{font-size:11px;padding:3px 0;border-bottom:1px solid #111;display:flex;gap:8px;}
+.log-time{font-size:9px;color:var(--faint);min-width:36px;flex-shrink:0;}
+.init-pill{padding:3px 9px;border-radius:9px;font-size:11px;border:1px solid transparent;display:inline-block;margin:2px;}
+.init-pill.active{border-width:2px;}
+select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--border);background:var(--surface3);color:var(--text);font-size:12px;margin-bottom:6px;}
+.diff-badge{font-size:9px;padding:1px 6px;border-radius:8px;}
+.diff-badge.easy{background:#051a0f;color:var(--green);}
+.diff-badge.medium{background:#1a1000;color:var(--orange);}
+.diff-badge.hard{background:#1a0505;color:var(--red);}
+.fortress-brick{width:18px;height:18px;border-radius:3px;background:#888;border:1px solid #aaa;display:inline-block;margin:2px;}
+.fortress-brick.gone{background:#1a1a1a;border-color:#222;}
+::-webkit-scrollbar{width:3px;height:3px;}
+::-webkit-scrollbar-thumb{background:#2a2a2a;border-radius:2px;}
+</style>
+</head>
+<body>
+<div id="dm-zoom-root" style="width:100%;min-height:100vh;transform-origin:top left;overflow:hidden;"><div class="layout">
+
+  <div class="topbar">
+    <span style="font-size:18px;">&#129520;</span>
+    <h1>Brick Quest &#8212; DM</h1>
+    <span class="phase-badge" id="phase-badge">Setup</span>
+    <span class="round-info">Round <span id="round-num">1</span> &nbsp;|&nbsp; Turn: <span id="active-turn" style="color:var(--gold)">&#8212;</span></span>
+    <span id="dm-conn" style="font-size:11px;color:var(--dim);">Connecting&#8230;</span>
+    <div class="conn-row" id="conn-row"></div>
+    <button class="topbar-btn" onclick="client.nextTurn()">Next Turn &#8594;</button>
+    <button class="topbar-btn danger" onclick="if(confirm('Reset game?'))client.resetGame()">Reset</button>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <div class="card-title">Players</div>
+      <div class="p-grid" id="p-grid">
+        <div style="color:var(--dim);font-size:12px;grid-column:1/-1;padding:10px 0;">Waiting for connection&#8230;</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;cursor:pointer;" onclick="toggleMapLog()">
+        <span class="card-title" style="margin-bottom:0;" id="map-section-title">Board Map</span>
+        <span style="font-size:10px;color:var(--dim);font-family:Cinzel,serif;letter-spacing:.04em;" id="map-toggle-hint">tap to view log ▾</span>
+      </div>
+      <div id="map-view">
+        <div class="board-scroll"><div class="board-inner" id="board-map"></div></div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:8px 0;">
+        <div class="card-title">Gates</div>
+        <div id="gates-panel"></div>
+      </div>
+      <div id="log-view" style="display:none;">
+        <div class="log-scroll" id="log-scroll"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Trapped Kingdom</div>
+      <div style="display:flex;gap:8px;margin-bottom:8px;">
+        <div style="flex:1;background:var(--surface2);border-radius:8px;padding:8px;text-align:center;">
+          <div style="font-family:Cinzel,serif;font-size:24px;color:var(--orange);" id="fortress-count">12</div>
+          <div style="font-size:10px;color:var(--dim);">Fortress Bricks</div>
+          <button class="btn W btn-sm" style="margin-top:4px;" onclick="client.removeFortressBrick()">Remove</button>
+        </div>
+        <div style="flex:1;background:var(--surface2);border-radius:8px;padding:8px;text-align:center;">
+          <div style="font-family:Cinzel,serif;font-size:24px;color:var(--green);" id="villager-count">0/3</div>
+          <div style="font-size:10px;color:var(--dim);">Villagers Rescued</div>
+          <button class="btn G btn-sm" style="margin-top:4px;" onclick="client.rescueVillager()">Rescue</button>
+        </div>
+      </div>
+      <div id="fortress-track" style="margin-bottom:10px;"></div>
+      <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;">
+        <div class="card-title" style="color:var(--gold);">Clues Discovered</div>
+        <div id="clue-list"><div style="font-size:12px;color:var(--faint);">No clues found yet.</div></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <div class="card-title">Turn Control</div>
+      <button class="btn G" style="width:100%;font-size:15px;padding:10px;font-family:Cinzel,serif;letter-spacing:.04em;margin-bottom:8px;" onclick="client.send('nextTurn')">⏭ Next Turn →</button>
+      <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;" id="turn-btns"></div>
+      <div class="btn-row">
+        <button class="btn P btn-sm" onclick="client.setPhase('trade')">Trade</button>
+        <button class="btn P btn-sm" onclick="client.setPhase('move')">Move</button>
+        <button class="btn P btn-sm" onclick="client.setPhase('land')">Land</button>
+        <button class="btn P btn-sm" onclick="client.setPhase('battle')">Battle</button>
+      </div>
+      <div style="margin-top:8px;padding:8px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.08em;color:var(--dim);text-transform:uppercase;">Movement</div>
+          <label style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--dim);cursor:pointer;">
+            <input type="checkbox" id="allow-backward" onchange="client.send('toggleMovement',{allowBackward:this.checked})" style="cursor:pointer;">
+            Allow Backward
+          </label>
+        </div>
+        <div id="move-active-player" style="font-size:13px;color:var(--gold);margin-bottom:6px;font-family:Cinzel,serif;">—</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <input id="move-roll-input" type="number" min="1" max="8" value="1"
+            style="width:80px;padding:6px;border-radius:7px;border:1px solid var(--border);background:var(--surface3);color:var(--text);">
+          <button class="btn P btn-sm" onclick="processMove(false)">→ Forward</button>
+          <button class="btn btn-sm" id="backward-btn" style="display:none;" onclick="processMove(true)">← Back</button>
+          <select id="move-player-sel" style="flex:1;min-width:80px;margin-bottom:0;font-size:11px;display:none;"></select>
+          <button class="btn btn-sm" style="font-size:10px;" onclick="document.getElementById('move-player-sel').style.display=document.getElementById('move-player-sel').style.display==='none'?'block':'none'">Other</button>
+        </div>
+        <div id="move-result" style="font-size:11px;color:var(--dim);margin-top:5px;"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Landing Events</div>
+      <div id="active-event-panel" style="display:none;margin-bottom:10px;padding:10px;border-radius:10px;background:#0a0a1a;border:2px solid var(--gold);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
+          <span style="font-family:Cinzel,serif;font-size:11px;color:var(--gold);">&#9889; ACTIVE LANDING EVENT</span>
+          <button class="btn G btn-sm" onclick="dmResolveEvent()">&#10003; Mark Resolved</button>
+        </div>
+        <div id="active-event-body"></div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
+        <select id="event-zone-sel" style="flex:1;margin-bottom:0;" onchange="if(document.getElementById('event-table').innerHTML) showEventTable()">
+          <option value="1">Zone 1 &#8212; Courtyard</option>
+          <option value="2">Zone 2 &#8212; Corridor</option>
+          <option value="3">Zone 3 &#8212; Guard Post</option>
+          <option value="4">Zone 4 &#8212; Flood Chamber</option>
+          <option value="5">Zone 5 &#8212; Throne Room</option>
+        </select>
+        <button class="btn P btn-sm" id="view-table-btn" onclick="toggleEventTable()">View Table</button>
+      </div>
+      <div id="event-table"></div>
+      <div id="trivia-panel" style="margin-top:8px;display:none;">
+        <div style="font-family:Cinzel,serif;font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:6px;">LEGO Trivia</div>
+        <div id="trivia-content"></div>
+        <div class="btn-row">
+          <button class="btn P btn-sm" onclick="nextTrivia()">Different</button>
+          <button class="btn G btn-sm" onclick="triviaCorrect()">&#10003; Correct</button>
+          <button class="btn btn-sm" onclick="document.getElementById('trivia-panel').style.display='none'">Close</button>
+        </div>
+      </div>
+      <div id="riddle-panel" style="margin-top:8px;display:none;">
+        <div style="font-family:Cinzel,serif;font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:6px;">Riddle</div>
+        <div id="riddle-content"></div>
+        <div id="riddle-solver-wrap" style="display:none;margin-top:8px;"></div>
+        <div class="btn-row">
+          <button class="btn G btn-sm" onclick="riddleSolved()">&#10003; Solved</button>
+          <button class="btn btn-sm" onclick="nextRiddle()">Different</button>
+          <button class="btn btn-sm" onclick="showChallenge()">Challenge</button>
+          <button class="btn btn-sm" onclick="document.getElementById('riddle-panel').style.display='none'">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="battle-section">
+      <div class="card-title">
+        Battle
+        <div style="display:flex;gap:4px;">
+          <button class="btn P btn-sm" onclick="showStartBattle()">Start Battle</button>
+          <button class="btn G btn-sm" onclick="client.endBattle()">End Battle</button>
+        </div>
+      </div>
+      <div id="battle-content"><div style="font-size:12px;color:var(--faint);">No active battle.</div></div>
+    </div>
+    <div id="battle-result-panel" style="display:none;"></div>
+  </div>
+</div>
+
+<div id="battle-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center;padding:20px;">
+  <div style="background:#111118;border:1px solid var(--border);border-radius:12px;padding:16px;max-width:380px;width:100%;">
+    <div style="font-family:Cinzel,serif;font-size:14px;color:var(--gold);margin-bottom:12px;">Start Battle</div>
+    <div style="margin-bottom:8px;">
+      <div style="font-size:10px;color:var(--dim);margin-bottom:4px;">Select Monsters:</div>
+      <div id="mon-checkboxes" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+    </div>
+    <div style="margin-bottom:8px;">
+      <div style="font-size:10px;color:var(--dim);margin-bottom:4px;">Combatants:</div>
+      <div id="combatant-checkboxes" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+    </div>
+    <div style="margin-bottom:8px;">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+        <input type="checkbox" id="is-boss-cb"> Boss fight
+      </label>
+    </div>
+    <div class="btn-row">
+      <button class="btn P" onclick="confirmStartBattle()">Begin</button>
+      <button class="btn" onclick="document.getElementById('battle-modal').style.display='none'">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="game.js"></script>
+<script>
+var client = new GameClient('dm');
+function applyDMFontSize(size) {
+  var scale = size / 16;
+  var root = document.getElementById('dm-zoom-root');
+  var layout = document.querySelector('.layout');
+  var html = document.documentElement;
+
+  html.style.overflowX = 'hidden';
+  document.body.style.overflowX = 'hidden';
+
+  if (scale <= 1) {
+    if (root) {
+      root.style.transform = '';
+      root.style.transformOrigin = '';
+      root.style.width = '100%';
+      root.style.minHeight = '';
+    }
+    html.style.overflowY = '';
+    document.body.style.overflowY = '';
+    document.body.style.height = '';
+    if (layout) { layout.style.height = ''; layout.style.minHeight = ''; layout.style.overflow = ''; }
+    document.querySelectorAll('.panel').forEach(function(p) { p.style.overflow = ''; p.style.height = ''; });
+  } else {
+    var invScale = 1 / scale;
+    if (root) {
+      root.style.transformOrigin = 'top left';
+      root.style.transform = 'scale(' + scale.toFixed(3) + ')';
+      root.style.width = (invScale * 100).toFixed(2) + 'vw';
+      root.style.minHeight = (invScale * 100).toFixed(2) + 'vh';
+    }
+    html.style.overflowY = 'auto';
+    document.body.style.overflowY = 'auto';
+    document.body.style.height = 'auto';
+    if (layout) { layout.style.height = 'auto'; layout.style.minHeight = (invScale*100).toFixed(2)+'vh'; layout.style.overflow = 'visible'; }
+    document.querySelectorAll('.panel').forEach(function(p) { p.style.overflow = 'visible'; p.style.height = 'auto'; });
+  }
+  try { localStorage.setItem('bq_dm_font_size', size); } catch(e) {}
+}
+function initDMFontSize() {
+  var saved = null;
+  try { saved = localStorage.getItem('bq_dm_font_size'); } catch(e) {}
+  var size = saved ? Math.max(16, parseInt(saved)) : 16;
+  applyDMFontSize(size);
+  var sl = document.getElementById('dm-font-slider');
+  if (sl) sl.value = size;
+}
+
+var G = null;
+var BCOLORS_DM = {blue:'#006DB7',gray:'#AAAAAA',white:'#EFEFEF',orange:'#F57C00',purple:'#7B2FBE',yellow:'#F5D000',red:'#D01012',green:'#237841'};
+var currentTriviaIdx = 0;
+var currentRiddleIdx = 0;
+var triviaTargetCls = null;
+
+var CLS_NAMES = {warrior:'Warrior',wizard:'Wizard',scout:'Scout',builder:'Builder',mender:'Mender',beastcaller:'Beastcaller'};
+var ZONE_COLORS = ['#0a1a0a','#1a1a2e','#2a1500','#2a0a0a','#1a0a2a'];
+
+function pLabel(p) {
+  if (!p) return '?';
+  return p.playerName ? p.playerName + ' (' + p.icon + ')' : p.icon + ' ' + (p.name || p.cls);
+}
+
+function renderAll() {
+  if (!G) return;
+  renderTopBar();
+  renderPlayers();
+  renderBoard();
+  renderGates();
+  renderScenario();
+  renderTurnControl();
+  renderActiveEvent();
+  // Riddle timer tick on DM
+  if (G.activeEvent && G.activeEvent.riddleActive) {
+    if (!window._dmRiddleTimer) {
+      window._dmRiddleTimer = setInterval(function() {
+        var bar = document.getElementById('dm-riddle-bar');
+        if (!bar || !G.activeEvent || !G.activeEvent.riddleActive) { clearInterval(window._dmRiddleTimer); window._dmRiddleTimer=null; return; }
+        var pct = Math.max(0, Math.round((G.activeEvent.riddleEndsAt - Date.now())/300));
+        bar.style.width = pct+'%';
+      }, 500);
+    }
+  } else if (window._dmRiddleTimer) {
+    clearInterval(window._dmRiddleTimer); window._dmRiddleTimer = null;
+  }
+  if (G.battle) { var be = document.getElementById('battle-section'); if (be) be.style.display='block'; renderBattle(); }
+  else { var be = document.getElementById('battle-section'); if (be) be.style.display='none'; }
+  // Show post-battle result panel if players haven't all continued yet
+  var br = document.getElementById('battle-result-panel');
+  if (br) {
+    if (G.battleResult) {
+      var loot = G.battleResult.loot || {gold:0,bricks:[]};
+      var resolved = G.battleResult.resolvedBy || [];
+      var total = G.battleResult.combatants || [];
+      // Build icon row
+      var BCOLORS = {red:'#D01012',blue:'#006DB7',green:'#237841',white:'#EFEFEF',gray:'#AAAAAA',purple:'#7B2FBE',yellow:'#F5D000',orange:'#F57C00',black:'#333'};
+      var iconRow = '';
+      for (var gi=0;gi<(loot.gold||0);gi++) iconRow += '<span style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:2px;">🪙</span>';
+      (loot.bricks||[]).forEach(function(b){
+        var bg=BCOLORS[b]||'#888';var bdr=b==='white'?'border:1px solid #ccc;':'';
+        iconRow+='<span style="width:18px;height:18px;border-radius:3px;background:'+bg+';'+bdr+'display:inline-block;margin:2px;box-shadow:0 1px 3px rgba(0,0,0,.4);"></span>';
+      });
+      br.style.display = 'block';
+      br.innerHTML = '<div style="padding:10px;border-radius:10px;background:#051a0f;border:1px solid var(--green);">'
+        + '<div style="font-family:Cinzel,serif;font-size:11px;color:var(--green);margin-bottom:8px;">⚔️ VICTORY</div>'
+        + (iconRow ? '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:2px;margin-bottom:8px;">' + iconRow + '</div>' : '')
+        + '<div style="font-size:12px;color:var(--text);margin-bottom:8px;">Acknowledged: ' + (resolved.length ? resolved.map(function(c){var pl=G.players[c];return pl?pLabel(pl):c;}).join(', ') : 'none yet') + ' (' + resolved.length + '/' + total.length + ')</div>'
+        + '<button class="btn G" onclick="client.send(\'resolveBattle\',{})" style="width:100%;">DM Force Resolve — Advance Turn</button>'
+        + '</div>';
+    } else {
+      br.style.display = 'none';
+      br.innerHTML = '';
+    }
+  }
+  renderClues();
+  renderLog();
+}
+
+function renderTopBar() {
+  var phaseBadge = document.getElementById('phase-badge');
+  if (phaseBadge) phaseBadge.textContent = G.phase;
+  var roundNum = document.getElementById('round-num');
+  if (roundNum) roundNum.textContent = G.round;
+  var ap = G.players[G.turnOrder[G.activePlayerIdx]];
+  var activeTurn = document.getElementById('active-turn');
+  if (activeTurn) activeTurn.textContent = ap ? pLabel(ap) : '?';
+
+  var cr = document.getElementById('conn-row');
+  if (cr) {
+    var crHtml = '';
+    Object.values(G.players).forEach(function(p) {
+      crHtml += '<span class="conn-dot"><span class="dot ' + (p.connected ? 'on' : 'off') + '"></span>'
+        + '<span style="color:' + (p.connected ? 'var(--green)' : 'var(--faint)') + ';">' + p.icon + ' ' + (p.playerName || p.name || p.cls) + '</span></span>';
+    });
+    cr.innerHTML = crHtml;
+  }
+
+  var sel = document.getElementById('move-player-sel');
+  if (sel) {
+    var selHtml = '';
+    Object.values(G.players).forEach(function(p) {
+      selHtml += '<option value="' + p.cls + '">' + pLabel(p) + '</option>';
+    });
+    sel.innerHTML = selHtml;
+  }
+  var moveLabel = document.getElementById('move-active-player');
+  if (moveLabel && ap) {
+    moveLabel.textContent = ap.icon + ' ' + pLabel(ap) + ' — enter their roll:';
+    if (sel) sel.value = ap.cls;
+  }
+  // Sync backward toggle
+  var bwCheck = document.getElementById('allow-backward');
+  if (bwCheck) bwCheck.checked = !!G.allowBackward;
+  var bwBtn = document.getElementById('backward-btn');
+  if (bwBtn) bwBtn.style.display = G.allowBackward ? 'inline-block' : 'none';
+}
+
+client.on(function(event, data) {
+  if (event === 'connected') {
+    var pill = document.getElementById('conn-pill');
+    if (pill) { pill.className='conn-pill on'; pill.textContent='DM Online'; }
+  }
+  if (event === 'disconnected') {
+    var pill = document.getElementById('conn-pill');
+    if (pill) { pill.className='conn-pill off'; pill.textContent='Offline'; }
+  }
+  if (event === 'state') {
+    G = data;
+    renderAll();
+  }
+  if (event === 'enhancedResult') {
+    showDMBanner('Enhanced Movement', data.playerName + ' activated Enhanced Movement — ' + data.duration + ' turn(s)! They may use 2 actions of the same type per turn.', 'var(--green)');
+  }
+  if (event === 'forceGateResult') {
+    var p2 = G && G.players && G.players[data.cls];
+    var nm = p2 ? (p2.playerName || p2.name) : (data.cls || '?');
+    var msg = data.note || (data.success
+      ? nm + ' forced the gate open! (rolled ' + data.roll + ')'
+      : nm + ' failed to force gate (rolled ' + data.roll + ', need 5+)');
+    showDMBanner('Gate Force Attempt', msg, data.success ? 'var(--green)' : 'var(--red)');
+  }
+  if (event === 'skillUnlocked') {
+    var skillNameDM = (data.skillName || data.skillId || '').replace(/_/g,' ');
+    skillNameDM = skillNameDM.charAt(0).toUpperCase() + skillNameDM.slice(1);
+    showDMBanner('Skill Unlocked', (data.playerName||data.cls) + ' unlocked: ' + skillNameDM, 'var(--purple)');
+  }
+  if (event === 'monsterAttackResult') {
+    // DM already sees all actions — no banner needed, state updates handle it
+  }
+});
+
+function toggleMapLog() {
+  var mapView  = document.getElementById('map-view');
+  var logView  = document.getElementById('log-view');
+  var title    = document.getElementById('map-section-title');
+  var hint     = document.getElementById('map-toggle-hint');
+  var showingMap = mapView.style.display !== 'none';
+  if (showingMap) {
+    mapView.style.display = 'none';
+    logView.style.display = 'block';
+    title.textContent = 'Session Log';
+    hint.textContent = 'tap to view map ▾';
+    renderLog();
+  } else {
+    mapView.style.display = 'block';
+    logView.style.display = 'none';
+    title.textContent = 'Board Map';
+    hint.textContent = 'tap to view log ▾';
+  }
+}
+
+var _openPlayerPanel = null;
+
+function togglePlayerPanel(event, cls) {
+  var panel = document.getElementById('player-panel-' + cls);
+  var arrow = document.getElementById('expand-arrow-' + cls);
+  if (!panel) return;
+  var isOpen = panel.style.display !== 'none';
+  Object.keys(G.players).forEach(function(c) {
+    var p2 = document.getElementById('player-panel-' + c);
+    var a = document.getElementById('expand-arrow-' + c);
+    if (p2) p2.style.display = 'none';
+    if (a) a.textContent = '▾';
+  });
+  if (!isOpen) {
+    panel.style.display = 'block';
+    if (arrow) arrow.textContent = '▴';
+    _openPlayerPanel = cls;
+  } else {
+    _openPlayerPanel = null;
+  }
+}
+
+function renderPlayers() {
+  var activeClass = G.turnOrder[G.activePlayerIdx];
+  var html = '';
+  Object.values(G.players).forEach(function(p) {
+    var pct = Math.max(0, Math.round(p.hp / p.hpMax * 100));
+    var hc = p.hp <= Math.floor(p.hpMax * .25) ? '#E24B4A' : p.hp <= Math.floor(p.hpMax * .5) ? '#EF9F27' : '#1D9E75';
+    var bkHtml = '';
+    Object.entries(p.bricks).forEach(function(entry) {
+      var color = entry[0]; var qty = entry[1];
+      if (qty <= 0) return;
+      var bg = BRICK_COLORS[color] || '#888';
+      var border = color === 'white' ? 'border:1px solid #ccc;' : '';
+      for (var i = 0; i < qty; i++) {
+        bkHtml += '<span class="mini-brick" style="background:' + bg + ';' + border + '"></span>';
+      }
+    });
+    var statuses = (p.statusEffects || []).map(function(s) {
+      return '<span style="font-size:9px;padding:1px 5px;border-radius:6px;background:#1a1a1a;color:#888;">' + s + '</span>';
+    }).join('');
+    var isActive = p.cls === activeClass;
+    var isKO = !p.alive || p.hp <= 0;
+    var spaceLabel = SPACES[p.space] ? SPACES[p.space].label : 'Start';
+    var enhAmt = G.enhancedMovement && G.enhancedMovement[p.cls];
+
+    html += '<div class="p-card' + (isActive ? ' active-p' : '') + (isKO ? ' ko-p' : '') + '">';
+
+    html += '<div onclick="togglePlayerPanel(event,\'' + p.cls + '\')" style="cursor:pointer;">';
+
+    html += '<div class="p-name" style="color:' + p.color + ';">'
+      + p.icon + ' ' + pLabel(p)
+      + (enhAmt ? '<span style="font-size:9px;color:var(--green);margin-left:4px;">⚡x'+enhAmt+'</span>' : '')
+      + '<span style="margin-left:auto;display:flex;align-items:center;gap:5px;">'
+      + '<span style="font-size:10px;color:var(--faint);" id="expand-arrow-'+p.cls+'">▾</span>'
+      + '<span class="dot ' + (p.connected ? 'on' : 'off') + '"></span>'
+      + '</span></div>';
+
+    html += '<div class="p-hpbar"><div class="p-hpfill" style="width:' + pct + '%;background:' + hc + ';"></div></div>';
+
+    html += '<div class="p-stats">'
+      + '<span style="color:' + hc + ';font-weight:700;">' + p.hp + '/' + p.hpMax + 'HP</span>'
+      + '<span>🛡 ' + (p.armor || 0) + '</span>'
+      + '<span>🪙 ' + p.gold + '</span>'
+      + '<span style="color:var(--faint);font-size:9px;">' + spaceLabel + '</span>'
+      + (p.tamed ? '<span style="color:var(--green);">🐾 ' + p.tamed.name.split(' ')[0] + '</span>' : '')
+      + '</div>';
+
+    if (statuses) html += '<div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:3px;">' + statuses + '</div>';
+    html += '<div class="p-bricks">' + (bkHtml || '<span style="font-size:9px;color:var(--faint);">No bricks</span>') + '</div>';
+
+    html += '</div>'; // end clickable header
+
+    // Expandable DM panel
+    html += '<div id="player-panel-' + p.cls + '" style="display:none;margin-top:8px;border-top:1px solid #2a2a2a;padding-top:8px;" onclick="event.stopPropagation();">';
+
+    // HP
+    html += '<div style="margin-bottom:8px;">'
+      + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--dim);margin-bottom:4px;">HIT POINTS</div>'
+      + '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">'
+      + '<button class="adj" onclick="client.adjustHP(\'' + p.cls + '\',-3)">−3</button>'
+      + '<button class="adj" onclick="client.adjustHP(\'' + p.cls + '\',-1)">−1</button>'
+      + '<span style="font-family:Cinzel,serif;font-size:15px;font-weight:700;min-width:52px;text-align:center;color:'+hc+';">' + p.hp + '/' + p.hpMax + '</span>'
+      + '<button class="adj" onclick="client.adjustHP(\'' + p.cls + '\',1)">+1</button>'
+      + '<button class="adj" onclick="client.adjustHP(\'' + p.cls + '\',3)">+3</button>'
+      + (isKO ? '<button class="adj" style="color:var(--green);" onclick="client.adjustHP(\'' + p.cls + '\',' + p.hpMax + ')">Revive</button>' : '')
+      + '</div></div>';
+
+    // Gold
+    html += '<div style="margin-bottom:8px;">'
+      + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--dim);margin-bottom:4px;">GOLD</div>'
+      + '<div style="display:flex;align-items:center;gap:5px;">'
+      + '<button class="adj" onclick="client.adjustGold(\'' + p.cls + '\',-3)">−3</button>'
+      + '<button class="adj" onclick="client.adjustGold(\'' + p.cls + '\',-1)">−1</button>'
+      + '<span style="font-family:Cinzel,serif;font-size:15px;font-weight:700;min-width:36px;text-align:center;color:var(--gold);">🪙' + p.gold + '</span>'
+      + '<button class="adj" onclick="client.adjustGold(\'' + p.cls + '\',1)">+1</button>'
+      + '<button class="adj" onclick="client.adjustGold(\'' + p.cls + '\',3)">+3</button>'
+      + '</div></div>';
+
+    // Shield
+    html += '<div style="margin-bottom:8px;">'
+      + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--dim);margin-bottom:4px;">SHIELD</div>'
+      + '<div style="display:flex;align-items:center;gap:5px;">'
+      + '<button class="adj" onclick="client.adjustArmor(\'' + p.cls + '\',-1)">−1</button>'
+      + '<span style="font-family:Cinzel,serif;font-size:15px;font-weight:700;min-width:36px;text-align:center;">🛡' + (p.armor||0) + '</span>'
+      + '<button class="adj" onclick="client.adjustArmor(\'' + p.cls + '\',1)">+1</button>'
+      + '</div></div>';
+
+    // Bricks
+    html += '<div><div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--dim);margin-bottom:5px;">BRICKS</div>';
+    BRICK_NAMES.forEach(function(color) {
+      var qty = p.bricks[color] || 0;
+      var bg = BRICK_COLORS[color] || '#888';
+      var bdr = color === 'white' ? 'border:1px solid #555;' : '';
+      var tc = (color==='white'||color==='yellow') ? '#666' : bg;
+      html += '<div style="display:flex;align-items:center;gap:5px;padding:3px 0;border-bottom:1px solid #1a1a1a;">'
+        + '<span style="width:10px;height:10px;border-radius:2px;background:'+bg+';'+bdr+'display:inline-block;flex-shrink:0;"></span>'
+        + '<span style="flex:1;font-size:11px;color:'+tc+';">'+color+'</span>'
+        + '<button class="adj" onclick="client.adjustBrick(\'' + p.cls + '\',\''+color+'\', -1)" '+(qty<1?'disabled':'')+'>−</button>'
+        + '<span style="font-size:12px;font-weight:700;min-width:20px;text-align:center;color:'+tc+';">'+qty+'</span>'
+        + '<button class="adj" onclick="client.adjustBrick(\'' + p.cls + '\',\''+color+'\', 1)">+</button>'
+        + '</div>';
+    });
+    html += '</div>';
+
+    html += '</div>'; // end expandable panel
+    html += '</div>'; // end p-card
+  });
+  document.getElementById('p-grid').innerHTML = html;
+  // Restore any previously open player panel after re-render
+  if (_openPlayerPanel) {
+    var rp = document.getElementById('player-panel-' + _openPlayerPanel);
+    var ra = document.getElementById('expand-arrow-' + _openPlayerPanel);
+    if (rp) { rp.style.display = 'block'; }
+    if (ra) { ra.textContent = '▴'; }
+  }
+}
+
+
+
+function renderBoard() {
+  var orangeSpaces = G.orangeSpaces || {};
+  var blueSpaces   = G.blueSpaces   || {};
+  var greenSpaces  = G.greenSpaces  || {};
+  var si = 0;
+  var inner = document.getElementById('board-map');
+  var html = '';
+  ZONES.forEach(function(z, zi) {
+    html += '<div class="zone-col">';
+    html += '<div class="zone-hdr" style="background:' + ZONE_COLORS[zi] + ';color:#ccc;">' + z.icon + ' ' + z.name + '</div>';
+    for (var s = 0; s < z.spaces; s++) {
+      var idx = si++;
+      var players = Object.values(G.players).filter(function(p) { return p.space === idx && p.alive; });
+      var trapped  = (orangeSpaces[idx] || 0) > 0;
+      var hasBlue  = (blueSpaces[idx]   || 0) > 0;
+      var hasGreen = (greenSpaces[idx]  || 0) > 0;
+      var tokens = players.map(function(p) {
+        return '<div class="p-token" style="background:' + p.color + ';">' + p.icon + '</div>';
+      }).join('');
+      var spLabel = z.storeAt === s ? 'S' + (s+1) + ' Shop' : (s+1) + '';
+      html += '<div class="space' + (players.length ? ' has-players' : '') + (trapped ? ' trapped' : '') + '" onclick="movePlayerToSpace(' + idx + ')">';
+      html += '<div class="space-num">' + spLabel + '</div>';
+      html += '<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:1px;">' + tokens + '</div>';
+      if (trapped)  html += '<div style="display:flex;align-items:center;gap:2px;"><span style=\"width:7px;height:7px;border-radius:1px;background:#F57C00;display:inline-block;\"></span><span style=\"font-size:7px;color:var(--orange);\">×' + orangeSpaces[idx] + '</span></div>';
+      if (hasBlue)  html += '<div style="display:flex;align-items:center;gap:2px;"><span style=\"width:7px;height:7px;border-radius:1px;background:#006DB7;display:inline-block;\"></span><span style=\"font-size:7px;color:#4db8ff;\">arcane</span></div>';
+      if (hasGreen) html += '<div style="font-size:7px;color:#1D9E75;">🟢 echo</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+    if (zi < 4) html += '<div style="align-self:center;color:var(--faint);font-size:14px;padding:0 2px;margin-top:18px;">&#8594;</div>';
+  });
+  inner.innerHTML = html;
+}
+
+function movePlayerToSpace(spaceIdx) {
+  var cls = prompt('Move which player? (warrior/wizard/scout/builder/mender/beastcaller)');
+  if (cls && G.players[cls]) client.send('dmMovePlayer', {cls:cls, roll:0, destination:spaceIdx});
+}
+
+function renderGates() {
+  var labels = {z1z2:'Zone 1 to 2 (Structural)', z2z3:'Zone 2 to 3 (Magical - Blue Key)', z3z4:'Zone 3 to 4 (Structural)', z4z5:'Zone 4 to 5 (Bridge)', z5boss:'Zone 5 Boss'};
+  var html = '';
+  Object.entries(G.gates).forEach(function(entry) {
+    var k = entry[0]; var v = entry[1];
+    html += '<div class="gate-row">';
+    html += '<div style="flex:1;font-size:11px;font-weight:600;">' + (labels[k] || k) + '</div>';
+    html += '<span class="gate-status ' + v + '">' + v + '</span>';
+    html += '<button class="adj btn-sm" onclick="client.setGate(\'' + k + '\',\'' + (v === 'locked' ? 'open' : 'locked') + '\')">' + (v === 'locked' ? 'Unlock' : 'Lock') + '</button>';
+    html += '</div>';
+  });
+  document.getElementById('gates-panel').innerHTML = html;
+}
+
+function renderScenario() {
+  document.getElementById('fortress-count').textContent = G.fortressBricks;
+  document.getElementById('villager-count').textContent = G.villagersRescued + '/3';
+  var html = '';
+  for (var i = 0; i < 12; i++) {
+    html += '<span class="fortress-brick' + (i >= G.fortressBricks ? ' gone' : '') + '"></span>';
+  }
+  document.getElementById('fortress-track').innerHTML = html;
+}
+
+function renderTurnControl() {
+  var html = '';
+  G.turnOrder.forEach(function(cls, idx) {
+    var p = G.players[cls];
+    var isAct = idx === G.activePlayerIdx;
+    html += '<button class="btn btn-sm' + (isAct ? ' P' : '') + '" onclick="client.send(\'setActivePlayer\',{idx:' + idx + '})">' + pLabel(p) + '</button>';
+  });
+  document.getElementById('turn-btns').innerHTML = html;
+}
+
+function processMove(backward) {
+  // Use active player by default; fall back to "Other" dropdown if visible
+  var sel = document.getElementById('move-player-sel');
+  var cls = (sel.style.display !== 'none' && sel.value) ? sel.value : G.turnOrder[G.activePlayerIdx];
+  var rawRoll = parseInt(document.getElementById('move-roll-input').value || 1);
+  if (!cls || !rawRoll) { document.getElementById('move-result').textContent = 'Enter the roll number first.'; return; }
+  var p = G.players[cls];
+  var finalRoll = rawRoll;
+  if (cls === 'scout' && !backward) finalRoll += (p.skills && p.skills.fleet_foot ? 3 : 1);
+  var debuff = (G.movementDebuffs && G.movementDebuffs[cls]) || 0;
+  if (debuff && !backward) finalRoll = Math.max(0, finalRoll - debuff);
+  var dest;
+  if (backward) {
+    dest = Math.max(0, p.space - finalRoll);
+  } else {
+    dest = p.space + finalRoll;
+    var gateKeys = ['z1z2','z2z3','z3z4','z4z5'];
+    var blockedAt = null;
+    gateKeys.forEach(function(k) {
+      if (blockedAt) return;
+      var gs = GATE_SPACES[k];
+      if (p.space <= gs && dest > gs && G.gates[k] === 'locked') { dest = gs; blockedAt = k; }
+    });
+    dest = Math.min(SPACES.length - 1, Math.max(0, dest));
+  }
+  client.send('dmMovePlayer', {cls:cls, roll:rawRoll, destination:dest, backward:!!backward});
+  var trapped  = ((G.orangeSpaces || {})[dest] || 0) > 0;
+  var hasBlue  = ((G.blueSpaces   || {})[dest] || 0) > 0;
+  var hasGreen = ((G.greenSpaces  || {})[dest] || 0) > 0;
+  var dir = backward ? '← back ' : '';
+  var spaceAlerts = (trapped ? ' ⚠ TRAP!' : '') + (hasBlue ? ' ✨ ARCANE!' : '') + (hasGreen ? ' 🟢 GREEN!' : '');
+  var note = (p.playerName || p.name) + ' rolled ' + rawRoll + ' ' + dir + '→ space ' + (dest+1) + spaceAlerts;
+  document.getElementById('move-result').textContent = note;
+  document.getElementById('move-roll-input').value = '1';
+  if (!backward) client.setPhase('land');
+}
+
+function renderActiveEvent() {
+  var ev = G.activeEvent;
+  var panel = document.getElementById('active-event-panel');
+  if (!panel) return;
+  if (!ev) { panel.style.display = 'none'; return; }
+  if (ev.resolved && !ev.blueResult && !ev.trapResult && !ev.grayResult && !ev.goldResult) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  var p = G.players[ev.cls];
+
+  // Build evData — either from table lookup or from forced event fields
+  var evData = null;
+  if (ev.forced) {
+    var icons = {gray:'<span style="width:12px;height:12px;border-radius:2px;background:#AAAAAA;display:inline-block;vertical-align:middle;"></span>',blue:'<span style="width:12px;height:12px;border-radius:2px;background:#006DB7;display:inline-block;vertical-align:middle;"></span>',white:'<span style="width:12px;height:12px;border-radius:2px;background:#EFEFEF;border:1px solid #ccc;display:inline-block;vertical-align:middle;"></span>',gold:'🪙',monster:'👺',boss:'💀',trap:'<span style="width:12px;height:12px;border-radius:2px;background:#F57C00;display:inline-block;vertical-align:middle;"></span>',riddle:'<span style="width:12px;height:12px;border-radius:2px;background:#F5D000;display:inline-block;vertical-align:middle;"></span>',purple:'<span style="width:12px;height:12px;border-radius:2px;background:#7B2FBE;display:inline-block;vertical-align:middle;"></span>',creeper:'🌿',nothing:'💨'};
+    var names = {gray:'Gray Brick',blue:'Blue Brick',white:'White Brick',gold:'Found Gold',monster:'Monster!',boss:'BOSS',trap:'Trap!',riddle:'Clue Found!',purple:'Purple Brick',creeper:'Creeping Vines!',nothing:'Nothing'};
+    evData = {
+      type: ev.evType,
+      icon: icons[ev.evType] || '⚡',
+      name: (names[ev.evType] || ev.evType) + ' (Forced)',
+      desc: ev.mids ? ev.mids.join(', ') : 'DM forced this event',
+      amount: ev.goldAmount,
+      mids: ev.mids || []
+    };
+  } else {
+    var table = LANDING_EVENTS[ev.zone + 1] || LANDING_EVENTS[1];
+    evData = table ? table[ev.roll - 1] : null;
+  }
+  if (!evData) return;
+
+  // ── Unified icon builder ──
+  function dmIconRow(items) {
+    var row = '';
+    items.forEach(function(item) {
+      var n = item.count || 1;
+      for (var i=0; i<n; i++) {
+        if (item.html) {
+          row += item.html;
+        } else if (item.emoji) {
+          row += '<span style="font-size:'+(item.size||20)+'px;line-height:1;display:inline-block;vertical-align:middle;margin:2px;">'+item.emoji+'</span>';
+        } else {
+          var bdr = item.color==='white'?'border:1px solid #ccc;':'';
+          row += '<span style="width:'+(item.size||20)+'px;height:'+(item.size||20)+'px;border-radius:3px;background:'+item.color+';'+bdr+'display:inline-block;vertical-align:middle;margin:2px;box-shadow:0 1px 4px rgba(0,0,0,.5);"></span>';
+        }
+      }
+    });
+    return row ? '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:2px;margin-top:4px;">'+row+'</div>' : '';
+  }
+
+  // ── Header ──
+  var evIconColor = BCOLORS_DM[evData.color || evData.type];
+  var evIconHtml = evIconColor
+    ? '<span style="width:32px;height:32px;border-radius:5px;background:'+evIconColor+';'+(evData.color==='white'?'border:1px solid #ccc;':'')+';display:inline-block;flex-shrink:0;box-shadow:0 2px 6px rgba(0,0,0,.4);"></span>'
+    : '<span style="font-size:26px;flex-shrink:0;">'+(evData.icon||'\u26a1')+'</span>';
+
+  var body = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">';
+  body += evIconHtml;
+  body += '<div style="flex:1;min-width:0;">';
+  body += '<div style="font-family:Cinzel,serif;font-size:13px;color:#fff;">' + evData.name + '</div>';
+  body += '<div style="font-size:10px;color:var(--dim);">';
+  if (ev.forced) body += '<span style="color:var(--orange);">FORCED</span> · ';
+  body += 'Zone '+(ev.zone+1)+' · '+(p?pLabel(p):ev.cls)+'</div>';
+  body += '</div></div>';
+
+  // TRAP
+  if (ev.trapResult) {
+    var tr = ev.trapResult;
+    body += '<div style="margin-top:6px;padding:10px;border-radius:8px;background:#1a0500;border:1px solid var(--orange)44;text-align:center;">';
+    if (tr.disarmed) {
+      body += '<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:4px;">';
+      body += '<span style="width:20px;height:20px;border-radius:3px;background:#AAAAAA;display:inline-block;"></span>';
+      body += '<span style="font-size:14px;color:var(--text-dim);">→</span>';
+      body += '<span style="width:20px;height:20px;border-radius:3px;background:#F57C00;display:inline-block;"></span>';
+      body += '</div><div style="font-size:10px;color:var(--green);font-family:Cinzel,serif;letter-spacing:.04em;">DISARMED</div>';
+    } else {
+      var TRAP_FLAV_DM = {
+        0:['Fast reflexes.','Not today.','The trap blinked. You didn\'t.','Clean dodge.'],
+        1:['A glancing blow.','It grazed you. Could have been worse.','One hit. The floor claims its small victory.','Just a scratch.'],
+        2:['It was always going to happen like this.','The floor had been waiting.','Two hits. The fortress is thorough.','You walked into both of them.'],
+        3:['You found it. Painfully.','One wrong step. The fortress collects its toll.','The mechanism was well-designed.','Three strikes from the stone.'],
+        4:['The fortress does not forgive impatience.','Four hits. Something snapped.','You triggered everything at once.','Heavy toll.'],
+        5:['The floor opened and did not stop.','Maximum yield. The fortress is satisfied.','Nothing personal. Entirely mechanical.','Five. You\'ve been marked by this place.']
+      };
+      var dmgKey = Math.min(Math.max(tr.dmg,0),5);
+      var tPool = TRAP_FLAV_DM[dmgKey] || TRAP_FLAV_DM[3];
+      var tFlav = tPool[(tr.dmg + (tr.dodged||0)) % tPool.length];
+      body += '<div style="font-size:22px;font-weight:700;color:var(--red);margin-bottom:4px;">\u2212'+tr.dmg+' \u2764\ufe0f</div>';
+      if (tr.dodged > 0) body += '<div style="font-size:10px;color:#888;margin-bottom:4px;">'+tr.dodged+' blocked</div>';
+      body += '<div style="font-size:11px;color:#888;font-style:italic;">'+tFlav+'</div>';
+    }
+    body += '</div>';
+  }
+
+  // GRAY
+  if (ev.grayResult) {
+    var gr = ev.grayResult;
+    var grCount = gr.searched ? (gr.found||0) : (gr.took||0);
+    body += '<div style="margin-top:6px;padding:8px 10px;border-radius:8px;background:#111108;border:1px solid #aaaaaa33;">';
+    body += '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:#888;margin-bottom:4px;">'+(gr.searched?'SEARCH \u2014 ROLL '+gr.roll:'TAKE')+'</div>';
+    if (grCount > 0) {
+      var gItems = []; for (var gi=0;gi<grCount;gi++) gItems.push({color:'#AAAAAA',size:20});
+      body += dmIconRow(gItems);
+    } else {
+      body += '<span style="font-size:11px;color:#555;">nothing found</span>';
+    }
+    if (gr.builderBonus) body += '<div style="font-size:10px;color:var(--gold);margin-top:3px;">+builder bonus</div>';
+    body += '</div>';
+  }
+
+  // BLUE result
+  if (ev.blueResult) {
+    var br = ev.blueResult;
+    var variantLabels = {singing_stone:'Singing Stone',sentry_stone:'Sentry Stone',cipher_lock:'Cipher Lock'};
+    var brBorderColor = br.success ? '#006DB7' : '#444';
+    body += '<div style="margin-top:6px;padding:8px 10px;border-radius:8px;background:#020a14;border:1px solid '+brBorderColor+'55;">';
+    body += '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:#4db8ff;margin-bottom:4px;">'+(variantLabels[ev.blueVariant]||'BLUE').toUpperCase()+'</div>';
+    var brMsg = br.msg || '';
+    var brBrickCount = parseInt((brMsg.match(/\+(\d+)\s*Blue Brick/i)||['','0'])[1])||0;
+    var brHasGold = /gold/i.test(brMsg);
+    var brHasShield = /shield/i.test(brMsg);
+    var brHpMatch = brMsg.match(/[\-\u2212](\d+)\s*HP/i);
+    var brHpDmg = brHpMatch ? parseInt(brHpMatch[1]) : 0;
+    var brItems = [];
+    for (var bi=0;bi<brBrickCount;bi++) brItems.push({color:'#006DB7',size:18});
+    if (brHasGold) brItems.push({emoji:'\ud83e\ude99',size:18});
+    if (brHasShield) brItems.push({emoji:'\ud83d\udee1',size:16});
+    if (brHpDmg > 0) brItems.push({html:'<span style="font-size:13px;color:#E24B4A;font-weight:700;vertical-align:middle;">\u2212'+brHpDmg+' \u2764\ufe0f</span>'});
+    body += brItems.length ? dmIconRow(brItems) : '<div style="font-size:11px;color:'+(br.success?'#4db8ff':'#888')+';">'+(br.success?'Success':'Consolation')+'</div>';
+    if (!br.success) body += '<div style="font-size:10px;color:#4db8ff55;margin-top:3px;font-style:italic;">Arcane energy remains</div>';
+    body += '</div>';
+  }
+
+  // BLUE in progress
+  if (evData.type === 'blue' && ev.blueVariant && !ev.blueResult) {
+    var vLabs2 = {singing_stone:'Singing Stone',sentry_stone:'Sentry Stone',cipher_lock:'Cipher Lock'};
+    body += '<div style="margin-top:6px;padding:6px 10px;border-radius:6px;background:#020a14;border:1px solid #006DB733;font-size:11px;color:#4db8ff66;font-style:italic;">'+(vLabs2[ev.blueVariant]||'Blue')+'\u2014challenge in progress\u2026</div>';
+  }
+
+  // GOLD
+  if (evData.type === 'gold') {
+    body += '<div style="margin-top:6px;padding:8px 10px;border-radius:8px;background:#1a1200;border:1px solid var(--gold)33;">';
+    if (ev.goldResult) {
+      var foundAmt = ev.goldResult.amount || 0;
+      var grWT = ev.goldResult.wrongTap;
+      body += '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--gold);margin-bottom:4px;">FOUND</div>';
+      if (foundAmt > 0) {
+        var gldItems2 = []; for (var gi3=0;gi3<foundAmt;gi3++) gldItems2.push({emoji:'\ud83e\ude99',size:22});
+        body += dmIconRow(gldItems2);
+      } else {
+        body += '<div style="font-size:11px;color:#888;font-style:italic;">Nothing found.</div>';
+      }
+      if (grWT) {
+        var isCrackDM = (ev.goldVariant === 'crack');
+        if (isCrackDM) {
+          body += '<div style="font-size:13px;color:var(--red);margin-top:4px;">\u22121 \u2764\ufe0f rat bite</div>';
+        } else if (ev.goldResult.maxHpUp) {
+          body += '<div style="font-size:13px;color:var(--green);margin-top:4px;">+1 \u2764\ufe0f &nbsp;<span style="font-size:10px;color:#888;">max HP increased</span></div>';
+        } else {
+          body += '<div style="font-size:13px;color:var(--green);margin-top:4px;">+1 \u2764\ufe0f</div>';
+        }
+      }
+      var dmTotal = ev.goldResult.totalPlaced || ev.goldMax || 0;
+      var dmLeft = dmTotal - foundAmt;
+      if (dmLeft > 0 && foundAmt > 0) body += '<div style="font-size:10px;color:#666;margin-top:3px;">' + dmLeft + ' coin' + (dmLeft===1?'':'s') + ' left behind</div>';
+    } else if (ev.goldVariant) {
+      var vLabel = ev.goldVariant === 'crack' ? 'Crack in the Wall' : 'Torch Reveal';
+      body += '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:#888;margin-bottom:4px;">'+vLabel.toUpperCase()+'</div>';
+      body += '<div style="font-size:11px;color:var(--gold)66;font-style:italic;">mini-game in progress\u2026</div>';
+    } else {
+      body += '<div style="font-size:11px;color:#666;font-style:italic;">\u2014</div>';
+    }
+    body += '</div>';
+  }
+
+  // CLUE
+  if (ev.pendingClue) {
+    var pc = ev.pendingClue;
+    body += '<div style="margin-top:8px;padding:10px;border-radius:8px;background:#1a1500;border:1px solid var(--gold)66;">';
+    body += '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--gold);margin-bottom:4px;">CLUE</div>';
+    body += '<div style="font-size:13px;color:var(--gold);">"' + pc.clue + '"</div>';
+    if (pc.riddleQ) body += '<div style="font-size:10px;color:var(--dim);margin-top:3px;">'+pc.riddleQ+'</div>';
+    body += '</div>';
+  }
+
+  // BUTTONS
+  if (evData.type === 'purple') body += '<button class="btn P btn-sm" style="margin-top:6px;" onclick="showTrivia(null)">Open Trivia</button>';
+  if (evData.type === 'riddle') {
+    if (ev.riddleActive) {
+      // Live riddle — show Q, answer, options for DM
+      var timeLeftDM = Math.max(0, ev.riddleEndsAt - Date.now());
+      var pctDM = Math.round(timeLeftDM / 300);
+      body += '<div style="margin-top:8px;padding:10px;background:#1a1500;border:1px solid var(--gold)44;border-radius:8px;">';
+      body += '<div style="background:#111;border-radius:4px;height:4px;margin-bottom:8px;overflow:hidden;"><div style="height:100%;width:'+pctDM+'%;background:var(--gold);transition:width 1s linear;" id="dm-riddle-bar"></div></div>';
+      body += '<div style="font-size:12px;color:var(--gold);line-height:1.5;margin-bottom:8px;font-style:italic;">"'+ev.riddleQ+'"</div>';
+      body += '<div style="font-size:11px;color:var(--faint);margin-bottom:3px;">Answer:</div>';
+      body += '<div style="font-size:14px;font-weight:700;color:var(--green);">'+ev.riddleA+'</div>';
+      if (ev.riddleOptions) {
+        body += '<div style="font-size:9px;color:var(--faint);margin-top:6px;">Options: '+ev.riddleOptions.join(' · ')+'</div>';
+      }
+      body += '</div>';
+    } else if (ev.riddleWinner) {
+      var winP = G.players[ev.riddleWinner];
+      body += '<div style="margin-top:6px;font-size:11px;color:var(--green);">'+(winP?pLabel(winP):ev.riddleWinner)+' answered correctly — +1 🟨</div>';
+      if (ev.pendingClue) body += '<div style="font-size:10px;color:var(--faint);margin-top:3px;font-style:italic;">"'+ev.pendingClue.clue+'"</div>';
+    } else if (ev.riddleExpired) {
+      body += '<div style="margin-top:6px;font-size:11px;color:var(--faint);">Timed out — no winner.</div>';
+    } else {
+      body += '<button class="btn btn-sm" style="margin-top:6px;border-color:#3a3000;color:var(--gold);" onclick="showRiddle(null)">Open Riddle (manual)</button>';
+    }
+  }
+  if ((evData.type === 'trap' || evData.type === 'doubletrap') && !ev.trapResult) {
+    body += '<button class="btn W btn-sm" style="margin-top:6px;width:100%;display:flex;align-items:center;justify-content:center;gap:6px;" onclick="placeTrap()"><span style="width:12px;height:12px;border-radius:2px;background:#F57C00;display:inline-block;"></span>Fire Trap'+(evData.type==='doubletrap'?' (\u00d72)':'')+'</button>';
+  }
+  if (evData.type === 'monster' || evData.type === 'boss') {
+    var mStr = evData.mids ? evData.mids.join(',') : '';
+    var isB = evData.type === 'boss';
+    body += '<button class="btn D btn-sm" style="margin-top:6px;" onclick="quickBattle(\'' + mStr + '\',' + isB + ')">Start Battle</button>';
+  }
+  document.getElementById('active-event-body').innerHTML = body;
+}
+
+function autoGoldResolve(amt) {
+  if (!G || !G.activeEvent) return;
+  client.resolveEvent(G.activeEvent.cls, 'gold', {amount: amt});
+}
+
+function dmResolveEvent() {
+  if (!G || !G.activeEvent) return;
+  client.send('dm_resolved', {});
+}
+
+function toggleEventTable() {
+  var el = document.getElementById('event-table');
+  var btn = document.getElementById('view-table-btn');
+  if (el.innerHTML) {
+    el.innerHTML = '';
+    if (btn) btn.textContent = 'View Table';
+  } else {
+    showEventTable();
+    if (btn) btn.textContent = 'Hide Table';
+  }
+}
+
+var _eventTablePayloads = [];
+
+function showEventTable() {
+  var zone = parseInt(document.getElementById('event-zone-sel').value);
+  var table = LANDING_EVENTS[zone] || LANDING_EVENTS[1];
+  _eventTablePayloads = [];
+  var html = '<div style="background:var(--surface2);border-radius:8px;overflow:hidden;border:1px solid var(--border);">';
+  table.forEach(function(ev, idx) {
+    _eventTablePayloads.push({
+      evType: ev.type,
+      zone: zone - 1,
+      goldAmount: ev.amount || 0,
+      brickColor: ev.color || ev.type,
+      mids: ev.mids || [],
+      isBoss: ev.type === 'boss'
+    });
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border);">';
+    html += '<span style="font-family:Cinzel,serif;font-size:11px;color:var(--dim);min-width:14px;">' + ev.roll + '</span>';
+    var evIC = BCOLORS_DM[ev.color || ev.type];
+    html += evIC
+      ? '<span style="width:14px;height:14px;border-radius:2px;background:'+evIC+';display:inline-block;vertical-align:middle;"></span>'
+      : '<span style="font-size:14px;">' + (ev.icon||'⚡') + '</span>';
+    html += '<div style="flex:1;"><div style="font-size:12px;font-weight:700;">' + ev.name + '</div></div>';
+    html += '<button class="btn W btn-sm" style="font-size:10px;" onclick="forceEventByIdx(' + idx + ')">Force</button>';
+    if (ev.type === 'purple') html += '<button class="btn P btn-sm" onclick="showTrivia(null)">Trivia</button>';
+    if (ev.type === 'riddle') html += '<button class="btn btn-sm" style="border-color:#3a3000;color:var(--gold);" onclick="showRiddle(null)">Riddle</button>';
+    if (ev.type === 'gold') html += '<button class="btn G btn-sm" onclick="awardGold(' + (ev.amount||1) + ')">+' + (ev.amount||1) + 'G</button>';
+    if (ev.type === 'monster' || ev.type === 'boss') {
+      var mStr = ev.mids ? ev.mids.join(',') : '';
+      html += '<button class="btn D btn-sm" onclick="quickBattle(\'' + mStr + '\',' + (ev.type === 'boss') + ')">Battle</button>';
+    }
+    if (ev.type === 'trap' || ev.type === 'doubletrap') html += '<button class="btn W btn-sm" onclick="placeTrap()">Trap</button>';
+    html += '</div>';
+  });
+  html += '</div>';
+  document.getElementById('event-table').innerHTML = html;
+}
+
+function forceEventByIdx(idx) {
+  var payload = _eventTablePayloads[idx];
+  if (!payload) return;
+  forceEvent(payload);
+}
+
+function forceEvent(payload) {
+  client.send('forceEvent', payload);
+  // For monster/battle events, open battle starter after short delay
+  if (payload.evType === 'monster' && payload.mids && payload.mids.length) {
+    setTimeout(function() { quickBattle(payload.mids.join(','), false); }, 300);
+  }
+  if (payload.evType === 'boss') {
+    setTimeout(function() { quickBattle('', true); }, 300);
+  }
+}
+
+function awardGold(amt) {
+  var active = G.turnOrder[G.activePlayerIdx];
+  if (active) client.adjustGold(active, amt);
+}
+
+function placeTrap() {
+  var activeCls = G.turnOrder[G.activePlayerIdx];
+  var ev = G.activeEvent;
+  var evType = (ev && ev.evType === 'doubletrap') ? 'doubletrap' : 'trap';
+  if (activeCls) client.resolveEvent(activeCls, evType, {});
+}
+
+function showTrivia(cls) {
+  triviaTargetCls = cls || G.turnOrder[G.activePlayerIdx];
+  currentTriviaIdx = Math.floor(Math.random() * LEGO_TRIVIA.length);
+  displayTrivia();
+  document.getElementById('trivia-panel').style.display = 'block';
+}
+
+function displayTrivia() {
+  var t = LEGO_TRIVIA[currentTriviaIdx];
+  document.getElementById('trivia-content').innerHTML =
+    '<div style="background:#0a0a1a;border:1px solid var(--purple);border-radius:8px;padding:10px;">'
+    + '<span class="diff-badge ' + t.diff + '">' + t.diff + '</span>'
+    + '<div style="font-size:13px;margin:6px 0;line-height:1.5;">' + t.q + '</div>'
+    + '<div id="trivia-answer" style="display:none;font-size:12px;color:var(--green);font-weight:700;margin-bottom:6px;">Answer: ' + t.a + '</div>'
+    + '<button class="btn btn-sm" onclick="document.getElementById(\'trivia-answer\').style.display=\'block\'">Reveal Answer</button>'
+    + '</div>';
+}
+
+function nextTrivia() { currentTriviaIdx = (currentTriviaIdx + 1) % LEGO_TRIVIA.length; displayTrivia(); }
+
+function triviaCorrect() {
+  if (triviaTargetCls && G.players[triviaTargetCls]) {
+    client.resolveEvent(triviaTargetCls, 'triviaSuccess', {});
+    document.getElementById('trivia-panel').style.display = 'none';
+  }
+}
+
+function showRiddle(cls) {
+  var riddleTargetCls = cls || G.turnOrder[G.activePlayerIdx];
+  // Pick a zone-appropriate riddle based on active player's position
+  var activeP = G.players[riddleTargetCls] || G.players[G.turnOrder[G.activePlayerIdx]];
+  var activeZone = activeP ? (SPACES[activeP.space] ? SPACES[activeP.space].zone : 0) : 0;
+  var used = G.usedRiddleIdxs || [];
+  // Find unused riddles for this zone
+  var zoneRiddles = RIDDLES.map(function(r,i){ return {r:r,i:i}; }).filter(function(ri){
+    return ri.r.zone === activeZone && used.indexOf(ri.i) < 0;
+  });
+  if (!zoneRiddles.length) {
+    // All zone clues found — use any unused riddle (no clue, just for yellow brick)
+    var anyUnused = RIDDLES.map(function(r,i){ return {r:r,i:i}; }).filter(function(ri){ return used.indexOf(ri.i)<0; });
+    zoneRiddles = anyUnused.length ? anyUnused : RIDDLES.map(function(r,i){ return {r:r,i:i}; });
+  }
+  var picked = zoneRiddles[Math.floor(Math.random()*zoneRiddles.length)];
+  currentRiddleIdx = picked.i;
+  displayRiddle(activeZone);
+  document.getElementById('riddle-panel').style.display = 'block';
+}
+
+function displayRiddle(zone) {
+  var r = RIDDLES[currentRiddleIdx];
+  var zoneName = (zone !== undefined && ZONES[zone]) ? ZONES[zone].name : '';
+  var cluePreview = r.clue
+    ? '<div style="margin-top:6px;padding:6px 8px;background:#0a1a0a;border:1px solid #1a3a1a;border-radius:6px;font-size:11px;color:#1D9E75;">🟡 Clue: <em>' + r.clue + '</em></div>'
+    : '<div style="font-size:11px;color:var(--faint);margin-top:4px;">No zone clue — yellow brick only</div>';
+  document.getElementById('riddle-content').innerHTML =
+    '<div style="background:#1a1500;border:1px solid #3a3000;border-radius:8px;padding:12px;">'
+    + (zoneName ? '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--faint);margin-bottom:6px;">Zone: '+zoneName+(r.category?' · '+r.category:'')+'</div>' : '')
+    + '<div style="font-size:14px;line-height:1.6;margin-bottom:10px;color:var(--gold);">"' + r.q + '"</div>'
+    + '<div id="riddle-answer" style="display:none;padding:8px;background:#0a1500;border:1px solid #2a3000;border-radius:6px;margin-bottom:8px;">'
+    + '<div style="font-size:11px;color:var(--faint);margin-bottom:3px;">Answer:</div>'
+    + '<div style="font-size:15px;font-weight:700;color:var(--gold);">' + r.a + '</div>'
+    + cluePreview
+    + '</div>'
+    + '<button class="btn Y btn-sm" onclick="var el=document.getElementById(\'riddle-answer\');el.style.display=el.style.display===\'none\'?\'block\':\'none\';">Reveal Answer & Clue</button>'
+    + '</div>';
+}
+
+function nextRiddle() {
+  // Cycle to next riddle in any zone
+  currentRiddleIdx = (currentRiddleIdx + 1) % RIDDLES.length;
+  displayRiddle();
+}
+
+function showChallenge() {
+  var c = CHALLENGES[Math.floor(Math.random() * CHALLENGES.length)];
+  document.getElementById('riddle-content').innerHTML +=
+    '<div style="margin-top:8px;padding:8px;background:#1a1500;border:1px solid #3a3000;border-radius:8px;font-size:13px;color:var(--gold);">Challenge: ' + c + '</div>';
+}
+
+function riddleSolved() {
+  var r = RIDDLES[currentRiddleIdx];
+  var opts = '';
+  Object.values(G.players).forEach(function(p) {
+    opts += '<button class="btn G btn-sm" style="margin:3px;" onclick="confirmRiddleSolver(\'' + p.cls + '\')">' + pLabel(p) + '</button>';
+  });
+  document.getElementById('riddle-solver-wrap').innerHTML = '<div style="font-size:11px;color:var(--dim);margin-bottom:5px;">Who solved it?</div>' + opts;
+  document.getElementById('riddle-solver-wrap').style.display = 'block';
+}
+
+function confirmRiddleSolver(solverCls) {
+  var r = RIDDLES[currentRiddleIdx];
+  client.resolveEvent(solverCls, 'riddle', {
+    solverCls: solverCls,
+    clue: r.clue || null,
+    riddleQ: r.q,
+    riddleIdx: currentRiddleIdx,
+    category: r.category || '',
+    zone: r.zone !== undefined ? r.zone : null
+  });
+  document.getElementById('riddle-panel').style.display = 'none';
+  document.getElementById('riddle-solver-wrap').style.display = 'none';
+}
+
+function showStartBattle() {
+  document.getElementById('battle-modal').style.display = 'flex';
+  var monHtml = '';
+  Object.entries(MONSTER_TEMPLATES).forEach(function(e) {
+    monHtml += '<label style="display:flex;align-items:center;gap:4px;font-size:11px;padding:3px 7px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);cursor:pointer;">'
+      + '<input type="checkbox" value="' + e[0] + '"> ' + e[1].name + '</label>';
+  });
+  document.getElementById('mon-checkboxes').innerHTML = monHtml;
+  var combHtml = '';
+  Object.values(G.players).forEach(function(p) {
+    combHtml += '<label style="display:flex;align-items:center;gap:4px;font-size:11px;padding:3px 7px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);cursor:pointer;">'
+      + '<input type="checkbox" value="' + p.cls + '" ' + (p.alive ? 'checked' : 'disabled') + '> ' + pLabel(p) + '</label>';
+  });
+  document.getElementById('combatant-checkboxes').innerHTML = combHtml;
+}
+
+function confirmStartBattle() {
+  var monIds = Array.from(document.querySelectorAll('#mon-checkboxes input:checked')).map(function(i) { return i.value; });
+  var combatants = Array.from(document.querySelectorAll('#combatant-checkboxes input:checked')).map(function(i) { return i.value; });
+  var isBoss = document.getElementById('is-boss-cb').checked;
+  if (!monIds.length || !combatants.length) { alert('Select monsters and combatants'); return; }
+  var monsters = buildMonsters(monIds);
+  if (isBoss) combatants = Object.keys(G.players).filter(function(c) { return G.players[c].alive; });
+  client.startBattle(monsters, combatants, isBoss);
+  document.getElementById('battle-modal').style.display = 'none';
+}
+
+function quickBattle(midsStr, isBoss) {
+  var mids = midsStr ? midsStr.split(',').filter(function(x) { return x; }) : [];
+  if (!mids.length) return;
+  var monsters = buildMonsters(mids);
+  var combatants = isBoss
+    ? Object.keys(G.players).filter(function(c) { return G.players[c].alive; })
+    : [G.turnOrder[G.activePlayerIdx]].filter(function(x) { return x; });
+  client.startBattle(monsters, combatants, isBoss);
+}
+
+function renderBattle() {
+  var b = G.battle;
+  var el = document.getElementById('battle-content');
+  if (!b) { el.innerHTML = '<div style="font-size:12px;color:var(--faint);">No active battle.</div>'; return; }
+
+  // Last player action panel
+  var html = '';
+  if (b.lastAction) {
+    var la = b.lastAction;
+    var isYellow = la.type === 'riddle' || la.color === 'yellow';
+    html += '<div style="padding:10px 14px;border-radius:10px;margin-bottom:8px;border:2px solid ' + (la.color||'#888') + ';background:' + (la.color||'#888') + '18;">';
+    html += '<div style="font-size:10px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--dim);margin-bottom:4px;">LAST PLAYER ACTION</div>';
+    html += '<div style="font-size:14px;font-weight:700;color:' + (la.color||'#fff') + ';">' + (la.icon||'') + ' ' + (la.description||'') + '</div>';
+    if (isYellow) html += '<div style="margin-top:6px;padding:6px 10px;border-radius:7px;background:#3a3000;font-size:12px;color:#F5D000;font-weight:700;">⚠ MONSTER IS CONFUSED — skip its next attack turn</div>';
+    html += '</div>';
+  }
+  // Confused monster banner
+  var confusedMons = (b.monsters||[]).filter(function(m) { return m.confused && m.hpCurrent > 0; });
+  if (confusedMons.length) {
+    html += '<div style="padding:8px 12px;border-radius:8px;background:#2a2500;border:2px solid #F5D000;margin-bottom:8px;font-size:13px;color:#F5D000;font-weight:700;">';
+    html += '<span style="width:10px;height:10px;border-radius:2px;background:#F5D000;display:inline-block;vertical-align:middle;margin-right:3px;"></span>CONFUSED: ' + confusedMons.map(function(m) { return m.name; }).join(', ') + ' — skips attack this round</div>';
+  }
+  html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;">';
+  (b.initiative || []).forEach(function(it, i) {
+    var p = G.players[it.cls];
+    var isAct = !b.monsterTurn && b.initIdx === i;
+    var col = p ? p.color : '#888';
+    html += '<div class="init-pill' + (isAct ? ' active' : '') + '" style="background:' + col + '22;color:' + col + ';border-color:' + col + ';">';
+    html += (p ? p.icon : '') + (p ? (p.playerName || p.name) : it.cls) + '(' + it.roll + ')</div>';
+  });
+  html += '<div class="init-pill' + (b.monsterTurn ? ' active' : '') + '" style="background:#1a0505;color:var(--red);border-color:var(--red);">Monsters</div></div>';
+
+  if (b.complication && b.complication !== 'none') {
+    html += '<div style="padding:6px 10px;border-radius:7px;background:#1a0800;border:1px solid var(--orange);font-size:11px;color:var(--orange);margin-bottom:6px;">Complication: ' + b.complication + '</div>';
+  }
+
+  (b.monsters || []).forEach(function(m, mi) {
+    var pct = Math.max(0, Math.round(m.hpCurrent / m.hpMax * 100));
+    var hc = m.hpCurrent <= Math.floor(m.hpMax * .25) ? '#E24B4A' : m.hpCurrent <= Math.floor(m.hpMax * .5) ? '#EF9F27' : '#888';
+    html += '<div class="mon-card' + (m.hpCurrent <= 0 ? ' dead' : '') + '">';
+    html += '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;margin-bottom:4px;">';
+    html += '<span style="font-size:13px;font-weight:700;">' + m.name + (m.hpCurrent <= 0 ? ' Dead' : '') + '</span>';
+    html += '<span style="font-size:11px;color:var(--dim);">' + m.hpCurrent + '/' + m.hpMax + 'HP Armor:' + (m.armor||0) + '</span></div>';
+    html += '<div style="height:4px;border-radius:2px;background:#1a1a1a;overflow:hidden;margin-bottom:5px;"><div style="width:' + pct + '%;height:100%;background:' + hc + ';"></div></div>';
+    var bricks = '';
+    for (var i = 0; i < m.hpMax; i++) {
+      bricks += '<span class="mon-brick' + (i >= m.hpCurrent ? ' gone' : '') + '" style="background:' + m.color + ';" onclick="client.send(\'monsterHPDelta\',{monsterIdx:' + mi + ',delta:-1})"></span>';
+    }
+    html += '<div style="display:flex;flex-wrap:wrap;gap:2px;margin:5px 0;">' + bricks + '</div>';
+    html += '<div style="font-size:10px;color:var(--dim);">Targets: ' + m.target + (m.confused ? ' CONFUSED' : '') + (m.cursed ? ' CURSED-' + m.cursed : '') + '</div>';
+    if (m.hpCurrent > 0) {
+      html += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:4px;">';
+      [1,2,3,5].forEach(function(n) {
+        html += '<button class="adj btn-sm" onclick="client.send(\'monsterHPDelta\',{monsterIdx:' + mi + ',delta:-' + n + '})">-' + n + '</button>';
+      });
+      html += '<button class="adj btn-sm" onclick="client.send(\'monsterHPDelta\',{monsterIdx:' + mi + ',delta:1})">+1</button>';
+      html += '<button class="btn P btn-sm" onclick="client.monsterAttack(' + mi + ')">Monster Attacks</button>';
+      if (m.tameable) html += '<button class="btn G btn-sm" onclick="client.tameAttempt(\'beastcaller\',' + mi + ')">Tame</button>';
+      if (m.holdsKey) html += '<button class="btn btn-sm" style="border-color:#3a3000;color:var(--gold);" onclick="awardKey(\'' + m.holdsKey + '\',' + mi + ')">Key</button>';
+      html += '</div>';
+    }
+    if (b.phase1Complete === false && m.phase === 1 && m.hpCurrent <= 0) {
+      html += '<button class="btn P btn-sm" style="margin-top:4px;" onclick="client.bossPhase2()">Phase 2</button>';
+    }
+    html += '</div>';
+  });
+
+  var allDead = (b.monsters || []).every(function(m) { return m.hpCurrent <= 0; });
+  html += '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;">';
+  html += '<button class="btn P btn-sm" onclick="client.send(\'nextBattleRound\')">Next Round</button>';
+  html += '<select style="flex:1;margin-bottom:0;" onchange="client.setComplication(this.value)">';
+  COMPLICATIONS.forEach(function(c) { html += '<option value="' + c.id + '">' + c.label + '</option>'; });
+  html += '</select>';
+  html += '</div>';
+
+  if (allDead) {
+    html += '<button class="btn G" style="margin-top:6px;width:100%;font-size:14px;padding:10px;" onclick="client.endBattle()">⚔️ End Battle — Distribute Loot &amp; Continue</button>';
+  }
+
+  el.innerHTML = html;
+}
+
+function awardKey(keyColor, mi) {
+  var cls = G.turnOrder[G.activePlayerIdx];
+  client.collectKey(keyColor, cls);
+  client.addLog((G.players[cls] ? pLabel(G.players[cls]) : cls) + ' claims ' + keyColor + ' key', 'key');
+}
+
+function renderClues() {
+  var clues = G.discoveredClues || [];
+  var el = document.getElementById('clue-list');
+  if (!el) return;
+  if (!clues.length) { el.innerHTML = '<div style="font-size:12px;color:var(--faint);">No clues found yet.</div>'; return; }
+  var html = '';
+  clues.forEach(function(c, i) {
+    var solver = c.solverCls ? G.players[c.solverCls] : null;
+    var solverLabel = solver ? pLabel(solver) : 'Unknown';
+    html += '<div style="padding:7px 10px;border-radius:8px;background:var(--surface2);border:1px solid #3a3000;margin-bottom:5px;">';
+    html += '<div style="font-size:12px;color:var(--gold);font-weight:700;margin-bottom:3px;">Clue ' + (i+1) + ': "' + c.clue + '"</div>';
+    html += '<div style="font-size:10px;color:var(--dim);">Earned by: ' + solverLabel + '</div>';
+    if (c.riddleQ) html += '<div style="font-size:10px;color:var(--faint);margin-top:2px;">Riddle: ' + c.riddleQ + '</div>';
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function showDMBanner(title, msg, color) {
+  var el = document.getElementById('dm-banner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'dm-banner';
+    el.style.cssText = 'position:fixed;top:60px;right:16px;max-width:340px;padding:12px 16px;border-radius:10px;border:2px solid;z-index:200;background:var(--surface2);box-shadow:0 4px 20px rgba(0,0,0,.5);';
+    document.body.appendChild(el);
+  }
+  el.style.borderColor = color;
+  el.innerHTML = '<div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.06em;color:' + color + ';margin-bottom:5px;">' + title + '</div>'
+    + '<div style="font-size:13px;color:var(--text);line-height:1.5;">' + msg + '</div>';
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(function() { el.style.display = 'none'; }, 6000);
+}
+
+function renderLog() {
+  var colors = {damage:'var(--red)',heal:'var(--green)',reward:'var(--gold)',battle:'var(--orange)',trade:'#888',gate:'var(--purple)',skill:'#5DA831',scenario:'#EF9F27',round:'var(--faint)',connect:'var(--green)',key:'var(--gold)',event:'#88aacc',normal:'var(--dim)'};
+  var html = '';
+  (G.log || []).forEach(function(e) {
+    html += '<div class="log-item"><div class="log-time">' + (e.t || '') + '</div><div style="color:' + (colors[e.kind] || 'var(--dim)') + ';">' + e.text + '</div></div>';
+  });
+  document.getElementById('log-scroll').innerHTML = html;
+}
+</script>
+</div>
+<style>
+#dm-pill{position:fixed;bottom:14px;right:14px;z-index:9999;display:flex;align-items:center;background:transparent;border:none;border-radius:22px;height:44px;padding:0 6px;overflow:hidden;width:44px;transition:width 0.3s ease,background 0.3s,border 0.25s;}
+#dm-pill.open{width:200px;background:rgba(0,0,0,0.72);border:1.5px solid rgba(255,255,255,0.15);}
+#dm-pill.pressing{background:rgba(0,0,0,0.5);border:1.5px solid rgba(245,208,0,0.6);}#dm-pill.pressing #dm-mag,#dm-pill.open #dm-mag{background:rgba(255,255,255,0.08);}
+#dm-mag{width:32px;height:32px;border-radius:50%;background:transparent;display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;position:relative;user-select:none;-webkit-user-select:none;transition:background 0.2s;}
+#dm-ring{position:absolute;inset:-5px;border-radius:50%;border:2px solid transparent;pointer-events:none;}
+#dm-ring.active{border-color:rgba(245,208,0,0.6);animation:dmring 1.5s linear forwards;}
+@keyframes dmring{0%{transform:scale(0.6);opacity:0;}50%{transform:scale(1);opacity:1;border-color:rgba(245,208,0,0.8);}100%{transform:scale(1.15);opacity:0;}}
+#dm-fc-controls{display:flex;align-items:center;gap:6px;margin-left:8px;opacity:0;transition:opacity 0.2s;white-space:nowrap;flex-shrink:0;}
+#dm-pill.open #dm-fc-controls{opacity:1;}
+</style>
+<div id="dm-pill">
+  <div id="dm-mag"><div id="dm-ring"></div><svg width="18" height="18" viewBox="0 0 20 20" fill="none" style="display:block;flex-shrink:0;"><circle cx="8.5" cy="8.5" r="5" stroke="rgba(255,255,255,0.75)" stroke-width="1.8"/><line x1="12.5" y1="12.5" x2="17" y2="17" stroke="rgba(255,255,255,0.75)" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+  <div id="dm-fc-controls">
+    <span style="font-size:10px;color:rgba(255,255,255,0.4);font-family:sans-serif;font-weight:400;">A</span>
+    <input type="range" id="dm-font-slider" min="16" max="22" value="16" step="1" style="width:72px;cursor:pointer;accent-color:#F5D000;" oninput="applyDMFontSize(this.value)">
+    <span style="font-size:14px;color:rgba(255,255,255,0.5);font-family:sans-serif;font-weight:400;">A</span>
+  </div>
+</div>
+<script>initDMFontSize();
+
+(function(){
+  var pill=document.getElementById('dm-pill');
+  var ring=document.getElementById('dm-ring');
+  var mag=document.getElementById('dm-mag');
+  var isOpen=false,holdT=null,tapN=0,tapT=null;
+  function open(){pill.classList.add('open');ring.classList.remove('active');pill.classList.remove('pressing');isOpen=true;}
+  function close(){pill.classList.remove('open');isOpen=false;}
+  function reset(){applyDMFontSize(16);var s=document.getElementById('dm-font-slider');if(s)s.value=16;close();}
+  var holdDuration = 1500;
+  function startHold(){
+    ring.classList.add('active');pill.classList.add('pressing');
+    holdT=setTimeout(function(){
+      if(isOpen){ close(); ring.classList.remove('active'); pill.classList.remove('pressing'); }
+      else { open(); }
+    }, holdDuration);
+  }
+  function cancelHold(){clearTimeout(holdT);ring.classList.remove('active');pill.classList.remove('pressing');}
+  function handleTripleTap(){tapN++;clearTimeout(tapT);tapT=setTimeout(function(){if(tapN>=3){reset();}tapN=0;},500);}
+  if(!mag)return;
+  mag.addEventListener('mousedown',startHold);
+  mag.addEventListener('mouseup',function(){cancelHold();handleTripleTap();});
+  mag.addEventListener('mouseleave',cancelHold);
+  mag.addEventListener('touchstart',function(e){e.preventDefault();startHold();},{passive:false});
+  mag.addEventListener('touchend',function(e){e.preventDefault();cancelHold();handleTripleTap();});
+  mag.addEventListener('touchmove',function(e){e.preventDefault();},{passive:false});
+})();
+</script>
+</body>
+</html>

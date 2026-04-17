@@ -1,0 +1,8 @@
+{
+  "name": "brick-quest",
+  "version": "2.0.0",
+  "description": "Brick Quest — LEGO tabletop RPG server",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.16.0" }
+}
