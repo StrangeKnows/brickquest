@@ -12,6 +12,162 @@ Player files (players.html, test_players.html) still contain **dead code paths**
 
 ---
 
+## Combat & Economy Design — v1 (April 2026)
+
+> **Status:** design spec, no code yet. This doc is the canonical reference for the redesigned game economy. Replaces all previous class/combat notes below.
+
+### Philosophy
+
+Starting conditions should feel **weak and scared**. A first goblin fight should leave a Warrior bloodied and a Wizard almost dead. Power and complexity grow as players earn skills, fuse fragments into bricks, and invest bricks into their kit and combat. The combat economy is driven by **brick refresh rate** during arena, and **fragment/fusion** on the board. Progression and discovery are the center of player experience — customization comes through earned upgrades.
+
+### The two-layer economy
+
+**In-arena (real-time combat):**
+- Player enters with a fixed class starting kit of 3 bricks
+- Bricks refresh CONTINUOUSLY during battle at per-class per-color rate
+- Signature colors refresh fast, baseline colors refresh slowly
+- Overload (holding a brick) burns multiple bricks at once, with fatigue curve
+- Pool caps prevent infinite stockpiling
+- When battle ends, arena brick state is discarded; inventory is separate
+
+**On-board (turn-based):**
+- Fragments are the primary resource (all 9 colors, 1 fragment type per color)
+- Fragments drop from landing events, enemy battle rewards, and market purchases
+- Fragments fuse into full bricks via a fusion minigame (mix of same-color and recipe combinations)
+- Bricks live in player inventory between battles
+- Bricks have rich **out-of-battle** uses — every color has pre-battle prep effects and other utility
+
+**The funnel:**
+```
+Fragments (scattered) → Fusion (minigame) → Bricks (inventory)
+                                                ↓
+                           ┌────────────────────┴────────────────────┐
+                           ↓                                         ↓
+                  BOARD USES (prep, events)           ARENA USES (abilities + refresh)
+                           ↓                                         ↓
+                  Armor/HP buffs, utility            Combat with fatigue curve
+                                                                     ↓
+                                                              BATTLE END
+                                                                     ↓
+                                              HP regen (scaled by performance)
+                                              Fragments (earned) + gold
+                                              Rare: full brick drop
+```
+
+### Class lineup (6 classes)
+
+Starting values — arena-entry. HP does not auto-refill fully between battles; regen scales with performance.
+
+| Class | HP | Speed | Signature (3s refresh, pool 4) | Secondary (5s refresh, pool 3) | Starting kit |
+|---|---|---|---|---|---|
+| Warrior | 14 | 150 | red | gray | red×2, gray×1 |
+| Wizard | 6 | 180 | blue | purple | blue×2, purple×1 |
+| Scout | 9 | 260 | orange | red | orange×2, red×1 |
+| Builder | 12 | 150 | gray | orange | gray×2, orange×1 |
+| Mender | 8 | 160 | white | purple | white×2, purple×1 |
+| Beastcaller | 10 | 220 | green | yellow | green×2, yellow×1 |
+
+All non-signature, non-secondary colors are **baseline** (10s refresh, pool cap 2).
+
+### Brick refresh mechanics (arena only)
+
+| Tier | Refresh rate | Pool cap |
+|---|---|---|
+| Signature (1 color per class) | 3s per brick | 4 max |
+| Secondary (1 color per class) | 5s per brick | 3 max |
+| Baseline (7 colors per class) | 10s per brick | 2 max |
+
+Refresh ticks continuously. Pool caps at the listed maximum.
+
+### Overload fatigue (hybrid)
+
+Every battle maintains two fatigue counters: **signature** and **off-class**.
+
+- Overload on signature or secondary color → signature counter +1
+- Overload on baseline color → off-class counter +2
+
+Each counter applies to its own overloads. Damage multiplier table:
+
+| Counter | Effectiveness |
+|---|---|
+| 0 | 100% |
+| 1 | 80% |
+| 2 | 60% |
+| 3 | 50% |
+| 4+ | 40% floor |
+
+Both counters reset at battle end.
+
+### Fragment & fusion system
+
+- 9 fragment types (one per color): red-frag, blue-frag, gray-frag, white-frag, yellow-frag, orange-frag, purple-frag, green-frag, black-frag
+- Fusion minigame recipes (TBD in playtest, but examples):
+  - 3 red-frag → 1 red brick (same-color)
+  - 2 red-frag + 1 blue-frag → 1 purple brick (recipe)
+  - 3 red-frag + 3 yellow-frag → 1 orange brick
+  - 3 white-frag → 1 white brick
+  - 5 gray-frag → 1 black brick (dark, rare)
+- Exact recipes and ratios to be tuned during playtest
+- Fragments drop from every event (landing rolls, enemy drops, market)
+
+### Out-of-battle brick uses (every color has rich uses)
+
+To be designed in detail (next session). Examples to start thinking:
+- Gray: convert to armor pip pre-battle; build temporary wall on board?
+- White: heal HP between battles; cleanse debuff?
+- Red: deal damage to a gate; intimidate (reroll?); pre-battle rage +damage?
+- Blue: scry (peek at next event); long-range reveal?
+- Orange: set trap on board space; pre-battle damage pool?
+- Green: create green-space (blocks enemies on board?); boost regen?
+- Purple: sacrifice HP for extra action; cleanse status?
+- Yellow: hint toward riddle; skip bad event?
+- Black: unclear; design later
+
+### Battle loot
+
+Victory rewards:
+- Fragments (guaranteed; quantity scales with battle performance)
+- Gold (small amount)
+- Very rarely: 1 full brick drop (jackpot)
+
+Battle performance metrics:
+- Speed of kill
+- HP remaining
+- No-damage or flawless (took 0 damage)
+- Overloads used (fewer = harder fight handled better)
+- Fatigue minimized
+
+These performance metrics ALSO drive post-battle HP regen rate. A flawless kill regenerates more HP than a squeaker.
+
+### HP regeneration philosophy
+
+- Does NOT auto-refill between battles
+- Regen happens based on achievement — better fights = more HP back
+- Exact curves TBD (candidate: flawless = +6 HP, dominant = +3 HP, survived = +1 HP, limping = 0)
+- This creates risk/reward for playing aggressively vs. conservatively
+- Also rewards cautious play on board (use prep bricks to buff before the fight)
+
+### Progression (skills system — deferred design)
+
+Not in this spec. Skills will be designed next economy pass. Current placeholder directions:
+
+- Reduce refresh time on signature color
+- Expand pool cap on signature
+- Reduce fatigue decay on overloads
+- Increase fragment drop rate from events
+- Class-specific abilities (each class gets 1-2 unique hooks)
+
+### Open questions for next design pass
+
+1. Exact out-of-battle use for every brick color (9 designs needed)
+2. Fusion minigame mechanic (what does it look like?)
+3. Fragment drop table by event type
+4. Precise HP regen formula tied to performance metrics
+5. Board prep action UI — how does player pick pre-battle buffs?
+6. Character tuning via playtest after base system is in code
+
+---
+
 ## What is BrickQuest?
 
 A multiplayer tabletop arena game. Players use colored "bricks" as abilities in real-time combat. DM controls the encounter via a separate screen. Runs on local network — players use phones, DM uses laptop.
