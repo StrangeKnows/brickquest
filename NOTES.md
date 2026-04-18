@@ -2,13 +2,13 @@
 
 ## Major Cleanup — April 2026
 
-The turn-based battle system and all class skills were ripped out to make room for the real-time arena battle system (v1 shipped Phase 1, Phase 2 next). Removed server-side: all `startBattle`, `rollAttack`, `useBrickInBattle`, `monsterAttack`, `endBattle`, `resolveBattle*`, `advanceBattleTurn`, `nextBattleRound`, `setComplication`, `bossPhase2`, `monsterHPDelta`, `battleTrapPersist`, plus all skill handlers (`unlockSkill`, `activateEnhanced`, `consumeEnhanced`, `deconstructGate`, `rebuildBridge`, `blueprint`, `forge`, `infiniteBlueprint`, `salvage`, `wrecking_ball`, `tameAttempt`, `commandTamed`, `catapult`), plus the legacy out-of-battle brick actions (`addShield`, `healPlayer`, `massRepair`, `revivePlayer`). Game.js lost `MONSTER_TEMPLATES`, `COMPLICATIONS`, and the entire `SKILLS` block. Player state no longer has `skills`, `tamed`, `scavengeRolled` fields; global no longer has `enhancedMovement` or `battleResult`.
+The turn-based battle system and all class skills were ripped out to make room for the real-time rumble system (v1 shipped Phase 1, Phase 2 next). Removed server-side: all `startBattle`, `rollAttack`, `useBrickInBattle`, `monsterAttack`, `endBattle`, `resolveBattle*`, `advanceBattleTurn`, `nextBattleRound`, `setComplication`, `bossPhase2`, `monsterHPDelta`, `battleTrapPersist`, plus all skill handlers (`unlockSkill`, `activateEnhanced`, `consumeEnhanced`, `deconstructGate`, `rebuildBridge`, `blueprint`, `forge`, `infiniteBlueprint`, `salvage`, `wrecking_ball`, `tameAttempt`, `commandTamed`, `catapult`), plus the legacy out-of-battle brick actions (`addShield`, `healPlayer`, `massRepair`, `revivePlayer`). Game.js lost `MONSTER_TEMPLATES`, `COMPLICATIONS`, and the entire `SKILLS` block. Player state no longer has `skills`, `tamed`, `scavengeRolled` fields; global no longer has `enhancedMovement` or `battleResult`.
 
-Player files (players.html, test_players.html) still contain **dead code paths** that reference the old system — skill tab rendering, battle-mode phase banners, initiative displays. Those paths never execute (they gate on `G.battle` or call SKILLS which is now empty). Left in for now to keep the rip contained; scrub during arena Phase 2 integration. Also kept as no-op stubs: the client-side wrappers like `client.startBattle()`, `client.tameAttempt()`, etc., so any orphaned UI buttons log a warning instead of crashing.
+Player files (players.html, test_players.html) still contain **dead code paths** that reference the old system — skill tab rendering, battle-mode phase banners, initiative displays. Those paths never execute (they gate on `G.battle` or call SKILLS which is now empty). Left in for now to keep the rip contained; scrub during Rumble Phase 2 integration. Also kept as no-op stubs: the client-side wrappers like `client.startBattle()`, `client.tameAttempt()`, etc., so any orphaned UI buttons log a warning instead of crashing.
 
-**Kept working** (untouched by rip): Red dash + gate-break, landing events (gold/gray/blue/trap/riddle/purple/creeper), prepare phase UI, trade/market/gate mechanics, arena battle pending + active flow, DM screen, player classes (HP/speed/starting bricks).
+**Kept working** (untouched by rip): Red dash + gate-break, landing events (gold/gray/blue/trap/riddle/purple/creeper), prepare phase UI, trade/market/gate mechanics, rumble pending + active flow, DM screen, player classes (HP/speed/starting bricks).
 
-**Rebuild queue:** skills system, all class-specific abilities (Builder's Blueprint/Forge, Beastcaller's Tame/Command, Mender's Mass Repair/Revive, etc.) — will be redesigned from scratch during arena Phase 2+ when combat is real.
+**Rebuild queue:** skills system, all class-specific abilities (Builder's Blueprint/Forge, Beastcaller's Tame/Command, Mender's Mass Repair/Revive, etc.) — will be redesigned from scratch during Rumble Phase 2+ when combat is real.
 
 ---
 
@@ -18,17 +18,17 @@ Player files (players.html, test_players.html) still contain **dead code paths**
 
 ### Philosophy
 
-Starting conditions should feel **weak and scared**. A first goblin fight should leave a Warrior bloodied and a Wizard almost dead. Power and complexity grow as players earn skills, fuse fragments into bricks, and invest bricks into their kit and combat. The combat economy is driven by **brick refresh rate** during arena, and **fragment/fusion** on the board. Progression and discovery are the center of player experience — customization comes through earned upgrades.
+Starting conditions should feel **weak and scared**. A first goblin fight should leave a Warrior bloodied and a Wizard almost dead. Power and complexity grow as players earn skills, fuse fragments into bricks, and invest bricks into their kit and combat. The combat economy is driven by **brick refresh rate** during rumble, and **fragment/fusion** on the board. Progression and discovery are the center of player experience — customization comes through earned upgrades.
 
 ### The two-layer economy
 
-**In-arena (real-time combat):**
+**In-rumble (real-time combat):**
 - Player enters with a fixed class starting kit of 3 bricks
 - Bricks refresh CONTINUOUSLY during battle at per-class per-color rate
 - Signature colors refresh fast, baseline colors refresh slowly
 - Overload (holding a brick) burns multiple bricks at once, with fatigue curve
 - Pool caps prevent infinite stockpiling
-- When battle ends, arena brick state is discarded; inventory is separate
+- When battle ends, rumble brick state is discarded; inventory is separate
 
 **On-board (turn-based):**
 - Fragments are the primary resource (all 9 colors, 1 fragment type per color)
@@ -43,7 +43,7 @@ Fragments (scattered) → Fusion (minigame) → Bricks (inventory)
                                                 ↓
                            ┌────────────────────┴────────────────────┐
                            ↓                                         ↓
-                  BOARD USES (prep, events)           ARENA USES (abilities + refresh)
+                  BOARD USES (prep, events)           RUMBLE USES (abilities + refresh)
                            ↓                                         ↓
                   Armor/HP buffs, utility            Combat with fatigue curve
                                                                      ↓
@@ -56,7 +56,7 @@ Fragments (scattered) → Fusion (minigame) → Bricks (inventory)
 
 ### Class lineup (6 classes)
 
-Starting values — arena-entry. HP does not auto-refill fully between battles; regen scales with performance.
+Starting values — rumble-entry. HP does not auto-refill fully between battles; regen scales with performance.
 
 | Class | HP | Speed | Signature (3s refresh, pool 4) | Secondary (5s refresh, pool 3) | Starting kit |
 |---|---|---|---|---|---|
@@ -69,7 +69,7 @@ Starting values — arena-entry. HP does not auto-refill fully between battles; 
 
 All non-signature, non-secondary colors are **baseline** (10s refresh, pool cap 2).
 
-### Brick refresh mechanics (arena only)
+### Brick refresh mechanics (rumble only)
 
 | Tier | Refresh rate | Pool cap |
 |---|---|---|
@@ -170,7 +170,7 @@ Not in this spec. Skills will be designed next economy pass. Current placeholder
 
 ## What is BrickQuest?
 
-A multiplayer tabletop arena game. Players use colored "bricks" as abilities in real-time combat. DM controls the encounter via a separate screen. Runs on local network — players use phones, DM uses laptop.
+A multiplayer tabletop rumble game. Players use colored "bricks" as abilities in real-time combat. DM controls the encounter via a separate screen. Runs on local network — players use phones, DM uses laptop.
 
 ## Brick Colors & Actions
 
@@ -222,7 +222,7 @@ Each class has two paths. Examples:
 - Mender: Lifeline (damage triggers regen pulse) vs Drain (heal scales with target missing HP)
 - Beastcaller: Plague (poison spreads on death) vs Herder (confuse becomes directional)
 
-## Arena Test — Technical Notes
+## Rumble Test — Technical Notes
 
 - Single HTML file, no dependencies
 - Canvas 2D rendering
@@ -302,7 +302,7 @@ Trade and direct item give blocked if either party is currently in battle (i.e.,
 
 Always accessible from prepare phase unless: player in battle, on a restricted zone (zone 5), or DM toggled off. No longer tied to specific board spaces. Rendered as an expandable action card with an inline 3x3 brick-purchase grid.
 
-## Arena Test — Brick Interaction Fix (Pointer Events)
+## Rumble Test — Brick Interaction Fix (formerly Arena Test) (Pointer Events)
 
 Original brick handler used mouse + touch events with listeners on `document`. On Brave Android (and likely other modern mobile browsers), this hit two problems:
 
@@ -322,7 +322,7 @@ Arena requests fullscreen automatically on class selection (valid user-gesture, 
 
 ## Android Issues — Status Overview
 
-When the arena brick interactions broke on mobile (no targeting, tap-acting-as-hold), debugging traced the root cause to touch-event coalescing on Brave Android. The fix was to switch to Pointer Events — but that required reverting `arena_test.html` to an older baseline (`ArenaTest001.html`) that had working brick mechanics. The reversion RE-INTRODUCED some prior mobile issues that had been addressed in a later version. Status below is honest about what's fixed vs. lost-in-revert.
+When the arena brick interactions broke on mobile (no targeting, tap-acting-as-hold), debugging traced the root cause to touch-event coalescing on Brave Android. The fix was to switch to Pointer Events — but that required reverting `rumble_test.html` to an older baseline (`ArenaTest001.html`) that had working brick mechanics. The reversion RE-INTRODUCED some prior mobile issues that had been addressed in a later version. Status below is honest about what's fixed vs. lost-in-revert.
 
 ### Fixed (current)
 
@@ -366,10 +366,108 @@ When the arena brick interactions broke on mobile (no targeting, tap-acting-as-h
 
 Default: only deliver files that changed this session.
 
-Full set (when explicitly requested): `server.js`, `game.js`, `players.html`, `dm_screen.html`, `test_players.html`, `arena_test.html`, `serve.sh`, `package.json`, `package-lock.json`.
+Full set (when explicitly requested): `server.js`, `game.js`, `players.html`, `dm_screen.html`, `test_players.html`, `rumble_test.html`, `rumble.js`, `rumble.css`, `serve.sh`, `package.json`, `package-lock.json`.
 
 End deliveries with the push command:
 ```
 cd ~/Desktop/BrickQuest && git add . && git commit -m "update" && git push
 ```
 or `./save.sh "what changed"`.
+
+---
+
+## Session: Rumble module v1 — extraction, economy, scaling, yellow aura
+
+### Architecture
+
+- Renamed `arena` → `rumble` project-wide (server, game, client pages, NOTES).
+- Extracted combat loop out of `rumble_test.html` (previously `arena_test.html`) into a standalone IIFE module: `rumble.js` + `rumble.css`. Test harness `rumble_test.html` is now a 150-line thin wrapper.
+- Public API on `window.Rumble`:
+  - Lifecycle: `init(opts)`, `teardown()`
+  - Control: `start(config)`, `setPauseState(bool)`, `forceEnd(reason)`
+  - Queries: `isActive()`, `getState()`, `getConfig()`, `getDebugInfo()`
+  - DM tools: `injectBricks(delta)`, `setPlayerHP(n)`, `setEnemyHP(n)`
+- Events emitted: `ready`, `start`, `tick` (~500ms), `pause`, `resume`, `playerHit`, `enemyHit`, `playerDown`, `enemyKilled`, `victory`, `defeat`, `timeout`, `quit`, `end` (always last).
+- Required DOM: `<canvas id="rumble-canvas">`, `<div id="rumble-brick-bar-left">`, `<div id="rumble-brick-bar-right">`. Optional: `<div id="rumble-hud">` with `#rumble-timer-display`, `<div id="rumble-debug">` (only created when URL has `?debug=1`).
+
+### Combat & Economy v1 (locked)
+
+| Class | HP | Speed | Signature (3s refresh, pool 4) | Secondary (5s, pool 3) | Starting Kit |
+|---|---|---|---|---|---|
+| Warrior | 14 | 150 | red | gray | red×2 + gray×1 |
+| Wizard | 6 | 180 | blue | purple | blue×2 + purple×1 |
+| Scout | 9 | 260 | orange | red | orange×2 + red×1 |
+| Builder | 12 | 150 | gray | orange | gray×2 + orange×1 |
+| Mender | 8 | 160 | white | purple | white×2 + purple×1 |
+| Beastcaller | 10 | 220 | green | yellow | green×2 + yellow×1 |
+
+- Baseline colors: 10s refresh, pool cap 2. Not in starting kit — only enter a rumble via future fragment/fusion economy.
+- **Critical clarification (learned this session):** pool caps are *ceilings*, not per-battle maxes. `brickMax per battle = min(starting kit count, pool cap)`. To exceed starting counts you find fragments on the board and fuse them, equipping more before next battle. Refreshing in combat only tops up to starting count, never higher.
+- Refresh timers staggered at battle start per color (random 0–rate offset) so when you spend bricks they don't all refresh synchronously.
+
+### Fatigue (visible, not yet scaling damage)
+
+- Curve: `[1.0, 0.8, 0.6, 0.5, 0.4]` (floor).
+- **1-brick overloads are exempt** — no fatigue cost. Only 2+ brick overloads increment counters.
+- Signature/secondary overloads increment signature counter +1.
+- Baseline overloads increment off-class counter +2 (hybrid penalty).
+- Floating "FATIGUE X%" text shows over player on each fatiguing fire.
+- Counter state exposed via `getState().fatigue` and `.overloadCount`.
+- **Damage is NOT yet scaled by the multiplier.** Deferred to a tuning pass post-playtest; hooks are in place at each `fireOverload<Color>` call site.
+
+### Display scaling
+
+- `getDisplayScale()` returns 0.60→1.00 based on `min(W, H)`:
+  - ≤400px → 0.60
+  - 400–700px → 0.60→0.80 linear
+  - 700–1100px → 0.80→1.00 linear
+  - ≥1100px → 1.00
+- `scaleDist(px)` helper multiplies by current scale.
+- Applied to: `player.r` (base 22), `goblin.r` (base 18), `AGGRO_RANGE` (base 200), `DEAGGRO_RANGE` (base 320), drag/tap thresholds (base 40, 20), green/purple burst radii (base 400), yellow confuse default radius (base 300), yellow aura radius (base 120), gray wall maxR (base 30+tier*22), black effect radius ranges.
+- `resize()` re-applies scale to living entities on viewport change (phone rotation handled).
+
+### Brick bar layout
+
+- Split into two fixed-position containers: `#rumble-brick-bar-left` + `#rumble-brick-bar-right`.
+- No backing card; transparent container with `pointer-events: none`, buttons opt back in. Minimal styling.
+- `_distributeBricks(colors)` sorts by tier (sig→sec→base, alphabetical tiebreak) then alternates right/left starting with RIGHT. Signature goes to dominant (right) hand by default.
+- Filter rule: render bricks where `brickMax > 0`. Empty-but-in-kit bricks stay visible showing their recharge bar. Colors not in kit stay hidden for full battle.
+- `getArenaBounds`: panelWidth 54 per side, pad 12, topHUD 50. Rumble space gains ~28px per side + 18px top vs. pre-split layout.
+
+### Gray armor (rebalance)
+
+- Base: **1 armor pip per gray brick**.
+  - Tap: +1 armor
+  - Overload N gray: +N armor
+- Comments mark `// Future "Iron Hide" skill will unlock 2-per-brick` at both hook sites. When skill system lands, multiplier attaches there.
+
+### Yellow aura (new mechanic)
+
+- **Tap yellow:** 3s persistent aura on player, follows as player moves. Radius ~120px (scaled). Goblin on first entry gets 2.0s confuse; each frame of contact refreshes timer to 1.0s. Stay in the field → stay confused. Leave → snap out ~1s later.
+- **Drag yellow to point:** unchanged — instant confuse burst at drop, ~87px radius.
+- **Overload yellow:** 3s aura, radius scales `120 + 40*(count-1)`. Anchored if drag-originated, follows player if tap-originated. Duration on caught goblins extends naturally via the per-frame refresh.
+- Visual: soft radial glow + dashed pulsing edge ring, occasional "?" particle shimmer above caught goblins.
+- New state: module-level `yellowAura`. New functions: `startYellowAura`, `updateYellowAura`, `drawYellowAura`. Reset on battle start.
+
+### Known issues / TODO queue
+
+1. **No auto-victory/defeat resolver.** Module emits `enemyKilled` but doesn't end the rumble; only `forceEnd()` terminates. Needs a combat resolver before real game integration.
+2. **Elapsed keeps ticking during pause** (cosmetic).
+3. **Fatigue-to-damage tuning pass** after playtest — wire multiplier into each color's damage/effect math.
+4. **Yellow particle density** possibly too busy (~9/sec). Decide after visual test.
+5. **Out-of-battle brick uses** (9 designs per brick) — needed for prepare-phase UI; user is working on these.
+6. **Fragment drop tables + fusion minigame** — TBD.
+7. **HP regen precise formula** — scales with battle performance, exact curve TBD.
+8. **Phase 2 integration:** wire rumble.js into players.html with server-sourced state, battleTick, victory/loss resolver, loot generation.
+9. **Audit other brick output values** against "1 brick = 1 unit; skills give multiplier" principle — white heal amount, red damage, blue bolt damage, orange trap damage, green push/poison, purple damage/heal, yellow confuse duration.
+
+### Locked design decisions
+
+- Refresh rates: 3s/5s/10s per signature/secondary/baseline tier, staggered at start.
+- Pool caps: 4/3/2 are ceilings. Battle max = min(starting kit, cap).
+- Fatigue curve `[1.0, 0.8, 0.6, 0.5, 0.4]`, hybrid penalty (+1 sig / +2 off-class), 1-brick exempt.
+- Starting kits: 3 bricks (2 sig + 1 sec) per class, locked per table above.
+- Class identity: signature color refreshes fastest. Refresh tier is *latent identity* — surfaces once fragment/fusion lets you bring non-class bricks in.
+- Brick bar: always balanced, signature right, secondary left, alternating for extras.
+- Growth path: starting kits stay static in v1; progression is entirely board-side (fragments → fusion → expanded inventory → richer kits).
+- Skill system: ripped out, pending redesign. Multiplier hooks reserved at gray armor + (future) other colors.
