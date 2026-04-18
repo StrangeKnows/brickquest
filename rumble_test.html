@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no,viewport-fit=cover">
+<title>BrickQuest — Rumble Test</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="rumble.css">
+<style>
+  /* Test-page UI only (class picker + readout panel).
+     Combat-related styles (canvas, brick bars, HUD) come from rumble.css. */
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { overscroll-behavior: none; }
+  body {
+    background:#0a0a0f; color:#eee;
+    font-family:'Cinzel',serif;
+    overflow:hidden;
+    width:100vw; height:100dvh;
+    display:flex; flex-direction:column;
+    touch-action:none;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #overlay {
+    position:fixed; inset:0; z-index:300;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    background:rgba(0,0,0,.88);
+    padding:20px;
+  }
+  #overlay h1 { font-size:24px; color:#F5D000; margin-bottom:6px; text-align:center; }
+  #overlay h2 { font-size:11px; color:#888; letter-spacing:.1em; margin:14px 0 8px; text-align:center; }
+  #overlay p  { font-size:12px; color:#888; margin-bottom:16px; text-align:center; max-width:300px; line-height:1.5; }
+
+  .mode-toggle { display:flex; gap:6px; margin-bottom:10px; }
+  .mode-btn {
+    padding:7px 14px; border-radius:8px; border:1px solid #333;
+    background:#111; cursor:pointer; font-family:'Cinzel',serif;
+    font-size:10px; letter-spacing:.08em; color:#888;
+    transition:all .15s;
+  }
+  .mode-btn.active { background:#1a1500; border-color:#F5D000; color:#F5D000; }
+
+  .class-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; width:300px; max-width:92vw; }
+  .class-pick {
+    padding:10px 6px; border-radius:8px; border:1px solid #333;
+    background:#111; cursor:pointer; text-align:center;
+    transition:border-color .15s, background .15s;
+  }
+  .class-pick:hover, .class-pick:active { border-color:#F5D000; background:#1a1500; }
+  .class-pick .icon { font-size:22px; display:block; margin-bottom:3px; }
+  .class-pick .name { font-size:9px; letter-spacing:.08em; color:#888; }
+  .class-pick .stats { font-size:9px; color:#555; margin-top:3px; font-family:monospace; }
+  .class-pick .kit   { font-size:9px; color:#aaa; margin-top:3px; font-family:monospace; line-height:1.4; }
+
+  /* Readout panel (live state during spec-mode battle) */
+  #readout {
+    position:fixed; top:8px; left:50%; transform:translateX(-50%);
+    z-index:210;
+    background:rgba(0,0,0,.85);
+    border:1px solid #333; border-radius:8px;
+    padding:6px 10px;
+    font-family:monospace; font-size:10px; color:#aaa;
+    line-height:1.5;
+    max-width:calc(100vw - 150px);
+    text-align:center;
+    pointer-events:none;
+  }
+  #readout .label { color:#666; }
+  #readout .val   { color:#eee; }
+  #readout .sig   { color:#F5D000; }
+  #readout .off   { color:#ff9944; }
+  #readout.hidden { display:none; }
+</style>
+</head>
+<body>
+
+<!-- HUD: timer top-right (optional on this test page) -->
+<div id="rumble-hud">
+  <div id="rumble-hud-right">
+    <div style="text-align:right;">
+      <div id="rumble-timer-display">INF</div>
+      <div id="rumble-timer-label">SECS</div>
+    </div>
+  </div>
+</div>
+
+<!-- Canvas + brick bars (left 5, right 4) -->
+<canvas id="rumble-canvas"></canvas>
+<div id="rumble-brick-bar-left" class="rumble-brick-bar"></div>
+<div id="rumble-brick-bar-right" class="rumble-brick-bar"></div>
+
+<!-- Live readout panel (shown during spec mode battles) -->
+<div id="readout" class="hidden"></div>
+
+<!-- Hidden compatibility elements: the module's updateHUD writes to these if present. -->
+<div style="display:none;">
+  <div id="hud-hp"></div>
+  <div id="hud-hp-max"></div>
+  <div id="hud-class"></div>
+  <div id="hp-bar"></div>
+  <div id="armor-pips"></div>
+  <div id="dash-display">DASH</div>
+  <div id="dash-cd">READY</div>
+</div>
+
+<!-- Debug overlay — only present on the page when ?debug=1 is in the URL. -->
+
+<!-- CLASS PICKER OVERLAY -->
+<div id="overlay">
+  <h1>BrickQuest Rumble Test</h1>
+  <p>Pick a mode and class.</p>
+
+  <h2>MODE</h2>
+  <div class="mode-toggle">
+    <button class="mode-btn active" id="mode-sandbox" onclick="setMode('sandbox')">SANDBOX (random bricks)</button>
+    <button class="mode-btn"        id="mode-spec"    onclick="setMode('spec')">SPEC (starting kit)</button>
+  </div>
+
+  <h2>CLASS</h2>
+  <div class="class-grid" id="class-grid"></div>
+</div>
+
+<script src="rumble.js"></script>
+<script>
+// ═══════════════════════════════════════════════════════════════════════
+// Rumble Test Harness
+// ═══════════════════════════════════════════════════════════════════════
+
+// Combat & Economy v1 — locked starting kits per class.
+// Each class starts with 3 bricks: 2 signature + 1 secondary.
+var SPEC_CLASSES = {
+  warrior:     { icon:'\u2694\uFE0F', name:'WARRIOR', hp:14, speed:150, sig:'red',    sec:'gray',   kit:{red:2, gray:1}     },
+  wizard:      { icon:'\uD83D\uDD2E', name:'WIZARD',  hp:6,  speed:180, sig:'blue',   sec:'purple', kit:{blue:2, purple:1}  },
+  scout:       { icon:'\uD83C\uDFC3', name:'SCOUT',   hp:9,  speed:260, sig:'orange', sec:'red',    kit:{orange:2, red:1}   },
+  builder:     { icon:'\uD83D\uDD27', name:'BUILDER', hp:12, speed:150, sig:'gray',   sec:'orange', kit:{gray:2, orange:1}  },
+  mender:      { icon:'\uD83D\uDC8A', name:'MENDER',  hp:8,  speed:160, sig:'white',  sec:'purple', kit:{white:2, purple:1} },
+  beastcaller: { icon:'\uD83D\uDC3E', name:'BEAST',   hp:10, speed:220, sig:'green',  sec:'yellow', kit:{green:2, yellow:1} },
+};
+
+var currentMode = 'sandbox';
+
+function setMode(m) {
+  currentMode = m;
+  document.getElementById('mode-sandbox').classList.toggle('active', m === 'sandbox');
+  document.getElementById('mode-spec').classList.toggle('active', m === 'spec');
+  renderClassGrid();
+}
+
+function renderClassGrid() {
+  var grid = document.getElementById('class-grid');
+  var html = '';
+  Object.keys(SPEC_CLASSES).forEach(function(cls) {
+    var m = SPEC_CLASSES[cls];
+    var stats = currentMode === 'spec'
+      ? 'HP ' + m.hp + ' \u00B7 spd ' + m.speed
+      : 'HP ' + m.hp + ' \u00B7 random kit';
+    var kit = currentMode === 'spec'
+      ? Object.entries(m.kit).map(function(kv) { return kv[1] + ' ' + kv[0]; }).join(' + ')
+      : '';
+    html += '<div class="class-pick" onclick="startTestRumble(\'' + cls + '\')">'
+      +   '<span class="icon">' + m.icon + '</span>'
+      +   '<span class="name">' + m.name + '</span>'
+      +   '<div class="stats">' + stats + '</div>'
+      +   (kit ? '<div class="kit">' + kit + '</div>' : '')
+      + '</div>';
+  });
+  grid.innerHTML = html;
+}
+
+// Sandbox mode gives 1-10 random bricks of each color.
+function randomSandboxBricks() {
+  var COLORS = ['red','white','yellow','blue','orange','gray','green','purple','black'];
+  var out = {};
+  COLORS.forEach(function(c) { out[c] = 1 + Math.floor(Math.random() * 10); });
+  return out;
+}
+
+// Request fullscreen if possible. Silent if denied (iframe, unsupported, etc).
+function tryFullscreen() {
+  var el = document.documentElement;
+  if (el.requestFullscreen)          el.requestFullscreen().catch(function(){});
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  else if (el.msRequestFullscreen)   el.msRequestFullscreen();
+}
+
+// Initialize the Rumble module ONCE on page load.
+Rumble.init({
+  onEvent: function(type, data) {
+    // Suppress tick spam; log the rest.
+    if (type !== 'tick') console.log('[Rumble]', type, data || '');
+    if (type === 'tick') updateReadout(data);
+    if (type === 'end')  showEndOverlay(data && data.reason);
+  }
+});
+
+function startTestRumble(cls) {
+  document.getElementById('overlay').style.display = 'none';
+  tryFullscreen();
+
+  var m = SPEC_CLASSES[cls];
+  var startConfig = {
+    cls: cls,
+    hp: m.hp,
+    hpMax: m.hp,
+    armor: 0,
+    mode: currentMode,
+    bricks: currentMode === 'spec' ? Object.assign({}, m.kit) : randomSandboxBricks(),
+  };
+  Rumble.start(startConfig);
+
+  // Show live readout in spec mode (refresh rates, fatigue counters are visible here)
+  var readout = document.getElementById('readout');
+  readout.classList.toggle('hidden', currentMode !== 'spec');
+}
+
+function updateReadout(state) {
+  if (!state || currentMode !== 'spec') return;
+  var r = document.getElementById('readout');
+  var brickSummary = Object.entries(state.playerBricks || {})
+    .filter(function(kv) { return kv[1] > 0 || (state.playerBrickMax[kv[0]] || 0) > 0; })
+    .map(function(kv) {
+      return '<span class="val">' + kv[0].substr(0,3) + ' ' + kv[1] + '/' + (state.playerBrickMax[kv[0]] || 0) + '</span>';
+    })
+    .slice(0, 5) // first 5 so it fits on small screens
+    .join(' ');
+  r.innerHTML =
+    '<span class="label">fatigue</span> ' +
+    '<span class="sig">sig:' + state.fatigue.signature + '</span> ' +
+    '<span class="off">off:' + state.fatigue.offClass + '</span> ' +
+    '<span class="label">overloads</span> <span class="val">' + state.overloadCount + '</span> ' +
+    '<span class="label">elapsed</span> <span class="val">' + state.elapsed.toFixed(1) + 's</span><br>' +
+    brickSummary;
+}
+
+function showEndOverlay(reason) {
+  document.getElementById('readout').classList.add('hidden');
+  var overlay = document.getElementById('overlay');
+  var title = reason === 'victory' ? 'RUMBLE COMPLETE'
+            : reason === 'timeout' ? "TIME'S UP"
+            : reason === 'defeat'  ? 'DEFEATED'
+            : 'RUMBLE ENDED';
+  var color = reason === 'victory' ? '#F5D000' : '#888';
+  overlay.innerHTML =
+    '<h1 style="color:' + color + ';">' + title + '</h1>'
+    + '<p>' + (reason || 'ended') + '</p>'
+    + '<div class="class-grid" style="width:180px;grid-template-columns:1fr;">'
+    +   '<div class="class-pick" onclick="location.reload()">Play Again</div>'
+    + '</div>';
+  overlay.style.display = 'flex';
+}
+
+// Build the class grid on first render.
+renderClassGrid();
+
+// URL ?debug=1 shows the debug overlay.
+if (/[?&]debug=1/.test(location.search)) {
+  var d = document.createElement('div');
+  d.id = 'rumble-debug';
+  document.body.appendChild(d);
+}
+</script>
+</body>
+</html>

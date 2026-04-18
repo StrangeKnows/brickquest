@@ -1,0 +1,108 @@
+/* ═══════════════════════════════════════════════════
+ * rumble.css — styles for the Rumble real-time combat module
+ *
+ * Host page needs:
+ *   <canvas id="rumble-canvas"></canvas>
+ *   <div id="rumble-brick-bar-left"></div>
+ *   <div id="rumble-brick-bar-right"></div>
+ * Optional (only rendered if present):
+ *   <div id="rumble-hud">...</div>
+ *   <div id="rumble-debug"></div>
+ * ═══════════════════════════════════════════════════ */
+
+#rumble-canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100dvh;
+  touch-action: none;
+  z-index: 50;
+}
+
+#rumble-hud {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  pointer-events: none;
+  font-family: 'Cinzel', serif;
+}
+#rumble-hud-right { display: flex; align-items: center; gap: 8px; }
+#rumble-timer-display { font-size: 28px; font-weight: 700; color: #F5D000; min-width: 32px; text-align: right; }
+#rumble-timer-label { font-size: 9px; letter-spacing: .1em; color: #666; }
+
+/* ── BRICK BARS (split: sig right, sec left — see rumble.js _distributeBricks) ──
+ * Minimal: no background card, no border. Buttons float directly over the
+ * rumble space, giving bricks more horizontal room on small screens. */
+.rumble-brick-bar {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  max-height: 95dvh;
+  overflow-y: auto;
+  pointer-events: none; /* container is transparent; buttons opt back in */
+}
+.rumble-brick-bar > * { pointer-events: auto; }
+#rumble-brick-bar-left  { left: 0; }
+#rumble-brick-bar-right { right: 0; }
+.rumble-brick-btn {
+  width: 48px;
+  height: 56px;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'Cinzel', serif;
+  transition: transform .1s, box-shadow .1s;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  padding: 0;
+}
+.rumble-brick-btn:active { transform: scale(.9); }
+.rumble-brick-btn .qty {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 8px;
+  font-size: 9px;
+  padding: 0 4px;
+  min-width: 16px;
+  text-align: center;
+  line-height: 16px;
+  color: #eee;
+}
+.rumble-brick-btn.empty { opacity: .25; pointer-events: none; }
+
+#rumble-debug {
+  position: fixed;
+  bottom: 8px;
+  left: 10px;
+  z-index: 200;
+  font-size: 10px;
+  color: #888;
+  font-family: monospace;
+  pointer-events: none;
+  text-shadow: 0 1px 2px #000;
+  opacity: 0.7;
+  max-width: calc(100vw - 20px);
+  word-break: break-all;
+}
