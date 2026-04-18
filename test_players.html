@@ -1514,6 +1514,11 @@ function render() {
 
 function restoreActiveEvent() {
   if (!G || !G.activeEvent) return;
+  // If this is a monster event and we have a pending arena battle for this player,
+  // the arena card handles the display instead. Skip the generic landing-result card.
+  if (G.activeEvent.evType === 'monster' && G.pendingArenaBattle && G.pendingArenaBattle.cls === MY_CLASS) return;
+  // Also skip during an active arena battle — arena card shows the state.
+  if (G.arenaBattle && G.arenaBattle.cls === MY_CLASS) return;
   var isRiddleEvent = G.activeEvent.evType === 'riddle';
   if (!isRiddleEvent && G.activeEvent.cls !== MY_CLASS) return;
   // Allow re-render even if resolved:true, as long as there's a result to show
@@ -1999,6 +2004,8 @@ function renderActions(me) {
     if (G.phase === 'prepare') {
       html += renderPreparePanel(me);
     }
+    // Arena battle card — pending (event card) or active (placeholder arena screen)
+    html += renderArenaCard(me);
     // Landing phase / event
     if (isMyTurn && G.phase === 'land' && !_pendingResult) {
       var hasActiveEvent = G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
@@ -2696,6 +2703,79 @@ function useRedBrickMove() {
 function usePurpleEnhanced() {
   if((G.players[MY_CLASS].bricks.purple||0)<1){toast('No purple bricks','warn');return;}
   client.activateEnhanced(MY_CLASS);
+}
+
+// ── ARENA BATTLE CARD ──
+// Shown on the active player's screen when:
+//  (A) G.pendingArenaBattle targets them → event card with flavor + Enter Arena button
+//  (B) G.arenaBattle is active and they're the fighter → placeholder arena screen
+// Both are rendered here so the UI transition is seamless.
+function renderArenaCard(me) {
+  if (!G) return '';
+  // Pending: event card with flavor text + Enter Arena button
+  if (G.pendingArenaBattle && G.pendingArenaBattle.cls === MY_CLASS && !G.arenaBattle) {
+    var pb = G.pendingArenaBattle;
+    return '<div id="arena-event-card" style="margin:12px 0;padding:16px;border-radius:12px;background:linear-gradient(180deg,#2a0a0a 0%,#1a0505 100%);border:2px solid var(--red);box-shadow:0 4px 16px rgba(226,75,74,.25);">'
+      + '<div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.12em;color:var(--red);margin-bottom:8px;text-align:center;">⚔ ENCOUNTER</div>'
+      + '<div style="font-size:32px;text-align:center;margin-bottom:8px;">👺</div>'
+      + '<div style="font-size:15px;color:var(--text);font-style:italic;text-align:center;line-height:1.5;margin-bottom:14px;">"' + escapeHtmlMin(pb.flavor) + '"</div>'
+      + '<div style="font-size:12px;color:var(--text-dim);text-align:center;margin-bottom:12px;">A <strong>' + escapeHtmlMin(pb.enemy.name) + '</strong> blocks your path. Enter the arena to fight.</div>'
+      + '<button class="btn" style="width:100%;padding:14px;font-size:15px;font-family:Cinzel,serif;letter-spacing:.1em;background:linear-gradient(180deg,var(--red) 0%,#8a2020 100%);border-color:var(--red);color:#fff;font-weight:700;" onclick="enterArenaClick()">⚔ ENTER ARENA</button>'
+      + '<div style="font-size:10px;color:var(--text-faint);text-align:center;margin-top:8px;">Fullscreen landscape recommended</div>'
+      + '</div>';
+  }
+  // Active: battle running
+  if (G.arenaBattle && G.arenaBattle.cls === MY_CLASS) {
+    var b = G.arenaBattle;
+    if (b.forced && !_arenaForcedSeen) {
+      _arenaForcedSeen = true;
+      try {
+        var el = document.documentElement;
+        if (el.requestFullscreen) el.requestFullscreen().catch(function(){});
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      } catch(_) {}
+      try {
+        if (screen.orientation && screen.orientation.lock) {
+          screen.orientation.lock('landscape').catch(function(){});
+        }
+      } catch(_) {}
+    }
+    var secs = Math.floor((b.elapsedMs||0)/1000);
+    var mm = Math.floor(secs/60), ss = secs%60;
+    return '<div id="arena-active-placeholder" style="margin:12px 0;padding:20px;border-radius:12px;background:#0a1a0a;border:2px solid var(--green);text-align:center;">'
+      + '<div style="font-family:Cinzel,serif;font-size:11px;letter-spacing:.12em;color:var(--green);margin-bottom:10px;">⚔ BATTLE ACTIVE' + (b.forced ? ' (DM FORCED)' : '') + '</div>'
+      + '<div style="font-size:48px;margin-bottom:8px;">⚔️</div>'
+      + '<div style="font-size:14px;color:var(--text);margin-bottom:6px;">Fighting <strong>' + escapeHtmlMin(b.enemy.name) + '</strong></div>'
+      + '<div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">HP ' + b.playerArena.hp + '/' + b.playerArena.hpMax + ' · Enemy HP ' + b.enemy.hp + '/' + (b.enemy.hpMax||b.enemy.hp)
+      + ' · ' + mm + ':' + (ss<10?'0':'') + ss + (b.paused ? ' ⏸' : '') + '</div>'
+      + '<div style="font-size:11px;color:var(--text-faint);font-style:italic;">Arena visuals coming in phase 2. For now, use DM controls to end the battle.</div>'
+      + '</div>';
+  }
+  _arenaForcedSeen = false;
+  return '';
+}
+
+var _arenaForcedSeen = false;
+
+function escapeHtmlMin(s) {
+  return String(s || '').replace(/[<>&"]/g, function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c];});
+}
+
+function enterArenaClick() {
+  // Request fullscreen on button tap (valid user gesture)
+  try {
+    var el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(function(){});
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  } catch(_) {}
+  // Lock landscape if supported (will silently fail on iOS)
+  try {
+    if (screen.orientation && screen.orientation.lock) {
+      screen.orientation.lock('landscape').catch(function(){});
+    }
+  } catch(_) {}
+  // Tell server we're ready to start
+  client.send('battleReady', { cls: MY_CLASS });
 }
 
 // ── LAND PANEL ──

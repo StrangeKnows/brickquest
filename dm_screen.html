@@ -196,6 +196,51 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
 
     <div class="card">
       <div class="card-title">Landing Events</div>
+
+      <!-- Arena battle — pending initiate -->
+      <div id="arena-pending-panel" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#2a0a0a;border:2px solid var(--red);">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
+          <span style="font-family:Cinzel,serif;font-size:10px;color:var(--red);letter-spacing:.08em;">⚔ BATTLE PENDING</span>
+          <button class="btn btn-sm" style="background:#222;font-size:10px;padding:3px 8px;" onclick="client.send('battleDismissPending',{})">✕ Dismiss</button>
+        </div>
+        <div id="arena-pending-text" style="font-size:12px;color:var(--text);margin-bottom:6px;">—</div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn P btn-sm" style="flex:1;" onclick="client.send('battleStartDM',{})">⚔ Start Battle</button>
+        </div>
+      </div>
+
+      <!-- Arena battle — active live view -->
+      <div id="arena-active-panel" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#0a1a0a;border:2px solid var(--green);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
+          <span style="font-family:Cinzel,serif;font-size:10px;color:var(--green);letter-spacing:.08em;">⚔ BATTLE ACTIVE</span>
+          <span id="arena-elapsed" style="font-family:ui-monospace,monospace;font-size:11px;color:var(--dim);">0:00</span>
+        </div>
+        <div style="margin-bottom:4px;">
+          <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px;">
+            <span id="arena-player-label" style="color:var(--text);">Player</span>
+            <span id="arena-player-hp-text" style="color:var(--dim);font-family:ui-monospace,monospace;">—</span>
+          </div>
+          <div style="height:8px;background:#1a1a1a;border-radius:4px;overflow:hidden;">
+            <div id="arena-player-hp-bar" style="height:100%;width:100%;background:var(--green);transition:width 0.3s;"></div>
+          </div>
+        </div>
+        <div style="margin-bottom:6px;">
+          <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px;">
+            <span id="arena-enemy-label" style="color:var(--text);">Enemy</span>
+            <span id="arena-enemy-hp-text" style="color:var(--dim);font-family:ui-monospace,monospace;">—</span>
+          </div>
+          <div style="height:8px;background:#1a1a1a;border-radius:4px;overflow:hidden;">
+            <div id="arena-enemy-hp-bar" style="height:100%;width:100%;background:var(--red);transition:width 0.3s;"></div>
+          </div>
+        </div>
+        <div id="arena-log" style="height:80px;overflow-y:auto;background:#080810;border:1px solid var(--border);border-radius:5px;padding:5px 7px;font-family:ui-monospace,'SF Mono',monospace;font-size:10px;line-height:1.5;margin-bottom:6px;"></div>
+        <div style="display:flex;gap:5px;flex-wrap:wrap;">
+          <button id="arena-pause-btn" class="btn btn-sm" style="flex:1;min-width:80px;font-size:11px;" onclick="arenaPauseToggle()">⏸ Pause</button>
+          <button id="arena-reset-btn" class="btn btn-sm" style="flex:1;min-width:80px;background:#3a2a1a;border-color:var(--gold);display:none;font-size:11px;" onclick="if(confirm('Reset battle to full HP on both sides?')) client.send('battleForceReset',{})">↻ Reset</button>
+          <button id="arena-quit-btn" class="btn btn-sm" style="flex:1;min-width:80px;background:#3a1a1a;border-color:var(--red);display:none;font-size:11px;" onclick="if(confirm('Quit battle? No winner, no consequence.')) client.send('battleForceQuit',{})">✕ Quit</button>
+        </div>
+      </div>
+
       <div id="active-event-panel" style="display:none;margin-bottom:10px;padding:10px;border-radius:10px;background:#0a0a1a;border:2px solid var(--gold);">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
           <span style="font-family:Cinzel,serif;font-size:11px;color:var(--gold);">&#9889; ACTIVE LANDING EVENT</span>
@@ -443,6 +488,114 @@ function renderTopBar() {
   if (bwCheck) bwCheck.checked = !!G.allowBackward;
   var bwBtn = document.getElementById('backward-btn');
   if (bwBtn) bwBtn.style.display = G.allowBackward ? 'inline-block' : 'none';
+
+  // ═══════════════ ARENA BATTLE RENDER ═══════════════
+  renderArenaBattlePanel(G);
+}
+
+function renderArenaBattlePanel(G) {
+  var pending = document.getElementById('arena-pending-panel');
+  var active  = document.getElementById('arena-active-panel');
+  if (!pending || !active) return;
+
+  // Nothing happening — hide both panels
+  if (!G.pendingArenaBattle && !G.arenaBattle) {
+    pending.style.display = 'none';
+    active.style.display = 'none';
+    return;
+  }
+
+  // Pending state: player rolled a monster, waiting on initiate
+  if (G.pendingArenaBattle && !G.arenaBattle) {
+    pending.style.display = 'block';
+    active.style.display = 'none';
+    var pb = G.pendingArenaBattle;
+    var p = G.players[pb.cls];
+    var pName = p ? (p.playerName || p.name) : pb.cls;
+    var pIcon = p ? p.icon : '';
+    var txt = document.getElementById('arena-pending-text');
+    if (txt) {
+      txt.innerHTML =
+        pIcon + ' <strong>' + pName + '</strong> vs <strong>' + pb.enemy.name + '</strong><br>' +
+        '<span style="font-style:italic;color:var(--dim);font-size:12px;">"' + pb.flavor + '"</span>';
+    }
+    return;
+  }
+
+  // Active state: live combat
+  if (G.arenaBattle) {
+    pending.style.display = 'none';
+    active.style.display = 'block';
+    var b = G.arenaBattle;
+    var ap = G.players[b.cls];
+    var apName = ap ? (ap.playerName || ap.name) : b.cls;
+    var apIcon = ap ? ap.icon : '';
+
+    // Elapsed time
+    var elapsed = b.elapsedMs || 0;
+    var s = Math.floor(elapsed / 1000);
+    var mm = Math.floor(s / 60), ss = s % 60;
+    var elEl = document.getElementById('arena-elapsed');
+    if (elEl) elEl.textContent = mm + ':' + (ss<10?'0':'') + ss + (b.paused ? ' ⏸' : '');
+
+    // Player HP
+    var pHp = b.playerArena.hp, pHpMax = b.playerArena.hpMax || 1;
+    var pLabel = document.getElementById('arena-player-label');
+    var pHpText = document.getElementById('arena-player-hp-text');
+    var pHpBar = document.getElementById('arena-player-hp-bar');
+    if (pLabel) pLabel.textContent = apIcon + ' ' + apName + (b.playerArena.armor ? ' 🛡' + b.playerArena.armor : '');
+    if (pHpText) pHpText.textContent = pHp + ' / ' + pHpMax + ' HP';
+    if (pHpBar) {
+      var pct = Math.max(0, Math.min(100, (pHp / pHpMax) * 100));
+      pHpBar.style.width = pct + '%';
+      pHpBar.style.background = pct > 50 ? 'var(--green)' : pct > 25 ? 'var(--gold)' : 'var(--red)';
+    }
+
+    // Enemy HP
+    var eHp = b.enemy.hp, eHpMax = b.enemy.hpMax || b.enemy.hp || 1;
+    var eLabel = document.getElementById('arena-enemy-label');
+    var eHpText = document.getElementById('arena-enemy-hp-text');
+    var eHpBar = document.getElementById('arena-enemy-hp-bar');
+    if (eLabel) eLabel.textContent = '👺 ' + b.enemy.name;
+    if (eHpText) eHpText.textContent = eHp + ' / ' + eHpMax + ' HP';
+    if (eHpBar) {
+      var epct = Math.max(0, Math.min(100, (eHp / eHpMax) * 100));
+      eHpBar.style.width = epct + '%';
+    }
+
+    // Action log
+    var logEl = document.getElementById('arena-log');
+    if (logEl && Array.isArray(b.log)) {
+      var rows = b.log.slice(-30).map(function(entry) {
+        var color = '#aaa';
+        if (entry.actor === 'player') color = '#6fc1ff';
+        else if (entry.actor === 'enemy') color = '#ff7b7b';
+        else if (entry.actor === 'system') color = 'var(--gold)';
+        var t = typeof entry.t === 'number' ? ('[' + (entry.t/1000).toFixed(1) + 's] ') : '';
+        var safe = String(entry.text || '').replace(/[<>&]/g, function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];});
+        return '<div style="color:' + color + ';">' + t + safe + '</div>';
+      }).join('');
+      // Only re-render + scroll if content changed (avoids flicker)
+      if (logEl.dataset.lastLen !== String(b.log.length)) {
+        logEl.innerHTML = rows;
+        logEl.scrollTop = logEl.scrollHeight;
+        logEl.dataset.lastLen = String(b.log.length);
+      }
+    }
+
+    // Pause button label + show/hide reset+quit
+    var pauseBtn = document.getElementById('arena-pause-btn');
+    var resetBtn = document.getElementById('arena-reset-btn');
+    var quitBtn  = document.getElementById('arena-quit-btn');
+    if (pauseBtn) pauseBtn.innerHTML = b.paused ? '▶ Resume' : '⏸ Pause';
+    if (resetBtn) resetBtn.style.display = b.paused ? 'inline-block' : 'none';
+    if (quitBtn)  quitBtn.style.display  = b.paused ? 'inline-block' : 'none';
+  }
+}
+
+function arenaPauseToggle() {
+  if (!G || !G.arenaBattle) return;
+  client.send('battlePause', { paused: !G.arenaBattle.paused });
 }
 
 client.on(function(event, data) {
@@ -774,6 +927,8 @@ function renderActiveEvent() {
   var panel = document.getElementById('active-event-panel');
   if (!panel) return;
   if (!ev) { panel.style.display = 'none'; return; }
+  // Monster events are now handled by the red Battle Pending card — hide the yellow one.
+  if (ev.evType === 'monster' || ev.evType === 'boss') { panel.style.display = 'none'; return; }
   if (ev.resolved && !ev.blueResult && !ev.trapResult && !ev.grayResult && !ev.goldResult) { panel.style.display = 'none'; return; }
   panel.style.display = 'block';
   var p = G.players[ev.cls];
@@ -1034,14 +1189,6 @@ function showEventTable() {
       : '<span style="font-size:14px;">' + (ev.icon||'⚡') + '</span>';
     html += '<div style="flex:1;"><div style="font-size:12px;font-weight:700;">' + ev.name + '</div></div>';
     html += '<button class="btn W btn-sm" style="font-size:10px;" onclick="forceEventByIdx(' + idx + ')">Force</button>';
-    if (ev.type === 'purple') html += '<button class="btn P btn-sm" onclick="showTrivia(null)">Trivia</button>';
-    if (ev.type === 'riddle') html += '<button class="btn btn-sm" style="border-color:#3a3000;color:var(--gold);" onclick="showRiddle(null)">Riddle</button>';
-    if (ev.type === 'gold') html += '<button class="btn G btn-sm" onclick="awardGold(' + (ev.amount||1) + ')">+' + (ev.amount||1) + 'G</button>';
-    if (ev.type === 'monster' || ev.type === 'boss') {
-      var mStr = ev.mids ? ev.mids.join(',') : '';
-      html += '<button class="btn D btn-sm" onclick="quickBattle(\'' + mStr + '\',' + (ev.type === 'boss') + ')">Battle</button>';
-    }
-    if (ev.type === 'trap' || ev.type === 'doubletrap') html += '<button class="btn W btn-sm" onclick="placeTrap()">Trap</button>';
     html += '</div>';
   });
   html += '</div>';
@@ -1056,13 +1203,10 @@ function forceEventByIdx(idx) {
 
 function forceEvent(payload) {
   client.send('forceEvent', payload);
-  // For monster/battle events, open battle starter after short delay
-  if (payload.evType === 'monster' && payload.mids && payload.mids.length) {
-    setTimeout(function() { quickBattle(payload.mids.join(','), false); }, 300);
-  }
-  if (payload.evType === 'boss') {
-    setTimeout(function() { quickBattle('', true); }, 300);
-  }
+  // NOTE: for monster events, the server now creates pendingArenaBattle directly,
+  // which shows the red Battle Pending card on DM + red encounter card on player.
+  // The old turn-based battle launcher (quickBattle) is no longer auto-triggered
+  // from forced monster events.
 }
 
 function awardGold(amt) {

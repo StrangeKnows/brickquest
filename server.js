@@ -9,7 +9,7 @@ const WebSocket = require('ws');
 const os = require('os');
 
 // Shared game constants
-const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
+const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ARENA_ENEMIES, ARENA_BATTLE_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
 
 const PORT = 8080;
 const MIME = {
@@ -51,6 +51,8 @@ function freshState() {
     battleResult: null,       // { loot, combatants, resolvedBy } — shown post-battle
     storeDisabled: false,     // DM toggle: disable store for all zones
     pendingDashRequest: null, // { cls, spaces, requestedAt } — awaits DM approval
+    pendingArenaBattle: null, // { cls, enemyType, enemy, flavor } — event card stage, awaits player or DM initiate
+    arenaBattle: null,        // active real-time battle state (see arena handlers below)
     log: [],
     players: {
       warrior:     mkPlayer('warrior',    '⚔️', '#993C1D', 12, 'd8',  {red:3,gray:2,white:1}),
@@ -116,6 +118,8 @@ function loadState() {
         });
       }
       if (G.pendingDashRequest === undefined) G.pendingDashRequest = null;
+      if (G.pendingArenaBattle === undefined) G.pendingArenaBattle = null;
+      if (G.arenaBattle === undefined) G.arenaBattle = null;
       console.log('[LOAD] Session restored from ' + data.savedAt);
       return true;
     }
@@ -513,6 +517,149 @@ wss.on('connection', (ws, req) => {
       broadcastState(); return;
     }
 
+    // ═══════════════════════════════════════════════════
+    // ARENA BATTLE HANDLERS
+    // ═══════════════════════════════════════════════════
+    // Shared helper: transition pendingArenaBattle → active arenaBattle state
+    function startArenaBattleFromPending(forced) {
+      if (!G.pendingArenaBattle) return false;
+      const pending = G.pendingArenaBattle;
+      const p = G.players[pending.cls];
+      if (!p) { G.pendingArenaBattle = null; return false; }
+      // Seed the live battle state — snapshot of player's current HP, armor,
+      // and bricks; the client reports back incrementally via battleTick.
+      G.arenaBattle = {
+        cls: pending.cls,
+        enemyType: pending.enemyType,
+        enemy: { ...pending.enemy },
+        flavor: pending.flavor,
+        playerArena: {
+          hp: p.hp,
+          hpMax: p.hpMax,
+          armor: p.armor || 0,
+          bricks: { ...p.bricks },
+        },
+        startTime: Date.now(),
+        elapsedMs: 0,
+        paused: false,
+        forced: !!forced,
+        log: [
+          { t:0, actor:'system', text: pending.flavor },
+        ],
+      };
+      G.pendingArenaBattle = null;
+      log((p.playerName||p.name) + ' — arena battle begins vs ' + pending.enemy.name, 'battle');
+    }
+
+    // Player taps "Enter Arena" on their event card
+    if (type === 'battleReady') {
+      const { cls } = P;
+      if (!G.pendingArenaBattle || G.pendingArenaBattle.cls !== cls) { broadcastState(); return; }
+      startArenaBattleFromPending(false);
+      broadcastState(); return;
+    }
+
+    // DM taps "Start Battle" (same effect as battleReady, DM side)
+    if (type === 'battleStartDM') {
+      if (!G.pendingArenaBattle) { broadcastState(); return; }
+      startArenaBattleFromPending(false);
+      broadcastState(); return;
+    }
+
+    // DM taps "Force Battle" — skips the event card, player drops straight to arena
+    if (type === 'battleForceDM') {
+      if (!G.pendingArenaBattle) { broadcastState(); return; }
+      startArenaBattleFromPending(true);
+      broadcastState(); return;
+    }
+
+    // Client sends periodic ticks with HP/brick/enemy state + log entries
+    if (type === 'battleTick') {
+      if (!G.arenaBattle) { broadcastState(); return; }
+      const { cls, playerHp, playerArmor, playerBricks, enemyHp, elapsedMs, logEntries } = P;
+      if (cls !== G.arenaBattle.cls) { broadcastState(); return; }
+      if (G.arenaBattle.paused) { broadcastState(); return; } // ignore ticks while paused
+      if (typeof playerHp === 'number') G.arenaBattle.playerArena.hp = playerHp;
+      if (typeof playerArmor === 'number') G.arenaBattle.playerArena.armor = playerArmor;
+      if (playerBricks && typeof playerBricks === 'object') G.arenaBattle.playerArena.bricks = playerBricks;
+      if (typeof enemyHp === 'number') G.arenaBattle.enemy.hp = enemyHp;
+      if (typeof elapsedMs === 'number') G.arenaBattle.elapsedMs = elapsedMs;
+      if (Array.isArray(logEntries) && logEntries.length) {
+        G.arenaBattle.log = G.arenaBattle.log.concat(logEntries);
+        // Cap log to last 60 entries
+        if (G.arenaBattle.log.length > 60) {
+          G.arenaBattle.log = G.arenaBattle.log.slice(-60);
+        }
+      }
+      broadcastState(); return;
+    }
+
+    // Client reports battle end with final state + winner
+    if (type === 'battleEnd') {
+      if (!G.arenaBattle) { broadcastState(); return; }
+      const { cls, victor, finalHp, finalArmor, finalBricks, reason } = P;
+      if (cls !== G.arenaBattle.cls) { broadcastState(); return; }
+      const p = G.players[cls];
+      if (p) {
+        if (typeof finalHp === 'number') p.hp = Math.max(0, finalHp);
+        if (typeof finalArmor === 'number') p.armor = Math.max(0, finalArmor);
+        if (finalBricks && typeof finalBricks === 'object') {
+          Object.keys(finalBricks).forEach(k => { p.bricks[k] = Math.max(0, finalBricks[k]); });
+        }
+        if (p.hp <= 0) p.alive = false;
+      }
+      const pName = p ? (p.playerName||p.name) : cls;
+      log(pName + ' battle ended — victor: ' + victor + (reason ? ' (' + reason + ')' : ''), 'battle');
+      G.arenaBattle = null;
+      G.phase = 'prepare';
+      broadcastState(); return;
+    }
+
+    // DM toggles pause
+    if (type === 'battlePause') {
+      if (!G.arenaBattle) { broadcastState(); return; }
+      G.arenaBattle.paused = !!P.paused;
+      log('Battle ' + (G.arenaBattle.paused ? 'paused' : 'resumed') + ' by DM', 'battle');
+      broadcastState(); return;
+    }
+
+    // DM force-resets the battle to fresh state (both sides full HP, bricks back to snapshot)
+    if (type === 'battleForceReset') {
+      if (!G.arenaBattle) { broadcastState(); return; }
+      const b = G.arenaBattle;
+      const p = G.players[b.cls];
+      if (!p) { broadcastState(); return; }
+      const enemyTpl = ARENA_ENEMIES[b.enemyType] || { hp: 60, hpMax: 60 };
+      b.enemy.hp = enemyTpl.hpMax || enemyTpl.hp;
+      b.playerArena.hp = p.hpMax;
+      b.playerArena.armor = 0;
+      // Don't reset bricks to original since those came from inventory at start;
+      // give the player back a snapshot if available, otherwise leave current.
+      b.startTime = Date.now();
+      b.elapsedMs = 0;
+      b.paused = false;
+      b.log = [{ t:0, actor:'system', text: '[DM force-reset]' }];
+      log('Battle force-reset by DM', 'battle');
+      broadcastState(); return;
+    }
+
+    // DM force-quits the battle — no consequences, player returns to board
+    if (type === 'battleForceQuit') {
+      if (!G.arenaBattle) { broadcastState(); return; }
+      log('Battle force-quit by DM', 'battle');
+      G.arenaBattle = null;
+      G.phase = 'prepare';
+      broadcastState(); return;
+    }
+
+    // DM dismisses a pending arena battle without starting it (e.g. reroll, skip)
+    if (type === 'battleDismissPending') {
+      if (!G.pendingArenaBattle) { broadcastState(); return; }
+      log('Pending battle dismissed by DM', 'battle');
+      G.pendingArenaBattle = null;
+      broadcastState(); return;
+    }
+
     if (type === 'pickupBlackBrick') {
       // Player passes through without stopping — gets brick
       const { cls, spaceIdx } = P;
@@ -593,6 +740,19 @@ wss.on('connection', (ws, req) => {
       // ── MONSTER / BOSS ──
       if (evType === 'monster' && mids && mids.length) {
         G.activeEvent = { cls, roll:'DM', zone:zone||0, resolved:false, evType:'monster', mids, forced:true };
+        // Force → pending arena battle: player will see red encounter card with Initiate button.
+        const enemyType = 'goblin'; // v1: all monster events become goblin
+        const enemyTpl = ARENA_ENEMIES[enemyType];
+        const flavorPool = ARENA_BATTLE_FLAVOR[enemyType] || [enemyTpl.name + ' appears!'];
+        const flavor = flavorPool[Math.floor(Math.random() * flavorPool.length)];
+        G.pendingArenaBattle = {
+          cls,
+          enemyType,
+          enemy: { ...enemyTpl },
+          flavor,
+          createdAt: Date.now(),
+        };
+        log(pName + ' — DM forced encounter: ' + enemyTpl.name, 'event');
       }
       if (evType === 'boss') {
         G.activeEvent = { cls, roll:'DM', zone:zone||0, resolved:false, evType:'boss', isBoss:true, forced:true };
@@ -725,6 +885,24 @@ wss.on('connection', (ws, req) => {
         eventMeta.blueVariant = variant;
         eventMeta.isWizard = (cls === 'wizard');
         log(pName+' found blue energy — '+variant+' event','event');
+      }
+      // ── ARENA BATTLE HOOK ──
+      // If the landing event is a monster, set up a pending arena battle.
+      // The event card on the player's screen AND a panel on the DM's screen
+      // can both initiate the arena. Either party's initiate wins.
+      if (evData.type === 'monster') {
+        const enemyType = 'goblin'; // v1: all monster events become goblin
+        const enemyTpl = ARENA_ENEMIES[enemyType];
+        const flavorPool = ARENA_BATTLE_FLAVOR[enemyType] || [enemyTpl.name + ' appears!'];
+        const flavor = flavorPool[Math.floor(Math.random() * flavorPool.length)];
+        G.pendingArenaBattle = {
+          cls,
+          enemyType,
+          enemy: { ...enemyTpl }, // clone so mutations don't leak
+          flavor,
+          createdAt: Date.now(),
+        };
+        log(pName + ' encounter: ' + enemyTpl.name + ' — awaiting initiate', 'event');
       }
     }
 

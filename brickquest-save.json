@@ -1,5 +1,5 @@
 {
-  "savedAt": "2026-04-18T02:44:38.206Z",
+  "savedAt": "2026-04-18T04:37:21.093Z",
   "G": {
     "round": 1,
     "phase": "prepare",
@@ -45,6 +45,8 @@
     "battleResult": null,
     "storeDisabled": false,
     "pendingDashRequest": null,
+    "pendingArenaBattle": null,
+    "arenaBattle": null,
     "log": [],
     "players": {
       "warrior": {

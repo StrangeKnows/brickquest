@@ -478,7 +478,37 @@ function buildMonsters(mids) {
   }).filter(Boolean);
 }
 
+// ── ARENA BATTLE (real-time combat) ───────────────────────────
+// Enemy templates used by the arena battle system (distinct from the
+// turn-based MONSTER_TEMPLATES). V1 has one hardcoded goblin.
+const ARENA_ENEMIES = {
+  goblin: {
+    type:     'goblin',
+    name:     'Goblin',
+    hp:       60,
+    hpMax:    60,
+    speed:    120,       // pixels/sec
+    attackDmg:3,
+    attackCd: 1.8,       // seconds between attacks
+    r:        22,
+    color:    '#27500A',
+  },
+};
+
+// Flavor text pool for battle initiation. One line is picked at random per
+// encounter and shown on the player's event card + logged to the DM.
+// Keyed by enemy type — each enemy has its own pool.
+const ARENA_BATTLE_FLAVOR = {
+  goblin: [
+    'A goblin leaps from the shadows, blade already swinging.',
+    'You hear a snarl. A goblin steps into your path, grinning.',
+    'The path ahead is blocked by a goblin. It smells awful.',
+    'Green-skinned and cackling, a goblin lunges.',
+    'A goblin, half-starved and twice as mean, bares its teeth.',
+  ],
+};
+
 // Node.js export (ignored in browser)
 if (typeof module !== 'undefined') {
-  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, SHIELD_MAX, SHIELD_COST, RIDDLES };
+  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ARENA_ENEMIES, ARENA_BATTLE_FLAVOR, SHIELD_MAX, SHIELD_COST, RIDDLES };
 }
