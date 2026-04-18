@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no,viewport-fit=cover">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>BrickQuest — Battle Arena Test</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&display=swap" rel="stylesheet">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    overscroll-behavior: none;
+  }
   body {
     background:#0a0a0f;
     color:#eee;
@@ -17,6 +17,9 @@
     overflow:hidden;
     width:100vw; height:100vh;
     display:flex; flex-direction:column;
+    touch-action:none;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
   }
 
   /* ── HUD ── */
@@ -33,43 +36,31 @@
   /* ── CANVAS ── */
   #arena-canvas {
     position:fixed; top:0; left:0;
+    width:100vw; height:100vh;
     touch-action:none;
-    display:block;
   }
 
   /* ── BRICK BAR ── */
-  #brick-bar-right {
+  #brick-bar {
     position:fixed; top:50%; right:0; transform:translateY(-50%); z-index:100;
     display:flex; flex-direction:column; align-items:center; gap:6px;
-    padding:10px 6px;
-    background:rgba(0,0,0,.85);
+    padding:10px 8px;
+    background:rgba(0,0,0,.8);
     border-radius:12px 0 0 12px;
     border-left:1px solid #222;
-    width:76px;
+    width:68px;
     max-height:95vh;
     overflow-y:auto;
-    touch-action:none;
-  }
-  #brick-bar-left {
-    position:fixed; top:50%; left:0; transform:translateY(-50%); z-index:100;
-    display:flex; flex-direction:column; align-items:center; gap:6px;
-    padding:10px 6px;
-    background:rgba(0,0,0,.85);
-    border-radius:0 12px 12px 0;
-    border-right:1px solid #222;
-    width:76px;
-    max-height:95vh;
-    overflow-y:auto;
-    touch-action:none;
   }
   .brick-btn {
-    width:56px; height:56px; border-radius:10px;
+    width:44px; height:44px; border-radius:8px;
     border:2px solid transparent;
     cursor:pointer; position:relative;
     display:flex; align-items:center; justify-content:center;
     font-size:10px; font-weight:700; font-family:'Cinzel',serif;
     transition:transform .1s, box-shadow .1s;
     -webkit-tap-highlight-color:transparent;
+    touch-action:none;
   }
   .brick-btn:active { transform:scale(.9); }
   .brick-btn .qty {
@@ -89,7 +80,7 @@
 
   /* ── OVERLAY ── */
   #overlay {
-    position:fixed; inset:0; z-index:9000;
+    position:fixed; inset:0; z-index:300;
     display:flex; flex-direction:column;
     align-items:center; justify-content:center;
     background:rgba(0,0,0,.85);
@@ -98,11 +89,6 @@
   #overlay p { font-size:13px; color:#888; margin-bottom:24px; text-align:center; max-width:280px; line-height:1.6; }
   .class-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; width:280px; }
   .class-pick {
-    -webkit-appearance:none; appearance:none;
-    -webkit-user-select:none; user-select:none;
-    touch-action:manipulation;
-    -webkit-user-select:none; user-select:none;
-    touch-action:manipulation;
     padding:10px 6px; border-radius:8px; border:1px solid #333;
     background:#111; cursor:pointer; text-align:center;
     transition:border-color .15s, background .15s;
@@ -115,7 +101,14 @@
 <body>
 
 <!-- HUD — timer only, HP/class/dash now drawn on canvas -->
-<div id="hud" style="display:none;"></div>
+<div id="hud">
+  <div id="hud-right">
+    <div style="text-align:right;">
+      <div id="timer-display">5</div>
+      <div id="timer-label">SECONDS</div>
+    </div>
+  </div>
+</div>
 <!-- Hidden elements kept for JS compatibility -->
 <div style="display:none;">
   <div id="hud-left"></div>
@@ -132,34 +125,34 @@
 <canvas id="arena-canvas"></canvas>
 
 <!-- Brick Bar -->
-<div id="brick-bar-left"></div><div id="brick-bar-right"></div>
+<div id="brick-bar" id="brick-bar"></div>
 
 <!-- Debug -->
 <div id="debug"></div>
 
 <!-- Class Select Overlay -->
-<div id="overlay" style="-webkit-user-select:none;user-select:none;">
+<div id="overlay">
   <h1>Choose Class</h1>
   <p>Select your class to enter the arena.</p>
   <div class="class-grid">
-    <button class="class-pick" type="button" onclick="startArena('warrior')">
+    <div class="class-pick" onclick="startArena('warrior')">
       <span class="icon">⚔️</span><span class="name">WARRIOR</span>
-    </button>
-    <button class="class-pick" type="button" onclick="startArena('wizard')">
+    </div>
+    <div class="class-pick" onclick="startArena('wizard')">
       <span class="icon">🔮</span><span class="name">WIZARD</span>
-    </button>
-    <button class="class-pick" type="button" onclick="startArena('scout')">
+    </div>
+    <div class="class-pick" onclick="startArena('scout')">
       <span class="icon">🏃</span><span class="name">SCOUT</span>
-    </button>
-    <button class="class-pick" type="button" onclick="startArena('builder')">
+    </div>
+    <div class="class-pick" onclick="startArena('builder')">
       <span class="icon">🔧</span><span class="name">BUILDER</span>
-    </button>
-    <button class="class-pick" type="button" onclick="startArena('mender')">
+    </div>
+    <div class="class-pick" onclick="startArena('mender')">
       <span class="icon">💊</span><span class="name">MENDER</span>
-    </button>
-    <button class="class-pick" type="button" onclick="startArena('beastcaller')">
+    </div>
+    <div class="class-pick" onclick="startArena('beastcaller')">
       <span class="icon">🐾</span><span class="name">BEAST</span>
-    </button>
+    </div>
   </div>
 </div>
 
@@ -170,52 +163,17 @@
 const ARENA_DURATION = 30; // seconds (30 for real game, 5 placeholder)
 
 const CLASS_META = {
-  warrior:     { color:'#FF5500', icon:'⚔️', hp:16, die:'d6', speed:170 },
-  wizard:      { color:'#7766FF', icon:'🔮', hp:8,  die:'d6', speed:195 },
-  scout:       { color:'#00CC88', icon:'🏃', hp:12, die:'d6', speed:260 },
-  builder:     { color:'#FFAA00', icon:'🔧', hp:14, die:'d6', speed:150 },
-  mender:      { color:'#FF6699', icon:'💊', hp:10, die:'d4', speed:160 },
-  beastcaller: { color:'#44BB22', icon:'🐾', hp:12, die:'d6', speed:220 },
-};
-
-// Per-class starting bricks and refresh rates
-const CLASS_BRICKS = {
-  warrior:     { red:3, gray:2, white:1 },
-  wizard:      { blue:2, black:1, yellow:1, purple:1 },
-  scout:       { orange:3, blue:1, red:1 },
-  builder:     { gray:4, orange:2, white:1 },
-  mender:      { white:3, purple:2, yellow:1 },
-  beastcaller: { green:3, yellow:2, orange:1 },
-};
-
-// Per-class refresh rates (seconds per charge)
-const CLASS_REFRESH = {
-  warrior:     { red:0.8, gray:1.2, white:2.5, blue:4,   yellow:4,   orange:3,   green:3,   purple:4,   black:3   },
-  wizard:      { red:5,   gray:5,   white:4,   blue:1.5,  yellow:2,   orange:4,   green:4,   purple:2.5, black:4   },
-  scout:       { red:2.5, gray:4,   white:3,   blue:2,    yellow:5,   orange:1,   green:1.5, purple:5,   black:5   },
-  builder:     { red:5,   gray:0.7, white:3,   blue:5,    yellow:2.5, orange:1.5, green:3,   purple:5,   black:5   },
-  mender:      { red:5,   gray:3.5, white:0.8, blue:5,    yellow:2,   orange:5,   green:2.5, purple:2,   black:5   },
-  beastcaller: { red:5,   gray:5,   white:3,   blue:5,    yellow:1.5, orange:2,   green:0.9, purple:3,   black:3.5 },
-};
-
-// Per-class heal amounts
-const CLASS_HEAL = {
-  warrior:2, wizard:2, scout:2, builder:3, mender:5, beastcaller:2
-};
-
-// Per-class signature damage modifiers
-const CLASS_DMG = {
-  warrior:     { red:4 },
-  wizard:      { blue:6 },
-  scout:       { orange_snap:3, bleed_dmg:2, bleed_dur:4 },
-  builder:     { wall_hp_mult:1.5 },
-  mender:      { purple_dmg:5, purple_heal_mult:1.0 },
-  beastcaller: { poison_dmg:2, poison_stacks:3, poison_dur:5 },
+  warrior:     { color:'#993C1D', icon:'⚔️', hp:12, die:'d6', speed:170 },
+  wizard:      { color:'#3C3489', icon:'🔮', hp:8,  die:'d6', speed:180 },
+  scout:       { color:'#085041', icon:'🏃', hp:10, die:'d6', speed:260 },
+  builder:     { color:'#C87800', icon:'🔧', hp:10, die:'d6', speed:150 },
+  mender:      { color:'#72243E', icon:'💊', hp:10, die:'d4', speed:160 },
+  beastcaller: { color:'#27500A', icon:'🐾', hp:10, die:'d6', speed:220 },
 };
 
 const BRICK_COLORS = {
   red:'#E24B4A', blue:'#006DB7', green:'#1D9E75', white:'#EFEFEF',
-  gray:'#5e6a7a', purple:'#7B2FBE', yellow:'#F5D000', orange:'#F57C00',
+  gray:'#AAAAAA', purple:'#7B2FBE', yellow:'#F5D000', orange:'#F57C00',
   black:'#333333'
 };
 
@@ -261,11 +219,9 @@ function makePlayer(cls) {
   var meta = CLASS_META[cls];
   var COLORS = ['red','white','yellow','blue','orange','gray','green','purple','black'];
   var brickMax = {}; var brickRecharge = {}; var bricks = {};
-  var startBricks = CLASS_BRICKS[cls] || {};
   COLORS.forEach(function(c) {
-    var start = startBricks[c] || 0;
-    brickMax[c] = start;
-    bricks[c] = start;
+    brickMax[c] = 1 + Math.floor(Math.random() * 10); // 1-10
+    bricks[c] = brickMax[c];
     brickRecharge[c] = 0;
   });
   return {
@@ -288,13 +244,12 @@ function makePlayer(cls) {
 // ARENA BOUNDS
 // ═══════════════════════════════════════════════════
 function getArenaBounds() {
-  var pad = 16;
-  var rightPanel = 82;
-  var leftPanel = 82;
+  var pad = 30;
+  var rightPanel = 78; // brick bar panel width
   return {
-    x: pad + leftPanel,
-    y: pad,
-    w: W - pad*2 - rightPanel - leftPanel,
+    x: pad,
+    y: pad + 70,
+    w: W - pad - rightPanel,
     h: H - pad*2 - 70
   };
 }
@@ -306,8 +261,8 @@ function getEventPos(e) {
   var rect = canvas.getBoundingClientRect();
   var touch = e.touches ? e.touches[0] : e;
   return {
-    x: touch.clientX - rect.left,
-    y: touch.clientY - rect.top
+    x: (touch.clientX - rect.left) * (canvas.width / rect.width),
+    y: (touch.clientY - rect.top)  * (canvas.height / rect.height)
   };
 }
 
@@ -437,7 +392,7 @@ function update(dt) {
   if (player) {
     if (!player.brickRecharge) player.brickRecharge = {};
     if (!player.brickMax) player.brickMax = {};
-    var BRICK_RECHARGE_RATE = CLASS_REFRESH[player.cls] || { red:1, gray:1, green:1, blue:2, white:2, yellow:2, orange:2, purple:3, black:3 };
+    var BRICK_RECHARGE_RATE = { red:1, gray:1, green:1, blue:2, white:2, yellow:2, orange:2, purple:3, black:3 };
     Object.keys(player.bricks).forEach(function(c) {
       if (!player.brickMax[c]) player.brickMax[c] = player.bricks[c];
       var isHeld = overloadState && overloadState.color === c;
@@ -481,30 +436,33 @@ function update(dt) {
 // ═══════════════════════════════════════════════════
 function draw() {
   ctx.clearRect(0, 0, W, H);
+
   var bounds = getArenaBounds();
 
-  // Arena floor
+  // ── Arena floor ──
   ctx.save();
   ctx.fillStyle = '#0d0d14';
   ctx.strokeStyle = '#1a1a2e';
   ctx.lineWidth = 2;
   roundRect(ctx, bounds.x, bounds.y, bounds.w, bounds.h, 16);
-  ctx.fill(); ctx.stroke();
+  ctx.fill();
+  ctx.stroke();
   ctx.restore();
 
-  // Floor grid
+  // ── Floor grid ──
   ctx.save();
   ctx.strokeStyle = 'rgba(255,255,255,0.03)';
   ctx.lineWidth = 1;
-  for (var gx = bounds.x; gx < bounds.x + bounds.w; gx += 40) {
+  var gridSize = 40;
+  for (var gx = bounds.x; gx < bounds.x + bounds.w; gx += gridSize) {
     ctx.beginPath(); ctx.moveTo(gx, bounds.y); ctx.lineTo(gx, bounds.y + bounds.h); ctx.stroke();
   }
-  for (var gy = bounds.y; gy < bounds.y + bounds.h; gy += 40) {
+  for (var gy = bounds.y; gy < bounds.y + bounds.h; gy += gridSize) {
     ctx.beginPath(); ctx.moveTo(bounds.x, gy); ctx.lineTo(bounds.x + bounds.w, gy); ctx.stroke();
   }
   ctx.restore();
 
-  // Arena border glow
+  // ── Arena border glow ──
   ctx.save();
   ctx.shadowColor = player ? player.color : '#333';
   ctx.shadowBlur = 20;
@@ -514,105 +472,481 @@ function draw() {
   ctx.stroke();
   ctx.restore();
 
-  // Effects behind player
-  if (typeof drawBlackEffect === 'function') drawBlackEffect(bounds);
-  if (typeof drawTraps === 'function') drawTraps();
-  if (typeof drawGrayWalls === 'function') drawGrayWalls();
-  if (typeof drawGreenBurst === 'function') drawGreenBurst();
-  if (typeof drawPurpleBursts === 'function') drawPurpleBursts();
-  if (typeof drawBlueBolts === 'function') drawBlueBolts();
-  if (typeof drawArmorBursts === 'function') drawArmorBursts();
-
-  // Goblins
-  goblins.forEach(function(g) {
-    if (!g) return;
-    if (typeof drawGoblin === 'function') drawGoblin(g);
-    else {
-      ctx.save();
-      ctx.fillStyle = g.dead ? '#333' : '#cc3300';
-      ctx.beginPath(); ctx.arc(g.x, g.y, g.r || 20, 0, Math.PI*2); ctx.fill();
-      // Goblin HP bar
-      if (!g.dead) {
-        var bw=60,bh=5,bx=g.x-bw/2,by=g.y-g.r-12;
-        ctx.fillStyle='#333'; ctx.fillRect(bx,by,bw,bh);
-        ctx.fillStyle='#cc3300'; ctx.fillRect(bx,by,bw*(g.hp/g.hpMax),bh);
-        ctx.fillStyle='#fff'; ctx.font='bold 10px sans-serif'; ctx.textAlign='center';
-        ctx.fillText(Math.ceil(g.hp)+'/'+g.hpMax, g.x, g.y-g.r-15);
-      }
-      ctx.restore();
-    }
-  });
-
-  // Red charge streak — under player
-  if (brickAction && brickAction.type === 'red' && brickAction._trail && brickAction._trail.length > 1) {
+  // ── Drag indicator ──
+  if (dragTarget && player) {
     ctx.save();
-    ctx.lineCap = 'round';
-    var _tr = brickAction._trail;
-    for (var _tri = 1; _tri < _tr.length; _tri++) {
-      var _pa = _tr[_tri-1], _pb = _tr[_tri];
-      var _talpha = _tri / _tr.length;
-      ctx.strokeStyle = 'rgba(255,60,40,' + (_talpha * 0.85).toFixed(3) + ')';
-      ctx.lineWidth = 4 + _talpha * 10;
-      ctx.shadowColor = '#ff3300';
-      ctx.shadowBlur = 12;
-      ctx.beginPath();
-      ctx.moveTo(_pa.x, _pa.y);
-      ctx.lineTo(_pb.x, _pb.y);
-      ctx.stroke();
-    }
+    ctx.setLineDash([4, 6]);
+    ctx.strokeStyle = player.color + (dragActive ? '88' : '33');
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y);
+    ctx.lineTo(dragTarget.x, dragTarget.y);
+    ctx.stroke();
+    // Target dot
+    ctx.setLineDash([]);
+    ctx.fillStyle = player.color + (dragActive ? '44' : '22');
+    ctx.beginPath();
+    ctx.arc(dragTarget.x, dragTarget.y, 8, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = player.color + (dragActive ? '88' : '44');
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
     ctx.restore();
   }
 
-  // Player
+  // ── Black effect (below everything) ──
+  var _bounds = getArenaBounds();
+  drawBlackEffect(_bounds);
+  // ── Traps ──
+  drawTraps();
+  // ── Confuse particles ──
+  drawConfuseParticles();
+  // ── Green burst ──
+  drawGreenBurst();
+  // ── Purple burst ──
+  drawPurpleBursts();
+  // ── Drag indicators ──
+  drawBlueDrag();
+  drawDragIndicator(greenDragPos, '#1D9E75', 'PUSH');
+  // Yellow — show AoE ring (around player by default, around drag target when over arena)
   if (player) {
-    ctx.save();
+    var rect2 = canvas.getBoundingClientRect();
+    var yellowOverArena = yellowDragPos &&
+      yellowDragPos.x >= rect2.left && yellowDragPos.x <= rect2.right &&
+      yellowDragPos.y >= rect2.top  && yellowDragPos.y <= rect2.bottom;
+    var ycx, ycy;
+    if (yellowOverArena) {
+      ycx = (yellowDragPos.x - rect2.left) * (canvas.width / rect2.width);
+      ycy = (yellowDragPos.y - rect2.top)  * (canvas.height / rect2.height);
+    } else {
+      ycx = player.x; ycy = player.y;
+    }
+    // Show ring whenever yellow is held (overloadState color=yellow) or dragging
+    var showYellowRing = (overloadState && overloadState.color === 'yellow') || yellowDragPos;
+    if (showYellowRing) {
+      ctx.save();
+      var now4 = performance.now();
+      var yPulse = 0.3 + 0.15 * Math.sin(now4 * 0.004);
+      // Line from player to drag target if over arena
+      if (yellowOverArena) {
+        ctx.setLineDash([4,6]);
+        ctx.strokeStyle = '#F5D000aa'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(ycx, ycy); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      // Radius ring
+      ctx.globalAlpha = 0.4;
+      ctx.strokeStyle = '#F5D000';
+      ctx.shadowColor = '#F5D000'; ctx.shadowBlur = 10;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 8]);
+      var yTier = (overloadState && overloadState.color==='yellow') ? Math.max(1, Math.floor(overloadState.timer / OVERLOAD_TIER) + 1) : 1;
+      var yRadius = 50 + yTier * 37;
+      ctx.beginPath(); ctx.arc(ycx, ycy, yRadius, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+      // Center dot
+      ctx.globalAlpha = yPulse * 2;
+      ctx.fillStyle = '#F5D000';
+      ctx.shadowBlur = 0;
+      ctx.beginPath(); ctx.arc(ycx, ycy, 4, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+  }
+  // Orange — growing spike trap radius reticle on drag
+  if (player && orangeDragPos) {
+    var rectO = canvas.getBoundingClientRect();
+    var oOverArena = orangeDragPos.x >= rectO.left && orangeDragPos.x <= rectO.right &&
+                     orangeDragPos.y >= rectO.top  && orangeDragPos.y <= rectO.bottom;
+    if (oOverArena) {
+      var ocx = (orangeDragPos.x - rectO.left) * (canvas.width / rectO.width);
+      var ocy = (orangeDragPos.y - rectO.top)  * (canvas.height / rectO.height);
+      var oTier = overloadState && overloadState.color==='orange' ?
+        Math.max(1, Math.min(player.brickMax?player.brickMax['orange']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
+      var oRadius = 25 + oTier * 15;
+      ctx.save();
+      // Dashed line from player
+      ctx.setLineDash([4,6]); ctx.strokeStyle='#F57C00aa'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(player.x,player.y); ctx.lineTo(ocx,ocy); ctx.stroke();
+      ctx.setLineDash([]);
+      // Radius ring
+      ctx.globalAlpha = 0.4;
+      ctx.strokeStyle='#F57C00'; ctx.shadowColor='#F57C00'; ctx.shadowBlur=10; ctx.lineWidth=2;
+      ctx.setLineDash([5,5]);
+      ctx.beginPath(); ctx.arc(ocx,ocy,oRadius,0,Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+      // Spike hints around ring
+      var nSpikes = 6;
+      ctx.fillStyle='#F57C00'; ctx.globalAlpha=0.5; ctx.shadowBlur=4;
+      for (var si=0;si<nSpikes;si++){
+        var sa=(si/nSpikes)*Math.PI*2;
+        ctx.beginPath();
+        ctx.moveTo(ocx+Math.cos(sa)*oRadius, ocy+Math.sin(sa)*oRadius);
+        ctx.lineTo(ocx+Math.cos(sa+0.15)*(oRadius-8), ocy+Math.sin(sa+0.15)*(oRadius-8));
+        ctx.lineTo(ocx+Math.cos(sa-0.15)*(oRadius-8), ocy+Math.sin(sa-0.15)*(oRadius-8));
+        ctx.closePath(); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+  drawDragIndicator(redDragPos, '#E24B4A', 'CHARGE');
+  // Gray — show wall radius on hold, move to drag target when over arena
+  if (player) {
+    var rectG = canvas.getBoundingClientRect();
+    var grayOverArena = grayDragPos &&
+      grayDragPos.x >= rectG.left && grayDragPos.x <= rectG.right &&
+      grayDragPos.y >= rectG.top  && grayDragPos.y <= rectG.bottom;
+    var gcx = grayOverArena ? (grayDragPos.x - rectG.left) * (canvas.width / rectG.width) : player.x;
+    var gcy = grayOverArena ? (grayDragPos.y - rectG.top)  * (canvas.height / rectG.height) : player.y;
+    var showGrayRing = grayOverArena;
+    if (showGrayRing) {
+      var gTier = overloadState && overloadState.color === 'gray' ?
+        Math.min(Math.floor(overloadState.timer / OVERLOAD_TIER) + 1, player.brickMax ? (player.brickMax['gray']||1) : 1) : 1;
+      var gWallR = 30 + gTier * 22;
+      ctx.save();
+      var gPulse = 0.3 + 0.15 * Math.sin(performance.now() * 0.004);
+      if (grayOverArena) {
+        ctx.setLineDash([4,6]); ctx.strokeStyle = '#AAAAAA88'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(gcx, gcy); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.globalAlpha = 0.4;
+      ctx.strokeStyle = '#AAAAAA'; ctx.shadowColor = '#AAAAAA'; ctx.shadowBlur = 10;
+      ctx.lineWidth = 2; ctx.setLineDash([6,6]);
+      ctx.beginPath(); ctx.arc(gcx, gcy, gWallR, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  }
+  drawDragIndicator(purpleDragPos, '#9B6FD4', 'BURST');
+  // Black — show darkness radius on hold/drag
+  if (player) {
+    var rectB = canvas.getBoundingClientRect();
+    var blackOverArena = blackDragPos &&
+      blackDragPos.x >= rectB.left && blackDragPos.x <= rectB.right &&
+      blackDragPos.y >= rectB.top  && blackDragPos.y <= rectB.bottom;
+    var bcx = blackOverArena ? (blackDragPos.x - rectB.left) * (canvas.width / rectB.width) : player.x;
+    var bcy = blackOverArena ? (blackDragPos.y - rectB.top)  * (canvas.height / rectB.height) : player.y;
+    var showBlackRing = (overloadState && overloadState.color === 'black') || blackDragPos;
+    if (showBlackRing) {
+      var bTierR = (overloadState && overloadState.color === 'black') ?
+        Math.max(1, Math.min(player.brickMax?player.brickMax['black']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
+      var bRadius = Math.min(50 + (bTierR - 1) * 100, 900);
+      ctx.save();
+      if (blackOverArena) {
+        ctx.setLineDash([4,6]); ctx.strokeStyle = '#55555588'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(bcx, bcy); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = '#888888'; ctx.shadowColor = '#444444'; ctx.shadowBlur = 12;
+      ctx.lineWidth = 1.5; ctx.setLineDash([4, 8]);
+      ctx.beginPath(); ctx.arc(bcx, bcy, bRadius, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+      // Faint swirling inner fill
+      ctx.globalAlpha = 0.05;
+      ctx.fillStyle = '#000000';
+      ctx.beginPath(); ctx.arc(bcx, bcy, bRadius, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+  }
+  // ── Blue bolts ──
+  drawBlueBolts();
+
+  // ── Goblin ──
+  deadGoblins.forEach(function(g) { drawDeadGoblin(g); });
+  goblins.forEach(function(g) { drawGoblin(g); });
+
+  // ── Player ──
+  if (player) {
+    // Brick action visual — red charge trail, charge phase only
+    if (brickAction && brickAction.type === 'red' && brickAction.phase === 'charge') {
+      var mult = brickAction.dmgMult || 1;
+      var now2 = performance.now();
+      var flicker = 0.85 + 0.15 * Math.sin(now2 * 0.03);
+      var trailLen = Math.max(1, Math.round((1 + Math.ceil(mult * 0.5)) * vScale(mult))); // longer trail at higher tier
+      ctx.save();
+      // Outer heat shockwave rings — scale with mult
+      for (var ri2 = Math.max(1, Math.round(Math.ceil(mult*0.25)*vScale(mult))); ri2 > 0; ri2--) {
+        ctx.globalAlpha = 0.035 * ri2 * flicker * vScale(mult);
+        ctx.fillStyle = ri2 > mult * 0.6 ? '#ff2200' : '#ff6644';
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, (player.r + ri2 * 8) * flicker, 0, Math.PI*2);
+        ctx.fill();
+      }
+      // Trail segments — solid, aggressive, tapered
+      for (var ti = 0; ti < trailLen; ti++) {
+        var tPct = ti / trailLen;
+        var tDist = 12 + ti * (10 + mult * 2);
+        var tSize = player.r * (1 - tPct * 0.7) * (mult > 1 ? 1 + mult * 0.1 : 1);
+        var tAlpha = (1 - tPct) * (0.5 + mult * 0.08);
+        // Shift hotter (more orange) near player, darker at tail
+        var tColor = tPct < 0.3 ? '#ff3300' : tPct < 0.6 ? '#cc2200' : '#881100';
+        ctx.globalAlpha = Math.min(1, tAlpha) * flicker;
+        ctx.shadowColor = '#ff2200';
+        ctx.shadowBlur = (2 + mult * 1.5) * (1 - tPct);
+        ctx.fillStyle = tColor;
+        ctx.beginPath();
+        ctx.arc(
+          player.x - brickAction.dirX * tDist,
+          player.y - brickAction.dirY * tDist,
+          tSize, 0, Math.PI*2
+        );
+        ctx.fill();
+      }
+      // Leading edge glow — brighter with tier
+      ctx.globalAlpha = 0.6 + mult * 0.08;
+      ctx.shadowColor = '#ff4400';
+      ctx.shadowBlur = 4 + mult * 2;
+      ctx.fillStyle = '#ff4400';
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r * 0.6 * flicker, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Dash trail
+    if (dashActive) {
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = player.color;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r * 1.4, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     // Shadow
+    ctx.save();
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.beginPath();
     ctx.ellipse(player.x, player.y + player.r - 4, player.r * 0.8, 6, 0, 0, Math.PI*2);
     ctx.fill();
     ctx.restore();
 
+    // Glow — flicker white during iframes
+    var iframeFlash = player.iframes > 0 && Math.floor(player.iframes * 10) % 2 === 0;
     ctx.save();
-    ctx.shadowColor = player.color;
+    ctx.shadowColor = iframeFlash ? '#ffffff' : player.color;
     ctx.shadowBlur = 24;
-    ctx.fillStyle = player.color + 'cc';
-    ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = iframeFlash ? '#ffffff88' : player.color + 'cc';
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+    ctx.fill();
     ctx.restore();
 
+    // Inner circle
     ctx.save();
-    ctx.fillStyle = player.color;
-    ctx.beginPath(); ctx.arc(player.x, player.y, player.r - 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = iframeFlash ? '#ffffff' : player.color;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r - 4, 0, Math.PI*2);
+    ctx.fill();
     ctx.restore();
 
+    // Icon
     ctx.save();
     ctx.font = '18px serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     ctx.fillText(player.icon, player.x, player.y);
     ctx.restore();
 
-    // Player HP bar (draw first)
-    var bw=80,bh=6,bx=player.x-bw/2,by=player.y-player.r-14;
-    ctx.fillStyle='#111'; ctx.fillRect(bx-1,by-1,bw+2,bh+2);
-    ctx.fillStyle='#2a2a2a'; ctx.fillRect(bx,by,bw,bh);
-    var pct=player.hp/player.hpMax;
-    ctx.fillStyle=pct>0.5?'#4a9a35':pct>0.25?'#cc8800':'#cc2200';
-    ctx.fillRect(bx,by,bw*pct,bh);
+    // ── Armor pips around player circle ──
+    var aMaxC = getArmorMax();
+    if ((player.armor||0) > 0) {
+      var orbitR = player.r + 10;
+      ctx.save();
+      for (var pi2 = 0; pi2 < (player.armor||0); pi2++) {
+        var pa2 = (pi2 / aMaxC) * Math.PI * 2 - Math.PI / 2;
+        var px2 = player.x + Math.cos(pa2) * orbitR;
+        var py2 = player.y + Math.sin(pa2) * orbitR;
+        ctx.fillStyle = '#AAAAAA';
+        ctx.shadowColor = '#AAAAAA'; ctx.shadowBlur = 4;
+        ctx.beginPath();
+        ctx.arc(px2, py2, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
 
-    // Player HP text (draw on top of bar, pushed above)
+    // ── Class armor visual (when armor > 0) ──
+    if ((player.armor||0) > 0) {
+      var ap = player.armor, ar = player.r;
+      var now3 = performance.now();
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, 0.4 + ap * 0.06);
+      ctx.shadowBlur = 8;
+      if (player.cls === 'warrior') {
+        // Plate segments — heavy overlapping arcs
+        ctx.shadowColor = '#cc8844';
+        ctx.strokeStyle = '#cc8844'; ctx.lineWidth = 4;
+        for (var pi=0; pi<6; pi++) {
+          var pa = (pi/6)*Math.PI*2;
+          ctx.beginPath();
+          ctx.arc(player.x+Math.cos(pa)*ar*0.55, player.y+Math.sin(pa)*ar*0.55, ar*0.38, pa-0.6, pa+0.6);
+          ctx.stroke();
+        }
+        // Center plate
+        ctx.fillStyle = '#cc884422';
+        ctx.beginPath(); ctx.arc(player.x, player.y, ar*0.4, 0, Math.PI*2); ctx.fill();
+      } else if (player.cls === 'builder') {
+        // Brick pattern — grid lines
+        ctx.shadowColor = '#C87800';
+        ctx.strokeStyle = '#C87800'; ctx.lineWidth = 2;
+        var bsize = ar * 0.35;
+        for (var bx=-1; bx<=1; bx++) {
+          for (var by=-1; by<=1; by++) {
+            var bpx = player.x + bx*bsize*1.1, bpy = player.y + by*bsize*0.7;
+            if (Math.hypot(bpx-player.x,bpy-player.y) < ar*0.9) {
+              ctx.strokeRect(bpx-bsize/2+(by%2)*bsize*0.5, bpy-bsize*0.35, bsize, bsize*0.7);
+            }
+          }
+        }
+      } else if (player.cls === 'mender') {
+        // Bandage cross pattern
+        ctx.shadowColor = '#ffffff';
+        ctx.strokeStyle = '#ffffff88'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(player.x, player.y-ar*0.8); ctx.lineTo(player.x, player.y+ar*0.8); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(player.x-ar*0.8, player.y); ctx.lineTo(player.x+ar*0.8, player.y); ctx.stroke();
+        // Rotating ring
+        ctx.strokeStyle = '#ff9999'; ctx.lineWidth = 2;
+        ctx.setLineDash([4,4]);
+        ctx.beginPath(); ctx.arc(player.x, player.y, ar*0.85, now3*0.001, now3*0.001+Math.PI*1.5); ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (player.cls === 'wizard') {
+        // Magic shield — rotating rune ring
+        ctx.shadowColor = '#8866ff';
+        ctx.strokeStyle = '#8866ff'; ctx.lineWidth = 2;
+        ctx.setLineDash([3,5]);
+        ctx.beginPath(); ctx.arc(player.x, player.y, ar*0.9, now3*0.0015, now3*0.0015+Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+        for (var ri3=0; ri3<4; ri3++) {
+          var ra3 = now3*0.002 + (ri3/4)*Math.PI*2;
+          ctx.fillStyle = '#8866ff';
+          ctx.beginPath(); ctx.arc(player.x+Math.cos(ra3)*ar*0.75, player.y+Math.sin(ra3)*ar*0.75, 3, 0, Math.PI*2); ctx.fill();
+        }
+      } else if (player.cls === 'scout') {
+        // Lightweight — just fast-rotating dashes
+        ctx.shadowColor = '#085041';
+        ctx.strokeStyle = '#22cc88'; ctx.lineWidth = 2;
+        ctx.setLineDash([6,10]);
+        ctx.beginPath(); ctx.arc(player.x, player.y, ar*0.88, -now3*0.003, -now3*0.003+Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (player.cls === 'beastcaller') {
+        // Organic — claw marks / leaf pattern
+        ctx.shadowColor = '#27500A';
+        ctx.strokeStyle = '#44aa44'; ctx.lineWidth = 2;
+        for (var ci=0; ci<3; ci++) {
+          var ca = (ci/3)*Math.PI*2 + now3*0.001;
+          ctx.beginPath();
+          ctx.moveTo(player.x+Math.cos(ca)*ar*0.3, player.y+Math.sin(ca)*ar*0.3);
+          ctx.quadraticCurveTo(
+            player.x+Math.cos(ca+0.6)*ar*0.7, player.y+Math.sin(ca+0.6)*ar*0.7,
+            player.x+Math.cos(ca+0.3)*ar*0.9, player.y+Math.sin(ca+0.3)*ar*0.9
+          );
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    // ── Player HP bar above player ──
+    var pBarW = 60, pBarH = 6;
+    var pBarX = player.x - pBarW/2;
+    var pBarY = player.y - player.r - 46; // above aura ring (r+22) and armor pip orbit (r+10)
+    var pHpPct = Math.min(1, player.hp / player.hpMax);
+    var isOverhealC = player.hp > player.hpMax;
+    var pHpColor = isOverhealC ? '#b06fef' : pHpPct > 0.5 ? '#4a9a35' : pHpPct > 0.25 ? '#F5D000' : '#E24B4A';
     ctx.save();
-    ctx.font = 'bold 12px Cinzel,serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    ctx.lineWidth = 3; ctx.strokeStyle = '#000';
-    ctx.strokeText(Math.ceil(player.hp) + '/' + player.hpMax, player.x, player.y - player.r - 18);
-    ctx.fillStyle = '#fff';
-    ctx.fillText(Math.ceil(player.hp) + '/' + player.hpMax, player.x, player.y - player.r - 18);
+    ctx.fillStyle = '#111'; ctx.fillRect(pBarX-1, pBarY-1, pBarW+2, pBarH+2);
+    ctx.fillStyle = '#2a2a2a'; ctx.fillRect(pBarX, pBarY, pBarW, pBarH);
+    ctx.fillStyle = pHpColor; ctx.shadowColor = pHpColor; ctx.shadowBlur = 4;
+    ctx.fillRect(pBarX, pBarY, pBarW * pHpPct, pBarH);
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 16px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(Math.round(player.hp) + '/' + player.hpMax, player.x, pBarY - 9);
+
     ctx.restore();
+
+    // ── Player buff/debuff icons — above HP numbers, stacked vertically ──
+    var playerEffects = [];
+    var pNow = performance.now();
+    var pPulse = 0.7 + 0.3 * Math.sin(pNow * 0.005);
+    if (playerRegen && playerRegen.timer > 0)
+      playerEffects.push({ icon: '✚', color: '#ffffff', timer: playerRegen.timer });
+    if (player.iframes > 0)
+      playerEffects.push({ icon: '🛡', color: '#88aaff', timer: player.iframes });
+    if (dashCooldown > 0)
+      playerEffects.push({ icon: '💨', color: '#F5D000', timer: dashCooldown });
+    if (playerEffects.length > 0) {
+      // Sort shortest duration first (top)
+      playerEffects.sort(function(a, b) {
+        if (a.timer === null) return 1;
+        if (b.timer === null) return -1;
+        return a.timer - b.timer;
+      });
+      var pRowH = 16;
+      // pBarY - 5 is hp number position, stack above that
+      var pStartY = pBarY - 10 - playerEffects.length * pRowH;
+      playerEffects.forEach(function(fx, fi) {
+        var ry = pStartY + fi * pRowH;
+        ctx.save();
+        ctx.globalAlpha = pPulse;
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = fx.color; ctx.shadowBlur = 5;
+        ctx.font = '13px serif';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = fx.color;
+        ctx.fillText(fx.icon, player.x - 2, ry);
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#dddddd';
+        ctx.shadowBlur = 0;
+        var lbl = fx.timer !== null ? Math.ceil(fx.timer)+'s' : (fx.label||'');
+        ctx.fillText(lbl, player.x + 2, ry);
+        ctx.restore();
+      });
+    }
   }
 
-  // Floating texts rendered by wrapped draw() below — don't double-draw here
-}
+  // ── Player sparkles (white heal — follow player) ──
+  if (player && playerSparkles.length) {
+    playerSparkles = playerSparkles.filter(function(s) { return s.alpha > 0.05; });
+    playerSparkles.forEach(function(s) {
+      s.alpha -= 0.024;
+      if (s.fixed) {
+        s.fx += s.vox * 60;
+        s.fy += s.voy * 60;
+      } else {
+        s.ox += s.vox;
+        s.oy += s.voy;
+      }
+      ctx.save();
+      ctx.globalAlpha = s.alpha;
+      ctx.font = 'bold ' + Math.round(s.size) + 'px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = s.color;
+      ctx.shadowColor = s.color;
+      ctx.shadowBlur = 10 * s.alpha;
+      ctx.fillText(s.text, s.fixed ? s.fx : player.x + s.ox, s.fixed ? s.fy : player.y + s.oy);
+      ctx.restore();
+    });
+  }
 
+  // ── Overload charge ──
+  drawOverloadCharge();
+  drawGrayWalls();
+  drawRegen();
+  // ── Armor bursts ──
+  drawArmorBursts();
+
+  // ── Debug ──
+  if (player) {
+    document.getElementById('debug').textContent =
+      `${player.cls} hp:${player.hp} | dash:${dashActive} dashTimer:${dashTimer.toFixed(2)} dragTarget:${dragTarget?'SET':'null'} dragActive:${dragActive} brickAction:${brickAction?brickAction.type+'/'+brickAction.phase:'null'}`;
+  }
+}
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -643,11 +977,9 @@ function loop(ts) {
 
 function updateHUD() {
   if (!player) return;
-  function setEl(id, val) { var e=document.getElementById(id); if(e) e.textContent=val; }
-  function setElStyle(id, prop, val) { var e=document.getElementById(id); if(e) e.style[prop]=val; }
-  setEl('hud-hp', player.hp);
-  setEl('hud-hp-max', '/ ' + player.hpMax + ' HP');
-  setEl('hud-class', player.cls.toUpperCase());
+  document.getElementById('hud-hp').textContent = player.hp;
+  document.getElementById('hud-hp-max').textContent = '/ ' + player.hpMax + ' HP';
+  document.getElementById('hud-class').textContent = player.cls.toUpperCase();
   var hpPct = Math.min(100, (player.hp / player.hpMax * 100));
   var isOverheal = player.hp > player.hpMax;
   var hpBar = document.getElementById('hp-bar');
@@ -655,7 +987,7 @@ function updateHUD() {
   hpBar.style.background = isOverheal
     ? 'linear-gradient(90deg,#7B2FBE,#b06fef)'
     : 'linear-gradient(90deg,#E24B4A,#ff6b6b)';
-  setElStyle('hud-hp', 'color', isOverheal ? '#b06fef' : '#E24B4A');
+  document.getElementById('hud-hp').style.color = isOverheal ? '#b06fef' : '#E24B4A';
   // Armor pips — show filled and empty up to max
   var armorEl = document.getElementById('armor-pips');
   if (armorEl) {
@@ -669,7 +1001,7 @@ function updateHUD() {
   }
   // Enemy HP
 
-  setEl('timer-display', '∞');
+  document.getElementById('timer-display').textContent = '∞';
   // Dash cooldown
   var dashEl = document.getElementById('dash-cd');
   var dashLabel = document.getElementById('dash-display');
@@ -690,7 +1022,7 @@ function updateHUD() {
 // ═══════════════════════════════════════════════════
 var overloadState = null; // { color, timer, startX, startY, dragPos }
 var OVERLOAD_HOLD = 2.5; // 0.5 second per tier (5 bricks = 2.5s max)
-var OVERLOAD_TIER = 0.9; // seconds per tier — needs deliberate hold
+var OVERLOAD_TIER = 0.5; // seconds per tier
 
 function startOverload(e, color) {
   if (!player || !player.bricks[color] || player.bricks[color] <= 0) return;
@@ -765,7 +1097,7 @@ function fireOverloadWhite(count, ox, oy) {
     return;
   }
   // Tap overload — instant heal with scaled burst
-  var healAmt = (CLASS_HEAL[player.cls] || 3) * count;
+  var healAmt = (player.cls === 'mender' ? 5 : 3) * count;
   var prev = player.hp;
   var cap2 = Math.max(player.hpMax, player.hp);
   player.hp = Math.min(cap2, player.hp + healAmt);
@@ -949,83 +1281,37 @@ var purpleDragPos = null;
 var blackDragActive = false;
 var blackDragPos = null;
 
-
-function getBrickIcon(color) {
-  var icons = {
-    red:'🔴', white:'⚪', yellow:'🟡', blue:'🔵',
-    orange:'🟠', gray:'⬜', green:'🟢', purple:'🟣', black:'⚫'
-  };
-  return icons[color] || '●';
-}
-
 function renderBrickBar() {
-  var barLeft  = document.getElementById('brick-bar-left');
-  var barRight = document.getElementById('brick-bar-right');
-  var LEFT_BRICKS  = ['black','yellow','green','gray','white'];
-  var RIGHT_BRICKS = ['red','blue','orange','purple'];
-  var bar = document.getElementById('brick-bar-right'); // legacy compat
-  if (!player) {
-    if (barLeft)  barLeft.innerHTML  = '';
-    if (barRight) barRight.innerHTML = '';
-    return;
-  }
-  var brickHtml = {};
-  ['black','yellow','green','gray','white','red','blue','orange','purple'].forEach(function(color) {
-    var count   = player.bricks[color] || 0;
-    var maxB    = player.brickMax[color] || 0;
-    if (maxB === 0) { brickHtml[color] = ''; return; } // skip bricks not in inventory
-    var recharge= player.brickRecharge[color] || 0;
-    var rate    = (CLASS_REFRESH[player.cls]||{})[color] || 2;
-    var rechargePct = maxB > 0 && count < maxB ? recharge / rate : 0;
-    var col     = BRICK_COLORS[color];
-    var isEmpty = count <= 0;
-    var isOverload = overloadState && overloadState.color === color;
-    var overloadPct = 0;
-    if (isOverload) {
-      var maxT = player.brickMax[color] || 1;
-      overloadPct = Math.min(1, overloadState.timer / (maxT * OVERLOAD_TIER));
-    }
-    // Pip dots
+  var bar = document.getElementById('brick-bar');
+  if (!player) { bar.innerHTML = ''; return; }
+  var html = '';
+  TEST_BRICKS.forEach(function(color) {
+    var qty = player.bricks[color] || 0;
+    var maxQ = player.brickMax ? (player.brickMax[color]||0) : qty;
+    var bg = BRICK_COLORS[color] || '#555';
+    var recharging = qty < maxQ;
+    var rechargePct = recharging ? ((player.brickRecharge[color]||0) / 1.0 * 100) : 0;
+    // Pip row
     var pips = '';
-    for (var i = 0; i < maxB; i++) {
-      var filled = i < count;
-      pips += '<span style="display:inline-block;width:'+(Math.max(4,Math.min(10,Math.floor(40/Math.max(maxB,1)))))+'px;height:4px;'
-            + 'border-radius:2px;margin:0 1px;'
-            + 'background:' + (filled ? col : '#333') + ';'
-            + (filled ? 'box-shadow:0 0 4px '+col+'88;' : '') + '"></span>';
+    for (var i = 0; i < maxQ; i++) {
+      var filled = i < qty;
+      pips += '<span style="display:inline-block;width:6px;height:6px;border-radius:2px;margin:1px;'
+        + 'background:' + (filled ? bg : '#333') + ';'
+        + 'box-shadow:' + (filled ? '0 0 4px '+bg : 'none') + ';"></span>';
     }
-    // Recharge bar
-    var rBar = rechargePct > 0
-      ? '<div style="position:absolute;bottom:0;left:0;height:3px;border-radius:0 0 6px 6px;'
-        + 'background:'+col+';width:'+(rechargePct*100)+'%;opacity:0.7;transition:width .1s;"></div>'
-      : '';
-    // Overload arc
-    var oArc = isOverload
-      ? '<div style="position:absolute;inset:-4px;border-radius:12px;'
-        + 'border:3px solid '+col+';opacity:0.9;'
-        + 'background:conic-gradient('+col+'88 '+(overloadPct*360)+'deg, transparent 0deg);'
-        + 'pointer-events:none;"></div>'
-      : '';
-    brickHtml[color] = '<button class="brick-btn' + (isEmpty ? ' empty' : '') + '" '
+    html += '<button class="brick-btn" '
       + 'id="brick-btn-' + color + '" '
-      + 'style="background:' + col + ';border-color:' + (isEmpty ? '#333' : '#fff3') + ';'
-      + 'box-shadow:' + (isEmpty ? 'none' : '0 0 12px '+col+'88, inset 0 2px 0 #ffffff22, inset 0 -2px 0 #00000033') + ';'
-      + 'opacity:' + (isEmpty ? '0.3' : '1') + ';'
-      + 'position:relative;overflow:visible;" '
-      + "onmousedown='onBrickDown(event,\"" + color + "\")'" + ' '
-      + "ontouchstart='onBrickDown(event,\"" + color + "\")'" + ' '
-      + '><span class="qty" style="color:'+col+';">' + count + '</span>'
-      + '<div style="position:absolute;bottom:4px;left:0;right:0;display:flex;justify-content:center;flex-wrap:wrap;gap:1px;">' + pips + '</div>'
-      + rBar + oArc
+      + 'style="background:' + bg + (qty>0?'22':'11') + ';border:2px solid ' + bg + (qty>0?'66':'33') + ';width:52px;height:60px;flex-direction:column;gap:2px;" '
+      + 'onpointerdown="onBrickDown(event,\'' + color + '\')" >'
+      + '<span style="width:24px;height:24px;border-radius:4px;background:' + bg + ';opacity:' + (qty>0?'1':'0.3') + ';'
+      + 'display:inline-block;box-shadow:0 1px 4px rgba(0,0,0,.5);"></span>'
+      + '<div style="display:flex;flex-wrap:wrap;justify-content:center;width:44px;">' + pips + '</div>'
+      + (recharging ? '<div style="width:40px;height:3px;background:#111;border-radius:2px;overflow:hidden;">'
+        + '<div style="width:'+rechargePct+'%;height:100%;background:'+bg+';transition:width 0.1s;"></div></div>' : '')
       + '</button>';
   });
-  var htmlLeft = '', htmlRight = '';
-  LEFT_BRICKS.forEach(function(c)  { htmlLeft  += brickHtml[c] || ''; });
-  RIGHT_BRICKS.forEach(function(c) { htmlRight += brickHtml[c] || ''; });
-  if (barLeft)  barLeft.innerHTML  = htmlLeft;
-  if (barRight) barRight.innerHTML = htmlRight;
+  bar.innerHTML = html;
 }
-
 
 // Blue drag-to-target
 function startDragAction(e, color, activeFn, dragActiveVar, dragPosVar) {
@@ -1047,10 +1333,10 @@ function startDragAction(e, color, activeFn, dragActiveVar, dragPosVar) {
         // Tap — use player position as origin
         activeFn(player.x, player.y);
       } else {
-        // Drag — use released canvas position (CSS pixels)
+        // Drag — use released canvas position
         var rect = canvas.getBoundingClientRect();
-        var cx = pos.x - rect.left;
-        var cy = pos.y - rect.top;
+        var cx = (pos.x - rect.left) * (canvas.width / rect.width);
+        var cy = (pos.y - rect.top) * (canvas.height / rect.height);
         activeFn(cx, cy);
       }
     }
@@ -1066,21 +1352,21 @@ function startDragAction(e, color, activeFn, dragActiveVar, dragPosVar) {
   document.addEventListener('touchend', onUp);
 }
 
-var _brickDownActive = false;
-var _lastTouchBrickTime = 0;
 function onBrickDown(e, color) {
-  // Suppress the synthetic mousedown that follows a touchstart on mobile
-  var now = performance.now();
-  if (e.type === 'mousedown' && (now - _lastTouchBrickTime) < 600) return;
-  if (e.type === 'touchstart') _lastTouchBrickTime = now;
-  if (_brickDownActive) return; // already handling another press
-  _brickDownActive = true;
   e.preventDefault();
   e.stopPropagation();
+
+  // NOTE: we attach pointermove/pointerup to document rather than the button
+  // because renderBrickBar() runs every animation frame, replacing the button's
+  // innerHTML. Listeners on the button would be wiped out mid-press. The pointer
+  // event system still delivers pointerup to document reliably even without
+  // setPointerCapture, as long as the original pointerdown was handled on a
+  // descendant of document (always true here).
+  var pointerId = e.pointerId;
+
   startOverload(e, color);
   var startTime = performance.now();
-  var startTouch = e.touches ? e.touches[0] : e;
-  var startCX = startTouch.clientX, startCY = startTouch.clientY;
+  var startCX = e.clientX, startCY = e.clientY;
   var dragPos = null;
   var dragFns = {
     green:  function(cx,cy){ startGreenBurst(cx,cy); },
@@ -1088,13 +1374,11 @@ function onBrickDown(e, color) {
     black:  function(cx,cy){ startBlackEffect(cx,cy); },
     orange: function(cx,cy,isDrag,tier){ startOrangeTrap(cx,cy,isDrag?tier:undefined); },
     yellow: function(cx,cy){ startYellowConfuse(cx,cy,87); },
-    red:    function(cx,cy,isDrag,tier){
-      var _t = tier || 1;
+    red:    function(cx,cy,isDrag){
       if (isDrag) {
-        // Charge toward the dropped location
-        startRedChargeTo(_t, cx, cy);
+        startRedChargeTo(1, cx, cy);
       } else {
-        startRedCharge(_t, null);
+        startRedCharge(1, null);
       }
     },
     white:  function(cx,cy,isDrag){ if(isDrag && Math.hypot(cx-player.x,cy-player.y) < player.r+30){ startWhiteRegen(1); } else { doWhiteHeal(cx,cy); } },
@@ -1102,11 +1386,11 @@ function onBrickDown(e, color) {
   };
 
   function onMove(ev) {
-    var t = ev.touches ? ev.touches[0] : ev;
-    dragPos = { x: t.clientX, y: t.clientY };
+    // Filter to the same pointer that started this press (in case of multitouch)
+    if (pointerId !== undefined && ev.pointerId !== pointerId) return;
+    dragPos = { x: ev.clientX, y: ev.clientY };
     if (overloadState) overloadState.dragPos = dragPos;
-    // Only show visual indicator once pointer has moved meaningfully
-    var moved = Math.hypot(t.clientX - startCX, t.clientY - startCY);
+    var moved = Math.hypot(ev.clientX - startCX, ev.clientY - startCY);
     if (moved > 15) {
       if (color === 'blue')   blueDragPos   = dragPos;
       if (color === 'green')  greenDragPos  = dragPos;
@@ -1120,25 +1404,22 @@ function onBrickDown(e, color) {
   }
 
   function onUp(ev) {
+    if (pointerId !== undefined && ev.pointerId !== pointerId) return;
     var held = (performance.now() - startTime) / 1000;
-    var upTouch = ev.touches ? (ev.changedTouches ? ev.changedTouches[0] : ev.touches[0]) : ev;
-    var upClientX = upTouch ? upTouch.clientX : startCX;
-    var upClientY = upTouch ? upTouch.clientY : startCY;
+    var upClientX = ev.clientX !== undefined ? ev.clientX : startCX;
+    var upClientY = ev.clientY !== undefined ? ev.clientY : startCY;
     var rect = canvas.getBoundingClientRect();
-    var canvasX = upClientX - rect.left;
-    var canvasY = upClientY - rect.top;
+    var canvasX = (upClientX - rect.left) * (canvas.width / rect.width);
+    var canvasY = (upClientY - rect.top)  * (canvas.height / rect.height);
     var isDrag = Math.hypot(upClientX - startCX, upClientY - startCY) > 20;
-    // If released outside arena, snap to nearest arena edge point
     var _ab = getArenaBounds();
     var _outOfArena = canvasX < _ab.x || canvasX > _ab.x+_ab.w || canvasY < _ab.y || canvasY > _ab.y+_ab.h;
     if (_outOfArena) {
-      // If released over brick panel (right side) with no meaningful drag into arena — treat as tap
       if (upClientX > rect.right - 160) {
         isDrag = false;
         canvasX = player ? player.x : _ab.x + _ab.w/2;
         canvasY = player ? player.y : _ab.y + _ab.h/2;
       } else {
-        // Snap to nearest arena boundary
         canvasX = Math.max(_ab.x, Math.min(_ab.x+_ab.w, canvasX));
         canvasY = Math.max(_ab.y, Math.min(_ab.y+_ab.h, canvasY));
       }
@@ -1151,24 +1432,15 @@ function onBrickDown(e, color) {
 
     var currentCharges = player.bricks[color] || 0;
     var tierDur = OVERLOAD_TIER;
-    var bricksUsed = Math.max(1, Math.min(currentCharges, Math.floor(held / tierDur) || 1));
-    var heldLongEnough = held >= tierDur;
+    var bricksUsed = Math.max(1, Math.min(currentCharges, Math.floor(held / tierDur)));
 
-    _brickDownActive = false;
-
-    if (isDrag && heldLongEnough && overloadState) {
-      // Drag + held long enough = "overload drag" — use the rich tier-aware overload path
-      fireOverload(canvasX, canvasY, bricksUsed);
-    } else if (isDrag) {
-      // Plain drag — dispatch drag handler at drag-destination coords, single brick
-      cancelOverload();
-      if (!player.bricks[color] || player.bricks[color] <= 0) {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        document.removeEventListener('touchmove', onMove);
-        document.removeEventListener('touchend', onUp);
-        return;
+    if (held >= tierDur && Math.floor(held / tierDur) >= 1) {
+      if (overloadState) {
+        fireOverload(isDrag ? canvasX : undefined, isDrag ? canvasY : undefined, bricksUsed);
       }
+    } else {
+      cancelOverload();
+      if (!player.bricks[color] || player.bricks[color] <= 0) { cleanup(); return; }
       if (color === 'blue') {
         player.bricks[color]--;
         player.brickRecharge[color] = player.brickRecharge[color] || 0;
@@ -1179,52 +1451,36 @@ function onBrickDown(e, color) {
         player.bricks[color]--;
         player.brickRecharge[color] = player.brickRecharge[color] || 0;
         renderBrickBar();
-        dragFns[color](canvasX, canvasY, true, 1);
-      } else {
-        useBrickAction(color);
-      }
-    } else if (heldLongEnough) {
-      // Pure hold in place — overload at player position
-      if (overloadState) {
-        fireOverload(undefined, undefined, bricksUsed);
-      }
-    } else {
-      cancelOverload();
-      // Quick tap — normal single brick action
-      if (!player.bricks[color] || player.bricks[color] <= 0) {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        document.removeEventListener('touchmove', onMove);
-        document.removeEventListener('touchend', onUp);
-        return;
-      }
-      if (color === 'blue') {
-        player.bricks[color]--;
-        player.brickRecharge[color] = player.brickRecharge[color] || 0;
-        renderBrickBar();
-        startBlueBolt(null);
-      } else if (dragFns[color]) {
-        player.bricks[color]--;
-        player.brickRecharge[color] = player.brickRecharge[color] || 0;
-        renderBrickBar();
-        dragFns[color](player.x, player.y, false, 1);
+        var ox = isDrag ? canvasX : player.x;
+        var oy = isDrag ? canvasY : player.y;
+        dragFns[color](ox, oy, isDrag, 1);
       } else {
         useBrickAction(color);
       }
     }
-
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    document.removeEventListener('touchmove', onMove);
-    document.removeEventListener('touchend', onUp);
+    cleanup();
   }
 
-  document.addEventListener('mousemove', onMove);
-  document.addEventListener('mouseup', onUp);
-  document.addEventListener('touchmove', onMove, {passive:true});
-  document.addEventListener('touchend', onUp);
+  function onCancel(ev) {
+    if (pointerId !== undefined && ev.pointerId !== pointerId) return;
+    cancelOverload();
+    blueDragPos=null; greenDragPos=null; purpleDragPos=null; blackDragPos=null;
+    yellowDragPos=null; orangeDragPos=null; redDragPos=null; grayDragPos=null;
+    cleanup();
+  }
 
-  if (color === 'blue') { blueDragActive = true; } }
+  function cleanup() {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onCancel);
+  }
+
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointercancel', onCancel);
+
+  if (color === 'blue') { blueDragActive = true; }
+}
 
 function useBrick(color) {
   useBrickAction(color);
@@ -1554,15 +1810,12 @@ function drawGoblin(g) {
   ctx.shadowBlur = 6;
   ctx.fillRect(barX, barY, barW * hpPct, barH);
   ctx.shadowBlur = 0;
-  // HP numbers — readable white-on-dark with stroke
-  ctx.font = 'bold 12px Cinzel,serif';
+  // HP numbers — match player style
+  ctx.font = 'bold 16px monospace';
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = '#000';
-  ctx.strokeText(Math.ceil(g.hp) + '/' + g.hpMax, g.x, barY - 4);
-  ctx.fillStyle = '#fff';
-  ctx.fillText(Math.ceil(g.hp) + '/' + g.hpMax, g.x, barY - 4);
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(g.hp + '/' + g.hpMax, g.x, barY - 9);
 
   // ── Status effect icons ──
   var statusEffects = [];
@@ -1711,8 +1964,8 @@ function startRedChargeTo(dmgMult, tx, ty) {
     type: 'red', phase: 'charge',
     startX: startX, startY: startY,
     dirX: dx/dist, dirY: dy/dist,
-    chargeSpeed: player.speed * 2.6,
-    returnSpeed: player.speed * 1.8,
+    chargeSpeed: player.speed * 4,
+    returnSpeed: player.speed * 2,
     hit: false, dmgMult: _dmgMult,
     targetX: tx, targetY: ty, // fixed target point
     usePoint: true,
@@ -1734,8 +1987,8 @@ function startRedCharge(dmgMult, targetGoblin) {
     phase: 'charge',
     startX: startX, startY: startY,
     dirX: nx, dirY: ny,
-    chargeSpeed: player.speed * 2.6,
-    returnSpeed: player.speed * 1.8,
+    chargeSpeed: player.speed * 4,
+    returnSpeed: player.speed * 2,
     hit: false,
     dmgMult: _dmgMult,
   };
@@ -1822,7 +2075,7 @@ function spawnHealSparkles(tier) {
 }
 
 function doWhiteHeal(targetX, targetY) {
-  var healAmt = (CLASS_HEAL[player.cls] || 3);
+  var healAmt = player.cls === 'mender' ? 5 : 3;
   var prev = player.hp;
   var cap = Math.max(player.hpMax, player.hp);
   player.hp = Math.min(cap, player.hp + healAmt);
@@ -1875,25 +2128,6 @@ function updateBrickAction(dt, bounds) {
       player.y += brickAction.dirY * step;
       player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
       player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
-
-      // Emit trail particles behind player during charge (opposite to direction)
-      var _chargeAngle = Math.atan2(-brickAction.dirY, -brickAction.dirX);
-      var _chargeDmg = brickAction.dmgMult || 1;
-      for (var _cti = 0; _cti < 3; _cti++) {
-        var _cta = _chargeAngle + (Math.random()-0.5)*0.9;
-        var _cts = 40 + Math.random()*60;
-        purpleParticles.push({
-          x: player.x + Math.cos(_cta)*(player.r*0.5),
-          y: player.y + Math.sin(_cta)*(player.r*0.5),
-          vx: Math.cos(_cta)*_cts, vy: Math.sin(_cta)*_cts,
-          r: 2 + Math.random()*(1.5 + _chargeDmg*0.8),
-          alpha: 0.85, color: '#ff3300', isRed: true,
-        });
-      }
-      // Motion-streak: record recent positions for trail draw
-      brickAction._trail = brickAction._trail || [];
-      brickAction._trail.push({ x: player.x, y: player.y, t: performance.now() });
-      if (brickAction._trail.length > 12) brickAction._trail.shift();
       // Hit check
       if (!brickAction.hit) {
         var hitG = goblins.find(function(g){ return Math.hypot(player.x-g.x,player.y-g.y) < player.r+g.r; });
@@ -2103,8 +2337,8 @@ function drawDragIndicator(dragPos, color, label) {
   var rect = canvas.getBoundingClientRect();
   // Only draw if pointer is actually over the canvas
   if (dragPos.x < rect.left || dragPos.x > rect.right || dragPos.y < rect.top || dragPos.y > rect.bottom) return;
-  var cx = dragPos.x - rect.left;
-  var cy = dragPos.y - rect.top;
+  var cx = (dragPos.x - rect.left) * (canvas.width / rect.width);
+  var cy = (dragPos.y - rect.top) * (canvas.height / rect.height);
   ctx.save();
   ctx.setLineDash([5,5]); ctx.strokeStyle = color+'88'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
@@ -2120,8 +2354,8 @@ function drawDragIndicator(dragPos, color, label) {
 function drawBlueDrag() {
   if (!blueDragActive || !blueDragPos || !player) return;
   var rect = canvas.getBoundingClientRect();
-  var cx = blueDragPos.x - rect.left;
-  var cy = blueDragPos.y - rect.top;
+  var cx = (blueDragPos.x - rect.left) * (canvas.width / rect.width);
+  var cy = (blueDragPos.y - rect.top) * (canvas.height / rect.height);
   ctx.save();
   ctx.setLineDash([5,5]); ctx.strokeStyle = '#4db8ff88'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
@@ -2828,17 +3062,8 @@ function drawBlackEffect(bounds) {
 
 
 function resize() {
-  var dpr = window.devicePixelRatio || 1;
-  var cssW = window.innerWidth;
-  var cssH = window.innerHeight;
-  W = cssW;
-  H = cssH;
-  canvas.width  = Math.round(cssW * dpr);
-  canvas.height = Math.round(cssH * dpr);
-  canvas.style.width  = cssW + 'px';
-  canvas.style.height = cssH + 'px';
-  // Scale drawing context so code can use CSS pixels — 1 unit = 1 CSS pixel
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
   if (player) {
     var bounds = getArenaBounds();
     player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
@@ -2849,33 +3074,29 @@ function resize() {
 // ═══════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════
-
 function startArena(cls) {
-  try {
-    document.getElementById('overlay').style.display = 'none';
-    canvas.addEventListener('mousedown',  onPointerDown, { passive:false });
-    canvas.addEventListener('mousemove',  onPointerMove, { passive:false });
-    canvas.addEventListener('mouseup',    onPointerUp);
-    canvas.addEventListener('touchstart', onPointerDown, { passive:false });
-    canvas.addEventListener('touchmove',  onPointerMove, { passive:false });
-    canvas.addEventListener('touchend',   onPointerUp);
-    player = makePlayer(cls);
-    timerLeft = ARENA_DURATION;
-    running = true;
-    renderBrickBar();
-    var bounds = getArenaBounds();
-    goblins = [];
-    goblins.push(makeGoblin(bounds, 0));
-    blueBolts = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = [];
-    greenBurst = null; greenDragActive = false; greenDragPos = null; purpleBursts = []; purpleParticles = [];
-    blackEffect = null; playerSparkles = []; goblinRespawnPending = false; playerRegen = null;
-    brickAction = null; dashCooldown = 0; dragTarget = null; dashGoblin = null; overloadState = null;
-    lastTs = performance.now();
-    updateHUD();
-    rafId = requestAnimationFrame(loop);
-  } catch(e) {
-  }
+  document.getElementById('overlay').style.display = 'none';
+  player = makePlayer(cls);
+  timerLeft = ARENA_DURATION;
+  running = true;
+  renderBrickBar();
 
+  // Spawn goblin after player is placed
+  var bounds = getArenaBounds();
+  goblins = [];
+  goblins.push(makeGoblin(bounds, 0));
+
+  // Reset all effects
+  blueBolts = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = [];
+  greenBurst = null; greenDragActive = false; greenDragPos = null; purpleBursts = []; purpleParticles = [];
+  blackEffect = null; playerSparkles = []; goblinRespawnPending = false; playerRegen = null;
+  brickAction = null; dashCooldown = 0; dragTarget = null; dashGoblin = null; overloadState = null;
+  // Timer
+  // Timer disabled for testing
+
+  lastTs = performance.now();
+  updateHUD(); // immediate update so HUD matches selected class
+  rafId = requestAnimationFrame(loop);
 }
 
 var goblinRespawnPending = false;
@@ -2931,14 +3152,13 @@ canvas = document.getElementById('arena-canvas');
 ctx = canvas.getContext('2d');
 resize();
 window.addEventListener('resize', resize);
-window.addEventListener('orientationchange', function(){ setTimeout(resize, 300); });
-if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
 
-// canvas listeners added in startArena
-
-// Request fullscreen on first touch - direct user gesture required
-// Force correct size
-resize();
+canvas.addEventListener('mousedown',  onPointerDown, { passive:false });
+canvas.addEventListener('mousemove',  onPointerMove, { passive:false });
+canvas.addEventListener('mouseup',    onPointerUp);
+canvas.addEventListener('touchstart', onPointerDown, { passive:false });
+canvas.addEventListener('touchmove',  onPointerMove, { passive:false });
+canvas.addEventListener('touchend',   onPointerUp);
 
 // Draw idle frame
 draw();

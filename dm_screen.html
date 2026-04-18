@@ -152,8 +152,7 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
       <button class="btn G" style="width:100%;font-size:15px;padding:10px;font-family:Cinzel,serif;letter-spacing:.04em;margin-bottom:8px;" onclick="client.send('nextTurn')">⏭ Next Turn →</button>
       <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;" id="turn-btns"></div>
       <div class="btn-row">
-        <button class="btn P btn-sm" onclick="client.setPhase('trade')">Trade</button>
-        <button class="btn P btn-sm" onclick="client.setPhase('move')">Move</button>
+        <button class="btn P btn-sm" onclick="client.setPhase('prepare')">Prepare</button>
         <button class="btn P btn-sm" onclick="client.setPhase('land')">Land</button>
         <button class="btn P btn-sm" onclick="client.setPhase('battle')">Battle</button>
       </div>
@@ -166,6 +165,14 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
           </label>
         </div>
         <div id="move-active-player" style="font-size:13px;color:var(--gold);margin-bottom:6px;font-family:Cinzel,serif;">—</div>
+        <div id="dash-request-panel" style="display:none;margin-bottom:8px;padding:10px;border-radius:8px;background:#2a1a0a;border:2px solid var(--red);">
+          <div style="font-family:Cinzel,serif;font-size:11px;color:var(--red);letter-spacing:.08em;margin-bottom:6px;">⚡ DASH REQUEST</div>
+          <div id="dash-request-text" style="font-size:13px;color:var(--text);margin-bottom:8px;">—</div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn G btn-sm" style="flex:1;" onclick="client.send('approveRedDash',{})">✓ Approve</button>
+            <button class="btn btn-sm" style="flex:1;background:#3a1a1a;border-color:var(--red);" onclick="client.send('denyRedDash',{})">✕ Deny</button>
+          </div>
+        </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input id="move-roll-input" type="number" min="1" max="8" value="1"
             style="width:80px;padding:6px;border-radius:7px;border:1px solid var(--border);background:var(--surface3);color:var(--text);">
@@ -175,6 +182,15 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
           <button class="btn btn-sm" style="font-size:10px;" onclick="document.getElementById('move-player-sel').style.display=document.getElementById('move-player-sel').style.display==='none'?'block':'none'">Other</button>
         </div>
         <div id="move-result" style="font-size:11px;color:var(--dim);margin-top:5px;"></div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);">
+          <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.08em;color:var(--red);margin-bottom:4px;">FORCE DASH (TESTING)</div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <input id="force-dash-spaces" type="number" min="1" value="3"
+              style="width:70px;padding:6px;border-radius:7px;border:1px solid var(--border);background:var(--surface3);color:var(--text);">
+            <button class="btn btn-sm" style="background:#3a1a1a;border-color:var(--red);" onclick="forceDashClick()">💥 Force Dash</button>
+          </div>
+          <div style="font-size:10px;color:var(--dim);margin-top:4px;">No brick cost. Respects key-only gates. Rolls break chance per class.</div>
+        </div>
       </div>
     </div>
 
@@ -406,6 +422,21 @@ function renderTopBar() {
   if (moveLabel && ap) {
     moveLabel.textContent = ap.icon + ' ' + pLabel(ap) + ' — enter their roll:';
     if (sel) sel.value = ap.cls;
+  }
+  // Dash request panel
+  var dashPanel = document.getElementById('dash-request-panel');
+  var dashText  = document.getElementById('dash-request-text');
+  if (dashPanel && dashText) {
+    if (G.pendingDashRequest) {
+      var pd = G.pendingDashRequest;
+      var pr = G.players[pd.cls];
+      var pName = pr ? (pr.playerName || pr.name) : pd.cls;
+      var pIcon = pr ? pr.icon : '';
+      dashText.innerHTML = pIcon + ' <strong>' + pName + '</strong> requests Red Dash → <strong>' + pd.spaces + '</strong> space' + (pd.spaces===1?'':'s');
+      dashPanel.style.display = 'block';
+    } else {
+      dashPanel.style.display = 'none';
+    }
   }
   // Sync backward toggle
   var bwCheck = document.getElementById('allow-backward');
@@ -718,6 +749,24 @@ function processMove(backward) {
   document.getElementById('move-result').textContent = note;
   document.getElementById('move-roll-input').value = '1';
   if (!backward) client.setPhase('land');
+}
+
+function forceDashClick() {
+  // Force dash for active player (or selected "Other") — DM testing tool
+  var sel = document.getElementById('move-player-sel');
+  var cls = (sel && sel.style.display !== 'none' && sel.value) ? sel.value : G.turnOrder[G.activePlayerIdx];
+  if (!cls || !G.players[cls]) {
+    document.getElementById('move-result').textContent = 'Pick a player first.';
+    return;
+  }
+  var inputEl = document.getElementById('force-dash-spaces');
+  var sp = parseInt(inputEl.value || 0);
+  if (!sp || sp < 1) {
+    document.getElementById('move-result').textContent = 'Enter a positive number of spaces.';
+    return;
+  }
+  client.send('forceDash', {cls: cls, spaces: sp});
+  document.getElementById('move-result').textContent = '[force] dashing ' + cls + ' → ' + sp + ' spaces';
 }
 
 function renderActiveEvent() {

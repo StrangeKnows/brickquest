@@ -1360,6 +1360,16 @@ function connectWS() {
         : 'Gate held firm (rolled ' + data.roll + ', need 5+) — took 2 damage';
       showGateResult(gateMsg, data.success);
     }
+    if (event === 'dashDenied') {
+      if (data.cls === MY_CLASS) {
+        toast('Dash not possible — ' + (data.reason || 'denied'), 'warn');
+      }
+    }
+    if (event === 'dashResult') {
+      if (data.cls === MY_CLASS) {
+        showDashResult(data);
+      }
+    }
     if (event === 'lootReady') {
       showLootScreen(data.loot);
     }
@@ -1985,9 +1995,9 @@ function renderActions(me) {
     // Pending result card (from reward, gate, etc.) — shown until dismissed
     html += renderResultCard();
 
-    // Movement phase
-    if (isMyTurn && G.phase === 'move') {
-      html += renderMovePanel(me);
+    // Prepare phase — unified panel
+    if (G.phase === 'prepare') {
+      html += renderPreparePanel(me);
     }
     // Landing phase / event
     if (isMyTurn && G.phase === 'land' && !_pendingResult) {
@@ -2003,28 +2013,330 @@ function renderActions(me) {
     if (!isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle' && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired)) {
       html += '<div id="landing-result"></div>';
     }
-    // Trade phase — also show on setup (first turn) and any non-specific phase
-    if (isMyTurn && (G.phase === 'trade' || G.phase === 'setup')) {
-      var hasRedT = (me.bricks.red||0)>0;
-      var hasPurpleT = (me.bricks.purple||0)>0;
-      var enhT = G.enhancedMovement && G.enhancedMovement[MY_CLASS];
-      html += '<div class="card" style="border-color:var(--cls-color)44;">'
-        + '<div style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.1em;color:var(--cls-color);margin-bottom:4px;">YOUR TURN</div>'
-        + '<div style="font-family:Cinzel,serif;font-size:17px;font-weight:700;color:var(--text);margin-bottom:8px;">🔄 Trade Phase</div>'
-        + '<div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Trade bricks freely with allies — use the Bricks tab. Special moves available before rolling:</div>'
-        + (hasRedT ? '<button class="btn warn" style="margin-bottom:6px;width:100%;" onclick="useRedBrickMove()">🔴 Red Brick Dash — 1–4 spaces (1 red brick)</button>' : '')
-        + (hasPurpleT ? '<button class="btn warn" style="margin-bottom:6px;width:100%;" onclick="usePurpleEnhanced()">🟣 Enhanced Movement (1 purple brick)</button>' : '')
-        + (enhT ? '<div style="padding:8px;border-radius:8px;background:#0a1a0a;border:1px solid var(--green);margin-bottom:8px;font-size:12px;color:var(--green);">⚡ Enhanced Movement active — ' + enhT + ' turn(s) remaining</div>' : '')
-        + '<button class="btn primary" style="width:100%;font-size:15px;padding:12px;font-family:Cinzel,serif;letter-spacing:.04em;" onclick="client.setPhase(\'move\')">Ready — Begin Move →</button>'
-        + '</div>';
+    // Out of battle free actions — only during land phase or off-turn; prepare phase has its own panel
+    if (G.phase !== 'prepare') {
+      html += renderOutOfBattleActions(me);
     }
-    // Out of battle free actions
-    html += renderOutOfBattleActions(me);
     // Gates
     html += renderGateActions(me);
   }
 
   el.innerHTML = html;
+}
+
+// ── PREPARE PANEL ──
+var _expandedAction = null;
+function toggleActionExpand(id) {
+  _expandedAction = _expandedAction === id ? null : id;
+  render();
+}
+
+window._debugPreparePanel = function() {
+  var pane = document.getElementById('pane-actions');
+  if (!pane) { console.log('pane-actions not found'); return; }
+  console.log('=== pane-actions ancestors ===');
+  var el = pane;
+  var depth = 0;
+  while (el && depth < 10) {
+    var style = window.getComputedStyle(el);
+    console.log(depth, el.tagName, 'id='+(el.id||''), 'class='+(el.className||''),
+      'bg=' + style.backgroundColor, 'border=' + style.border, 'br=' + style.borderRadius,
+      'mw=' + style.maxWidth, 'pad=' + style.padding);
+    el = el.parentElement;
+    depth++;
+  }
+  console.log('=== pane-actions direct children ===');
+  Array.from(pane.children).forEach(function(c, i) {
+    var style = window.getComputedStyle(c);
+    console.log(i, c.tagName, 'class=' + (c.className||''),
+      'bg=' + style.backgroundColor, 'border=' + style.border, 'br=' + style.borderRadius);
+  });
+};
+
+var PREPARE_FLAVOR = [
+  'The torches crackle. Someone should really check the pilot light.',
+  'A rat scurries past. It looks like it has somewhere to be.',
+  'You smell damp stone and bad decisions.',
+  'The dungeon sighs. It\'s been a long week.',
+  'Distant dripping. Always distant dripping.',
+  'A draft from nowhere. Ghosts, probably. Or the HVAC.',
+  'Your boots squelch. You don\'t want to know why.',
+  'Something skitters. Or was that your stomach?',
+  'The walls seem closer than before. Or you ate a big lunch.',
+  'An old map flutters by. It\'s not yours, but finders keepers.',
+  'Faint music from the east. The goblins might have a piano.',
+  'You feel watched. Check the corner. Yep, a crack in the stone shaped like a face.',
+  'The dungeon master rolls dice behind a screen. You pretend not to hear.',
+  'A torch flickers out. Dramatic. Unnecessary. You are impressed.',
+  'Somewhere, a door slams. You did not move.',
+  'A low rumble. Either a dragon, or someone is hungry.',
+  'You find a copper coin. It\'s stuck to the floor.',
+  'The air tastes like old parchment and regret.',
+  'A skeleton waves. You wave back. It\'s only polite.',
+  'Brave, aren\'t you? Or short on other options.',
+];
+var _flavorIdx = 0;
+function nextFlavor() {
+  _flavorIdx = (_flavorIdx + Math.floor(Math.random()*5) + 1) % PREPARE_FLAVOR.length;
+  return PREPARE_FLAVOR[_flavorIdx];
+}
+var _lastFlavorPhase = null;
+var _lastFlavor = '';
+function currentFlavor() {
+  var key = (G && G.phase) + '|' + (G && G.round) + '|' + (G && G.activePlayerIdx);
+  if (_lastFlavorPhase !== key) {
+    _lastFlavorPhase = key;
+    _lastFlavor = nextFlavor();
+  }
+  return _lastFlavor;
+}
+
+function renderPreparePanel(me) {
+  var actions = buildPrepareActions(me);
+  if (!actions.length) return '';
+  var html = '<div style="text-align:center;margin:6px 0 14px 0;padding:0 10px;">'
+    + '<div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;color:var(--text-dim);line-height:1.5;">' + currentFlavor() + '</div>'
+    + '</div>';
+  actions.forEach(function(a) {
+    html += renderActionButton(a);
+  });
+  return html;
+}
+
+function buildPrepareActions(me) {
+  var list = [];
+  var isMyTurn = G.turnOrder && G.turnOrder[G.activePlayerIdx] === MY_CLASS;
+  var dashPending = !!(G.pendingDashRequest && G.pendingDashRequest.cls === MY_CLASS);
+  var dashUsed = !!me.dashUsedThisTurn;
+  var hasRed = (me.bricks.red||0) > 0;
+  var hasWhite = (me.bricks.white||0) > 0;
+  var hasGray = (me.bricks.gray||0) > 0;
+  var die = (PLAYER_META[MY_CLASS] || {}).die || 'd6';
+  var inBattle = G.battle && Array.isArray(G.battle.combatants) && G.battle.combatants.indexOf(MY_CLASS) >= 0;
+
+  if (isMyTurn) {
+  list.push({
+    id: 'move',
+    label: '🎲 Move',
+    detail: 'Ready to make some moves?\nChoose how you\'ll advance this turn.',
+    available: true,
+    children: [
+      {
+        id: 'move_roll',
+        label: '🎲 Roll Die',
+        detail: 'Roll your ' + die + ' to see how many spaces you advance.\nCall the number to your DM — they\'ll move you on the board.',
+        available: true,
+        onUse: function() {},
+      },
+      {
+        id: 'move_dash',
+        label: '🔴 Red Brick Dash',
+        detail: dashPending
+          ? '⚡ CHARGING...\nAwaiting DM approval.'
+          : dashUsed
+            ? 'Already dashed this turn.\nRefreshes next prepare phase.'
+            : !hasRed
+              ? 'No red charges available.\nCollect red bricks to dash.'
+              : 'Costs 1 red charge. Dash 1–4 spaces forward.\n\nIf you move fast enough into a door, it may hurt — but come tumbling down.\n\nOne red charge will be unavailable if you encounter any enemy this turn, but will return on next prepare phase.',
+        available: hasRed && !dashUsed && !dashPending,
+        pending: dashPending,
+        onUse: useRedBrickMove,
+      },
+    ],
+  });
+  }
+
+  {
+    var healAmt = (typeof SELF_HEAL_AMT !== 'undefined' && SELF_HEAL_AMT[MY_CLASS]) ? SELF_HEAL_AMT[MY_CLASS] : 2;
+    list.push({
+      id: 'self_heal',
+      label: '💊 Self Heal',
+      detail: hasWhite
+        ? 'Costs 1 white brick.\nRestore ' + healAmt + ' HP.'
+        : 'No white bricks available.\nFind or trade for a white brick to heal.',
+      available: hasWhite,
+      onUse: selfHeal,
+    });
+  }
+
+  if (MY_CLASS === 'mender') {
+    list.push({
+      id: 'heal_ally',
+      label: '💊 Heal Ally',
+      detail: hasWhite
+        ? 'Costs 1 white brick.\nChoose an ally to restore HP.'
+        : 'No white bricks available.',
+      available: hasWhite,
+      onUse: function(){ showHealSelector(-1); },
+    });
+    var whiteCount = me.bricks.white || 0;
+    list.push({
+      id: 'mass_repair',
+      label: '💊 Mass Repair',
+      detail: whiteCount >= 2
+        ? 'Costs 2 white bricks.\nHeal every player a small amount.'
+        : 'Need 2 white bricks.\nCurrent: ' + whiteCount + '.',
+      available: whiteCount >= 2,
+      onUse: function(){ client.massRepair(); },
+    });
+    var downed = Object.values(G.players).filter(function(p){ return !p.alive || p.hp<=0; });
+    if (downed.length) {
+      list.push({
+        id: 'revive',
+        label: '✨ Revive',
+        detail: 'Bring a downed player back from the brink.\nCheck with DM for cost.',
+        available: true,
+        onUse: showReviveSelector,
+      });
+    }
+  }
+
+  {
+    var hasIronHide = MY_CLASS === 'warrior' && me.skills && me.skills.iron_hide;
+    var sCost = (MY_CLASS === 'warrior' || MY_CLASS === 'builder') ? 1 : 2;
+    var sGain = hasIronHide ? 2 : 1;
+    var sMult = hasIronHide ? 1.5 : (MY_CLASS === 'warrior' ? 0.75 : 0.5);
+    var sMax = Math.floor(me.hpMax * sMult);
+    var shieldHaveEnough = (me.bricks.gray || 0) >= sCost;
+    var shieldAtMax = (me.armor || 0) >= sMax;
+    var shieldDetail;
+    if (shieldAtMax) {
+      shieldDetail = 'Shield is at maximum (' + sMax + ').\nUse some or take a hit first.';
+    } else if (!shieldHaveEnough) {
+      shieldDetail = 'Needs ' + sCost + ' gray brick' + (sCost>1?'s':'') + '.\nCurrent: ' + (me.bricks.gray || 0) + '.\nWould add +' + sGain + ' pip.';
+    } else {
+      shieldDetail = 'Costs ' + sCost + ' gray brick' + (sCost>1?'s':'') + '.\n+' + sGain + ' pip.\nCurrent shield: ' + (me.armor || 0) + ' / ' + sMax + '.';
+    }
+    list.push({
+      id: 'add_shield',
+      label: '🛡 Add Shield',
+      detail: shieldDetail,
+      available: shieldHaveEnough && !shieldAtMax,
+      onUse: function(){ client.addShield(MY_CLASS); },
+    });
+  }
+
+  if (MY_CLASS === 'builder' && me.skills) {
+    if (me.skills.forge) {
+      var canForge = BRICK_NAMES.some(function(k){ return (me.bricks[k]||0) >= 2; });
+      list.push({
+        id: 'forge',
+        label: '🔧 Forge',
+        detail: canForge
+          ? 'Combine 2 bricks of the same color into 1 of any color.'
+          : 'Need 2 bricks of the same color to forge.',
+        available: canForge,
+        onUse: showForge,
+      });
+    }
+    if (me.skills.blueprint) {
+      list.push({
+        id: 'blueprint',
+        label: '📋 Blueprint',
+        detail: hasGray
+          ? 'Costs 1 gray brick.\nDuplicate one of your bricks.'
+          : 'Need 1 gray brick.',
+        available: hasGray,
+        onUse: showBlueprint,
+      });
+    }
+  }
+
+  var zone = (SPACES[me.space] && SPACES[me.space].zone) || 0;
+  var zoneRestricted = zone === 4;
+  var marketBlocked = inBattle || zoneRestricted || G.storeDisabled;
+  var marketDetail;
+  if (inBattle) {
+    marketDetail = 'Market closed during battle.';
+  } else if (zoneRestricted) {
+    marketDetail = 'Market unavailable in this zone.';
+  } else if (G.storeDisabled) {
+    marketDetail = 'Market closed by DM.';
+  } else {
+    marketDetail = 'Buy bricks with gold.\nYour gold: 🪙' + (me.gold || 0) + '.';
+  }
+  list.push({
+    id: 'market',
+    label: '🛒 Market',
+    detail: marketDetail,
+    available: !marketBlocked,
+    isMarket: true,
+    onUse: null,
+  });
+
+  return list;
+}
+
+function renderActionButton(a) {
+  var expanded = _expandedAction === a.id || (a.children && a.children.some(function(c){return _expandedAction === c.id;}));
+  var grayed = !a.available && !a.children && !a.isMarket;
+  if (grayed && !a.pending) return '';
+  var bg = a.pending ? '#3a1a0a' : expanded ? '#2a2a36' : '#1d1d28';
+  var border = a.pending ? 'var(--red)' : expanded ? 'var(--cls-color)' : '#3a3a48';
+  var opacity = grayed ? '0.45' : '1';
+  var cursor = grayed ? 'not-allowed' : 'pointer';
+  var boxShadow = expanded
+    ? '0 0 0 2px var(--cls-color)55, 0 4px 12px rgba(0,0,0,0.6)'
+    : '0 2px 6px rgba(0,0,0,0.5)';
+  var html = '<div style="margin:0 0 14px 0;border-radius:12px;border:1px solid '+border+';background:'+bg+';overflow:hidden;box-shadow:'+boxShadow+';">'
+    + '<div style="padding:16px 14px;font-size:15px;font-weight:700;color:var(--text);cursor:'+cursor+';opacity:'+opacity+';text-align:center;position:relative;" '
+    +   'onclick="'+(grayed ? '' : "toggleActionExpand('"+a.id+"')")+'">'
+    + '<span>'+a.label+'</span>'
+    + '<span style="position:absolute;right:14px;top:50%;transform:translateY(-50%);color:var(--text-dim);font-size:12px;">'+(expanded?'▾':'▸')+'</span>'
+    + '</div>';
+  if (expanded) {
+    html += '<div style="padding:14px;border-top:1px solid rgba(255,255,255,0.08);font-size:13px;color:var(--text-dim);background:rgba(0,0,0,0.25);">'
+         + '<div style="margin-bottom:12px;line-height:1.55;white-space:pre-line;text-align:center;">'+a.detail+'</div>';
+    if (a.children) {
+      a.children.forEach(function(c) { html += renderActionButton(c); });
+    } else if (a.isMarket && a.available) {
+      html += renderMarketGrid();
+    } else if (a.available && a.onUse) {
+      html += '<div style="text-align:center;"><button class="btn primary" style="width:100%;font-size:14px;" onclick="runAction(\''+a.id+'\')">Use</button></div>';
+    } else if (a.pending) {
+      html += '<div style="text-align:center;color:var(--red);font-family:Cinzel,serif;letter-spacing:.05em;padding:6px;">Waiting...</div>';
+    }
+    html += '</div>';
+  }
+  html += '</div>'; // close outer card div
+  return html;
+}
+
+function renderMarketGrid() {
+  if (!G || !G.players || !G.players[MY_CLASS]) return '';
+  var me = G.players[MY_CLASS];
+  var prices = { red:1, gray:1, green:1, blue:2, white:2, yellow:2, orange:2, purple:3, black:3 };
+  var html = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;">';
+  Object.entries(prices).forEach(function(e) {
+    var col = e[0], price = e[1];
+    var bg = BRICK_COLORS[col] || '#888';
+    var bdr = col === 'white' ? 'border:1px solid #ccc;' : '';
+    var tc = (col === 'white' || col === 'yellow') ? '#333' : bg;
+    var canAfford = (me.gold || 0) >= price;
+    html += '<button onclick="buyBrick(this.dataset.color)" data-color="' + col + '" ' + (canAfford ? '' : 'disabled') + ' '
+          + 'style="display:flex;flex-direction:column;align-items:center;gap:5px;padding:10px 6px;border-radius:10px;'
+          + 'background:' + bg + '18;border:1px solid ' + (canAfford ? bg : '#333') + ';cursor:' + (canAfford ? 'pointer' : 'not-allowed') + ';'
+          + 'opacity:' + (canAfford ? '1' : '.4') + ';">'
+          + '<span style="width:22px;height:22px;border-radius:4px;background:' + bg + ';' + bdr + 'display:block;box-shadow:0 1px 3px rgba(0,0,0,.4);"></span>'
+          + '<span style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.04em;color:' + tc + ';">' + col + '</span>'
+          + '<span style="font-size:13px;color:var(--gold);">🪙' + price + '</span>'
+          + '</button>';
+  });
+  html += '</div>';
+  return html;
+}
+
+var _actionRegistry = null;
+function runAction(id) {
+  _actionRegistry = {};
+  var me = G && G.players ? G.players[MY_CLASS] : null;
+  if (me) {
+    var actions = buildPrepareActions(me);
+    var walk = function(arr) { arr.forEach(function(a){ _actionRegistry[a.id] = a.onUse; if (a.children) walk(a.children); }); };
+    walk(actions);
+  }
+  var fn = _actionRegistry[id];
+  if (fn) fn();
 }
 
 // ── ATTACK ──
@@ -2339,11 +2651,29 @@ function renderMovePanel(me) {
     + enhBanner
     + (notes.length ? '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">' + notes.join(' · ') + '</div>' : '')
     + '<div style="font-size:13px;color:var(--text-dim);padding:10px;background:var(--surface3);border-radius:8px;margin-bottom:8px;">📣 Call your roll aloud — DM will move you on the board map.</div>'
-    + (hasRed ? '<button class="btn warn" onclick="useRedBrickMove()">🔴 Red Brick Dash — choose 1–4 spaces (costs 1 red brick)</button>' : '')
+    + renderDashControl(me, 'move')
     + (hasPurple && !enh ? '<button class="btn warn" onclick="usePurpleEnhanced()">🟣 Enhanced Movement — d3 turns bonus actions (1 purple brick)</button>' : '')
     + '<button class="btn" onclick="client.setPhase(\'land\')">Skip movement</button>'
     + '</div>';
   return html;
+}
+
+// Render the red dash control — button, pending banner, or disabled state
+function renderDashControl(me, phaseCtx) {
+  var hasRed = (me.bricks.red||0)>0;
+  if (!hasRed) return '';
+  var pending = G.pendingDashRequest && G.pendingDashRequest.cls === MY_CLASS;
+  if (pending) {
+    return '<div style="padding:10px;border-radius:8px;background:#2a1a0a;border:1px solid var(--red);margin-bottom:6px;font-size:13px;color:var(--red);text-align:center;font-family:Cinzel,serif;letter-spacing:.05em;">⚡ CHARGING... <span style="color:var(--text-dim);font-family:inherit;font-size:11px;letter-spacing:0;">awaiting DM approval</span></div>';
+  }
+  if (me.dashUsedThisTurn) {
+    return '<button class="btn" style="margin-bottom:6px;width:100%;opacity:.45;cursor:not-allowed;" disabled>🔴 Dash spent — refreshes next turn</button>';
+  }
+  var label = phaseCtx === 'trade'
+    ? '🔴 Red Brick Dash — 1–4 spaces (1 red brick)'
+    : '🔴 Red Brick Dash — choose 1–4 spaces (costs 1 red brick)';
+  var widthStyle = phaseCtx === 'trade' ? 'margin-bottom:6px;width:100%;' : '';
+  return '<button class="btn warn" style="'+widthStyle+'" onclick="useRedBrickMove()">'+label+'</button>';
 }
 
 function useEnhancedExtra(actionType) {
@@ -2352,13 +2682,16 @@ function useEnhancedExtra(actionType) {
 }
 
 function useRedBrickMove() {
-  if((G.players[MY_CLASS].bricks.red||0)<1){toast('No red bricks','warn');return;}
-  var spaces=parseInt(prompt('Move how many spaces? (1–4)')||0);
-  if(spaces<1||spaces>4){toast('Invalid: enter 1–4','warn');return;}
-  client.adjustBrick(MY_CLASS,'red',-1);
-  var clsName = PLAYER_META[MY_CLASS] ? PLAYER_META[MY_CLASS].name : MY_CLASS;
-  client.addLog(clsName+' red brick dash — '+spaces+' spaces','move');
-  toast('Dashing '+spaces+' spaces — tell the DM!','success');
+  var me = G.players[MY_CLASS];
+  if(!me || (me.bricks.red||0)<1){toast('No red bricks — dash not possible','warn');return;}
+  if(me.dashUsedThisTurn){toast('Already dashed this turn — dash not possible','warn');return;}
+  if(G.pendingDashRequest){toast('Dash request already pending — dash not possible','warn');return;}
+  var input = prompt('Dash how many spaces? (1–4)');
+  if(input===null) return; // cancelled
+  var spaces=parseInt(input||0);
+  if(!(spaces>=1 && spaces<=4)){toast('Invalid — enter 1, 2, 3, or 4','warn');return;}
+  client.send('requestRedDash', {cls: MY_CLASS, spaces: spaces});
+  toast('Charging... waiting for DM','info');
 }
 function usePurpleEnhanced() {
   if((G.players[MY_CLASS].bricks.purple||0)<1){toast('No purple bricks','warn');return;}
@@ -5408,6 +5741,34 @@ function showGateResult(msg, success) {
   render();
 }
 
+function showDashResult(data) {
+  var events = data.gateEvents || [];
+  var hadBreak = events.some(function(g){ return g.kind === 'break_success'; });
+  var hadFail  = events.some(function(g){ return g.kind === 'break_fail'; });
+  var hadKeyStop = events.some(function(g){ return g.kind === 'key_stop'; });
+  var flavor = data.flavor || {};
+  var lines = [];
+  if (hadKeyStop) lines.push('A locked magical gate bars the way. The dash ends.');
+  if (hadBreak)   lines.push(flavor.success || 'Crashed through!');
+  if (hadFail)    lines.push(flavor.fail || 'The gate held.');
+  if (!events.length) {
+    lines.push((data.forcedByDM ? '[DM forced] ' : '') + 'Dashed ' + (data.end - data.start) + ' space' + ((data.end-data.start)===1?'':'s') + '.');
+  }
+  var dmgLine = data.totalDmg > 0
+    ? '−' + data.totalDmg + ' HP' + (data.totalArmorAbsorbed>0?' ('+data.totalArmorAbsorbed+' absorbed by armor)':'')
+    : data.totalArmorAbsorbed > 0 ? 'Armor absorbed all damage (' + data.totalArmorAbsorbed + ')' : '';
+  var allClear = !hadFail && !hadKeyStop;
+  _pendingResult = {
+    border: hadFail ? 'var(--red)' : hadKeyStop ? 'var(--yellow)' : allClear ? 'var(--green)' : 'var(--orange)',
+    title: data.forcedByDM ? 'Forced Dash' : (hadFail ? 'Dash Stopped' : hadBreak ? 'Through the Gate!' : hadKeyStop ? 'Gate Sealed' : 'Dashed!'),
+    icon: hadBreak ? '💥' : hadFail ? '🛑' : hadKeyStop ? '🗝️' : '⚡',
+    mainNum: data.totalDmg > 0 ? -data.totalDmg : null,
+    detail: lines.join(' ') + (dmgLine ? '\n' + dmgLine : ''),
+    kind: 'dash'
+  };
+  render();
+}
+
 function showLootScreen(loot) {
   var existing = document.getElementById('loot-modal');
   if (existing) existing.remove();
@@ -5799,6 +6160,8 @@ function connectWS() {
       if (event === 'error')           toast(data.msg, 'warn');
       if (event === 'rewardPopup') { var isRiddleYellow = data.kind==='brick' && data.color==='yellow' && G && G.activeEvent && G.activeEvent.evType==='riddle'; if (!isRiddleYellow) showRewardPopup(data); }
       if (event === 'forceGateResult') showGateResult(data.success?'Gate forced! (roll '+data.roll+')':'Gate held (roll '+data.roll+') — 2 dmg', data.success);
+      if (event === 'dashDenied' && data.cls===MY_CLASS) toast('Dash not possible — '+(data.reason||'denied'),'warn');
+      if (event === 'dashResult' && data.cls===MY_CLASS) showDashResult(data);
       if (event === 'enhancedResult' && data.cls===MY_CLASS) toast('Enhanced Movement: '+data.duration+' turn(s)!','success');
       if (event === 'skillUnlocked') {
         var sn=(data.skillId||'').replace(/_/g,' ');

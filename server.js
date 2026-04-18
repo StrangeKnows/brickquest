@@ -9,7 +9,7 @@ const WebSocket = require('ws');
 const os = require('os');
 
 // Shared game constants
-const { SPACES, ZONES, GATE_SPACES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, SHIELD_MAX, SHIELD_COST } = require('./game.js');
+const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
 
 const PORT = 8080;
 const MIME = {
@@ -21,7 +21,7 @@ const MIME = {
 function freshState() {
   return {
     round: 1,
-    phase: 'setup',           // setup|trade|move|land|battle
+    phase: 'prepare',           // prepare|land|battle
     activePlayerIdx: 0,
     turnOrder: ['warrior','wizard','scout','builder','mender','beastcaller'],
     battle: null,
@@ -50,6 +50,7 @@ function freshState() {
     allowBackward: false,     // DM toggle: allow players to move backward
     battleResult: null,       // { loot, combatants, resolvedBy } — shown post-battle
     storeDisabled: false,     // DM toggle: disable store for all zones
+    pendingDashRequest: null, // { cls, spaces, requestedAt } — awaits DM approval
     log: [],
     players: {
       warrior:     mkPlayer('warrior',    '⚔️', '#993C1D', 12, 'd8',  {red:3,gray:2,white:1}),
@@ -77,6 +78,8 @@ function mkPlayer(cls, icon, color, hp, die, bricks) {
     scavengeRolled: false, // reset each gate deconstruct
     playerName: '',        // real player's name, set on login
     earnedClues: [],      // clues this player earned by solving yellow challenges
+    dashUsedThisTurn: false, // reset on each turn advance — one red dash per own turn
+    battleDashPenalty: 0,    // if >0, decrement red by this much at battle start (consumed once)
   };
 }
 
@@ -99,6 +102,20 @@ function loadState() {
     const data = JSON.parse(fs.readFileSync(SAVE_FILE, 'utf8'));
     if (data && data.G) {
       G = data.G;
+      // Migration: old phases trade/move/setup → prepare
+      if (G.phase === 'trade' || G.phase === 'move' || G.phase === 'setup') {
+        console.log('[LOAD] Migrating old phase "' + G.phase + '" → "prepare"');
+        G.phase = 'prepare';
+      }
+      // Migration: ensure new per-player fields exist
+      if (G.players) {
+        Object.keys(G.players).forEach(function(c) {
+          var p = G.players[c];
+          if (p.dashUsedThisTurn === undefined) p.dashUsedThisTurn = false;
+          if (p.battleDashPenalty === undefined) p.battleDashPenalty = 0;
+        });
+      }
+      if (G.pendingDashRequest === undefined) G.pendingDashRequest = null;
       console.log('[LOAD] Session restored from ' + data.savedAt);
       return true;
     }
@@ -252,6 +269,99 @@ function applyHeal(healerCls, targetCls, overHeal=false) {
 function roll(sides) { return Math.floor(Math.random()*sides)+1; }
 function rollRange(min,max) { return min + Math.floor(Math.random()*(max-min+1)); }
 
+// ── DASH RESOLVER ─────────────────────────────────────────
+// Handles movement, gate interactions, damage, and landing event for both
+// player-initiated (approveRedDash) and DM force-dash (forceDash).
+// Emits a dashResult message to all clients with everything that happened,
+// so the active player can show a dramatic result card.
+function resolveDash(cls, spaces, forcedByDM) {
+  const p = G.players[cls];
+  if (!p) return;
+  const meta = PLAYER_META[cls] || {};
+  const boardLen = SPACES.length;
+  const startSpace = p.space;
+  const requested = Math.max(1, parseInt(spaces)||1);
+  let target = Math.min(startSpace + requested, boardLen - 1);
+
+  // Walk the path from current space +1 to target, stopping/resolving gates as we go
+  const gateKeys = Object.keys(GATE_SPACES);
+  const gateEvents = []; // accumulate events to report to the client
+  let finalDest = target;
+  let totalDmg = 0;
+  let totalArmorAbsorbed = 0;
+
+  for (let i = startSpace + 1; i <= target; i++) {
+    const gateKey = gateKeys.find(k => GATE_SPACES[k] === i);
+    if (!gateKey) continue;
+    if (G.gates[gateKey] !== 'locked') continue; // open gate, pass through
+    const rule = GATE_RULES[gateKey] || 'forceable';
+    if (rule === 'key') {
+      // Key-only gate — stop at the gate space, do not attempt break
+      finalDest = i;
+      gateEvents.push({ gate: gateKey, space: i, kind: 'key_stop' });
+      break;
+    }
+    // Forceable gate — attempt break
+    const chance = meta.dashBreakChance !== undefined ? meta.dashBreakChance : 0.5;
+    const breakSuccess = Math.random() < chance;
+    const alwaysDmg = !!meta.dashDmgAlwaysRolls;
+    let dmg = 0;
+    if (breakSuccess || alwaysDmg) {
+      const dmgRange = meta.dashBreakDmg || [1,2];
+      dmg = rollRange(dmgRange[0], dmgRange[1]);
+    }
+    // Apply armor absorption
+    let absorbed = 0;
+    if (dmg > 0 && (p.armor||0) > 0) {
+      absorbed = Math.min(p.armor, dmg);
+      p.armor -= absorbed;
+      dmg -= absorbed;
+    }
+    if (dmg > 0) {
+      p.hp = Math.max(0, p.hp - dmg);
+      if (p.hp <= 0) p.alive = false;
+    }
+    totalDmg += dmg;
+    totalArmorAbsorbed += absorbed;
+    if (breakSuccess) {
+      G.gates[gateKey] = 'open';
+      gateEvents.push({ gate: gateKey, space: i, kind: 'break_success', dmg, armorAbsorbed: absorbed });
+      // Continue dash past the gate
+    } else {
+      finalDest = i; // stop at gate on failure
+      gateEvents.push({ gate: gateKey, space: i, kind: 'break_fail', dmg, armorAbsorbed: absorbed });
+      break;
+    }
+  }
+
+  p.space = finalDest;
+  // DM force-dash stays in prepare so player returns to their prior status.
+  // Player-initiated dash advances to land so the landing event triggers.
+  if (!forcedByDM) {
+    G.phase = 'land';
+  }
+
+  const pName = p.playerName || p.name;
+  const logPrefix = forcedByDM ? '[DM-force]' : '';
+  log(`${logPrefix} ${pName} dashed ${startSpace+1} → ${finalDest+1}${totalDmg>0?' (−'+totalDmg+' HP)':''}`.trim(), 'move');
+  for (const g of gateEvents) {
+    if (g.kind === 'key_stop') log(`Gate ${g.gate} requires a key — dash halted`, 'gate');
+    else if (g.kind === 'break_success') log(`${pName} crashed through ${g.gate}! ${g.dmg>0 ? '−'+g.dmg+' HP' : 'unscathed'}${g.armorAbsorbed>0?' ('+g.armorAbsorbed+' absorbed)':''}`, 'gate');
+    else if (g.kind === 'break_fail') log(`${pName} bounced off ${g.gate}${g.dmg>0 ? ' — '+g.dmg+' HP' : ''}${g.armorAbsorbed>0?' ('+g.armorAbsorbed+' absorbed)':''}`, 'gate');
+  }
+
+  // Broadcast a dashResult so the active player can show a dramatic card
+  const flavor = DASH_FLAVOR[cls] || { success:'Through!', fail:'Blocked!' };
+  const resultMsg = JSON.stringify({
+    type: 'dashResult',
+    cls, forcedByDM,
+    start: startSpace, end: finalDest, requested,
+    gateEvents, totalDmg, totalArmorAbsorbed,
+    flavor,
+  });
+  clients.forEach((info, cws) => { if(cws.readyState===1) cws.send(resultMsg); });
+}
+
 // ── MESSAGE HANDLER ───────────────────────────────────────
 wss.on('connection', (ws, req) => {
   const params = new URL(req.url, 'http://x').searchParams;
@@ -287,8 +397,16 @@ wss.on('connection', (ws, req) => {
           }
         });
       }
-      G.phase = 'trade';
+      G.phase = 'prepare';
       const nextCls = G.turnOrder[G.activePlayerIdx];
+      // Reset per-turn flags for the new active player
+      if (G.players[nextCls]) {
+        G.players[nextCls].dashUsedThisTurn = false;
+      }
+      // Clear dash penalty for everyone (if no battle triggered, penalty expires)
+      G.turnOrder.forEach(c => { if (G.players[c]) G.players[c].battleDashPenalty = 0; });
+      // Clear any stale pending dash (shouldn't exist, but defensive)
+      G.pendingDashRequest = null;
       log(`--- ${G.players[nextCls]?.playerName||G.players[nextCls]?.name||nextCls}'s turn (Round ${G.round}) ---`,'round');
       // Keep skipping if player not connected (but stop after full loop to avoid infinite)
       } while (!G.players[G.turnOrder[G.activePlayerIdx]]?.connected && attempts < G.turnOrder.length);
@@ -317,7 +435,7 @@ wss.on('connection', (ws, req) => {
       ws.send(JSON.stringify({type:'rewardPopup',kind:'brick',color,label:'Bought '+color+' brick! ('+price+'g)',brickColor:BRICK_COLORS[color]||'#888'}));
     }
 
-    if (type === 'setActivePlayer') { G.activePlayerIdx = P.idx; G.phase='trade'; }
+    if (type === 'setActivePlayer') { G.activePlayerIdx = P.idx; G.phase='prepare'; }
 
     // ── MOVEMENT (DM enters roll) ──
     if (type === 'dmMovePlayer') {
@@ -334,6 +452,64 @@ wss.on('connection', (ws, req) => {
       G.phase = 'land';
       log(`${p.name} moved ${rawRoll}${cls==='scout'?'+scout bonus':''} → space ${destination+1}`,'move');
       // Check black brick pass-through (no stop = safe pickup)
+      broadcastState(); return;
+    }
+
+    // ── RED DASH — player requests, DM approves ──
+    if (type === 'requestRedDash') {
+      const { cls, spaces } = P;
+      const p = G.players[cls];
+      if (!p) { broadcastState(); return; }
+      // Validate: must be active player's turn, phase is move or trade, has red brick, hasn't dashed this turn, no pending
+      const activeCls = G.turnOrder[G.activePlayerIdx];
+      if (cls !== activeCls) { ws.send(JSON.stringify({type:'dashDenied', cls, reason:'not your turn'})); broadcastState(); return; }
+      if (G.phase !== 'prepare') { ws.send(JSON.stringify({type:'dashDenied', cls, reason:'not in prepare phase'})); broadcastState(); return; }
+      if ((p.bricks.red||0) < 1) { ws.send(JSON.stringify({type:'dashDenied', cls, reason:'no red bricks'})); broadcastState(); return; }
+      if (p.dashUsedThisTurn) { ws.send(JSON.stringify({type:'dashDenied', cls, reason:'already dashed this turn'})); broadcastState(); return; }
+      if (G.pendingDashRequest) { ws.send(JSON.stringify({type:'dashDenied', cls, reason:'another dash request pending'})); broadcastState(); return; }
+      const sp = Math.max(1, Math.min(4, parseInt(spaces)||1));
+      G.pendingDashRequest = { cls, spaces: sp, requestedAt: Date.now() };
+      log(`${p.playerName||p.name} requested red dash → ${sp} spaces (awaiting DM)`,'move');
+      broadcastState(); return;
+    }
+
+    if (type === 'approveRedDash') {
+      if (!G.pendingDashRequest) { broadcastState(); return; }
+      const { cls, spaces } = G.pendingDashRequest;
+      const p = G.players[cls];
+      if (!p || (p.bricks.red||0) < 1) {
+        G.pendingDashRequest = null;
+        broadcastState(); return;
+      }
+      // Consume brick + per-turn flag + battle fatigue
+      p.bricks.red -= 1;
+      p.dashUsedThisTurn = true;
+      p.battleDashPenalty = 1; // next battle this turn decrements red by 1 extra
+      resolveDash(cls, spaces, false);
+      G.pendingDashRequest = null;
+      broadcastState(); return;
+    }
+
+    if (type === 'denyRedDash') {
+      if (!G.pendingDashRequest) { broadcastState(); return; }
+      const { cls } = G.pendingDashRequest;
+      const p = G.players[cls];
+      G.pendingDashRequest = null;
+      if (p) log(`${p.playerName||p.name} red dash denied by DM`,'move');
+      const denyMsg = JSON.stringify({type:'dashDenied', cls, reason:'denied by DM'});
+      clients.forEach((info, cws) => { if(cws.readyState===1) cws.send(denyMsg); });
+      broadcastState(); return;
+    }
+
+    // ── DM FORCE DASH — testing tool. No brick cost, no flags. Still gate-resolves normally. ──
+    if (type === 'forceDash') {
+      const { cls, spaces } = P;
+      const p = G.players[cls];
+      if (!p) { broadcastState(); return; }
+      const sp = Math.max(1, parseInt(spaces)||1);
+      G.pendingDashRequest = null;
+      log(`[DM] force-dash ${p.playerName||p.name} → ${sp} spaces`,'move');
+      resolveDash(cls, sp, true);
       broadcastState(); return;
     }
 
@@ -873,7 +1049,7 @@ wss.on('connection', (ws, req) => {
           }
         });
       }
-      G.phase = 'trade';
+      G.phase = 'prepare';
       log('DM resolved — ' + (G.players[G.turnOrder[G.activePlayerIdx]]?.name||'?') + ' turn begins','normal');
       broadcastState(); return;
     }
@@ -1054,7 +1230,14 @@ wss.on('connection', (ws, req) => {
     }
 
     // ── TRADING ──
+    // Helper: is this player currently in an active battle?
+    const isInBattle = (cls) => !!(G.battle && Array.isArray(G.battle.combatants) && G.battle.combatants.includes(cls));
+
     if (type === 'offerTrade') {
+      if (isInBattle(P.fromCls) || isInBattle(P.toCls)) {
+        ws.send(JSON.stringify({type:'error', msg:'Cannot trade with a player in battle'}));
+        broadcastState(); return;
+      }
       const id = Date.now().toString();
       const offerBricks = P.offerBricks || (P.offerColor ? {[P.offerColor]:1} : {});
       const offerGold   = P.offerGold || 0;
@@ -1105,6 +1288,10 @@ wss.on('connection', (ws, req) => {
     // ── GIVE ITEMS (no trade required, direct transfer) ──
     if (type === 'giveItems') {
       const { fromCls, targetCls, bricks: giveBricks, gold: giveGold } = P;
+      if (isInBattle(fromCls) || isInBattle(targetCls)) {
+        ws.send(JSON.stringify({type:'error', msg:'Cannot give items to/from a player in battle'}));
+        broadcastState(); return;
+      }
       const from = G.players[fromCls];
       const to   = G.players[targetCls];
       if (!from || !to) { broadcastState(); return; }
@@ -1343,6 +1530,18 @@ wss.on('connection', (ws, req) => {
       });
       G.phase='battle';
       G.activeEvent = null; // clear landing event when battle begins
+      // Apply dash penalty: any combatant who dashed this turn loses 1 additional red at battle start
+      combatants.forEach(cls => {
+        const p = G.players[cls];
+        if (p && p.battleDashPenalty > 0) {
+          const amt = Math.min(p.battleDashPenalty, p.bricks.red||0);
+          if (amt > 0) {
+            p.bricks.red -= amt;
+            log(`${p.playerName||p.name} −${amt} red brick (dash fatigue)`,'damage');
+          }
+          p.battleDashPenalty = 0;
+        }
+      });
       log(`Battle: ${monsters.map(m=>m.name).join(' + ')}`,'battle');
     }
     if (type === 'rollAttack') {
@@ -1595,7 +1794,7 @@ wss.on('connection', (ws, req) => {
       const allDone = G.battleResult.combatants.every(c => G.battleResult.resolvedBy.includes(c));
       if (allDone) {
         G.battleResult = null;
-        G.phase = 'trade';
+        G.phase = 'prepare';
         G.activePlayerIdx = (G.activePlayerIdx + 1) % G.turnOrder.length;
         log('All players acknowledged — next turn begins','normal');
       }
@@ -1604,7 +1803,7 @@ wss.on('connection', (ws, req) => {
       // DM force-resolves — skips waiting for players
       G.battleResult = null;
       if (G.battle) G.battle = null;
-      G.phase = 'trade';
+      G.phase = 'prepare';
       G.activePlayerIdx = (G.activePlayerIdx + 1) % G.turnOrder.length;
       log('Battle resolved by DM','normal');
     }
@@ -1638,7 +1837,9 @@ httpServer.listen(PORT,'0.0.0.0',()=>{
   for(const n of Object.values(nets).flat()) { if(n.family==='IPv4'&&!n.internal){ip=n.address;break;} }
   console.log(`\n🧱 BRICK QUEST v2 RUNNING\n`);
   console.log(`  DM Screen:    http://${ip}:${PORT}/dm_screen.html`);
-  console.log(`  All Players:  http://${ip}:${PORT}/players.html\n`);
+  console.log(`  All Players:  http://${ip}:${PORT}/players.html`);
+  console.log(`  Test Players: http://${ip}:${PORT}/test_players.html`);
+  console.log(`  Arena Test:   http://${ip}:${PORT}/arena_test.html\n`);
   console.log(`  Console commands: save | load | reset | status\n`);
   console.log(`  Game auto-saves to brickquest-save.json after every action.\n`);
   console.log(`  Press Ctrl+C to stop (state will be saved).\n`);

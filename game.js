@@ -10,12 +10,40 @@ const BRICK_COLORS = {
 const BRICK_NAMES = Object.keys(BRICK_COLORS);
 
 const PLAYER_META = {
-  warrior:     { name:'Warrior',     icon:'⚔️', color:'#993C1D', hp:12, die:'d8' },
-  wizard:      { name:'Wizard',      icon:'🔮', color:'#3C3489', hp:8,  die:'d6' },
-  scout:       { name:'Scout',       icon:'🏃', color:'#085041', hp:10, die:'d6' },
-  builder:     { name:'Builder',     icon:'🔧', color:'#854F0B', hp:10, die:'d6' },
-  mender:      { name:'Mender',      icon:'💊', color:'#72243E', hp:10, die:'d4' },
-  beastcaller: { name:'Beastcaller', icon:'🐾', color:'#27500A', hp:10, die:'d6' },
+  warrior:     { name:'Warrior',     icon:'⚔️', color:'#993C1D', hp:12, die:'d8', weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
+  wizard:      { name:'Wizard',      icon:'🔮', color:'#3C3489', hp:8,  die:'d6', weight:'light', dashBreakChance:0.15, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
+  scout:       { name:'Scout',       icon:'🏃', color:'#085041', hp:10, die:'d6', weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
+  builder:     { name:'Builder',     icon:'🔧', color:'#854F0B', hp:10, die:'d6', weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
+  mender:      { name:'Mender',      icon:'💊', color:'#72243E', hp:10, die:'d4', weight:'mid',   dashBreakChance:0.50, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
+  beastcaller: { name:'Beastcaller', icon:'🐾', color:'#27500A', hp:10, die:'d6', weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
+};
+
+// Flavor text per class for dash gate-break outcomes
+const DASH_FLAVOR = {
+  warrior: {
+    success: 'Shoulder first! The gate shatters like kindling.',
+    fail:    'The gate holds. Impossible.',
+  },
+  builder: {
+    success: 'Iron boot meets brittle wood. The gate folds inward.',
+    fail:    'The hinges refuse. That\'s not how I built them.',
+  },
+  mender: {
+    success: 'Faster than expected! The gate cracks under the charge.',
+    fail:    'The gate absorbs the blow. Mender falls back, winded.',
+  },
+  scout: {
+    success: 'Shoulder-rolled through the splinters.',
+    fail:    'Bounced off. That\'s going to leave a mark.',
+  },
+  beastcaller: {
+    success: 'The totem hums, the gate yields.',
+    fail:    'The spirits decline this battle. The gate remains.',
+  },
+  wizard: {
+    success: 'Somehow... the gate gives way. A minor miracle.',
+    fail:    'Why did I think these frail wrists could handle that?',
+  },
 };
 
 const SELF_HEAL_AMT  = { mender:4, warrior:3, builder:3, scout:2, wizard:2, beastcaller:2 };
@@ -72,6 +100,17 @@ const GATE_SPACES = {
   z2z3: ZONES[0].spaces + ZONES[1].spaces - 1,
   z3z4: ZONES[0].spaces + ZONES[1].spaces + ZONES[2].spaces - 1,
   z4z5: ZONES[0].spaces + ZONES[1].spaces + ZONES[2].spaces + ZONES[3].spaces - 1,
+};
+
+// Gate traversal rules — which gates can be forced vs which require a key
+// 'forceable' = can be broken open via forceGate (or dash-through in future)
+// 'key'       = requires a magical/colored key to open; cannot be forced
+const GATE_RULES = {
+  z1z2:   'forceable',
+  z2z3:   'key',
+  z3z4:   'forceable',
+  z4z5:   'key',
+  z5boss: 'forceable',
 };
 
 // ── LANDING EVENT TABLES ─────────────────────────────────
@@ -441,5 +480,5 @@ function buildMonsters(mids) {
 
 // Node.js export (ignored in browser)
 if (typeof module !== 'undefined') {
-  module.exports = { SPACES, ZONES, GATE_SPACES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, SHIELD_MAX, SHIELD_COST, RIDDLES };
+  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, SHIELD_MAX, SHIELD_COST, RIDDLES };
 }
