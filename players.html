@@ -395,6 +395,9 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 let MY_CLASS = null;
 let client   = null;
 let G        = null; // full game state
+// Skills system was removed during cleanup — keep an empty stub so
+// legacy references elsewhere (dead code paths) don't throw.
+const SKILLS = {};
 let pendingTradeOffer = null;
 var _pendingTradeSent = null; // { targetCls, wantColor, offerColor } — shown on sender's Bricks tab
 var _marketOpen = false;
@@ -672,10 +675,10 @@ function setConn(on) {
 }
 
 // ── TABS ──
+// Skills tab removed during cleanup; skill system pending redesign.
 const TAB_DEFS = [
   { id:'status',  label:'Status'  },
   { id:'actions', label:'Actions' },
-  { id:'skills',  label:'Skills'  },
   { id:'party',   label:'Party'   },
 ];
 

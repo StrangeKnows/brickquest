@@ -158,92 +158,6 @@ const LANDING_EVENTS = {
   ],
 };
 
-// ── MONSTERS ─────────────────────────────────────────────
-const MONSTER_TEMPLATES = {
-  goblin:   { name:'Goblin Scout',  hp:5,  armor:0, dmg:'d6',   color:'#237841', target:'random',  ambush:false, tameable:true,  loot:{gold:1,bricks:['green']} },
-  skeleton: { name:'Skeleton Guard',hp:6,  armor:1, dmg:'d6',   color:'#B4B2A9', target:'highest', ambush:false, tameable:false, loot:{gold:1,bricks:['gray']}, holdsKey:'blue' },
-  wolf:     { name:'Shadow Wolf',   hp:10, armor:1, dmg:'d6+1', color:'#444444', target:'lowest',  ambush:true,  tameable:true,  loot:{gold:1,bricks:['gray','black']} },
-  troll:    { name:'Stone Troll',   hp:18, armor:2, dmg:'d6+2', color:'#5F5E5A', target:'highest', ambush:false, tameable:true,  loot:{gold:2,bricks:['gray','gray']} },
-  imp:      { name:'Fire Imp',      hp:8,  armor:0, dmg:'d6+1', color:'#D01012', target:'lowest',  ambush:true,  tameable:false, loot:{gold:1,bricks:['red','orange']} },
-  knight:   { name:'Cursed Knight', hp:15, armor:2, dmg:'d6+2', color:'#534AB7', target:'highest', ambush:false, tameable:false, loot:{gold:2,bricks:['purple','gray']} },
-  wraith:   { name:'Void Wraith',   hp:12, armor:3, dmg:'d6+3', color:'#3C3489', target:'lowest',  ambush:true,  tameable:false, loot:{gold:2,bricks:['purple','blue']} },
-  colossus_shell: { name:'Colossus — Shell', hp:28, armor:3, dmg:'d6+3', color:'#888780', target:'highest', ambush:false, tameable:false, loot:{gold:0,bricks:[]}, phase:1 },
-  colossus_core:  { name:'Colossus — Core',  hp:12, armor:0, dmg:'d6+3', color:'#222222', target:'random',  ambush:false, tameable:false, loot:{gold:5,bricks:['purple','purple']}, phase:2, blueOnly:true },
-};
-
-// ── COMPLICATIONS ─────────────────────────────────────────
-const COMPLICATIONS = [
-  { id:'none',    label:'No complication',  desc:'Straight fight.' },
-  { id:'none',    label:'No complication',  desc:'Straight fight.' },
-  { id:'poison',  label:'Poison',           desc:'All players lose 1 HP end of each battle round. Mender Cleanse removes it.' },
-  { id:'trapped', label:'Trapped Battlefield', desc:'DM places 2 orange bricks on random spaces. Landing = 1–3 damage each.' },
-  { id:'armored', label:'Armored Surge',    desc:'Main monster +2 armor this fight. Blue magic still ignores.' },
-  { id:'swarm',   label:'Swarm',            desc:'New Goblin Scout spawns end of round 2 if original monsters alive.' },
-];
-
-// ── SKILLS ───────────────────────────────────────────────
-const SKILLS = {
-  warrior: [
-    { id:'iron_hide',         tier:1, name:'Iron Hide',         desc:'Upgrades Warrior shield: each gray brick now fills 2 shield pips instead of 1. Max shields raised to 150% of max HP.', use:'Passive', unlock:{gray:2} },
-    { id:'power_strike',      tier:1, name:'Power Strike',      desc:'Rolling max on d8 adds +3 bonus damage.', use:'Passive', unlock:{red:2} },
-    { id:'cover',             tier:1, name:'Cover',             desc:'Redirect one attack per round from any ally to yourself.', use:'Free reaction, no cost', unlock:{gray:1,white:1} },
-    { id:'rage_break_plus',   tier:2, name:'Rage Break+',       desc:'Multiply last attack roll ×2, usable twice per battle.', use:'Brick slot: 2 red', unlock:{red:3} },
-    { id:'whirlwind',         tier:2, name:'Whirlwind',         desc:'Attack every monster in zone, each takes half d8.', use:'Brick slot: 1 red', unlock:{red:3,gray:1} },
-    { id:'fortress_stance',   tier:2, name:'Fortress Stance',   desc:'Skip movement: +3 armor bricks, all monsters −1 this round.', use:'Skip move, no cost', unlock:{gray:3,white:1} },
-    { id:'legendary_bastion', tier:3, name:'Legendary Bastion', desc:'ONCE PER GAME: immune 2 rounds, all monsters must target you.', use:'2 gray + 1 red', unlock:{gray:4,white:2} },
-    { id:'warlords_fury',     tier:3, name:"Warlord's Fury",    desc:'ONCE PER GAME: roll d8 three times on one monster, ignores armor.', use:'3 red', unlock:{red:5,gray:1} },
-  ],
-  wizard: [
-    { id:'overcharge',    tier:1, name:'Overcharge',    desc:'Arcane Bolt damage scales: base 4–8 + 1 extra per blue/purple held.', use:'Passive', unlock:{blue:2} },
-    { id:'extended_ward', tier:1, name:'Extended Ward', desc:'Ward blocks 2 attacks instead of 1.', use:'1 purple — upgraded Ward', unlock:{purple:1,blue:1} },
-    { id:'chain_lightning',tier:1,name:'Chain Lightning',desc:'Arcane Bolt bounces to second monster for half damage.', use:'Passive, automatic', unlock:{blue:2,yellow:1} },
-    { id:'shatter_storm', tier:2, name:'Shatter Storm', desc:'Shatter removes 7–11 bricks, 2 overflow to nearest monster.', use:'Brick slot: 2 blue', unlock:{blue:3} },
-    { id:'mana_surge',    tier:2, name:'Mana Surge',    desc:'Once per battle: cast any ability for free.', use:'Saves next ability cost', unlock:{blue:3,purple:1} },
-    { id:'confound',      tier:2, name:'Confound',      desc:'Force monster to attack random target this round.', use:'Brick slot: 1 yellow', unlock:{yellow:2,purple:1} },
-    { id:'time_freeze',   tier:3, name:'Time Freeze',   desc:'ONCE PER GAME: all monsters skip 2 full turns.', use:'1 purple + 1 blue', unlock:{purple:3,blue:2} },
-    { id:'cataclysm',     tier:3, name:'Cataclysm',     desc:'ONCE PER GAME: 13–17 magic damage to every monster, ignores armor.', use:'3 blue', unlock:{blue:5,purple:1} },
-  ],
-  scout: [
-    { id:'long_shot',  tier:1, name:'Long Shot',  desc:'Snipe extends to 4 zones, critical on 4–6.', use:'Passive', unlock:{red:2} },
-    { id:'ghost_step', tier:1, name:'Ghost Step', desc:'Shadow Step free once per round.', use:'Free first Shadow Step each round', unlock:{gray:2} },
-    { id:'fleet_foot', tier:1, name:'Fleet Foot', desc:'+2 to every movement roll (stacks with Scout +1 base = +3 total).', use:'Passive', unlock:{green:2} },
-    { id:'backstab',   tier:2, name:'Backstab',   desc:'+3 damage when attacking same turn as Shadow Step.', use:'Passive, triggers on condition', unlock:{gray:1,orange:1} },
-    { id:'barrage',    tier:2, name:'Barrage',    desc:'Triple Shot: roll d6 three times, use highest.', use:'Brick slot: 2 red', unlock:{red:3} },
-    { id:'relay',      tier:2, name:'Relay',      desc:'Pass brick to ally while moving through their zone.', use:'Free during movement, consent required', unlock:{green:2,yellow:1} },
-    { id:'death_mark', tier:3, name:'Death Mark', desc:'Once per battle: mark one monster, all attacks +3 this round.', use:'1 orange', unlock:{gray:3,orange:2} },
-    { id:'blitz',      tier:3, name:'Blitz',      desc:'ONCE PER GAME: take two full turns in a row.', use:'No cost', unlock:{green:3,red:2} },
-  ],
-  builder: [
-    { id:'scavenge',          tier:1, name:'Scavenge',          desc:'After gate deconstruct: roll d6 — 4+ recover 1 gray, 6 recover 2.', use:'Automatic on deconstruct', unlock:{gray:2} },
-    { id:'blueprint',         tier:1, name:'Blueprint',         desc:'Once per zone: duplicate 1 brick from inventory.', use:'Free action, costs 1 gray', unlock:{gray:1,yellow:1} },
-    { id:'wrecking_ball',     tier:1, name:'Wrecking Ball',     desc:'Deconstruct deals 2 bonus damage to monster in zone.', use:'Free bonus on Deconstruct', unlock:{red:1,gray:1} },
-    { id:'forge',             tier:2, name:'Forge',             desc:'Spend 2 same-color bricks → receive 1 any-color brick. Out of battle only.', use:'Free action, out of battle', unlock:{gray:2,yellow:1} },
-    { id:'catapult',          tier:2, name:'Catapult',          desc:'6–8 damage ignoring all armor.', use:'Brick slot: 2 gray', unlock:{red:1,gray:3} },
-    { id:'supply_drop',       tier:2, name:'Supply Drop',       desc:'Give 2 bricks to ally in same or adjacent zone. Once per battle.', use:'No cost, proximity restricted', unlock:{green:2,yellow:1} },
-    { id:'salvage',           tier:3, name:'Salvage',           desc:'ONCE PER GAME: claim all monster loot + d3 bonus bricks on defeat.', use:'No cost, triggers on kill', unlock:{gray:3,orange:1} },
-    { id:'infinite_blueprint',tier:3, name:'Infinite Blueprint',desc:'ONCE PER GAME: every brick in hand doubles.', use:'Costs 3 gray', unlock:{yellow:3,purple:2} },
-  ],
-  mender: [
-    { id:'deep_mend',    tier:1, name:'Deep Mend',    desc:'Brick Mend heals 6–8 HP when target is below half HP.', use:'Passive upgrade, same cost', unlock:{white:2} },
-    { id:'fast_heal',    tier:1, name:'Fast Heal',    desc:'First Brick Mend each round costs no slot (brick still spent).', use:'First heal free per round', unlock:{white:2,yellow:1} },
-    { id:'cleanse_plus', tier:1, name:'Cleanse+',     desc:'Cleanse removes effects from all players in zone (was single target).', use:'Free action, once per round', unlock:{yellow:2} },
-    { id:'mass_surge',   tier:2, name:'Mass Surge',   desc:'Mass Repair heals 3–5 HP to every living player.', use:'Brick slot: 2 white', unlock:{white:3} },
-    { id:'swift_revive', tier:2, name:'Swift Revive', desc:'Revival uses no action slot — just the brick cost.', use:'Bricks only, no slot', unlock:{purple:1,white:1} },
-    { id:'sanctuary',    tier:2, name:'Sanctuary',    desc:'Monsters cannot enter Mender\'s zone while Mender is present.', use:'Passive while in zone', unlock:{white:2,yellow:2} },
-    { id:'phoenix_surge',tier:3, name:'Phoenix Surge',desc:'ONCE PER GAME: all fallen players return at full HP.', use:'2 purple', unlock:{purple:4,white:2} },
-    { id:'divine_shield',tier:3, name:'Divine Shield',desc:'ONCE PER GAME: no player takes any damage for 1 full round.', use:'1 white + 1 yellow', unlock:{white:3,yellow:2,purple:1} },
-  ],
-  beastcaller: [
-    { id:'easy_tame',      tier:1, name:'Easy Tame',      desc:'Tame succeeds on 2+. Yellow gift drops to 1+.', use:'Passive upgrade', unlock:{green:1,yellow:1} },
-    { id:'beast_bond',     tier:1, name:'Beast Bond',     desc:'Tamed monsters +2 HP and +1 to attack rolls.', use:'Passive, all tamed', unlock:{green:2} },
-    { id:'thorn_trap',     tier:1, name:'Thorn Trap',     desc:'Your orange brick traps deal 3–5 damage (others deal 1–2).', use:'Passive upgrade', unlock:{orange:1,green:1} },
-    { id:'double_tame',    tier:2, name:'Double Tame',    desc:'Hold 2 tamed monsters. Both act each turn (1 green each).', use:'Passive, just tame a second', unlock:{green:3} },
-    { id:'bloodlust',      tier:2, name:'Bloodlust',      desc:'When tamed monster kills, it immediately attacks again. No cost.', use:'Passive, triggers on kill', unlock:{orange:2,green:1} },
-    { id:'pack_call_plus', tier:2, name:'Pack Call+',     desc:'All monsters target Beastcaller for 3 rounds.', use:'Brick slot: 1 orange', unlock:{orange:2} },
-    { id:'alpha_predator', tier:3, name:'Alpha Predator', desc:"ONCE PER GAME: tamed monster hits every monster in zone at once.", use:'1 green', unlock:{orange:3,green:2} },
-    { id:'natures_wrath',  tier:3, name:"Nature's Wrath", desc:"ONCE PER GAME: 3–5 armor-ignoring dmg all monsters, then 2–3/turn until dispelled.", use:'2 green + 1 yellow', unlock:{green:5,yellow:2} },
-  ],
-};
 
 // ── STORE PRICES ─────────────────────────────────────────
 const STORE_PRICES = {
@@ -405,31 +319,13 @@ class GameClient {
   setPhase(p)                       { this.send('setPhase',{phase:p}); }
   adjustHP(cls,amount)              { this.send('adjustHP',{cls,amount}); }
   adjustBrick(cls,color,amount)     { this.send('adjustBrick',{cls,color,amount}); }
-  addShield(cls)                    { this.send('addShield',{cls}); }
   purchaseBrick(cls,color)          { this.send('purchaseBrick',{cls,color}); }
   adjustGold(cls,amount)            { this.send('adjustGold',{cls,amount}); }
   adjustArmor(cls,amount)           { this.send('adjustArmor',{cls,amount}); }
   offerTrade(fromCls,toCls,wantBricks,offerBricks,offerGold) { this.send('offerTrade',{fromCls,toCls,wantBricks,offerBricks,offerGold}); }
   respondTrade(id,accept)           { this.send('respondTrade',{id,accept}); }
-  unlockSkill(cls,skillId,cost)     { this.send('unlockSkill',{cls,skillId,cost}); }
-  healPlayer(healerCls,targetCls)   { this.send('healPlayer',{healerCls,targetCls}); }
-  revivePlayer(healerCls,targetCls) { this.send('revivePlayer',{healerCls,targetCls}); }
-  massRepair()                      { this.send('massRepair'); }
-  tameAttempt(cls,monsterIdx)       { this.send('tameAttempt',{cls,monsterIdx}); }
-  commandTamed(cls,monsterIdx)      { this.send('commandTamed',{cls,monsterIdx}); }
-  rollAttack(cls,monsterIdx)        { this.send('rollAttack',{cls,monsterIdx}); }
-  useBrick(cls,color,monsterIdx,targetCls) { this.send('useBrickInBattle',{cls,brickColor:color,monsterIdx,targetCls}); }
-  catapult(monsterIdx)              { this.send('catapult',{monsterIdx}); }
-  startBattle(monsters,combatants,isBoss) { this.send('startBattle',{monsters,combatants,isBoss}); }
-  endBattle()                       { this.send('endBattle'); }
-  monsterAttack(idx)                { this.send('monsterAttack',{monsterIdx:idx}); }
-  nextBattleRound()                 { this.send('nextBattleRound'); }
-  setComplication(c)                { this.send('setComplication',{complication:c}); }
-  bossPhase2()                      { this.send('bossPhase2'); }
   setGate(gate,status)              { this.send('setGate',{gate,status}); }
-  deconstructGate(cls,gate)         { this.send('deconstructGate',{cls,gate}); }
   forceGate(cls,gate)               { this.send('forceGate',{cls,gate}); }
-  rebuildBridge()                   { this.send('rebuildBridge'); }
   collectKey(color,cls)             { this.send('collectKey',{keyColor:color,cls}); }
   useKey(cls,gate,color)            { this.send('useKey',{cls,gate,keyColor:color}); }
   landingRoll(cls,roll,zone)        { this.send('landingRoll',{cls,roll,zone}); }
@@ -439,14 +335,37 @@ class GameClient {
   dmMovePlayer(cls,roll,destination){ this.send('dmMovePlayer',{cls,roll,destination}); }
   addLog(text,kind)                 { this.send('addLog',{text,kind}); }
   resetGame()                       { this.send('resetGame'); }
-  blueprint(color)                  { this.send('blueprint',{color}); }
-  forge(fromColor,toColor)          { this.send('forge',{fromColor,toColor}); }
-  salvage()                         { this.send('salvage'); }
-  activateEnhanced(cls)             { this.send('activateEnhanced',{cls}); }
   disarmTrap(cls,spaceIdx)          { this.send('disarmTrap',{cls,spaceIdx}); }
   triggerTrap(cls,spaceIdx)         { this.send('triggerTrap',{cls,spaceIdx}); }
   removeFortressBrick()             { this.send('removeFortressBrick'); }
   rescueVillager()                  { this.send('rescueVillager'); }
+
+  // ── LEGACY STUBS ──
+  // Kept as no-ops so orphaned UI paths (dead code tied to removed turn-based
+  // battle + skills) don't throw if they fire. Remove after full UI cleanup.
+  _legacy(name) { console.warn('[legacy no-op]', name); }
+  unlockSkill()       { this._legacy('unlockSkill'); }
+  healPlayer()        { this._legacy('healPlayer'); }
+  revivePlayer()      { this._legacy('revivePlayer'); }
+  massRepair()        { this._legacy('massRepair'); }
+  tameAttempt()       { this._legacy('tameAttempt'); }
+  commandTamed()      { this._legacy('commandTamed'); }
+  rollAttack()        { this._legacy('rollAttack'); }
+  useBrick()          { this._legacy('useBrick'); }
+  catapult()          { this._legacy('catapult'); }
+  startBattle()       { this._legacy('startBattle'); }
+  endBattle()         { this._legacy('endBattle'); }
+  monsterAttack()     { this._legacy('monsterAttack'); }
+  nextBattleRound()   { this._legacy('nextBattleRound'); }
+  setComplication()   { this._legacy('setComplication'); }
+  bossPhase2()        { this._legacy('bossPhase2'); }
+  deconstructGate()   { this._legacy('deconstructGate'); }
+  rebuildBridge()     { this._legacy('rebuildBridge'); }
+  blueprint()         { this._legacy('blueprint'); }
+  forge()             { this._legacy('forge'); }
+  salvage()           { this._legacy('salvage'); }
+  activateEnhanced()  { this._legacy('activateEnhanced'); }
+  addShield()         { this._legacy('addShield'); }
 }
 
 // ── UTILITY ───────────────────────────────────────────────
@@ -470,12 +389,6 @@ function hpBar(hp,max,color='#1D9E75') {
   return `<div style="height:8px;border-radius:4px;background:#333;overflow:hidden;">
     <div style="width:${pct}%;height:100%;background:${c};border-radius:4px;transition:width .4s;"></div>
   </div>`;
-}
-function buildMonsters(mids) {
-  return mids.map(id=>{
-    const t=MONSTER_TEMPLATES[id]; if(!t)return null;
-    return {...t,hpCurrent:t.hp,hpMax:t.hp,confused:false,cursed:0,confuseRounds:0};
-  }).filter(Boolean);
 }
 
 // ── ARENA BATTLE (real-time combat) ───────────────────────────
@@ -510,5 +423,5 @@ const ARENA_BATTLE_FLAVOR = {
 
 // Node.js export (ignored in browser)
 if (typeof module !== 'undefined') {
-  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ARENA_ENEMIES, ARENA_BATTLE_FLAVOR, SHIELD_MAX, SHIELD_COST, RIDDLES };
+  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ARENA_ENEMIES, ARENA_BATTLE_FLAVOR, SHIELD_MAX, SHIELD_COST, RIDDLES };
 }

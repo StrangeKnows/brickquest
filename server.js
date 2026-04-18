@@ -9,7 +9,7 @@ const WebSocket = require('ws');
 const os = require('os');
 
 // Shared game constants
-const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, MONSTER_TEMPLATES, COMPLICATIONS, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ARENA_ENEMIES, ARENA_BATTLE_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
+const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ARENA_ENEMIES, ARENA_BATTLE_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
 
 const PORT = 8080;
 const MIME = {
@@ -27,7 +27,6 @@ function freshState() {
     battle: null,
     activeEvent: null,
     pendingTrade: null,       // { fromCls, toCls, color, id }
-    enhancedMovement: {},     // { cls: turnsRemaining }
     movementDebuffs: {},      // { cls: spacePenalty }
     cursedPlayers: {},        // { cls: { penalty:n } }
     blackBrickSpaces: [],     // [{ spaceIdx, coveredByYellow }]
@@ -48,7 +47,6 @@ function freshState() {
     yellowSpaces: {},          // { spaceIdx: true } — unclaimed yellow brick from expired riddle
     greenSpaces: {},          // { spaceIdx: 1 } — unresolved green events (future)
     allowBackward: false,     // DM toggle: allow players to move backward
-    battleResult: null,       // { loot, combatants, resolvedBy } — shown post-battle
     storeDisabled: false,     // DM toggle: disable store for all zones
     pendingDashRequest: null, // { cls, spaces, requestedAt } — awaits DM approval
     pendingArenaBattle: null, // { cls, enemyType, enemy, flavor } — event card stage, awaits player or DM initiate
@@ -73,11 +71,8 @@ function mkPlayer(cls, icon, color, hp, die, bricks) {
     hp, hpMax:hp, armor:0, gold:3,
     die, space:0, alive:true,
     bricks: {...allBricks,...bricks},
-    skills: {},
-    tamed: null,           // { name, hp, hpMax, dmg, armor }
     statusEffects: [],     // ['poisoned','confused','cursed']
     connected: false,
-    scavengeRolled: false, // reset each gate deconstruct
     playerName: '',        // real player's name, set on login
     earnedClues: [],      // clues this player earned by solving yellow challenges
     dashUsedThisTurn: false, // reset on each turn advance — one red dash per own turn
@@ -168,7 +163,7 @@ if (process.stdin.isTTY) {
       console.log('--- GAME STATUS ---');
       console.log('Round:', G.round, '| Phase:', G.phase);
       console.log('Active player:', G.turnOrder[G.activePlayerIdx]);
-      console.log('Battle active:', !!G.battle);
+      console.log('Arena battle:', !!G.arenaBattle);
       Object.values(G.players).forEach(function(p) {
         if (!p.playerName && p.hp === p.hpMax) return; // skip unjoined
         var brickTotal = Object.values(p.bricks).reduce(function(a,b){return a+b;},0);
@@ -251,24 +246,6 @@ function log(text, kind='normal') {
 }
 
 // ── HEAL HELPER ───────────────────────────────────────────
-const SELF_HEAL = { mender:4, warrior:3, builder:3, scout:2, wizard:2, beastcaller:2 };
-const ALLY_HEAL = { mender:4 }; // others = 2
-
-function applyHeal(healerCls, targetCls, overHeal=false) {
-  const p = G.players[targetCls];
-  const isSelf = healerCls === targetCls;
-  let amt = isSelf ? (SELF_HEAL[healerCls]||2) : (ALLY_HEAL[healerCls]||2);
-  // Deep Mend: if target below half HP
-  if (healerCls==='mender' && p.hp <= Math.floor(p.hpMax/2)) {
-    if (G.players.mender.skills.deep_mend) amt = Math.floor(Math.random()*3)+6; // 6-8
-  }
-  const cap = overHeal ? p.hpMax + 3 : p.hpMax;
-  p.hp = Math.min(cap, p.hp + amt);
-  if (p.hp > 0) p.alive = true;
-  log(`${G.players[healerCls].name} healed ${p.name} +${amt} HP`, 'heal');
-  return amt;
-}
-
 // ── ROLL HELPERS ──────────────────────────────────────────
 function roll(sides) { return Math.floor(Math.random()*sides)+1; }
 function rollRange(min,max) { return min + Math.floor(Math.random()*(max-min+1)); }
@@ -447,7 +424,7 @@ wss.on('connection', (ws, req) => {
       const p = G.players[cls];
       let finalRoll = rawRoll;
       // Apply modifiers
-      if (cls==='scout') finalRoll += (p.skills.fleet_foot ? 3 : 1);
+      if (cls==='scout') finalRoll += 1;
       if (G.movementDebuffs[cls]) { finalRoll = Math.max(0, finalRoll - G.movementDebuffs[cls]); delete G.movementDebuffs[cls]; }
       // Enhanced movement doesn't add spaces — it adds action slots
       // destination is computed by DM screen after gate checks
@@ -1283,28 +1260,6 @@ wss.on('connection', (ws, req) => {
       log(`${p.name} triggered ${count} trap(s) at space ${spaceIdx+1} — ${totalDmg} damage`,'damage');
     }
 
-    // ── ORANGE TRAP PERSISTENCE ROLL (in battle) ──
-    if (type === 'battleTrapPersist') {
-      const { trapIdx } = P;
-      const r = roll(6);
-      const persists = r % 2 !== 0; // odd = continues
-      G.battle.traps = G.battle.traps || [];
-      if (!persists && G.battle.traps[trapIdx]) G.battle.traps[trapIdx].active = false;
-      ws.send(JSON.stringify({ type:'trapPersistResult', roll:r, persists, trapIdx }));
-      if (persists) {
-        const t = G.battle.traps[trapIdx];
-        if (t) {
-          const isScount = t.setBy==='scout';
-          const dmg = isScount ? rollRange(2,4) : rollRange(1,2);
-          // Apply to monster
-          if (G.battle && G.battle.monsters[0]) {
-            G.battle.monsters[0].hpCurrent = Math.max(0, G.battle.monsters[0].hpCurrent - dmg);
-            log(`Battle trap persists — ${dmg} damage to ${G.battle.monsters[0].name}`,'damage');
-          }
-        }
-      }
-    }
-
     // ── PLAYERS ──
     if (type === 'adjustHP') {
       const p = G.players[P.cls];
@@ -1329,30 +1284,9 @@ wss.on('connection', (ws, req) => {
       log('Store '+(G.storeDisabled?'disabled':'enabled'),'action');
     }
 
-    if (type === 'addShield') {
-      const sp = G.players[P.cls];
-      const hasIH = P.cls==='warrior' && sp.skills && sp.skills.iron_hide;
-      const sCost = (P.cls==='warrior'||P.cls==='builder') ? 1 : 2;
-      const sGain = hasIH ? 2 : 1;
-      if ((sp.bricks.gray||0) < sCost) {
-        ws.send(JSON.stringify({type:'error',msg:'Need '+sCost+' gray brick'+(sCost>1?'s':'')+' to add shield'}));
-        broadcastState(); return;
-      }
-      const sMult = hasIH ? 1.5 : (P.cls==='warrior' ? 0.75 : 0.5);
-      const sMax = Math.floor(sp.hpMax * sMult);
-      if ((sp.armor||0) >= sMax) {
-        ws.send(JSON.stringify({type:'error',msg:'Shield at maximum ('+sMax+')'}));
-        broadcastState(); return;
-      }
-      sp.bricks.gray -= sCost;
-      sp.armor = Math.min(sMax, (sp.armor||0) + sGain);
-      log(`${sp.playerName||sp.name} +${sGain} shield (${sp.armor}/${sMax} max, cost ${sCost} gray)`,'action');
-    }
-
     if (type === 'adjustArmor') {
       const ap = G.players[P.cls];
-      const shieldMult2 = (P.cls==='warrior' && ap.skills && ap.skills.iron_hide) ? 1.5 : (P.cls==='warrior' ? 0.75 : 0.5);
-      const maxShield2 = Math.floor(ap.hpMax * shieldMult2);
+      const maxShield2 = Math.floor(ap.hpMax * 0.5);
       ap.armor = Math.max(0, Math.min(maxShield2, (ap.armor||0)+P.amount));
       log(`${ap.name} shield ${P.amount>0?'+':''}${P.amount} → ${ap.armor}/${maxShield2}`,'action');
     }
@@ -1366,50 +1300,9 @@ wss.on('connection', (ws, req) => {
       log(`${G.players[P.cls].name} ${P.status} removed`,'action');
     }
 
-    // ── HEALING ──
-    if (type === 'healPlayer') {
-      const { healerCls, targetCls } = P;
-      const healer = G.players[healerCls];
-      if ((healer.bricks.white||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 white brick'})); broadcastState(); return; }
-      healer.bricks.white--;
-      applyHeal(healerCls, targetCls, false);
-    }
-    if (type === 'massRepair') {
-      const mender = G.players.mender;
-      const cost = mender.skills.mass_surge ? 2 : 2;
-      if ((mender.bricks.white||0) < cost) { ws.send(JSON.stringify({type:'error',msg:`Need ${cost} white bricks`})); broadcastState(); return; }
-      mender.bricks.white -= cost;
-      const amt = mender.skills.mass_surge ? rollRange(3,5) : 3;
-      G.turnOrder.forEach(cls => {
-        const p = G.players[cls];
-        if(p.alive) { p.hp = Math.min(p.hpMax+3, p.hp+amt); }
-      });
-      log(`Mender Mass Repair: all players +${amt} HP`,'heal');
-    }
-
-    // ── REVIVAL ──
-    if (type === 'revivePlayer') {
-      const { healerCls, targetCls } = P;
-      const healer = G.players[healerCls];
-      const target = G.players[targetCls];
-      const isMender = healerCls === 'mender';
-      const purpleCost = isMender?1:2;
-      const whiteCost  = isMender?1:2;
-      if ((healer.bricks.purple||0)<purpleCost || (healer.bricks.white||0)<whiteCost) {
-        ws.send(JSON.stringify({type:'error',msg:`Need ${purpleCost} purple + ${whiteCost} white`}));
-        broadcastState(); return;
-      }
-      healer.bricks.purple -= purpleCost;
-      healer.bricks.white  -= whiteCost;
-      target.hp = isMender ? target.hpMax : Math.floor(target.hpMax/2);
-      target.alive = true;
-      target.statusEffects = target.statusEffects.filter(s=>s!=='down');
-      log(`${healer.name} revived ${target.name} → ${target.hp} HP`,'heal');
-    }
-
     // ── TRADING ──
     // Helper: is this player currently in an active battle?
-    const isInBattle = (cls) => !!(G.battle && Array.isArray(G.battle.combatants) && G.battle.combatants.includes(cls));
+    const isInBattle = (cls) => !!(G.arenaBattle && G.arenaBattle.cls === cls);
 
     if (type === 'offerTrade') {
       if (isInBattle(P.fromCls) || isInBattle(P.toCls)) {
@@ -1498,64 +1391,8 @@ wss.on('connection', (ws, req) => {
         }
       }
     }
-    if (type === 'unlockSkill') {
-      const { cls, skillId, cost } = P;
-      const p = G.players[cls];
-      const canAfford = Object.entries(cost).every(([k,v])=>(p.bricks[k]||0)>=v);
-      if (!canAfford) { ws.send(JSON.stringify({type:'error',msg:'Cannot afford skill'})); broadcastState(); return; }
-      Object.entries(cost).forEach(([k,v])=>p.bricks[k]-=v);
-      p.skills[skillId]=true;
-      log((p.playerName||p.name)+' unlocked '+skillId,'skill');
-      // Notify the player's own socket
-      const skMsg = JSON.stringify({ type:'skillUnlocked', skillId, cls,
-        playerName: p.playerName||p.name,
-        skillName: skillId.replace(/_/g,' ')
-      });
-      clients.forEach((info, cws) => {
-        if ((info.role===cls || info.role==='dm') && cws.readyState===1) {
-          cws.send(skMsg);
-        }
-      });
-    }
-
-    // ── ENHANCED MOVEMENT ──
-    if (type === 'activateEnhanced') {
-      const { cls } = P;
-      const p = G.players[cls];
-      if ((p.bricks.purple||0)<1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 purple brick'})); broadcastState(); return; }
-      p.bricks.purple--;
-      const duration = roll(3); // d3
-      G.enhancedMovement[cls] = duration;
-      log((p.playerName||p.name)+' activated Enhanced Movement for '+duration+' turn(s)','action');
-      // Notify both the player and broadcast to DM
-      const enhMsg = JSON.stringify({ type:'enhancedResult', cls, duration, playerName:p.playerName||p.name });
-      clients.forEach((info, cws) => { if(cws.readyState===1) cws.send(enhMsg); });
-    }
-    if (type === 'consumeEnhanced') {
-      if (G.enhancedMovement[P.cls]) {
-        G.enhancedMovement[P.cls]--;
-        if (G.enhancedMovement[P.cls]<=0) delete G.enhancedMovement[P.cls];
-      }
-    }
 
     // ── GATES ──
-    if (type === 'deconstructGate') {
-      const { cls, gate } = P;
-      const p = G.players[cls];
-      if (cls!=='builder') { ws.send(JSON.stringify({type:'error',msg:'Only Builder can deconstruct'})); broadcastState(); return; }
-      if ((p.bricks.gray||0)<2) { ws.send(JSON.stringify({type:'error',msg:'Need 2 gray bricks'})); broadcastState(); return; }
-      p.bricks.gray -= 2;
-      G.gates[gate] = 'open';
-      log(`Builder deconstructed ${gate} gate`,'gate');
-      // Scavenge roll
-      if (p.skills.scavenge) {
-        const r = roll(6);
-        const recovered = r>=6?2:r>=4?1:0;
-        if (recovered>0) { p.bricks.gray+=recovered; log(`Scavenge: recovered ${recovered} gray brick(s)! (roll ${r})`,'reward'); }
-        else log(`Scavenge: no recovery (roll ${r})`,'action');
-        ws.send(JSON.stringify({ type:'scavengeResult', roll:r, recovered }));
-      }
-    }
     if (type === 'forceGate') {
       const { cls, gate } = P;
       const p = G.players[cls];
@@ -1576,13 +1413,6 @@ wss.on('connection', (ws, req) => {
       const fgMsg = JSON.stringify({ type:'forceGateResult', roll:r, success, cls, gate, dmg, armorAbsorbed, note });
       clients.forEach((info, cws) => { if(cws.readyState===1) cws.send(fgMsg); });
     }
-    if (type === 'rebuildBridge') {
-      const p = G.players.builder;
-      if ((p.bricks.gray||0)<4) { ws.send(JSON.stringify({type:'error',msg:'Need 4 gray bricks'})); broadcastState(); return; }
-      p.bricks.gray -= 4;
-      G.gates.z4z5 = 'open';
-      log('Builder rebuilt the bridge!','gate');
-    }
     if (type === 'setGate') { G.gates[P.gate] = P.status; log(`Gate ${P.gate} → ${P.status}`,'gate'); }
     if (type === 'collectKey') { G.magicKeys[P.keyColor]=P.cls; log(`${G.players[P.cls].name} claimed ${P.keyColor} key`,'key'); }
     if (type === 'useKey') {
@@ -1590,400 +1420,6 @@ wss.on('connection', (ws, req) => {
       G.magicKeys[keyColor]=null;
       G.gates[gate]='open';
       log(`${G.players[cls].name} used ${keyColor} key → ${gate} open`,'gate');
-    }
-
-    // ── BUILDER SPECIAL ──
-    if (type === 'blueprint') {
-      const p = G.players.builder;
-      if ((p.bricks.gray||0)<1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 gray brick'})); broadcastState(); return; }
-      p.bricks.gray--;
-      p.bricks[P.color] = (p.bricks[P.color]||0)+1;
-      log(`Blueprint: duplicated 1 ${P.color} brick`,'action');
-    }
-    if (type === 'forge') {
-      const p = G.players.builder;
-      const { fromColor, toColor } = P;
-      if ((p.bricks[fromColor]||0)<2) { ws.send(JSON.stringify({type:'error',msg:'Need 2 '+fromColor+' bricks'})); broadcastState(); return; }
-      p.bricks[fromColor]-=2;
-      p.bricks[toColor]=(p.bricks[toColor]||0)+1;
-      log(`Forge: 2 ${fromColor} → 1 ${toColor}`,'action');
-    }
-    if (type === 'infiniteBlueprint') {
-      const p = G.players.builder;
-      if ((p.bricks.gray||0)<3) { ws.send(JSON.stringify({type:'error',msg:'Need 3 gray bricks'})); broadcastState(); return; }
-      p.bricks.gray-=3;
-      Object.keys(p.bricks).forEach(k=>{ p.bricks[k]*=2; });
-      log('INFINITE BLUEPRINT: all bricks doubled!','action');
-    }
-    if (type === 'salvage') {
-      // Builder claims monster loot + d3 bonus
-      const p = G.players.builder;
-      const bonus = roll(3);
-      const colors = ['red','blue','green','gray','white','yellow','orange'];
-      for(let i=0;i<bonus;i++) { const c=colors[Math.floor(Math.random()*colors.length)]; p.bricks[c]=(p.bricks[c]||0)+1; }
-      log(`Salvage: Builder claims monster loot + ${bonus} bonus brick(s)!`,'reward');
-    }
-    if (type === 'wrecking_ball') {
-      // Damage monster during deconstruct
-      if (G.battle && G.battle.monsters[0]) {
-        G.battle.monsters[0].hpCurrent = Math.max(0, G.battle.monsters[0].hpCurrent-2);
-        log('Wrecking Ball: 2 bonus damage!','damage');
-      }
-    }
-
-    // ── TAMING ──
-    if (type === 'tameAttempt') {
-      const { cls, monsterIdx } = P;
-      const p = G.players[cls];
-      const threshold = cls==='beastcaller' ? (p.skills.easy_tame?2:3) : 5;
-      if ((p.bricks.green||0)<2) { ws.send(JSON.stringify({type:'error',msg:'Need 2 green bricks'})); broadcastState(); return; }
-      p.bricks.green-=2;
-      const r = roll(6);
-      const success = r >= threshold;
-      ws.send(JSON.stringify({ type:'tameResult', roll:r, success, threshold }));
-      if (success && G.battle) {
-        const mon = G.battle.monsters[monsterIdx];
-        if (mon) {
-          p.tamed = { name:mon.name, hp:mon.hpCurrent+2, hpMax:mon.hpMax+2, dmg:mon.dmg, armor:mon.armor };
-          // Remove from battle monsters
-          G.battle.monsters[monsterIdx].hpCurrent = 0;
-          log(`${p.name} TAMED ${mon.name}!`,'action');
-        }
-      } else {
-        log(`${p.name} tame failed (rolled ${r}, need ${threshold})`,'action');
-      }
-    }
-    if (type === 'commandTamed') {
-      const p = G.players[P.cls];
-      if ((p.bricks.green||0)<1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 green brick'})); broadcastState(); return; }
-      p.bricks.green--;
-      if (p.skills.beast_bond) {
-        // +1 to roll
-        const r = roll(6)+1;
-        const bonus = p.skills.beast_bond ? 1 : 0;
-        const dmg = r + (p.tamed?.armor||0 > 0 ? 0 : 0);
-        if (G.battle && G.battle.monsters[0]) {
-          G.battle.monsters[0].hpCurrent = Math.max(0, G.battle.monsters[0].hpCurrent - r);
-          log(`${p.tamed?.name} attacks for ${r} damage! (beast bond +1)`,'damage');
-        }
-      } else {
-        const tDmg = parseInt((p.tamed?.dmg||'d6').replace('d','').split('+')[0]);
-        const r = roll(tDmg||6);
-        if (G.battle && G.battle.monsters[P.monsterIdx||0]) {
-          const mon = G.battle.monsters[P.monsterIdx||0];
-          const net = Math.max(0,r-mon.armor);
-          mon.hpCurrent = Math.max(0, mon.hpCurrent-net);
-          log(`${p.tamed?.name} attacks ${mon.name} for ${net} damage`,'damage');
-        }
-      }
-    }
-
-    // ── BATTLE ──
-    if (type === 'startBattle') {
-      const { monsters, combatants, isBoss } = P;
-      // Build initiative
-      const init = combatants.map(cls=>({cls,roll:roll(6)})).sort((a,b)=>b.roll-a.roll);
-      G.battle = {
-        monsters: monsters.map(m=>({...m,hpCurrent:m.hp,confused:false,cursed:0,confuseRounds:0})),
-        combatants, initiative:init,
-        initIdx:0, monsterTurn:false,
-        battleRound:1, isBoss,
-        complication:null, traps:[],
-        scoutDamageActive:false,
-        phase1Complete:isBoss?false:null,
-        lastAction:null,
-      };
-      // Ambush check
-      monsters.forEach((m,i)=>{
-        if(m.ambush && !isBoss) {
-          const targets = combatants.map(c=>G.players[c]).filter(p=>p.alive);
-          let tgt = m.target==='lowest' ? targets.reduce((a,b)=>b.hp<a.hp?b:a) : targets.reduce((a,b)=>b.hp>a.hp?b:a);
-          const dmg = rollRange(1,6)+(parseInt((m.dmg||'d6').split('+')[1])||0);
-          const ambushAbsorb = Math.min(tgt.armor||0, dmg);
-          tgt.armor = Math.max(0, (tgt.armor||0) - ambushAbsorb);
-          const net = Math.max(0,dmg-ambushAbsorb);
-          tgt.hp=Math.max(0,tgt.hp-net); if(tgt.hp<=0)tgt.alive=false;
-          log(`⚡ AMBUSH! ${m.name} → ${tgt.name}: −${net} HP${ambushAbsorb>0?' ('+ambushAbsorb+' blocked)':''}`,'damage');
-        }
-      });
-      G.phase='battle';
-      G.activeEvent = null; // clear landing event when battle begins
-      // Apply dash penalty: any combatant who dashed this turn loses 1 additional red at battle start
-      combatants.forEach(cls => {
-        const p = G.players[cls];
-        if (p && p.battleDashPenalty > 0) {
-          const amt = Math.min(p.battleDashPenalty, p.bricks.red||0);
-          if (amt > 0) {
-            p.bricks.red -= amt;
-            log(`${p.playerName||p.name} −${amt} red brick (dash fatigue)`,'damage');
-          }
-          p.battleDashPenalty = 0;
-        }
-      });
-      log(`Battle: ${monsters.map(m=>m.name).join(' + ')}`,'battle');
-    }
-    if (type === 'rollAttack') {
-      const { cls, monsterIdx, useSkill } = P;
-      const p = G.players[cls];
-      if (!G.battle) return;
-      const mon = G.battle.monsters[monsterIdx];
-      if (!mon || mon.hpCurrent<=0) return;
-
-      const sides = parseInt(p.die.replace('d',''));
-      let r = roll(sides);
-      let dmg = r;
-      let note = `d${sides}=${r}`;
-
-      // Boss phase 2 — physical = 0
-      if (G.battle.isBoss && G.battle.phase1Complete && !mon.blueOnly===false) {
-        // If it's the core (blueOnly=true) and this is physical
-        if (mon.blueOnly) { dmg=0; note='physical=0 (Phase 2)'; }
-      }
-
-      // Power Strike (Warrior)
-      if (cls==='warrior' && p.skills.power_strike && r===sides) { dmg+=3; note+='+3 PowerStrike'; }
-      // Cursed
-      const curse = G.cursedPlayers[cls];
-      if (curse) { dmg=Math.max(0,dmg-curse.penalty); note+=`−${curse.penalty}curse`; delete G.cursedPlayers[cls]; p.statusEffects=p.statusEffects.filter(s=>s!=='cursed'); }
-
-      const net = Math.max(0, dmg-(mon.armor||0));
-      mon.hpCurrent = Math.max(0, mon.hpCurrent-net);
-      log(`${p.name} ${note} → −${net} HP on ${mon.name} (${mon.hpCurrent}/${mon.hpMax})`,'damage');
-
-      // Bloodlust (Beastcaller)
-      if (cls==='beastcaller' && p.skills.bloodlust && p.tamed && mon.hpCurrent<=0) {
-        // Find next living monster
-        const next = G.battle.monsters.find(m=>m.hpCurrent>0);
-        if(next) { const bd=roll(6); next.hpCurrent=Math.max(0,next.hpCurrent-bd); log(`Bloodlust: ${p.tamed.name} hits ${next.name} for ${bd}!`,'damage'); }
-      }
-
-      ws.send(JSON.stringify({ type:'attackResult', roll:r, dmg, net, note }));
-      G.battle.lastAction = { cls, icon:'⚔️', description:(p.playerName||p.name)+' attacked '+mon.name+' for '+net+' damage (rolled '+r+')', color:p.color };
-      G.battle.initIdx++;
-    }
-    if (type === 'useBrickInBattle') {
-      const { cls, brickColor, monsterIdx } = P;
-      const p = G.players[cls];
-      if ((p.bricks[brickColor]||0)<1) { ws.send(JSON.stringify({type:'error',msg:'No '+brickColor+' bricks'})); broadcastState(); return; }
-      p.bricks[brickColor]--;
-
-      const mon = G.battle?.monsters[monsterIdx||0];
-      let result = { type:'brickResult', color:brickColor, effect:'', dmg:0 };
-
-      if (brickColor==='red') {
-        const range = cls==='warrior' ? '3-5' : '1-3';
-        const dmg = cls==='warrior' ? rollRange(3,5) : rollRange(1,3);
-        if(mon){mon.hpCurrent=Math.max(0,mon.hpCurrent-dmg);} result.dmg=dmg; result.range=range; result.effect=`${dmg} armor-ignoring damage`;
-        log(`${p.name} red brick: ${dmg} damage (ignores armor)`,'damage');
-        G.battle.lastAction = { cls, icon:'🔴', description:(p.playerName||p.name)+' used RED BRICK — '+dmg+' armor-ignoring damage on '+mon?.name, color:'#D01012' };
-      }
-      if (brickColor==='blue') {
-        const range = cls==='wizard' ? '4-8' : '3';
-        const base = cls==='wizard' ? rollRange(4,8) : 3;
-        if(mon){mon.hpCurrent=Math.max(0,mon.hpCurrent-base);} result.dmg=base; result.range=range; result.effect=`${base} magic damage (ignores armor)`;
-        log(`${p.name} blue brick: ${base} magic damage`,'damage');
-        G.battle.lastAction = { cls, icon:'🔵', description:(p.playerName||p.name)+' used BLUE BRICK — '+base+' magic damage (ignores armor) on '+mon?.name, color:'#006DB7' };
-      }
-      if (brickColor==='white') {
-        const isSelf = !P.targetCls || P.targetCls===cls;
-        const tgtCls = P.targetCls||cls;
-        applyHeal(cls,tgtCls,true); result.effect='heal used';
-      }
-      if (brickColor==='gray') {
-        // Iron Hide warrior: 1 gray = +2 shield. Builder: 1 gray = +1. Others: 2 gray = +1.
-        const hasIronHide = cls==='warrior' && p.skills && p.skills.iron_hide;
-        const grayNeeded = (cls==='warrior'||cls==='builder') ? 1 : 2;
-        const shieldGain = hasIronHide ? 2 : 1;
-        if (grayNeeded === 2 && (p.bricks.gray||0) < 1) {
-          ws.send(JSON.stringify({type:'error',msg:'Need 2 gray bricks to add shield'})); broadcastState(); return;
-        }
-        if (grayNeeded === 2) {
-          p.bricks.gray = Math.max(0, (p.bricks.gray||0) - 1);
-        }
-        const shieldMult = hasIronHide ? 1.5 : (cls==='warrior' ? 0.75 : 0.5);
-        const maxShield = Math.floor(p.hpMax * shieldMult);
-        if ((p.armor||0) >= maxShield) {
-          result.effect = 'Shield at maximum (' + maxShield + ')';
-          log(`${p.name} shield already at max (${maxShield})`,'action');
-        } else {
-          p.armor = Math.min(maxShield, (p.armor||0) + shieldGain);
-          result.effect = '+' + shieldGain + ' shield ('+p.armor+'/'+maxShield+' max)';
-          log(`${p.name} +${shieldGain} shield (${p.armor}/${maxShield} max)`,'action');
-        }
-      }
-      if (brickColor==='purple') {
-        const dmg=rollRange(3,5); const heal=rollRange(2,3);
-        const wizDmg=cls==='wizard'?rollRange(4,8):dmg;
-        const purpleRange = cls==='wizard' ? '4-8 dmg + 2-3 HP' : '3-5 dmg + 2-3 HP';
-        if(mon){mon.hpCurrent=Math.max(0,mon.hpCurrent-wizDmg);}
-        p.hp=Math.min(p.hpMax+3,p.hp+heal); result.dmg=wizDmg; result.heal=heal; result.range=purpleRange; result.effect=`${wizDmg} damage + ${heal} HP self`;
-        log(`${p.name} purple brick: ${wizDmg} dmg + ${heal} HP`,'action');
-        G.battle.lastAction = { cls, icon:'🟣', description:(p.playerName||p.name)+' used PURPLE BRICK — '+wizDmg+' dmg + '+heal+' HP healed', color:'#7B2FBE' };
-      }
-      if (brickColor==='yellow') {
-        if(mon){ mon.confused=true; mon.confuseRounds=1;
-          if(cls==='scout'){ G.battle.scoutDamageActive=true; }
-          if(cls==='beastcaller'){ mon.slowedAttack=true; }
-        }
-        result.effect='monster confused (guaranteed 1 round, then DM rolls)';
-        log(`${p.name} yellow brick: ${mon?.name} confused`,'action');
-        G.battle.lastAction = { cls, icon:'🟡', description:(p.playerName||p.name)+' used YELLOW BRICK — '+mon?.name+' is CONFUSED! Skips next attack.', color:'#F5D000' };
-      }
-      if (brickColor==='orange') {
-        // Set battle trap
-        const trapDmg = cls==='scout'?rollRange(2,4):rollRange(1,2);
-        if(!G.battle.traps)G.battle.traps=[];
-        G.battle.traps.push({active:true,setBy:cls,dmg:trapDmg});
-        if(mon){mon.hpCurrent=Math.max(0,mon.hpCurrent-trapDmg);}
-        result.effect=`Trap set! Fires ${trapDmg} dmg immediately, persists on odd rolls`;
-        log(`${p.name} orange brick: trap set (${trapDmg} dmg)`,'action');
-      }
-      if (brickColor==='black') {
-        const pen=cls==='wizard'?rollRange(3,4):2;
-        if(mon){mon.cursed=(mon.cursed||0)+pen;}
-        result.effect=`Monster cursed −${pen} per attack, persists until even roll`;
-        log(`${p.name} black brick: monster cursed −${pen}`,'action');
-        G.battle.lastAction = { cls, icon:'⬛', description:(p.playerName||p.name)+' used BLACK BRICK — '+mon?.name+' cursed, -'+pen+' per attack', color:'#555' };
-      }
-
-      ws.send(JSON.stringify(result));
-    }
-    if (type === 'catapult') {
-      const p = G.players.builder;
-      if ((p.bricks.gray||0)<2) { ws.send(JSON.stringify({type:'error',msg:'Need 2 gray bricks'})); broadcastState(); return; }
-      p.bricks.gray-=2;
-      const dmg=rollRange(6,8);
-      const mon=G.battle?.monsters[P.monsterIdx||0];
-      if(mon){mon.hpCurrent=Math.max(0,mon.hpCurrent-dmg);}
-      log(`Catapult: ${dmg} damage ignoring armor!`,'damage');
-      ws.send(JSON.stringify({type:'catapultResult',dmg}));
-    }
-    if (type === 'monsterAttack') {
-      const { monsterIdx } = P;
-      if(!G.battle) return;
-      const mon = G.battle.monsters[monsterIdx];
-      if(!mon||mon.hpCurrent<=0) return;
-      // Confusion check (after first guaranteed round)
-      if(mon.confused && mon.confuseRounds>0) {
-        const r=roll(6);
-        if(r>=5){ mon.confused=false; mon.confuseRounds=0;
-          if(G.battle.scoutDamageActive) G.battle.scoutDamageActive=false;
-          log(`${mon.name} confusion dispelled (rolled ${r})`,'action');
-        } else {
-          // Check Beastcaller slow
-          if(mon.slowedAttack){ log(`${mon.name} confused & slowed — skips attack`,'action'); G.battle.initIdx++; broadcastState(); return; }
-          log(`${mon.name} still confused — skips attack (rolled ${r})`,'action');
-          G.battle.initIdx++; broadcastState(); return;
-        }
-      }
-      mon.confuseRounds++;
-
-      // Determine target
-      const alive = G.battle.combatants.map(c=>G.players[c]).filter(p=>p.alive);
-      let tgt;
-      if(mon.target==='highest') tgt=alive.reduce((a,b)=>b.hp>a.hp?b:a);
-      else if(mon.target==='lowest') tgt=alive.reduce((a,b)=>b.hp<a.hp?b:a);
-      else tgt=alive[Math.floor(Math.random()*alive.length)];
-      if(!tgt) { G.battle.initIdx++; broadcastState(); return; }
-
-      const parts = (mon.dmg||'d6').split('+');
-      const sides = parseInt(parts[0].replace('d',''));
-      const bonus = parseInt(parts[1]||0);
-      let r=roll(sides)+bonus;
-      const mCurse=mon.cursed||0;
-      if(mCurse>0){ r=Math.max(0,r-mCurse);
-        const mRoll=roll(6);
-        if(mRoll%2===0){ mon.cursed=0; log(`${mon.name} curse cleared (even roll)`,'action'); }
-      }
-      // Each armor point absorbs 1 damage and is consumed — iron_hide affects pip gain not absorption
-      const armorAbsorb = Math.min(tgt.armor||0, r);
-      tgt.armor = Math.max(0, (tgt.armor||0) - armorAbsorb);
-      const net=Math.max(0,r-armorAbsorb);
-      tgt.hp=Math.max(0,tgt.hp-net); if(tgt.hp<=0)tgt.alive=false;
-
-      // Scout damage during confusion
-      if(G.battle.scoutDamageActive&&cls==='scout') { /* applied per-turn by scout */ }
-
-      log(`${mon.name} → ${tgt.name}: −${net} HP (${tgt.hp}/${tgt.hpMax})`,'damage');
-      // Broadcast to ALL so every player's battle log gets the monster action
-      const monAtkMsg = JSON.stringify({ type:'monsterAttackResult', monsterName:mon.name, targetCls:tgt.cls, targetName:(tgt.playerName||tgt.name), roll:r, net, armorAbsorbed:armorAbsorb });
-      clients.forEach((info, cws) => { if(cws.readyState===1) cws.send(monAtkMsg); });
-      G.battle.initIdx++;
-    }
-    if (type === 'advanceBattleTurn') { G.battle && G.battle.initIdx++; }
-    if (type === 'nextBattleRound') {
-      if(!G.battle) return;
-      G.battle.battleRound++;
-      G.battle.initIdx=0;
-      G.battle.monsterTurn=false;
-      // End of battle round poison
-      if(G.battle.complication==='poison') {
-        G.battle.combatants.forEach(cls=>{
-          const p=G.players[cls];
-          if(p.alive){p.hp=Math.max(0,p.hp-1);if(p.hp<=0)p.alive=false;log(`${p.name} poison −1`,'damage');}
-        });
-      }
-      log(`--- Battle round ${G.battle.battleRound} ---`,'battle');
-    }
-    if (type === 'setComplication') {
-      if(G.battle) G.battle.complication=P.complication;
-      log(`Complication: ${P.complication}`,'battle');
-    }
-    if (type === 'bossPhase2') {
-      if(G.battle) { G.battle.phase1Complete=true; log('PHASE 2 — BLACK CORE!','battle'); }
-    }
-    if (type === 'monsterHPDelta') {
-      const { monsterIdx, delta } = P;
-      if (G.battle && G.battle.monsters[monsterIdx]) {
-        const mon = G.battle.monsters[monsterIdx];
-        mon.hpCurrent = Math.max(0, Math.min(mon.hpMax, mon.hpCurrent + delta));
-        if (delta < 0) log(`${mon.name} ${delta} HP → ${mon.hpCurrent}/${mon.hpMax}`, 'damage');
-        else log(`${mon.name} +${delta} HP → ${mon.hpCurrent}/${mon.hpMax}`, 'heal');
-      }
-    }
-    if (type === 'endBattle') {
-      if (!G.battle) { broadcastState(); return; }
-      const loot = { gold:0, bricks:[] };
-      G.battle.monsters.forEach(m => {
-        if (m.hpCurrent <= 0) {
-          loot.gold += (m.loot && m.loot.gold) ? m.loot.gold : 0;
-          if (m.loot && m.loot.bricks) loot.bricks.push(...m.loot.bricks);
-        }
-      });
-      const combatants = G.battle.combatants || [];
-      // Distribute loot to all combatants immediately
-      combatants.forEach(cls => {
-        const p = G.players[cls];
-        if (!p) return;
-        p.gold += loot.gold;
-        loot.bricks.forEach(b => { p.bricks[b] = (p.bricks[b]||0)+1; });
-      });
-      log('Battle won! Loot: +'+loot.gold+'G + ['+loot.bricks.join(', ')+'] to '+combatants.join(', '),'reward');
-      // Store result for player victory screens — battle clears, turn advances when all resolve
-      G.battleResult = { loot, combatants, resolvedBy:[] };
-      G.battle = null;
-    }
-    if (type === 'collectLoot') { broadcastState(); return; }
-    if (type === 'resolveBattleResult') {
-      // Player clicked Continue on their victory screen
-      if (!G.battleResult) { broadcastState(); return; }
-      const { cls } = P;
-      if (!G.battleResult.resolvedBy.includes(cls)) G.battleResult.resolvedBy.push(cls);
-      const allDone = G.battleResult.combatants.every(c => G.battleResult.resolvedBy.includes(c));
-      if (allDone) {
-        G.battleResult = null;
-        G.phase = 'prepare';
-        G.activePlayerIdx = (G.activePlayerIdx + 1) % G.turnOrder.length;
-        log('All players acknowledged — next turn begins','normal');
-      }
-    }
-    if (type === 'resolveBattle') {
-      // DM force-resolves — skips waiting for players
-      G.battleResult = null;
-      if (G.battle) G.battle = null;
-      G.phase = 'prepare';
-      G.activePlayerIdx = (G.activePlayerIdx + 1) % G.turnOrder.length;
-      log('Battle resolved by DM','normal');
     }
 
     // ── SCENARIO ──

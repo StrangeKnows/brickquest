@@ -280,41 +280,6 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
         </div>
       </div>
     </div>
-
-    <div class="card" id="battle-section">
-      <div class="card-title">
-        Battle
-        <div style="display:flex;gap:4px;">
-          <button class="btn P btn-sm" onclick="showStartBattle()">Start Battle</button>
-          <button class="btn G btn-sm" onclick="client.endBattle()">End Battle</button>
-        </div>
-      </div>
-      <div id="battle-content"><div style="font-size:12px;color:var(--faint);">No active battle.</div></div>
-    </div>
-    <div id="battle-result-panel" style="display:none;"></div>
-  </div>
-</div>
-
-<div id="battle-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center;padding:20px;">
-  <div style="background:#111118;border:1px solid var(--border);border-radius:12px;padding:16px;max-width:380px;width:100%;">
-    <div style="font-family:Cinzel,serif;font-size:14px;color:var(--gold);margin-bottom:12px;">Start Battle</div>
-    <div style="margin-bottom:8px;">
-      <div style="font-size:10px;color:var(--dim);margin-bottom:4px;">Select Monsters:</div>
-      <div id="mon-checkboxes" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
-    </div>
-    <div style="margin-bottom:8px;">
-      <div style="font-size:10px;color:var(--dim);margin-bottom:4px;">Combatants:</div>
-      <div id="combatant-checkboxes" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
-    </div>
-    <div style="margin-bottom:8px;">
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
-        <input type="checkbox" id="is-boss-cb"> Boss fight
-      </label>
-    </div>
-    <div class="btn-row">
-      <button class="btn P" onclick="confirmStartBattle()">Begin</button>
-      <button class="btn" onclick="document.getElementById('battle-modal').style.display='none'">Cancel</button>
-    </div>
   </div>
 </div>
 
@@ -402,35 +367,6 @@ function renderAll() {
     }
   } else if (window._dmRiddleTimer) {
     clearInterval(window._dmRiddleTimer); window._dmRiddleTimer = null;
-  }
-  if (G.battle) { var be = document.getElementById('battle-section'); if (be) be.style.display='block'; renderBattle(); }
-  else { var be = document.getElementById('battle-section'); if (be) be.style.display='none'; }
-  // Show post-battle result panel if players haven't all continued yet
-  var br = document.getElementById('battle-result-panel');
-  if (br) {
-    if (G.battleResult) {
-      var loot = G.battleResult.loot || {gold:0,bricks:[]};
-      var resolved = G.battleResult.resolvedBy || [];
-      var total = G.battleResult.combatants || [];
-      // Build icon row
-      var BCOLORS = {red:'#D01012',blue:'#006DB7',green:'#237841',white:'#EFEFEF',gray:'#AAAAAA',purple:'#7B2FBE',yellow:'#F5D000',orange:'#F57C00',black:'#333'};
-      var iconRow = '';
-      for (var gi=0;gi<(loot.gold||0);gi++) iconRow += '<span style="width:20px;height:20px;border-radius:50%;background:#F5D000;display:inline-block;vertical-align:middle;margin:2px;box-shadow:0 1px 4px #F5D00066;"></span>';
-      (loot.bricks||[]).forEach(function(b){
-        var bg=BCOLORS[b]||'#888';var bdr=b==='white'?'border:1px solid #ccc;':'';
-        iconRow+='<span style="width:18px;height:18px;border-radius:3px;background:'+bg+';'+bdr+'display:inline-block;margin:2px;box-shadow:0 1px 3px rgba(0,0,0,.4);"></span>';
-      });
-      br.style.display = 'block';
-      br.innerHTML = '<div style="padding:10px;border-radius:10px;background:#051a0f;border:1px solid var(--green);">'
-        + '<div style="font-family:Cinzel,serif;font-size:11px;color:var(--green);margin-bottom:8px;">⚔️ VICTORY</div>'
-        + (iconRow ? '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:2px;margin-bottom:8px;">' + iconRow + '</div>' : '')
-        + '<div style="font-size:12px;color:var(--text);margin-bottom:8px;">Acknowledged: ' + (resolved.length ? resolved.map(function(c){var pl=G.players[c];return pl?pLabel(pl):c;}).join(', ') : 'none yet') + ' (' + resolved.length + '/' + total.length + ')</div>'
-        + '<button class="btn G" onclick="client.send(\'resolveBattle\',{})" style="width:100%;">DM Force Resolve — Advance Turn</button>'
-        + '</div>';
-    } else {
-      br.style.display = 'none';
-      br.innerHTML = '';
-    }
   }
   renderClues();
   renderLog();
@@ -1324,124 +1260,6 @@ function confirmRiddleSolver(solverCls) {
   document.getElementById('riddle-solver-wrap').style.display = 'none';
 }
 
-function showStartBattle() {
-  document.getElementById('battle-modal').style.display = 'flex';
-  var monHtml = '';
-  Object.entries(MONSTER_TEMPLATES).forEach(function(e) {
-    monHtml += '<label style="display:flex;align-items:center;gap:4px;font-size:11px;padding:3px 7px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);cursor:pointer;">'
-      + '<input type="checkbox" value="' + e[0] + '"> ' + e[1].name + '</label>';
-  });
-  document.getElementById('mon-checkboxes').innerHTML = monHtml;
-  var combHtml = '';
-  Object.values(G.players).forEach(function(p) {
-    combHtml += '<label style="display:flex;align-items:center;gap:4px;font-size:11px;padding:3px 7px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);cursor:pointer;">'
-      + '<input type="checkbox" value="' + p.cls + '" ' + (p.alive ? 'checked' : 'disabled') + '> ' + pLabel(p) + '</label>';
-  });
-  document.getElementById('combatant-checkboxes').innerHTML = combHtml;
-}
-
-function confirmStartBattle() {
-  var monIds = Array.from(document.querySelectorAll('#mon-checkboxes input:checked')).map(function(i) { return i.value; });
-  var combatants = Array.from(document.querySelectorAll('#combatant-checkboxes input:checked')).map(function(i) { return i.value; });
-  var isBoss = document.getElementById('is-boss-cb').checked;
-  if (!monIds.length || !combatants.length) { alert('Select monsters and combatants'); return; }
-  var monsters = buildMonsters(monIds);
-  if (isBoss) combatants = Object.keys(G.players).filter(function(c) { return G.players[c].alive; });
-  client.startBattle(monsters, combatants, isBoss);
-  document.getElementById('battle-modal').style.display = 'none';
-}
-
-function quickBattle(midsStr, isBoss) {
-  var mids = midsStr ? midsStr.split(',').filter(function(x) { return x; }) : [];
-  if (!mids.length) return;
-  var monsters = buildMonsters(mids);
-  var combatants = isBoss
-    ? Object.keys(G.players).filter(function(c) { return G.players[c].alive; })
-    : [G.turnOrder[G.activePlayerIdx]].filter(function(x) { return x; });
-  client.startBattle(monsters, combatants, isBoss);
-}
-
-function renderBattle() {
-  var b = G.battle;
-  var el = document.getElementById('battle-content');
-  if (!b) { el.innerHTML = '<div style="font-size:12px;color:var(--faint);">No active battle.</div>'; return; }
-
-  // Last player action panel
-  var html = '';
-  if (b.lastAction) {
-    var la = b.lastAction;
-    var isYellow = la.type === 'riddle' || la.color === 'yellow';
-    html += '<div style="padding:10px 14px;border-radius:10px;margin-bottom:8px;border:2px solid ' + (la.color||'#888') + ';background:' + (la.color||'#888') + '18;">';
-    html += '<div style="font-size:10px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--dim);margin-bottom:4px;">LAST PLAYER ACTION</div>';
-    html += '<div style="font-size:14px;font-weight:700;color:' + (la.color||'#fff') + ';">' + (la.icon||'') + ' ' + (la.description||'') + '</div>';
-    if (isYellow) html += '<div style="margin-top:6px;padding:6px 10px;border-radius:7px;background:#3a3000;font-size:12px;color:#F5D000;font-weight:700;">⚠ MONSTER IS CONFUSED — skip its next attack turn</div>';
-    html += '</div>';
-  }
-  // Confused monster banner
-  var confusedMons = (b.monsters||[]).filter(function(m) { return m.confused && m.hpCurrent > 0; });
-  if (confusedMons.length) {
-    html += '<div style="padding:8px 12px;border-radius:8px;background:#2a2500;border:2px solid #F5D000;margin-bottom:8px;font-size:13px;color:#F5D000;font-weight:700;">';
-    html += '<span style="width:10px;height:10px;border-radius:2px;background:#F5D000;display:inline-block;vertical-align:middle;margin-right:3px;"></span>CONFUSED: ' + confusedMons.map(function(m) { return m.name; }).join(', ') + ' — skips attack this round</div>';
-  }
-  html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;">';
-  (b.initiative || []).forEach(function(it, i) {
-    var p = G.players[it.cls];
-    var isAct = !b.monsterTurn && b.initIdx === i;
-    var col = p ? p.color : '#888';
-    html += '<div class="init-pill' + (isAct ? ' active' : '') + '" style="background:' + col + '22;color:' + col + ';border-color:' + col + ';">';
-    html += (p ? p.icon : '') + (p ? (p.playerName || p.name) : it.cls) + '(' + it.roll + ')</div>';
-  });
-  html += '<div class="init-pill' + (b.monsterTurn ? ' active' : '') + '" style="background:#1a0505;color:var(--red);border-color:var(--red);">Monsters</div></div>';
-
-  if (b.complication && b.complication !== 'none') {
-    html += '<div style="padding:6px 10px;border-radius:7px;background:#1a0800;border:1px solid var(--orange);font-size:11px;color:var(--orange);margin-bottom:6px;">Complication: ' + b.complication + '</div>';
-  }
-
-  (b.monsters || []).forEach(function(m, mi) {
-    var pct = Math.max(0, Math.round(m.hpCurrent / m.hpMax * 100));
-    var hc = m.hpCurrent <= Math.floor(m.hpMax * .25) ? '#E24B4A' : m.hpCurrent <= Math.floor(m.hpMax * .5) ? '#EF9F27' : '#888';
-    html += '<div class="mon-card' + (m.hpCurrent <= 0 ? ' dead' : '') + '">';
-    html += '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;margin-bottom:4px;">';
-    html += '<span style="font-size:13px;font-weight:700;">' + m.name + (m.hpCurrent <= 0 ? ' Dead' : '') + '</span>';
-    html += '<span style="font-size:11px;color:var(--dim);">' + m.hpCurrent + '/' + m.hpMax + 'HP Armor:' + (m.armor||0) + '</span></div>';
-    html += '<div style="height:4px;border-radius:2px;background:#1a1a1a;overflow:hidden;margin-bottom:5px;"><div style="width:' + pct + '%;height:100%;background:' + hc + ';"></div></div>';
-    var bricks = '';
-    for (var i = 0; i < m.hpMax; i++) {
-      bricks += '<span class="mon-brick' + (i >= m.hpCurrent ? ' gone' : '') + '" style="background:' + m.color + ';" onclick="client.send(\'monsterHPDelta\',{monsterIdx:' + mi + ',delta:-1})"></span>';
-    }
-    html += '<div style="display:flex;flex-wrap:wrap;gap:2px;margin:5px 0;">' + bricks + '</div>';
-    html += '<div style="font-size:10px;color:var(--dim);">Targets: ' + m.target + (m.confused ? ' CONFUSED' : '') + (m.cursed ? ' CURSED-' + m.cursed : '') + '</div>';
-    if (m.hpCurrent > 0) {
-      html += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:4px;">';
-      [1,2,3,5].forEach(function(n) {
-        html += '<button class="adj btn-sm" onclick="client.send(\'monsterHPDelta\',{monsterIdx:' + mi + ',delta:-' + n + '})">-' + n + '</button>';
-      });
-      html += '<button class="adj btn-sm" onclick="client.send(\'monsterHPDelta\',{monsterIdx:' + mi + ',delta:1})">+1</button>';
-      html += '<button class="btn P btn-sm" onclick="client.monsterAttack(' + mi + ')">Monster Attacks</button>';
-      if (m.tameable) html += '<button class="btn G btn-sm" onclick="client.tameAttempt(\'beastcaller\',' + mi + ')">Tame</button>';
-      if (m.holdsKey) html += '<button class="btn btn-sm" style="border-color:#3a3000;color:var(--gold);" onclick="awardKey(\'' + m.holdsKey + '\',' + mi + ')">Key</button>';
-      html += '</div>';
-    }
-    if (b.phase1Complete === false && m.phase === 1 && m.hpCurrent <= 0) {
-      html += '<button class="btn P btn-sm" style="margin-top:4px;" onclick="client.bossPhase2()">Phase 2</button>';
-    }
-    html += '</div>';
-  });
-
-  var allDead = (b.monsters || []).every(function(m) { return m.hpCurrent <= 0; });
-  html += '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;">';
-  html += '<button class="btn P btn-sm" onclick="client.send(\'nextBattleRound\')">Next Round</button>';
-  html += '<select style="flex:1;margin-bottom:0;" onchange="client.setComplication(this.value)">';
-  COMPLICATIONS.forEach(function(c) { html += '<option value="' + c.id + '">' + c.label + '</option>'; });
-  html += '</select>';
-  html += '</div>';
-
-  if (allDead) {
-    html += '<button class="btn G" style="margin-top:6px;width:100%;font-size:14px;padding:10px;" onclick="client.endBattle()">⚔️ End Battle — Distribute Loot &amp; Continue</button>';
-  }
-
-  el.innerHTML = html;
-}
 
 function awardKey(keyColor, mi) {
   var cls = G.turnOrder[G.activePlayerIdx];
