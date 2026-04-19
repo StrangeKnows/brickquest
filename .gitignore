@@ -140,3 +140,4 @@ vite.config.ts.timestamp-*
 node_modules/
 ngrok
 .DS_Store
+brickquest-save.json
