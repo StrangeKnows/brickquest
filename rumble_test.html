@@ -117,6 +117,14 @@
     <button class="mode-btn"        id="mode-spec"    onclick="setMode('spec')">SPEC (starting kit)</button>
   </div>
 
+  <h2>ENTITIES</h2>
+  <div class="mode-toggle">
+    <button class="mode-btn active" id="ent-1" onclick="setEntityCount(1)">1</button>
+    <button class="mode-btn"        id="ent-2" onclick="setEntityCount(2)">2</button>
+    <button class="mode-btn"        id="ent-3" onclick="setEntityCount(3)">3</button>
+    <button class="mode-btn"        id="ent-5" onclick="setEntityCount(5)">5</button>
+  </div>
+
   <h2>CLASS</h2>
   <div class="class-grid" id="class-grid"></div>
 </div>
@@ -134,11 +142,20 @@ var SPEC_CLASSES = {
   wizard:      { icon:'\uD83D\uDD2E', name:'WIZARD',  hp:6,  speed:180, sig:'blue',   sec:'purple', kit:{blue:2, purple:1}  },
   scout:       { icon:'\uD83C\uDFC3', name:'SCOUT',   hp:9,  speed:260, sig:'orange', sec:'red',    kit:{orange:2, red:1}   },
   builder:     { icon:'\uD83D\uDD27', name:'BUILDER', hp:12, speed:150, sig:'gray',   sec:'orange', kit:{gray:2, orange:1}  },
-  mender:      { icon:'\uD83D\uDC8A', name:'MENDER',  hp:8,  speed:160, sig:'white',  sec:'purple', kit:{white:2, purple:1} },
+  mender:      { icon:'\uD83D\uDC8A', name:'MENDER',  hp:8,  speed:160, sig:'white',  sec:'black', kit:{white:2, black:1} },
   beastcaller: { icon:'\uD83D\uDC3E', name:'BEAST',   hp:10, speed:220, sig:'green',  sec:'yellow', kit:{green:2, yellow:1} },
 };
 
 var currentMode = 'sandbox';
+var currentEntityCount = 1;
+
+function setEntityCount(n) {
+  currentEntityCount = n;
+  [1, 2, 3, 5].forEach(function(v) {
+    var el = document.getElementById('ent-' + v);
+    if (el) el.classList.toggle('active', v === n);
+  });
+}
 
 function setMode(m) {
   currentMode = m;
@@ -206,6 +223,7 @@ function startTestRumble(cls) {
     armor: 0,
     mode: currentMode,
     bricks: currentMode === 'spec' ? Object.assign({}, m.kit) : randomSandboxBricks(),
+    entityCount: currentEntityCount,
   };
   Rumble.start(startConfig);
 

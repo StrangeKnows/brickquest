@@ -1453,7 +1453,7 @@ httpServer.listen(PORT,'0.0.0.0',()=>{
   console.log(`  DM Screen:    http://${ip}:${PORT}/dm_screen.html`);
   console.log(`  All Players:  http://${ip}:${PORT}/players.html`);
   console.log(`  Test Players: http://${ip}:${PORT}/test_players.html`);
-  console.log(`  Arena Test:   http://${ip}:${PORT}/arena_test.html\n`);
+  console.log(`  Rumble Test:  http://${ip}:${PORT}/rumble_test.html\n`);
   console.log(`  Console commands: save | load | reset | status\n`);
   console.log(`  Game auto-saves to brickquest-save.json after every action.\n`);
   console.log(`  Press Ctrl+C to stop (state will be saved).\n`);

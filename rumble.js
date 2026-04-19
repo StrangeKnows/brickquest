@@ -24,7 +24,7 @@
 //   DM tools:
 //     injectBricks(delta)   delta: { red: 2, gray: -1, ... } — adjusts player bricks
 //     setPlayerHP(n)        clamp to [0, hpMax]
-//     setEnemyHP(n)         clamp to [0, enemy.hpMax] — targets first living goblin
+//     setEnemyHP(n)         clamp to [0, enemy.hpMax] — targets first living entity
 //
 // Events emitted via options.onEvent(type, data):
 //   'ready'    — module initialized
@@ -68,7 +68,7 @@ const CLASS_META = {
   wizard:      { color:'#3C3489', icon:'🔮', hp:6,  die:'d6', speed:180, signature:'blue',   secondary:'purple'  },
   scout:       { color:'#085041', icon:'🏃', hp:9,  die:'d6', speed:260, signature:'orange', secondary:'red'     },
   builder:     { color:'#C87800', icon:'🔧', hp:12, die:'d6', speed:150, signature:'gray',   secondary:'orange'  },
-  mender:      { color:'#72243E', icon:'💊', hp:8,  die:'d4', speed:160, signature:'white',  secondary:'purple'  },
+  mender:      { color:'#72243E', icon:'💊', hp:8,  die:'d4', speed:160, signature:'white',  secondary:'black'   },
   beastcaller: { color:'#27500A', icon:'🐾', hp:10, die:'d6', speed:220, signature:'green',  secondary:'yellow'  },
 };
 
@@ -88,9 +88,20 @@ function brickTier(cls, color) {
   return 'baseline';
 }
 
+// Class-color affinity damage multiplier. Using your class's signature
+// color hits harder; using an off-class (baseline) color hits softer.
+// Secondary sits at neutral. See Combat & Economy v1 spec.
+function affinityMult(color) {
+  if (!player) return 1.0;
+  var tier = brickTier(player.cls, color);
+  if (tier === 'signature') return 1.25;
+  if (tier === 'baseline')  return 0.8;
+  return 1.0;
+}
+
 // Display scale: 0.60 (phones) to 1.00 (desktops). Smooth-interpolated.
 // Reference = smaller of viewport W/H so tall portrait phones still scale down.
-// Used to shrink player radius, goblin radius, and aggro ranges on small screens.
+// Used to shrink player radius, entity radius, and aggro ranges on small screens.
 function getDisplayScale() {
   var ref = Math.min(W || window.innerWidth || 800, H || window.innerHeight || 600);
   if (ref <= 400)  return 0.60;
@@ -148,8 +159,8 @@ var lastTs = 0;
 var cfg = null; // last start(config) object
 
 var player = null;
-var goblins = [];
-var deadGoblins = [];
+var entities = [];
+var deadEntities = [];
 var pendingVictory = 0; // countdown to victory screen
 var arena = {};
 var timerLeft = ARENA_DURATION;
@@ -163,7 +174,7 @@ var dragTarget = null;
 var dashCooldown = 0;
 var dashActive = false;
 var dashTarget = null;
-var dashGoblin = null;
+var dashEntity = null;
 var dashSpeed = 0;
 var DASH_DURATION = 0.75; // distance = dashSpeed * 0.75 px
 var dashTimer = 0;
@@ -252,11 +263,11 @@ function onPointerDown(e) {
       dashSpeed = player.speed * 3;
       dashTimer = DASH_DURATION;
       dashCooldown = 5;
-      // If released near a goblin, track toward them
+      // If released near a entity, track toward them
       var rect2 = canvas.getBoundingClientRect();
       var cx2 = (pos.x - rect2.left) * (canvas.width / rect2.width);
       var cy2 = (pos.y - rect2.top) * (canvas.height / rect2.height);
-      dashGoblin = goblins.find(function(g){ return Math.hypot(cx2-g.x,cy2-g.y)<g.r+50; }) || null;
+      dashEntity = entities.find(function(g){ return Math.hypot(cx2-g.x,cy2-g.y)<g.r+50; }) || null;
       showFloatingText(player.x, player.y - 50, 'EVADE!', player.color);
     }
     lastTapTime = 0; // reset so triple-tap doesn't re-trigger
@@ -295,9 +306,9 @@ function update(dt) {
   // Dash movement — overrides normal movement
   if (dashActive) {
     dashTimer -= dt;
-    // If tracking a goblin, update target to follow them
-    if (dashGoblin && dashGoblin.hp > 0) {
-      dashTarget = { x: dashGoblin.x, y: dashGoblin.y };
+    // If tracking a entity, update target to follow them
+    if (dashEntity && dashEntity.hp > 0) {
+      dashTarget = { x: dashEntity.x, y: dashEntity.y };
     }
     var ddx = dashTarget ? dashTarget.x - player.x : 0;
     var ddy = dashTarget ? dashTarget.y - player.y : 0;
@@ -310,7 +321,7 @@ function update(dt) {
       if (dashTarget && ddist <= 4) { player.x = dashTarget.x; player.y = dashTarget.y; }
       dashActive = false;
       dashTarget = null;
-      dashGoblin = null;
+      dashEntity = null;
       dragTarget = null; // clear drag target so normal movement doesn't continue
     }
   } else if (dragTarget) {
@@ -330,28 +341,28 @@ function update(dt) {
   player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
   player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
 
-  // Push player and goblin apart if overlapping
-  // Push goblins away from player — player is not moved by collision
-  goblins.forEach(function(goblin) {
-    var odx = player.x - goblin.x, ody = player.y - goblin.y;
+  // Push player and entity apart if overlapping
+  // Push entities away from player — player is not moved by collision
+  entities.forEach(function(entity) {
+    var odx = player.x - entity.x, ody = player.y - entity.y;
     var odist = Math.sqrt(odx*odx+ody*ody);
-    var minDist = player.r + goblin.r;
+    var minDist = player.r + entity.r;
     if (odist < minDist && odist > 0) {
       var push = minDist - odist;
       var nx = odx/odist, ny = ody/odist;
-      goblin.x -= nx*push;
-      goblin.y -= ny*push;
-      goblin.x = Math.max(bounds.x+goblin.r, Math.min(bounds.x+bounds.w-goblin.r, goblin.x));
-      goblin.y = Math.max(bounds.y+goblin.r, Math.min(bounds.y+bounds.h-goblin.r, goblin.y));
+      entity.x -= nx*push;
+      entity.y -= ny*push;
+      entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
+      entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
     }
   });
 
-  // Goblin
-  deadGoblins.forEach(function(g) { g.deathTimer -= dt; });
-  deadGoblins = deadGoblins.filter(function(g) { return g.deathTimer > 0; });
-  goblins.forEach(function(g) { updateGoblinConfusion(g, dt); updateGoblin(g, dt, bounds); });
-  goblins.forEach(function(g) { if (g.hp <= 0 && !g.dead) { g.dead = true; g.deathTimer = 2.5; deadGoblins.push(g); } });
-  goblins = goblins.filter(function(g) { return !g.dead; });
+  // Entity
+  deadEntities.forEach(function(g) { g.deathTimer -= dt; });
+  deadEntities = deadEntities.filter(function(g) { return g.deathTimer > 0; });
+  entities.forEach(function(g) { updateEntityConfusion(g, dt); updateEntity(g, dt, bounds); });
+  entities.forEach(function(g) { if (g.hp <= 0 && !g.dead) { g.dead = true; g.deathTimer = 2.5; deadEntities.push(g); } });
+  entities = entities.filter(function(g) { return !g.dead; });
   // Brick actions
   tickBrickCooldowns(dt);
   // Brick refresh. In 'spec' mode, uses BRICK_ECONOMY per-tier rates based on class.
@@ -392,10 +403,11 @@ function update(dt) {
   updateArmorBursts(dt);
   updateGreenBurst(dt);
   updateYellowAura(dt);
+  updateWhiteField(dt);
   updateConfuseParticles(dt);
   updateRegen(dt);
-  goblins.forEach(function(g) {
-    updateGoblinPoison(g, dt);
+  entities.forEach(function(g) {
+    updateEntityPoison(g, dt);
     g.slowTimer = Math.max(0, (g.slowTimer||0) - dt);
     if (g.slowTimer <= 0) g.slowed = false;
     g.attackSlowTimer = Math.max(0, (g.attackSlowTimer||0) - dt);
@@ -476,6 +488,7 @@ function draw() {
   drawTraps();
   // ── Yellow aura (persistent daze field) ──
   drawYellowAura();
+  drawWhiteField();
   // ── Confuse particles ──
   drawConfuseParticles();
   // ── Green burst ──
@@ -629,9 +642,9 @@ function draw() {
   // ── Blue bolts ──
   drawBlueBolts();
 
-  // ── Goblin ──
-  deadGoblins.forEach(function(g) { drawDeadGoblin(g); });
-  goblins.forEach(function(g) { drawGoblin(g); });
+  // ── Entity ──
+  deadEntities.forEach(function(g) { drawDeadEntity(g); });
+  entities.forEach(function(g) { drawEntity(g); });
 
   // ── Player ──
   if (player) {
@@ -886,12 +899,15 @@ function draw() {
     }
   }
 
-  // ── Player sparkles (white heal — follow player) ──
+  // ── Player sparkles (white heal — follow player, or world-space for field) ──
   if (player && playerSparkles.length) {
     playerSparkles = playerSparkles.filter(function(s) { return s.alpha > 0.05; });
     playerSparkles.forEach(function(s) {
       s.alpha -= 0.024;
-      if (s.fixed) {
+      if (s.worldSpace) {
+        s.wx += s.vox * 60;
+        s.wy += s.voy * 60;
+      } else if (s.fixed) {
         s.fx += s.vox * 60;
         s.fy += s.voy * 60;
       } else {
@@ -906,7 +922,9 @@ function draw() {
       ctx.fillStyle = s.color;
       ctx.shadowColor = s.color;
       ctx.shadowBlur = 10 * s.alpha;
-      ctx.fillText(s.text, s.fixed ? s.fx : player.x + s.ox, s.fixed ? s.fy : player.y + s.oy);
+      var sx = s.worldSpace ? s.wx : (s.fixed ? s.fx : player.x + s.ox);
+      var sy = s.worldSpace ? s.wy : (s.fixed ? s.fy : player.y + s.oy);
+      ctx.fillText(s.text, sx, sy);
       ctx.restore();
     });
   }
@@ -1088,47 +1106,149 @@ function fireOverloadRed(count, ox, oy)   {
 }
 function fireOverloadWhite(count, ox, oy) {
   var _isDrag = ox !== undefined;
-  var isDrag = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) < player.r + 30; // must drop on player
-  if (isDrag) {
-    startWhiteRegen(count);
+  var isOnPlayer = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) < player.r + 30;
+  if (isOnPlayer || !_isDrag) {
+    // Tap or drop-on-player: direct overload heal
+    var healAmt = Math.round((player.cls === 'mender' ? 5 : 3) * count * affinityMult('white'));
+    var prev = player.hp;
+    var cap2 = Math.max(player.hpMax, player.hp);
+    player.hp = Math.min(cap2, player.hp + healAmt);
+    showFloatingText(player.x, player.y-50, '✚ +' + Math.round(player.hp-prev) + (count>1?' x'+count:''), '#EFEFEF');
+    spawnHealSparkles(count);
+    var sparkCount = Math.max(1, Math.round(count * 3 * vScale(count)));
+    var sizeBase = 2 + count * 0.4;
+    var speedBase = 0.15 + count * 0.04;
+    var spreadR = 6 + count * 4;
+    var colors2 = ['#ffffff','#ffccee','#ff99cc','#ffe0f0'];
+    if (count >= 4) colors2.push('#ffaaff','#cc88ff');
+    for (var i = 0; i < sparkCount; i++) {
+      var angle = Math.random() * Math.PI * 2;
+      var speed = speedBase + Math.random() * speedBase;
+      var size = sizeBase + Math.random() * sizeBase * 0.8;
+      playerSparkles.push({
+        ox: Math.cos(angle)*(spreadR * Math.random()),
+        oy: Math.sin(angle)*(spreadR * Math.random()),
+        vox: Math.cos(angle)*speed, voy: Math.sin(angle)*speed-0.3*(count*0.5),
+        text: i%3===0?'✦':'✧',
+        color: colors2[Math.floor(Math.random()*colors2.length)],
+        size: size, alpha: 1, life: 1
+      });
+    }
     return;
   }
-  // Tap overload — instant heal with scaled burst
-  var healAmt = (player.cls === 'mender' ? 5 : 3) * count;
-  var prev = player.hp;
-  var cap2 = Math.max(player.hpMax, player.hp);
-  player.hp = Math.min(cap2, player.hp + healAmt);
-  showFloatingText(player.x, player.y-50, '✚ +' + Math.round(player.hp-prev) + (count>1?' x'+count:''), '#EFEFEF');
-  spawnHealSparkles(count);
-  // Overload: scale count, size, speed with overload level
-  var sparkCount = Math.max(1, Math.round(count * 3 * vScale(count)));
-  var sizeBase = 2 + count * 0.4;   // grows with overload
-  var speedBase = 0.15 + count * 0.04;
-  var spreadR = 6 + count * 4;
-  var colors2 = ['#ffffff','#ffccee','#ff99cc','#ffe0f0'];
-  if (count >= 4) colors2.push('#ffaaff','#cc88ff'); // purplish at high overload
-  for (var i = 0; i < sparkCount; i++) {
+  // Drop on empty space or entity: create static healing field.
+  // Heals allies (including player if they enter) per tick, soft-slows
+  // enemies inside to discourage staying in it.
+  startWhiteField(ox, oy, count);
+}
+
+// ── WHITE HEALING FIELD ─────────────────────────────
+// Overload white cast on empty space/entity creates a persistent zone.
+// Allies inside heal per tick. Entities inside have their movement
+// gently slowed (soft repel).
+var whiteField = null; // { timer, duration, ox, oy, radius, healPerTick, tickTimer, pulse, sparkleTimer }
+
+function startWhiteField(ox, oy, count) {
+  var mult = affinityMult('white');
+  var duration = 3.0 * count;
+  var radius = scaleDist((60 + count * 20) * mult);
+  whiteField = {
+    timer: duration,
+    duration: duration,
+    ox: ox, oy: oy,
+    radius: radius,
+    healPerTick: Math.max(1, Math.round((1 + count) * mult)),
+    tickTimer: 0,
+    pulse: 0,
+    sparkleTimer: 0,
+  };
+  showFloatingText(ox, oy - 30, 'SANCTUARY x' + count, '#EFEFEF');
+}
+
+function updateWhiteField(dt) {
+  if (!whiteField) return;
+  whiteField.timer -= dt;
+  whiteField.pulse = (whiteField.pulse + dt * 2) % (Math.PI * 2);
+  if (whiteField.timer <= 0) { whiteField = null; return; }
+  var cx = whiteField.ox, cy = whiteField.oy, r = whiteField.radius;
+  // Heal the player if inside the field (allies: player only for now)
+  if (player && Math.hypot(player.x - cx, player.y - cy) <= r) {
+    whiteField.tickTimer += dt;
+    if (whiteField.tickTimer >= 0.5) {
+      whiteField.tickTimer -= 0.5;
+      var prev = player.hp;
+      player.hp = Math.min(player.hpMax, player.hp + whiteField.healPerTick);
+      if (player.hp > prev) {
+        showFloatingText(player.x, player.y - 40, '✚ +' + (player.hp - prev), '#EFEFEF');
+      }
+    }
+  }
+  // Soft-slow any entity inside the field (gentle repel effect)
+  entities.forEach(function(e) {
+    if (Math.hypot(e.x - cx, e.y - cy) <= r) {
+      e.whiteFieldSlowed = true;
+      e.whiteFieldSlowTimer = 0.25; // refreshed each frame while inside
+    }
+  });
+  // Occasional sparkle shimmer in the field for visual life
+  whiteField.sparkleTimer += dt;
+  if (whiteField.sparkleTimer >= 0.08) {
+    whiteField.sparkleTimer = 0;
     var angle = Math.random() * Math.PI * 2;
-    var speed = speedBase + Math.random() * speedBase;
-    var size = sizeBase + Math.random() * sizeBase * 0.8;
-    playerSparkles.push({
-      ox: Math.cos(angle)*(spreadR * Math.random()),
-      oy: Math.sin(angle)*(spreadR * Math.random()),
-      vox: Math.cos(angle)*speed, voy: Math.sin(angle)*speed-0.3*(count*0.5),
-      text: i%3===0?'✦':'✧',
-      color: colors2[Math.floor(Math.random()*colors2.length)],
-      size: size, alpha: 1, life: 1
-    });
+    var dist = Math.random() * r * 0.9;
+    spawnHealSparkleAt(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
   }
 }
+
+function drawWhiteField() {
+  if (!whiteField || !ctx) return;
+  var cx = whiteField.ox, cy = whiteField.oy, r = whiteField.radius;
+  var pct = whiteField.timer / whiteField.duration;
+  var a = Math.max(0, Math.min(1, pct)) * 0.55;
+  ctx.save();
+  // Soft white radial glow
+  var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+  grad.addColorStop(0, 'rgba(255, 255, 255, ' + (a * 0.28) + ')');
+  grad.addColorStop(0.6, 'rgba(255, 240, 245, ' + (a * 0.18) + ')');
+  grad.addColorStop(1.0, 'rgba(255, 200, 220, 0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  // Pulsing edge ring
+  var pulseScale = 1 + Math.sin(whiteField.pulse) * 0.04;
+  ctx.strokeStyle = 'rgba(255, 255, 255, ' + a + ')';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([10, 5]);
+  ctx.beginPath(); ctx.arc(cx, cy, r * pulseScale, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// Helper used by updateWhiteField for shimmer particles. We reuse the
+// existing playerSparkles array with world-space coords so we don't
+// build a separate particle system.
+function spawnHealSparkleAt(x, y) {
+  playerSparkles.push({
+    worldSpace: true,
+    wx: x, wy: y,
+    vox: (Math.random() - 0.5) * 0.1,
+    voy: -0.2 - Math.random() * 0.15,
+    text: Math.random() < 0.5 ? '✦' : '✧',
+    color: '#ffffff',
+    size: 2 + Math.random() * 2,
+    alpha: 1, life: 1,
+  });
+}
+
+
 function fireOverloadYellow(count, ox, oy) {
   // 3s aura. Radius scales with count. If cast from drag-target coords,
   // aura is anchored there. Otherwise it follows the player.
-  // Per-goblin confuse duration is extended each frame they're in the aura,
+  // Per-entity confuse duration is extended each frame they're in the aura,
   // so overloading (bigger radius, higher hit chance) naturally produces
-  // longer confuses on the goblins you manage to keep inside.
+  // longer confuses on the entities you manage to keep inside.
   var dragOrigin = ox !== undefined && Math.hypot(ox - player.x, oy - player.y) > scaleDist(40);
-  var r = scaleDist(120 + (count - 1) * 40);
+  var mult = affinityMult('yellow');
+  var r = scaleDist((120 + (count - 1) * 40) * mult);
   startYellowAura({
     follow: !dragOrigin,
     ox: dragOrigin ? ox : player.x,
@@ -1139,21 +1259,26 @@ function fireOverloadYellow(count, ox, oy) {
   });
 }
 function fireOverloadBlue(count) {
-  var target = goblins.length ? goblins.reduce(function(a,b){
+  var target = entities.length ? entities.reduce(function(a,b){
     return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null;
   if (!target) return;
-  // Single bolt that scales with tier
+  // Single bolt. Damage scales with overload count AND class affinity.
+  // Overload bolts also create a minor impact burst radius that damages
+  // nearby entities for half damage. Burst radius scales with count.
+  var mult = affinityMult('blue');
   blueBolts.push({
     x: player.x, y: player.y,
     target: target,
     speed: 400 + count * 40,
-    dmg: 4 * count,
+    dmg: Math.round(4 * count * mult),
     r: 6 + count * 4,       // x1=10, x5=26
     dead: false,
     travelled: 0,
     tier: count,
     glow: count * 10,
     delayTimer: 0,
+    burstRadius: scaleDist(30 + count * 15),  // impact burst AoE
+    burstDmg: Math.round(2 * count * mult),   // ~half primary dmg
   });
 }
 function fireOverloadOrange(count, ox, oy) {
@@ -1161,13 +1286,14 @@ function fireOverloadOrange(count, ox, oy) {
   if (isDrag) {
     fireOverloadOrangeScatter(count, ox, oy);
   } else {
-    // Tap overload — spike aura with count charges
+    // Tap overload — spike aura with count charges (affinity boosts charges)
+    var charges = Math.max(1, Math.round(count * affinityMult('orange')));
     if (orangeAura) {
-      orangeAura.charges += count;
-      showFloatingText(player.x, player.y-50, 'WIRED +'+count, '#F57C00');
+      orangeAura.charges += charges;
+      showFloatingText(player.x, player.y-50, 'WIRED +'+charges, '#F57C00');
     } else {
-      orangeAura = { charges: count, pulse: 0, r: player.r + 22 };
-      showFloatingText(player.x, player.y-50, 'COILED x'+count, '#F57C00');
+      orangeAura = { charges: charges, pulse: 0, r: player.r + 22 };
+      showFloatingText(player.x, player.y-50, 'COILED x'+charges, '#F57C00');
     }
   }
 }
@@ -1178,9 +1304,10 @@ function fireOverloadGray(count, ox, oy) {
   } else {
     var aMax2 = getArmorMax();
     var prevArmor = player.armor||0;
-    // Base: 1 armor pip per brick in overload. Future "Iron Hide" skill will
-    // unlock 2-per-brick (multiplier hook goes here once skill system lives).
-    player.armor = Math.min(aMax2, prevArmor + count);
+    // Base: 1 armor pip per brick × affinity. Signature (Builder's gray,
+    // Warrior's gray-as-secondary = 1.0×) gets 1.25× stacks.
+    var pips = Math.max(1, Math.round(count * affinityMult('gray')));
+    player.armor = Math.min(aMax2, prevArmor + pips);
     var gained = player.armor - prevArmor;
     showFloatingText(player.x, player.y-50, 'FORTIFIED +'+gained+(count>1?' x'+count:''), '#AAAAAA');
     armorBursts.push({ x:player.x, y:player.y, r:player.r, alpha:0.9 });
@@ -1188,27 +1315,30 @@ function fireOverloadGray(count, ox, oy) {
 }
 function fireOverloadGreen(count, ox, oy) {
   // Each brick beyond the first doubles poison damage (1-2-4-8-16)
+  var mult = affinityMult('green');
   if (greenBurst && !greenBurst.done) {
     greenBurst._poisonedIds=[]; greenBurst._pushIds=[];
   } else {
-    greenBurst = { r:0, maxR:scaleDist(400), alpha:1, done:false, _poisonedIds:[], _pushIds:[], ox:ox, oy:oy };
+    greenBurst = { r:0, maxR:scaleDist(400 * mult), alpha:1, done:false, _poisonedIds:[], _pushIds:[], ox:ox, oy:oy };
   }
-  greenBurst._poisonMult = count; // passed to poison application
+  greenBurst._poisonMult = count * mult; // affinity scales poison damage
 }
 function fireOverloadPurple(count, ox, oy) {
-  purpleBursts.push({ r:0, maxR:scaleDist(400), alpha:1, done:false, hit:false, ox:ox, oy:oy, dmgMult:count });
+  var mult = affinityMult('purple');
+  purpleBursts.push({ r:0, maxR:scaleDist(400 * mult), alpha:1, done:false, hit:false, ox:ox, oy:oy, dmgMult:count * mult });
 }
 function fireOverloadBlack(count, ox, oy) {
+  var mult = affinityMult('black');
   if (blackEffect) {
-    blackEffect.RADIUS = Math.min(blackEffect.RADIUS + scaleDist(count * 100), scaleDist(900));
-    blackEffect.timer = 3.0 * count;
-    blackEffect.DURATION = 3.0 * count;
-    blackEffect.tickDmg = count;
+    blackEffect.RADIUS = Math.min(blackEffect.RADIUS + scaleDist(count * 100 * mult), scaleDist(900 * mult));
+    blackEffect.timer = 3.0 * count * mult;
+    blackEffect.DURATION = 3.0 * count * mult;
+    blackEffect.tickDmg = Math.max(1, Math.round(count * mult));
   } else {
-    blackEffect = { timer:3.0*count, DURATION:3.0*count, tickTimer:0, TICK:0.5, alpha:0,
-      FADE_IN:0.8, FADE_OUT:0.8, ox:ox, oy:oy, RADIUS:scaleDist(50+(count-1)*100), tickDmg:count };
+    blackEffect = { timer:3.0*count*mult, DURATION:3.0*count*mult, tickTimer:0, TICK:0.5, alpha:0,
+      FADE_IN:0.8, FADE_OUT:0.8, ox:ox, oy:oy, RADIUS:scaleDist((50+(count-1)*100)*mult), tickDmg:Math.max(1, Math.round(count*mult)) };
   }
-  goblins.forEach(function(g) {
+  entities.forEach(function(g) {
     if (Math.hypot(g.x-ox,g.y-oy)<blackEffect.RADIUS) { g.attackSlowed=true; g.attackSlowTimer=blackEffect.DURATION; }
   });
 }
@@ -1434,7 +1564,7 @@ function onBrickDown(e, color) {
     orange: function(cx,cy,isDrag,tier){ startOrangeTrap(cx,cy,isDrag?tier:undefined); },
     yellow: function(cx,cy,isDrag){
       if (isDrag) {
-        startYellowConfuse(cx, cy, scaleDist(87));
+        startYellowConfuse(cx, cy, scaleDist(87 * affinityMult('yellow')));
       } else {
         startYellowAura({ follow: true, radius: scaleDist(120), duration: 3.0, label: 'DAZE FIELD' });
       }
@@ -1510,7 +1640,7 @@ function onBrickDown(e, color) {
         player.bricks[color]--;
         player.brickRecharge[color] = player.brickRecharge[color] || 0;
         renderBrickBar();
-        var onTarget = goblins.find(function(g){ return Math.hypot(canvasX-g.x,canvasY-g.y)<g.r+30; });
+        var onTarget = entities.find(function(g){ return Math.hypot(canvasX-g.x,canvasY-g.y)<g.r+30; });
         startBlueBolt(onTarget || null);
       } else if (dragFns[color]) {
         player.bricks[color]--;
@@ -1611,9 +1741,9 @@ draw = function() {
 };
 
 // ═══════════════════════════════════════════════════
-// GOBLIN OBJECT
+// ENTITY OBJECT
 // ═══════════════════════════════════════════════════
-function makeGoblin(bounds, angleOffset) {
+function makeEntity(bounds, angleOffset) {
   // Spawn on side opposite player, spread by angleOffset
   var px = player.x, py = player.y;
   var cx = bounds.x + bounds.w/2, cy = bounds.y + bounds.h/2;
@@ -1653,7 +1783,7 @@ function makeGoblin(bounds, angleOffset) {
 
 
 function vScale(tier) { return tier <= 1 ? 1.5 : 0.5; }
-function damageGoblin(g, dmg, aggro) {
+function damageEntity(g, dmg, aggro) {
   g.hp = Math.max(0, g.hp - dmg);
   if (aggro !== false) {
     g.aggroed = true;
@@ -1661,7 +1791,7 @@ function damageGoblin(g, dmg, aggro) {
   }
 }
 
-function updateGoblin(g, dt, bounds) {
+function updateEntity(g, dt, bounds) {
   if (!player) return;
 
   g.attackCooldown = Math.max(0, g.attackCooldown - dt);
@@ -1670,6 +1800,14 @@ function updateGoblin(g, dt, bounds) {
     g.attackDebuff = Math.max(0, g.attackDebuff - dt);
   }
   g.flashTimer     = Math.max(0, g.flashTimer - dt);
+
+  // White field soft-slow decays every frame; refreshed from updateWhiteField
+  // while entity is inside the healing zone. Slows movement to ~50% when active.
+  if ((g.whiteFieldSlowTimer || 0) > 0) {
+    g.whiteFieldSlowTimer = Math.max(0, g.whiteFieldSlowTimer - dt);
+    if (g.whiteFieldSlowTimer <= 0) g.whiteFieldSlowed = false;
+  }
+  var whiteFieldMult = g.whiteFieldSlowed ? 0.5 : 1;
 
   var dx = player.x - g.x;
   var dy = player.y - g.y;
@@ -1717,7 +1855,7 @@ function updateGoblin(g, dt, bounds) {
       g.wanderTimer = 1.5 + Math.random() * 2;
     }
     var slowMult = g.slowed ? 0.1 : 1;
-    var patrolSpeed = g.speed * 0.35 * slowMult;
+    var patrolSpeed = g.speed * 0.35 * slowMult * whiteFieldMult;
     if (wdist > 4) {
       g.x += (wdx/wdist) * patrolSpeed * dt;
       g.y += (wdy/wdist) * patrolSpeed * dt;
@@ -1727,11 +1865,11 @@ function updateGoblin(g, dt, bounds) {
   if (g.state === 'chase') {
     if (g.confused && g.confuseDirX !== undefined) {
       // Move randomly when confused
-      var confusedSpeed = g.speed * 0.5 * (g.slowed ? 0.1 : 1);
+      var confusedSpeed = g.speed * 0.5 * (g.slowed ? 0.1 : 1) * whiteFieldMult;
       g.x += g.confuseDirX * confusedSpeed * dt;
       g.y += g.confuseDirY * confusedSpeed * dt;
     } else if (distToPlayer > 2) {
-      var effectiveSpeed = g.slowed ? g.speed * 0.1 : g.speed;
+      var effectiveSpeed = (g.slowed ? g.speed * 0.1 : g.speed) * whiteFieldMult;
       g.x += (dx/distToPlayer) * effectiveSpeed * dt;
       g.y += (dy/distToPlayer) * effectiveSpeed * dt;
     }
@@ -1758,7 +1896,7 @@ function updateGoblin(g, dt, bounds) {
     }
     player.iframes = 0.9;
 
-    // Bounce goblin back
+    // Bounce entity back
     var nx = -dx/distToPlayer, ny = -dy/distToPlayer;
     g.bounceVx = nx * 320;
     g.bounceVy = ny * 320;
@@ -1776,7 +1914,7 @@ function updateGoblin(g, dt, bounds) {
   }
 }
 
-function drawDeadGoblin(g) {
+function drawDeadEntity(g) {
   var fadeAlpha = Math.min(1, g.deathTimer / 0.5); // fade out in last 0.5s
   ctx.save();
   ctx.globalAlpha = fadeAlpha;
@@ -1811,7 +1949,7 @@ function drawDeadGoblin(g) {
   ctx.restore();
 }
 
-function drawGoblin(g) {
+function drawEntity(g) {
   ctx.save();
 
   // Flash white on attack
@@ -1845,7 +1983,7 @@ function drawGoblin(g) {
   ctx.arc(g.x, g.y, g.r - 4, 0, Math.PI*2);
   ctx.fill();
 
-  // Goblin icon
+  // Entity icon
   ctx.font = '16px serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1859,7 +1997,7 @@ function drawGoblin(g) {
     ctx.fill();
   }
 
-  // HP bar above goblin
+  // HP bar above entity
   var barW = 60, barH = 7;
   var barX = g.x - barW/2, barY = g.y - g.r - 16;
   var hpPct = g.hp / g.hpMax;
@@ -1895,7 +2033,7 @@ function drawGoblin(g) {
     statusEffects.push({ icon:'⬇', color:'#7788cc', timer: debuffTimer });
   }
 
-  // Check bleeds on this goblin
+  // Check bleeds on this entity
   var gBleeds = bleeds.filter(function(b){ return b.target === g && b.timer > 0; });
   if (gBleeds.length > 0) {
     var maxBleed = gBleeds.reduce(function(a,b){ return a.timer>b.timer?a:b; });
@@ -2011,7 +2149,7 @@ function useBrickAction(color) {
 
   if (color === 'red')    startRedCharge(1);
   if (color === 'white')  doWhiteHeal(player.x, player.y);
-  if (color === 'yellow') startYellowAura({ follow: true, radius: scaleDist(120), duration: 3.0, label: 'DAZE FIELD' });
+  if (color === 'yellow') startYellowAura({ follow: true, radius: scaleDist(120 * affinityMult('yellow')), duration: 3.0, label: 'DAZE FIELD' });
   if (color === 'blue')   startBlueBolt(null);
   if (color === 'orange') startOrangeTrap(player.x, player.y);
   if (color === 'gray')   startGrayArmor(player.x, player.y);
@@ -2039,13 +2177,13 @@ function startRedChargeTo(dmgMult, tx, ty) {
   showFloatingText(player.x, player.y-50, 'BLITZ!', '#E24B4A');
 }
 
-function startRedCharge(dmgMult, targetGoblin) {
-  if (!goblins.length) return;
+function startRedCharge(dmgMult, targetEntity) {
+  if (!entities.length) return;
   var _dmgMult = dmgMult || 1;
-  var goblin = targetGoblin || goblins.reduce(function(a,b){
+  var entity = targetEntity || entities.reduce(function(a,b){
     return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;});
   var startX = player.x, startY = player.y;
-  var dx = goblin.x - player.x, dy = goblin.y - player.y;
+  var dx = entity.x - player.x, dy = entity.y - player.y;
   var dist = Math.sqrt(dx*dx + dy*dy) || 1;
   var nx = dx/dist, ny = dy/dist;
   brickAction = {
@@ -2072,10 +2210,11 @@ function getArmorMax() {
   return Math.floor(player.hpMax * mult);
 }
 function startWhiteRegen(tier) {
+  var mult = affinityMult('white');
   var baseHeal = player.cls === 'mender' ? 5 : 3;
   var baseDur = 5;
-  var hpPerSec = baseHeal * Math.pow(1.25, tier-1) / baseDur;
-  var duration = baseDur * Math.pow(2, tier-1);
+  var hpPerSec = baseHeal * Math.pow(1.25, tier-1) / baseDur * mult;
+  var duration = baseDur * Math.pow(2, tier-1) * mult;
   if (playerRegen) {
     // Stack — extend duration
     playerRegen.hpPerSec = Math.max(playerRegen.hpPerSec, hpPerSec);
@@ -2141,7 +2280,7 @@ function spawnHealSparkles(tier) {
 }
 
 function doWhiteHeal(targetX, targetY) {
-  var healAmt = player.cls === 'mender' ? 5 : 3;
+  var healAmt = Math.round((player.cls === 'mender' ? 5 : 3) * affinityMult('white'));
   var prev = player.hp;
   var cap = Math.max(player.hpMax, player.hp);
   player.hp = Math.min(cap, player.hp + healAmt);
@@ -2155,7 +2294,7 @@ function doWhiteHeal(targetX, targetY) {
 // ── YELLOW — Confuse ──────────────────────────────
 // Two flavors:
 //   • Aura (tap, overload):       3s ring that follows player or stays anchored;
-//                                  any goblin inside gets confused, refreshed
+//                                  any entity inside gets confused, refreshed
 //                                  each frame while in contact.
 //   • Instant burst (drag-to-pt): one-shot confuse burst at the drop point.
 var yellowAura = null; // { timer, baseRadius, followPlayer, ox, oy, label }
@@ -2184,15 +2323,16 @@ function updateYellowAura(dt) {
   var cx = yellowAura.followPlayer ? player.x : yellowAura.ox;
   var cy = yellowAura.followPlayer ? player.y : yellowAura.oy;
   var r = yellowAura.baseRadius;
-  goblins.forEach(function(g) {
+  var mult = affinityMult('yellow');
+  entities.forEach(function(g) {
     if (Math.hypot(g.x - cx, g.y - cy) <= r) {
       if (!g.confused) {
-        // First entry this session: seed a 2s confuse that lingers briefly after leaving
+        // First entry: seed a 2s confuse (scaled by affinity)
         g.confused = true;
-        g.confuseTimer = Math.max(g.confuseTimer || 0, 2.0);
+        g.confuseTimer = Math.max(g.confuseTimer || 0, 2.0 * mult);
       } else {
-        // Already confused: top up by a small sliver each frame in contact
-        g.confuseTimer = Math.max(g.confuseTimer || 0, 1.0);
+        // Already confused: top up each frame in contact (scaled by affinity)
+        g.confuseTimer = Math.max(g.confuseTimer || 0, 1.0 * mult);
       }
     }
   });
@@ -2230,14 +2370,15 @@ function drawYellowAura() {
 function startYellowConfuse(ox, oy, radius) {
   // Retained for drag-to-point instant bursts. Aura behavior now lives in
   // startYellowAura; taps and overloads route through there.
+  var mult = affinityMult('yellow');
   var cx = ox !== undefined ? ox : player.x;
   var cy = oy !== undefined ? oy : player.y;
-  var r = radius || scaleDist(300);
+  var r = radius || scaleDist(300 * mult);
   var hit = 0;
-  goblins.forEach(function(g) {
+  entities.forEach(function(g) {
     if (Math.hypot(g.x-cx, g.y-cy) <= r) {
       g.confused = true;
-      g.confuseTimer = (g.confuseTimer||0) + 2.0;
+      g.confuseTimer = (g.confuseTimer||0) + 2.0 * mult;
       hit++;
     }
   });
@@ -2256,8 +2397,8 @@ function updateBrickAction(dt, bounds) {
       if (brickAction.usePoint) {
         // Fixed direction toward dropped point
       } else {
-        // Track nearest goblin
-        var nearestG = goblins.length ? goblins.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null;
+        // Track nearest entity
+        var nearestG = entities.length ? entities.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null;
         if (nearestG) {
           var cdx = nearestG.x - player.x, cdy = nearestG.y - player.y;
           var cdist = Math.sqrt(cdx*cdx+cdy*cdy);
@@ -2272,11 +2413,12 @@ function updateBrickAction(dt, bounds) {
       player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
       // Hit check
       if (!brickAction.hit) {
-        var hitG = goblins.find(function(g){ return Math.hypot(player.x-g.x,player.y-g.y) < player.r+g.r; });
+        var hitG = entities.find(function(g){ return Math.hypot(player.x-g.x,player.y-g.y) < player.r+g.r; });
         if (hitG) {
           var rMult = brickAction.dmgMult||1;
-          damageGoblin(hitG, 3 * rMult); hitG.flashTimer = 0.3;
-          showFloatingText(hitG.x, hitG.y - 30, '-'+(3*rMult), '#E24B4A');
+          var rDmg = Math.round(3 * rMult * affinityMult('red'));
+          damageEntity(hitG, rDmg); hitG.flashTimer = 0.3;
+          showFloatingText(hitG.x, hitG.y - 30, '-'+rDmg, '#E24B4A');
           var rBurst = 8 + rMult * 4; // consistent count regardless of vScale
           for (var rbi = 0; rbi < rBurst; rbi++) {
             var rba = Math.random()*Math.PI*2;
@@ -2290,7 +2432,7 @@ function updateBrickAction(dt, bounds) {
           hitG.bounceVx = (kx/kd)*300; hitG.bounceVy = (ky/kd)*300;
           hitG.bounceTimer = 0.35; hitG.state = 'bounce';
           brickAction.hit = true;
-          if (goblins.length > 0 && goblins.every(function(g){return g.hp<=0;})) triggerVictory();
+          if (entities.length > 0 && entities.every(function(g){return g.hp<=0;})) triggerVictory();
           // Reverse red particles to stream back toward player origin
           var _rdx = brickAction.startX - hitG.x, _rdy = brickAction.startY - hitG.y;
           var _rd = Math.sqrt(_rdx*_rdx+_rdy*_rdy)||1;
@@ -2333,11 +2475,11 @@ function updateBrickAction(dt, bounds) {
       var rx = brickAction.startX - player.x;
       var ry = brickAction.startY - player.y;
       var rd = Math.sqrt(rx*rx+ry*ry);
-      var nearestForReturn = goblins.length ? goblins[0] : null;
+      var nearestForReturn = entities.length ? entities[0] : null;
       var safeStop = nearestForReturn ? nearestForReturn.AGGRO_RANGE * 1.5 : 0;
-      var distToGoblin = nearestForReturn ? Math.hypot(player.x-nearestForReturn.x, player.y-nearestForReturn.y) : 9999;
+      var distToEntity = nearestForReturn ? Math.hypot(player.x-nearestForReturn.x, player.y-nearestForReturn.y) : 9999;
       brickAction.returnTimer = (brickAction.returnTimer||0) + dt;
-      if (distToGoblin >= safeStop || rd <= 8 || brickAction.returnTimer >= 3.0) {
+      if (distToEntity >= safeStop || rd <= 8 || brickAction.returnTimer >= 3.0) {
         brickAction = null; // always terminates within 3s
       } else {
         var rs = Math.min(brickAction.returnSpeed * dt, rd);
@@ -2350,8 +2492,8 @@ function updateBrickAction(dt, bounds) {
 }
 
 
-// ── UPDATE GOBLIN CONFUSION ───────────────────────
-function updateGoblinConfusion(g, dt) {
+// ── UPDATE ENTITY CONFUSION ───────────────────────
+function updateEntityConfusion(g, dt) {
   if (!g.confused) return;
   g.confuseTimer -= dt;
   if (g.confuseTimer <= 0) {
@@ -2375,9 +2517,9 @@ function updateGoblinConfusion(g, dt) {
 var blueBolts = [];
 
 function startBlueBolt(lockedTarget) {
-  var target = lockedTarget || (goblins.length ? goblins.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null);
+  var target = lockedTarget || (entities.length ? entities.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null);
   if (!target || !player) return;
-  blueBolts.push({ x: player.x, y: player.y, target: target, speed: 500, dmg: 4, r: 7, dead: false, travelled: 0, tier: 1, glow: 0, delayTimer: 0 });
+  blueBolts.push({ x: player.x, y: player.y, target: target, speed: 500, dmg: Math.round(4 * affinityMult('blue')), r: 7, dead: false, travelled: 0, tier: 1, glow: 0, delayTimer: 0 });
   showFloatingText(player.x, player.y - 50, 'LANCE!', '#4db8ff');
 }
 
@@ -2415,9 +2557,22 @@ function updateBlueBolts(dt, bounds) {
     }
     // Require minimum travel before hit registers
     if (b.travelled > 30 && dist < b.r + b.target.r) {
-      damageGoblin(b.target, b.dmg);
+      damageEntity(b.target, b.dmg);
       b.target.flashTimer = 0.2;
       showFloatingText(b.target.x, b.target.y - 30, '-' + b.dmg, '#4db8ff');
+      // Overload impact burst: damage entities near the target (primary target
+      // excluded since it already took full dmg). burstRadius/burstDmg only set
+      // on overload bolts, so tap-blue impacts act as before.
+      if (b.burstRadius && b.burstDmg) {
+        entities.forEach(function(other) {
+          if (other === b.target || other.hp <= 0) return;
+          if (Math.hypot(other.x - b.target.x, other.y - b.target.y) <= b.burstRadius) {
+            damageEntity(other, b.burstDmg);
+            other.flashTimer = 0.2;
+            showFloatingText(other.x, other.y - 30, '-' + b.burstDmg, '#6fb8ff');
+          }
+        });
+      }
       // Impact burst scaled by tier
       var tier = b.tier || 1;
       var burstCount = Math.max(1, Math.round((2 + Math.ceil(tier * 1.25)) * vScale(tier)));
@@ -2502,7 +2657,7 @@ function drawBlueDrag() {
   ctx.setLineDash([5,5]); ctx.strokeStyle = '#4db8ff88'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
   ctx.setLineDash([]);
-  var onTarget = goblins.some(function(g){return Math.hypot(cx-g.x,cy-g.y)<g.r+30;});
+  var onTarget = entities.some(function(g){return Math.hypot(cx-g.x,cy-g.y)<g.r+30;});
   ctx.strokeStyle = onTarget ? '#4db8ff' : '#4db8ff44'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(cx, cy, 16, 0, Math.PI*2); ctx.stroke();
   ctx.restore();
@@ -2575,17 +2730,17 @@ function spawnSpikeTrap(x, y, r, initialDmg, sealed) {
     initialDmg: initialDmg || 2,
     pulse: 0, done: false, target: null,
     spikeAngle: Math.random() * Math.PI * 2,
-    // if sealed, trap contains already-caught goblins
-    caughtGoblins: [],
+    // if sealed, trap contains already-caught entities
+    caughtEntities: [],
   };
   if (sealed) {
-    // Catch goblins within radius immediately
-    goblins.forEach(function(g) {
+    // Catch entities within radius immediately
+    entities.forEach(function(g) {
       if (Math.hypot(g.x-x, g.y-y) < r + g.r) {
-        t.caughtGoblins.push(g);
+        t.caughtEntities.push(g);
         t.triggered = true;
         t.holdTimer = t.HOLD_DURATION;
-        damageGoblin(g, t.initialDmg, false);
+        damageEntity(g, t.initialDmg, false);
         showFloatingText(g.x, g.y-30, '⚡-'+t.initialDmg, '#ff6600');
       }
     });
@@ -2594,29 +2749,31 @@ function spawnSpikeTrap(x, y, r, initialDmg, sealed) {
 }
 
 function startOrangeTrap(ox, oy, tier) {
+  var mult = affinityMult('orange');
   var isDrag = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) > scaleDist(40);
   if (isDrag) {
-    var tr = 25 + (tier||1) * 15;
-    var dmg = 1 + (tier||1);
+    var tr = (25 + (tier||1) * 15) * mult;
+    var dmg = Math.max(1, Math.round((1 + (tier||1)) * mult));
     spawnSpikeTrap(ox, oy, tr, dmg, true);
     showFloatingText(ox, oy-40, 'SNARE!', '#F57C00');
   } else {
     // Tap — just place small trap at feet
-    spawnSpikeTrap(player.x, player.y, 20, 2, false);
+    spawnSpikeTrap(player.x, player.y, 20 * mult, Math.max(1, Math.round(2 * mult)), false);
     showFloatingText(player.x, player.y-40, 'PRIMED!', '#F57C00');
   }
 }
 
 function fireOverloadOrangeScatter(count, ox, oy) {
-  var tr = 25 + count * 15;
-  var dmg = 1 + count;
+  var mult = affinityMult('orange');
+  var tr = (25 + count * 15) * mult;
+  var dmg = Math.max(1, Math.round((1 + count) * mult));
   spawnSpikeTrap(ox, oy, tr, dmg, true);
   showFloatingText(ox, oy-40, 'PINNED x'+count+'!', '#F57C00');
 }
 
 function applyBleed(g, dmg, tier) {
   var bleedDmg = Math.max(1, Math.floor(dmg * 0.5));
-  var duration = 3.0 * Math.pow(1.25, (tier || 1) - 1);
+  var duration = 3.0 * Math.pow(1.25, (tier || 1) - 1) * affinityMult('orange');
   bleeds.push({ target: g, dmg: bleedDmg, timer: duration, tick: 0 });
 }
 
@@ -2627,9 +2784,9 @@ function updateBleeds(dt) {
     b.tick += dt;
     if (b.tick >= 1.0) {
       b.tick -= 1.0;
-      damageGoblin(b.target, b.dmg, false);
+      damageEntity(b.target, b.dmg, false);
       showFloatingText(b.target.x, b.target.y-20, '🩸 -'+b.dmg, '#cc2200');
-      if (goblins.length > 0 && goblins.every(function(g){return g.hp<=0;})) triggerVictory();
+      if (entities.length > 0 && entities.every(function(g){return g.hp<=0;})) triggerVictory();
     }
   });
 }
@@ -2638,7 +2795,7 @@ function updateTraps(dt) {
   // Aura
   if (orangeAura) {
     orangeAura.pulse = (orangeAura.pulse + dt*4) % (Math.PI*2);
-    goblins.forEach(function(g) {
+    entities.forEach(function(g) {
       if (Math.hypot(g.x-player.x, g.y-player.y) < orangeAura.r + g.r) {
         if (!g._auraTrap) {
           g._auraTrap = true;
@@ -2659,27 +2816,27 @@ function updateTraps(dt) {
       if (t.snapTimer < t.SNAP) t.snapTimer += dt;
       t.holdTimer -= dt;
       if (t.holdTimer <= 0) {
-        // Release — apply bleed to caught goblins
+        // Release — apply bleed to caught entities
         var bTier = Math.max(1, t.initialDmg - 1);
-        t.caughtGoblins.forEach(function(g) {
+        t.caughtEntities.forEach(function(g) {
           applyBleed(g, t.initialDmg, bTier);
         });
         t.done = true;
         return;
       }
-      // Hold caught goblins in place
-      t.caughtGoblins.forEach(function(g) {
+      // Hold caught entities in place
+      t.caughtEntities.forEach(function(g) {
         g.bounceVx=0; g.bounceVy=0; g.bounceTimer=0.05; g.state='bounce';
         g.x += (t.x-g.x)*0.08; g.y += (t.y-g.y)*0.08; // pull toward center
       });
     } else {
-      // Waiting — detect goblin
-      goblins.forEach(function(g) {
+      // Waiting — detect entity
+      entities.forEach(function(g) {
         if (!t.triggered && Math.hypot(g.x-t.x,g.y-t.y)<t.r+g.r) {
           t.triggered = true;
           t.holdTimer = t.HOLD_DURATION;
-          t.caughtGoblins = [g];
-          damageGoblin(g, t.initialDmg, false);
+          t.caughtEntities = [g];
+          damageEntity(g, t.initialDmg, false);
           showFloatingText(t.x,t.y-30,'SPRING! -'+t.initialDmg,'#ff6600');
         }
       });
@@ -2770,20 +2927,23 @@ function startGrayArmor(targetX, targetY, tier) {
     startGrayWall(targetX, targetY, tier || 1);
   } else {
     var aMax = getArmorMax();
-    // Base: 1 armor pip per gray brick. Future "Iron Hide"-style skill can
-    // unlock 2-per-brick (multiplier will hook here once skill system lives).
-    player.armor = Math.min(aMax, (player.armor||0) + 1);
-    showFloatingText(player.x, player.y-50, 'PLATED!', '#AAAAAA');
+    // Base: 1 armor pip per gray brick, scaled by affinity. Signature gray
+    // (Builder/Warrior) gives 1.25× armor which rounds favorably on stacks.
+    // Future "Iron Hide"-style skill will unlock higher multipliers.
+    var pips = Math.max(1, Math.round(1 * affinityMult('gray')));
+    player.armor = Math.min(aMax, (player.armor||0) + pips);
+    showFloatingText(player.x, player.y-50, 'PLATED!' + (pips > 1 ? ' +' + pips : ''), '#AAAAAA');
     armorBursts.push({ x: player.x, y: player.y, r: player.r, alpha: 0.8 });
   }
 }
 
 function startGrayWall(cx, cy, tier) {
-  var maxR = scaleDist(30 + tier * 22);
-  var hp = 4 * tier;
-  // Mark which goblins start inside — only they get contained
+  var mult = affinityMult('gray');
+  var maxR = scaleDist((30 + tier * 22) * mult);
+  var hp = Math.max(1, Math.round(4 * tier * mult));
+  // Mark which entities start inside — only they get contained
   var containedIds = [];
-  goblins.forEach(function(g, i) {
+  entities.forEach(function(g, i) {
     if (Math.hypot(g.x-cx, g.y-cy) < maxR) containedIds.push(i);
   });
   grayWalls.push({
@@ -2823,9 +2983,9 @@ function updateGrayWalls(dt) {
       }
     }
 
-    // Push contained goblins back inside, damage wall on sustained contact
-    if (!w._goblinCooldowns) w._goblinCooldowns = {};
-    goblins.forEach(function(g, gi) {
+    // Push contained entities back inside, damage wall on sustained contact
+    if (!w._entityCooldowns) w._entityCooldowns = {};
+    entities.forEach(function(g, gi) {
       var isContained = w.containedIds && w.containedIds.indexOf(gi) >= 0;
       if (!isContained) return;
       var dx = g.x - w.x, dy = g.y - w.y;
@@ -2835,16 +2995,16 @@ function updateGrayWalls(dt) {
         // Push back inside
         g.x = w.x + (dx/dist) * wallEdge;
         g.y = w.y + (dy/dist) * wallEdge;
-        // Sustained damage — 1 per second per goblin
-        w._goblinCooldowns[gi] = (w._goblinCooldowns[gi]||0) - dt;
-        if (w._goblinCooldowns[gi] <= 0) {
-          w._goblinCooldowns[gi] = 1.0; // 1s cooldown
+        // Sustained damage — 1 per second per entity
+        w._entityCooldowns[gi] = (w._entityCooldowns[gi]||0) - dt;
+        if (w._entityCooldowns[gi] <= 0) {
+          w._entityCooldowns[gi] = 1.0; // 1s cooldown
           w.hp = Math.max(0, w.hp - 1);
           w.flashTimer = 0.15;
           showFloatingText(w.x + (dx/dist)*w.r, w.y + (dy/dist)*w.r - 10, 'CRACK!', '#AAAAAA');
         }
       } else {
-        w._goblinCooldowns[gi] = 0; // reset when not pushing
+        w._entityCooldowns[gi] = 0; // reset when not pushing
       }
     });
   });
@@ -2912,7 +3072,7 @@ var greenBurst = null;
 function startGreenBurst(ox, oy) {
   var x = (ox !== undefined) ? ox : player.x;
   var y = (oy !== undefined) ? oy : player.y;
-  var BURST_R = scaleDist(400);
+  var BURST_R = scaleDist(400 * affinityMult('green'));
   if (greenBurst && !greenBurst.done) {
     // Already active — just trigger a new push wave without restarting radius
     greenBurst._poisonedIds = []; // allow re-poison on reuse
@@ -2929,33 +3089,33 @@ function updateGreenBurst(dt) {
   greenBurst.r += 600 * dt;
   greenBurst.alpha = Math.max(0, 1 - (greenBurst.r / greenBurst.maxR));
 
-  // Ring acts as solid wall — push all goblins
-  goblins.forEach(function(goblin) {
+  // Ring acts as solid wall — push all entities
+  entities.forEach(function(entity) {
     var gox = greenBurst.ox||player.x, goy = greenBurst.oy||player.y;
-    var dx = goblin.x - gox, dy = goblin.y - goy;
+    var dx = entity.x - gox, dy = entity.y - goy;
     var dist = Math.sqrt(dx*dx+dy*dy) || 1;
     var pushTarget = greenBurst.maxR * 0.75;
-    var gId = goblins.indexOf(goblin);
+    var gId = entities.indexOf(entity);
     if (!greenBurst._pushIds) greenBurst._pushIds = [];
-    if (dist < greenBurst.maxR && dist < pushTarget - goblin.r && greenBurst._pushIds.indexOf(gId) < 0) {
+    if (dist < greenBurst.maxR && dist < pushTarget - entity.r && greenBurst._pushIds.indexOf(gId) < 0) {
       var nx = dx/dist, ny = dy/dist;
-      goblin.bounceVx = nx * 420; goblin.bounceVy = ny * 420;
-      goblin.bounceTimer = 0.4; goblin.state = 'bounce';
+      entity.bounceVx = nx * 420; entity.bounceVy = ny * 420;
+      entity.bounceTimer = 0.4; entity.state = 'bounce';
       greenBurst._pushIds.push(gId);
     }
     // Poison when ring passes — per-burst tracking so stacking always works
-    var distCheck = Math.hypot(goblin.x - gox, goblin.y - goy);
-    if (greenBurst.r >= distCheck - goblin.r) {
+    var distCheck = Math.hypot(entity.x - gox, entity.y - goy);
+    if (greenBurst.r >= distCheck - entity.r) {
       if (!greenBurst._poisonedIds) greenBurst._poisonedIds = [];
-      var gId = goblins.indexOf(goblin);
+      var gId = entities.indexOf(entity);
       if (greenBurst._poisonedIds.indexOf(gId) < 0) {
-        goblin.poisoned = true;
-        goblin.poisonTimer = 4.0;
+        entity.poisoned = true;
+        entity.poisonTimer = 4.0;
         // Normal cast doubles stack; overload multiplies by 2^count (1-2-4-8-16)
         var mult = greenBurst._poisonMult || 1;
         var newStack = Math.pow(2, mult - 1);
-        goblin.poisonStack = goblin.poisonStack > 0 ? goblin.poisonStack * Math.pow(2, mult) : newStack;
-        goblin.poisonTick = goblin.poisonTick || 0;
+        entity.poisonStack = entity.poisonStack > 0 ? entity.poisonStack * Math.pow(2, mult) : newStack;
+        entity.poisonTick = entity.poisonTick || 0;
         greenBurst._poisonedIds.push(gId);
       }
     }
@@ -2964,7 +3124,7 @@ function updateGreenBurst(dt) {
   if (greenBurst.r >= greenBurst.maxR * 1.1) greenBurst.done = true;
 }
 
-function updateGoblinPoison(g, dt) {
+function updateEntityPoison(g, dt) {
   if (!g.poisoned) return;
   g.poisonTimer -= dt;
   if (g.poisonTimer <= 0) { g.poisoned = false; g.poisonTick = 0; g.poisonStack = 0; return; }
@@ -2972,10 +3132,10 @@ function updateGoblinPoison(g, dt) {
   if (g.poisonTick >= 1.0) {
     g.poisonTick -= 1.0;
     var poisonDmg = g.poisonStack || 1;
-    damageGoblin(g, poisonDmg, false); // poison is environmental
+    damageEntity(g, poisonDmg, false); // poison is environmental
     g.flashTimer = 0.08;
     showFloatingText(g.x, g.y-30, '☠ -' + poisonDmg, '#1D9E75');
-    if (goblins.length > 0 && goblins.every(function(x){return x.hp<=0;})) triggerVictory();
+    if (entities.length > 0 && entities.every(function(x){return x.hp<=0;})) triggerVictory();
   }
 }
 
@@ -3010,7 +3170,8 @@ var purpleBursts = [];
 function startPurpleBurst(ox, oy) {
   var x = (ox !== undefined) ? ox : player.x;
   var y = (oy !== undefined) ? oy : player.y;
-  purpleBursts.push({ r: 0, maxR: scaleDist(400), alpha: 1, done: false, hit: false, ox: x, oy: y });
+  var mult = affinityMult('purple');
+  purpleBursts.push({ r: 0, maxR: scaleDist(400 * mult), alpha: 1, done: false, hit: false, ox: x, oy: y, dmgMult: mult });
   showFloatingText(x, y-50, 'RUPTURE!', '#7B2FBE');
 }
 
@@ -3036,19 +3197,19 @@ function updatePurpleBursts(dt) {
       color: Math.random() > 0.5 ? '#9B6FD4' : '#ffffff',
     });
   }
-  // Hit goblin — per-burst tracking so back-to-back bursts each deal damage
+  // Hit entity — per-burst tracking so back-to-back bursts each deal damage
   if (!purpleBurst._hitIds) purpleBurst._hitIds = [];
-  goblins.forEach(function(goblin) {
-    var gId = goblins.indexOf(goblin);
+  entities.forEach(function(entity) {
+    var gId = entities.indexOf(entity);
     if (purpleBurst._hitIds.indexOf(gId) >= 0) return;
-    var dist = Math.hypot(goblin.x-purpleBurst.ox, goblin.y-purpleBurst.oy);
+    var dist = Math.hypot(entity.x-purpleBurst.ox, entity.y-purpleBurst.oy);
     if (purpleBurst.r >= dist) {
       var pbRemote = Math.hypot(purpleBurst.ox-player.x, purpleBurst.oy-player.y) > 20;
       var purpleDmg = 3 * (purpleBurst.dmgMult||1);
-      var prevHp = goblin.hp;
-      damageGoblin(goblin, purpleDmg, !pbRemote); goblin.flashTimer = 0.2;
-      var actualDmg = prevHp - goblin.hp; // actual damage dealt (may be less if goblin low HP)
-      showFloatingText(goblin.x, goblin.y-30, '-' + actualDmg, '#7B2FBE');
+      var prevHp = entity.hp;
+      damageEntity(entity, purpleDmg, !pbRemote); entity.flashTimer = 0.2;
+      var actualDmg = prevHp - entity.hp; // actual damage dealt (may be less if entity low HP)
+      showFloatingText(entity.x, entity.y-30, '-' + actualDmg, '#7B2FBE');
 
       purpleBurst._hitIds.push(gId);
       // Heal player by damage dealt, allow overheal up to 3x max HP
@@ -3057,7 +3218,7 @@ function updatePurpleBursts(dt) {
         player.hp = Math.min(overhealCap, player.hp + actualDmg);
         showFloatingText(player.x, player.y-50, '+' + actualDmg + ' HP', '#9B6FD4');
       }
-      if (goblins.length > 0 && goblins.every(function(g){return g.hp<=0;})) triggerVictory();
+      if (entities.length > 0 && entities.every(function(g){return g.hp<=0;})) triggerVictory();
     }
   });
   if (purpleBurst.r >= purpleBurst.maxR) purpleBurst.done = true;
@@ -3104,19 +3265,20 @@ function drawPurpleBursts() {
 function startBlackEffect(ox, oy) {
   var x = (ox !== undefined) ? ox : player.x;
   var y = (oy !== undefined) ? oy : player.y;
+  var mult = affinityMult('black');
   if (blackEffect) {
     // Already active — expand radius by 1.3x, reset timer, shift origin toward new cast
-    blackEffect.RADIUS = Math.min(blackEffect.RADIUS * 1.3, 900);
+    blackEffect.RADIUS = Math.min(blackEffect.RADIUS * 1.3, scaleDist(900 * mult));
     blackEffect.timer = blackEffect.DURATION;
     blackEffect.ox = (blackEffect.ox + x) / 2;
     blackEffect.oy = (blackEffect.oy + y) / 2;
     showFloatingText(x, y-50, 'DARKNESS+!', '#777');
   } else {
-    blackEffect = { timer: 3.0, DURATION: 3.0, tickTimer: 0, TICK: 0.5, alpha: 0,
-      FADE_IN: 0.8, FADE_OUT: 0.8, ox: x, oy: y, RADIUS: 50 };
+    blackEffect = { timer: 3.0 * mult, DURATION: 3.0 * mult, tickTimer: 0, TICK: 0.5, alpha: 0,
+      FADE_IN: 0.8, FADE_OUT: 0.8, ox: x, oy: y, RADIUS: scaleDist(50 * mult), tickDmg: Math.max(1, Math.round(1 * mult)) };
     showFloatingText(x, y-50, 'VOID!', '#555555');
   }
-  goblins.forEach(function(g) {
+  entities.forEach(function(g) {
     if (Math.hypot(g.x-x, g.y-y) < blackEffect.RADIUS) { g.attackSlowed = true; g.attackSlowTimer = 3.0; }
   });
 }
@@ -3136,8 +3298,8 @@ function updateBlackEffect(dt) {
     var outProgress = (elapsed - fadeIn - hold) / fadeOut;
     blackEffect.alpha = Math.max(0, (1 - outProgress) * 0.7);
   }
-  // Pull goblins toward origin + damage ticks
-  goblins.forEach(function(g) {
+  // Pull entities toward origin + damage ticks
+  entities.forEach(function(g) {
     var dx = blackEffect.ox - g.x, dy = blackEffect.oy - g.y;
     var dist = Math.sqrt(dx*dx+dy*dy);
     if (dist < blackEffect.RADIUS && dist > 4) {
@@ -3146,28 +3308,49 @@ function updateBlackEffect(dt) {
       g.y += (dy/dist) * pullStr;
     }
   });
+  // Damage tick every TICK seconds. Accumulate damage per entity and only
+  // display a floating number every DISPLAY_INTERVAL seconds so players can
+  // read the impact instead of seeing a spam of small ticks.
   blackEffect.tickTimer += dt;
+  blackEffect.displayTimer = (blackEffect.displayTimer || 0) + dt;
+  var DISPLAY_INTERVAL = 1.5;
   if (blackEffect.tickTimer >= blackEffect.TICK) {
     blackEffect.tickTimer -= blackEffect.TICK;
-    goblins.forEach(function(goblin) {
-      var dist = Math.hypot(goblin.x-blackEffect.ox, goblin.y-blackEffect.oy);
+    entities.forEach(function(entity) {
+      var dist = Math.hypot(entity.x-blackEffect.ox, entity.y-blackEffect.oy);
       if (dist < blackEffect.RADIUS) {
         var beRemote = Math.hypot(blackEffect.ox-player.x, blackEffect.oy-player.y) > 20;
         var beTick = blackEffect.tickDmg || 1;
-        damageGoblin(goblin, beTick, !beRemote); goblin.flashTimer=0.08;
-        showFloatingText(goblin.x, goblin.y-25, '💀 -1', '#888888');
+        damageEntity(entity, beTick, !beRemote); entity.flashTimer=0.08;
+        // Accumulate displayed damage on the entity
+        entity._blackAccumDmg = (entity._blackAccumDmg || 0) + beTick;
       }
     });
-    if (goblins.length > 0 && goblins.every(function(g){return g.hp<=0;})) triggerVictory();
   }
-      if (blackEffect && blackEffect.timer <= 0) {
-      var _ox = blackEffect.ox, _oy = blackEffect.oy, _r = blackEffect.RADIUS;
-      blackEffect = null;
-      goblins.forEach(function(g) {
-        g.attackSlowed=false; g.attackSlowTimer=0;
-        if (Math.hypot(g.x-_ox, g.y-_oy) < _r) { g.slowed=true; g.slowTimer=5.0; }
-      });
-    }
+  // Flush accumulated damage display every DISPLAY_INTERVAL seconds
+  if (blackEffect.displayTimer >= DISPLAY_INTERVAL) {
+    blackEffect.displayTimer -= DISPLAY_INTERVAL;
+    entities.forEach(function(entity) {
+      if (entity._blackAccumDmg && entity._blackAccumDmg > 0) {
+        showFloatingText(entity.x, entity.y-25, '💀 -' + entity._blackAccumDmg, '#888888');
+        entity._blackAccumDmg = 0;
+      }
+    });
+  }
+  if (entities.length > 0 && entities.every(function(g){return g.hp<=0;})) triggerVictory();
+  if (blackEffect && blackEffect.timer <= 0) {
+    var _ox = blackEffect.ox, _oy = blackEffect.oy, _r = blackEffect.RADIUS;
+    blackEffect = null;
+    entities.forEach(function(g) {
+      g.attackSlowed=false; g.attackSlowTimer=0;
+      if (Math.hypot(g.x-_ox, g.y-_oy) < _r) { g.slowed=true; g.slowTimer=5.0; }
+      // Flush any pending black accum damage text so players see final total
+      if (g._blackAccumDmg && g._blackAccumDmg > 0) {
+        showFloatingText(g.x, g.y-25, '💀 -' + g._blackAccumDmg, '#888888');
+        g._blackAccumDmg = 0;
+      }
+    });
+  }
 }
 
 function drawBlackEffect(bounds) {
@@ -3215,8 +3398,8 @@ function resize() {
     player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
     player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
   }
-  if (goblins && goblins.length) {
-    goblins.forEach(function(g) {
+  if (entities && entities.length) {
+    entities.forEach(function(g) {
       g.r = Math.round(18 * scale);
       g.AGGRO_RANGE = Math.round(200 * scale);
       g.DEAGGRO_RANGE = Math.round(320 * scale);
@@ -3279,17 +3462,23 @@ function _internalStart(config) {
   _startedAt = performance.now();
   renderBrickBar();
 
-  // Spawn goblin after player is placed
+  // Spawn entities after player is placed. cfg.entityCount (default 1) lets
+  // the host page request multiple entities for scaling tests.
   var bounds = getArenaBounds();
-  goblins = [];
-  goblins.push(makeGoblin(bounds, 0));
+  entities = [];
+  var count = Math.max(1, Math.min(10, cfg.entityCount || 1));
+  for (var si = 0; si < count; si++) {
+    // Spread entities around a circle so they don't all spawn stacked.
+    var angleOffset = count > 1 ? (si / count) * Math.PI * 2 : 0;
+    entities.push(makeEntity(bounds, angleOffset));
+  }
 
   // Reset all effects
   blueBolts = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = [];
   greenBurst = null; greenDragActive = false; greenDragPos = null; purpleBursts = []; purpleParticles = [];
-  blackEffect = null; playerSparkles = []; goblinRespawnPending = false; playerRegen = null;
-  brickAction = null; dashCooldown = 0; dragTarget = null; dashGoblin = null; overloadState = null;
-  yellowAura = null;
+  blackEffect = null; playerSparkles = []; entityRespawnPending = false; playerRegen = null;
+  yellowAura = null; whiteField = null;
+  brickAction = null; dashCooldown = 0; dragTarget = null; dashEntity = null; overloadState = null;
 
   lastTs = performance.now();
   updateHUD();
@@ -3302,18 +3491,18 @@ function _internalStart(config) {
   emit('start', { cls: cls, mode: cfg.mode || 'sandbox' });
 }
 
-var goblinRespawnPending = false;
+var entityRespawnPending = false;
 
 function triggerVictory() {
-  if (!running || goblinRespawnPending) return;
-  goblinRespawnPending = true;
+  if (!running || entityRespawnPending) return;
+  entityRespawnPending = true;
   showFloatingText(player.x, player.y - 60, 'FELLED!', '#F5D000');
   emit('enemyKilled');
   setTimeout(function() {
-    if (!running) { goblinRespawnPending = false; return; }
+    if (!running) { entityRespawnPending = false; return; }
     var bounds = getArenaBounds();
-    goblins.push(makeGoblin(bounds, 0));
-    goblinRespawnPending = false;
+    entities.push(makeEntity(bounds, 0));
+    entityRespawnPending = false;
   }, 2000);
 }
 
@@ -3353,7 +3542,7 @@ var _tickInterval = null;
 function _computeState() {
   if (!player) return null;
   var first = null;
-  for (var i = 0; i < goblins.length; i++) { if (goblins[i].hp > 0) { first = goblins[i]; break; } }
+  for (var i = 0; i < entities.length; i++) { if (entities[i].hp > 0) { first = entities[i]; break; } }
   return {
     playerCls:   player.cls,
     playerHp:    player.hp,
@@ -3433,7 +3622,7 @@ function _internalTeardown() {
   _eventHandler = null;
   _initialized = false;
   player = null;
-  goblins = [];
+  entities = [];
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3481,7 +3670,7 @@ window.Rumble = {
     return {
       running: running,
       hasPlayer: !!player,
-      goblinCount: goblins.length,
+      entityCount: entities.length,
       projectileCount: (blueBolts||[]).length,
       trapCount: (traps||[]).length,
       wallCount: (grayWalls||[]).length,
@@ -3505,7 +3694,7 @@ window.Rumble = {
     updateHUD();
   },
   setEnemyHP: function(n) {
-    var g = goblins.find(function(x){ return x.hp > 0; });
+    var g = entities.find(function(x){ return x.hp > 0; });
     if (!g) return;
     g.hp = Math.max(0, Math.min(g.hpMax, n|0));
   },
