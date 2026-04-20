@@ -23,12 +23,13 @@ Starting conditions should feel **weak and scared**. A first goblin fight should
 ### The two-layer economy
 
 **In-rumble (real-time combat):**
-- Player enters with a fixed class starting kit of 3 bricks
+- Player enters with their current inventory of bricks
+- Starting kit is 3 bricks (2 signature + 1 secondary); inventory grows via progression
 - Bricks refresh CONTINUOUSLY during battle at per-class per-color rate
 - Signature colors refresh fast, baseline colors refresh slowly
 - Overload (holding a brick) burns multiple bricks at once, with fatigue curve
-- Pool caps prevent infinite stockpiling
-- When battle ends, rumble brick state is discarded; inventory is separate
+- Inventory IS the rumble pool. No separate cap. Own 5 blues → have 5 blues available (minus whatever is currently refreshing)
+- When battle ends, spent bricks all refresh for next battle (inventory is persistent)
 
 **On-board (turn-based):**
 - Fragments are the primary resource (all 9 colors, 1 fragment type per color)
@@ -58,26 +59,26 @@ Fragments (scattered) → Fusion (minigame) → Bricks (inventory)
 
 Starting values — rumble-entry. HP does not auto-refill fully between battles; regen scales with performance.
 
-| Class | HP | Speed | Signature (3s refresh, pool 4) | Secondary (5s refresh, pool 3) | Starting kit |
+| Class | HP | Speed | Signature (3s refresh) | Secondary (5s refresh) | Starting kit |
 |---|---|---|---|---|---|
 | Warrior | 14 | 150 | red | gray | red×2, gray×1 |
 | Wizard | 6 | 180 | blue | purple | blue×2, purple×1 |
 | Scout | 9 | 260 | orange | red | orange×2, red×1 |
 | Builder | 12 | 150 | gray | orange | gray×2, orange×1 |
-| Mender | 8 | 160 | white | purple | white×2, purple×1 |
+| Mender | 8 | 160 | white | black | white×2, black×1 |
 | Beastcaller | 10 | 220 | green | yellow | green×2, yellow×1 |
 
-All non-signature, non-secondary colors are **baseline** (10s refresh, pool cap 2).
+All non-signature, non-secondary colors are **baseline** (10s refresh).
 
 ### Brick refresh mechanics (rumble only)
 
-| Tier | Refresh rate | Pool cap |
-|---|---|---|
-| Signature (1 color per class) | 3s per brick | 4 max |
-| Secondary (1 color per class) | 5s per brick | 3 max |
-| Baseline (7 colors per class) | 10s per brick | 2 max |
+| Tier | Refresh rate |
+|---|---|
+| Signature (1 color per class) | 3s per brick |
+| Secondary (1 color per class) | 5s per brick |
+| Baseline (7 colors per class) | 10s per brick |
 
-Refresh ticks continuously. Pool caps at the listed maximum.
+Refresh ticks continuously. Each brick refreshes back to available once its timer elapses. Available count tops out at inventory count — you can't have more bricks in a rumble than you own.
 
 ### Overload fatigue (hybrid)
 
@@ -152,7 +153,7 @@ These performance metrics ALSO drive post-battle HP regen rate. A flawless kill 
 Not in this spec. Skills will be designed next economy pass. Current placeholder directions:
 
 - Reduce refresh time on signature color
-- Expand pool cap on signature
+- Reduce refresh time on secondary color
 - Reduce fatigue decay on overloads
 - Increase fragment drop rate from events
 - Class-specific abilities (each class gets 1-2 unique hooks)
@@ -392,7 +393,7 @@ or `./save.sh "what changed"`.
 
 ### Combat & Economy v1 (locked)
 
-| Class | HP | Speed | Signature (3s refresh, pool 4) | Secondary (5s, pool 3) | Starting Kit |
+| Class | HP | Speed | Signature (3s refresh) | Secondary (5s refresh) | Starting Kit |
 |---|---|---|---|---|---|
 | Warrior | 14 | 150 | red | gray | red×2 + gray×1 |
 | Wizard | 6 | 180 | blue | purple | blue×2 + purple×1 |
@@ -403,8 +404,8 @@ or `./save.sh "what changed"`.
 
 **Mender design note:** Originally Mender had white signature + purple secondary. This proved to be a problem — both bricks in the kit are pure support/healing, meaning a Mender had no threat capability and never felt endangered. Swapping purple for black (pull/crush zone) gives them a control tool: they can pull goblins into a zone, damage them over time, slow them. This creates tension in combat (they have to choose between healing and threat management) while keeping white as their core healing identity. Purple becomes baseline for Mender again.
 
-- Baseline colors: 10s refresh, pool cap 2. Not in starting kit — only enter a rumble via future fragment/fusion economy.
-- **Critical clarification (learned this session):** pool caps are *ceilings*, not per-battle maxes. `brickMax per battle = min(starting kit count, pool cap)`. To exceed starting counts you find fragments on the board and fuse them, equipping more before next battle. Refreshing in combat only tops up to starting count, never higher.
+- Baseline colors: 10s refresh. Not in starting kit — only enter a rumble via future fragment/fusion economy.
+- **Inventory IS the rumble pool.** No separate pool cap. If you own N blues, you can fire up to N blues in a battle before needing to wait for refresh. Growth via fragments/fusion directly increases rumble capability.
 - Refresh timers staggered at battle start per color (random 0–rate offset) so when you spend bricks they don't all refresh synchronously.
 
 ### Fatigue (visible, not yet scaling damage)
@@ -490,6 +491,231 @@ Matrix reference (each class has exactly one signature + one secondary; all 7 ot
 | Mender | white | black |
 | Beastcaller | green | yellow |
 
+### Overload stack bonus (locked)
+
+Overloading adds a per-brick power bonus on top of linear count scaling. The more bricks you commit to one cast, the more powerful each individual brick becomes. This addresses the v1 problem where 2-brick overload equaled 2 taps mathematically — making overload feel identical to split-firing, which defeats the purpose of holding/committing.
+
+Formula:
+```
+overloadStackMult(count) = 1 + (count - 1) * 0.2
+final_output = base × count × overloadStackMult(count) × affinityMult(color)
+```
+
+Scale table (per-brick multiplier at different counts):
+- count=1 (tap): 1.0× (no bonus — this is the baseline)
+- count=2: 1.2× per brick (output = base × 2 × 1.2)
+- count=3: 1.4× per brick
+- count=4: 1.6× per brick
+- count=5: 1.8× per brick
+- count=10: 2.8× per brick
+
+**Unbounded by design.** No diminishing returns curve, no hard cap. Monster difficulty scales to match player progression — tougher monsters will justify bigger numbers. A 10-brick overload should feel like a god-tier nuke, and that's the point.
+
+Applied to ALL 9 brick colors (damage, heal, duration, radius, charge count — whatever output the color produces).
+
+Concrete impact — Wizard blue overload damage before vs after:
+
+| Count | Before (4 × count × 1.25) | After (× stack mult) |
+|-------|---|---|
+| 1 (tap) | 5 | 5 (unchanged) |
+| 2 | 10 | 12 |
+| 3 | 15 | 21 |
+| 5 | 25 | 45 |
+| 10 | 50 | 140 |
+
+Design intent: make the choice to HOLD and commit bricks meaningful. Previously a 2-brick overload was identical to two taps except for timing/fatigue downsides, which is backwards incentive. Now committing to overload is mathematically rewarded proportional to commitment.
+
+### Inventory as rumble pool (locked)
+
+Previously there was a concept of "pool caps" (signature=4, secondary=3, baseline=2) that clamped how many bricks of each color a player could bring into rumble. This concept has been **removed entirely**. Inventory IS the rumble pool.
+
+- Own N bricks of a color → have N available in rumble (minus currently-refreshing).
+- No artificial ceiling. Earning bricks through progression (fragments → fusion → inventory) directly increases rumble capability.
+- Refresh rates still tier by class (3s signature / 5s secondary / 10s baseline) — but refresh tops back up to inventory count, not to some separate cap.
+
+Design intent: progression feels like permanent power growth. A Wizard who fuses 2 more blue bricks into their inventory now has 4 blue available in EVERY future rumble until they lose or spend them. No artificial invisible ceiling capping the benefit.
+
+Implementation: `BRICK_ECONOMY.poolCaps` removed from code. Spec-mode `_internalStart` no longer clamps brickMax via `Math.min(startQty, caps[tier])` — it just uses `startQty` directly.
+
+Update bookkeeping: overload stack bonus + uncapped inventory together mean a Wizard could theoretically commit 10 bricks to a single blue overload. Fatigue system is already safe (5-entry curve uses last value as floor for indices ≥ 5). Monster difficulty will scale with progression to justify these numbers.
+
+### Tap inventory scaling (locked)
+
+The BASE value of every brick's output scales with bricks OWNED beyond the starting kit. Permanent progression — earning a brick makes every use of that color stronger forever.
+
+Formula:
+```
+tapScaleMult(color) = 1 + 0.10 × max(0, owned - startingCount)
+scaledBase = originalBase × tapScaleMult(color)
+```
+
+Where `owned` comes from the player's brickMax (equals current inventory in spec mode), and `startingCount` comes from the locked starting kit (e.g., 2 for Wizard blue, 1 for Wizard purple).
+
+**Applies to both tap AND overload.** Overload math multiplies off the scaled base, so they compound naturally:
+```
+tap damage   = scaledBase × affinityMult(color)
+overload dmg = scaledBase × count × overloadStackMult(count) × affinityMult(color)
+```
+
+Example — Wizard blue progression (base=4, starting kit=2):
+
+| Owned | tapScaleMult | Tap damage (×1.25 sig aff) | 3-brick overload |
+|-------|--------------|---------------------------|-------------------|
+| 2 (start) | 1.0 | 5 | 21 |
+| 3 | 1.1 | 6 | 23 |
+| 5 | 1.3 | 7 | 27 |
+| 10 | 1.8 | 9 | 38 |
+| 20 | 2.8 | 14 | 59 |
+| 50 | 5.8 | 29 | 122 |
+
+Uncapped by design — consistent with the "monster difficulty scales, don't cap player power" philosophy. A player with 50 owned bricks of their signature color is endgame-strong and will face endgame monsters.
+
+Applied to all 9 colors (damage, heal, armor pips, burst radii, effect durations, trap radii, charge counts — every output).
+
+### Crit roll system (fully implemented)
+
+Every cast (tap OR overload) rolls for a critical. On success, a color-specific **threshold effect** fires AND the full visual signature triggers (screen flash, banner, haptic, per-color flourish).
+
+Formula:
+```
+critChance(color, count) = 0.10 + 0.08 × max(0, count - 1) + affinityBonus
+```
+
+Where:
+- Tap count = 1
+- Overload count = bricks committed (2+)
+- **affinityBonus:** signature +5%, secondary 0%, baseline -3%
+- Clamped to [0, 0.99] — always some chance to fail
+
+Example rates for a Wizard:
+
+| Cast | Count | Base | Sig bonus | Final |
+|------|-------|------|-----------|-------|
+| Tap blue (sig) | 1 | 10% | +5% | **15%** |
+| Tap purple (sec) | 1 | 10% | 0% | 10% |
+| Tap red (baseline) | 1 | 10% | -3% | 7% |
+| 3-brick blue overload | 3 | 26% | +5% | **31%** |
+| 5-brick blue overload | 5 | 42% | +5% | **47%** |
+| 5-brick red overload (off-class) | 5 | 42% | -3% | 39% |
+| 10-brick blue overload | 10 | 82% | +5% | **87%** |
+
+Design intent:
+- Taps get occasional crit excitement (~7-15% depending on class match) — rare enough to feel special
+- Overloads scale up — committing more bricks means more likely to see the threshold fire
+- Class affinity rewards playing your colors (signature) and gently punishes off-class
+- Never guaranteed (99% ceiling) — the 1% miss keeps the moment honest
+
+Implementation:
+- `critChance(color, count)` + `rollCrit(color, count)` helpers
+- Roll fires at central dispatch: `fireOverload` (overloads) and `useBrickAction` (taps)
+- Global `_currentCrit` flag set per cast, reset at battle start
+- Async effects (red charge, blue bolt, bursts) store `isCrit` on their struct to survive until impact
+- On successful roll, `triggerCritSignature(color, x, y)` fires the universal visual package
+
+### 9 threshold effects (all implemented)
+
+Each crit fires a color-specific threshold on top of normal damage/effect. All 9 are designed to work against single enemies AND groups — no dead crits.
+
+| Color | Name | Mechanic | Implementation site |
+|---|---|---|---|
+| RED | CRUSHING BLOW | 2× damage + 2× knockback | charge impact in updateBrickAction |
+| BLUE | MARK | Target takes +50% dmg from ALL sources for 3s | bolt impact; `g.markedTimer` read in `damageEntity` |
+| WHITE | BLESSING | Self-heal: purge debuff hook (no player debuffs yet in v1) / Field: first tick heals 2× | doWhiteHeal + updateWhiteField |
+| GRAY | REINFORCE | Armor pips 2× / Wall HP 2× | startGrayArmor, fireOverloadGray, startGrayWall |
+| GREEN | NECROSIS | Poison never decays (permanent until cleansed/killed) | greenBurst._necrosis flag → entity._poisonNoDecay → updateEntityPoison |
+| ORANGE | SHRAPNEL | Trap detonates AoE (1.8× radius) on trigger | spawnSpikeTrap sealed + unsealed trigger |
+| YELLOW | DAZE | Confused entities take 2× damage from all sources | aura/burst sets `g.dazed`, read in `damageEntity` alongside confuseTimer |
+| PURPLE | SILENCE | Disables enemy attacks for 2s | purple burst impact sets `g.silencedTimer`; attack gate in updateEntity respects it |
+| BLACK (overload zone) | SINGULARITY | Pull 2× speed + tick damage 2× | isCrit stored on blackEffect; updateBlackEffect reads it |
+| BLACK (tap witherbolt) | DEEP WITHER | Applies 2 wither stacks instead of 1 | witherBolt.stacksApplied=2 when isCrit |
+
+Amp flags (`markedTimer`, `dazed`, `poisonNoDecay`, `silencedTimer`) decay per-frame in updateEntity. Dazed clears when confuse expires. Marked/Silenced decay on their own timers.
+
+### WITHERBOLT — Mender black tap identity (fully implemented)
+
+Black TAP replaced a generic zone-pull with a distinct ranged damage tool. Black OVERLOAD still uses the zone mechanic. This split is intentional: overload is commitment-heavy area denial; tap is Mender's signature "chip and amp" ranged offense.
+
+Mechanics:
+- Medium-range slow bolt (260 px/s vs blue's 500 px/s — preserves "slow application" identity)
+- Auto-targets nearest entity. If dragged, targets nearest entity to drag coords.
+- Wobbles sinusoidally in flight — sinister curved path
+- Base damage: 2 × tap × affinity (Mender black aff = 1.0 secondary)
+- Applies 1 **WITHER stack** on hit (2 on DEEP WITHER crit)
+- Refund brick if no target present
+
+Wither stack mechanics:
+- **No hard cap on stacks** — scaling handles balance
+- **Shared timer:** each new witherbolt refreshes full 5s duration. Don't cast for 5s → all stacks drop.
+- Stacks + timer displayed on entity body (`✦ W x3 4s`) + subtle dark stain overlay (stain opacity scales with stack count, caps at 45% alpha)
+
+Witherbolt-specific self-scaling (back-to-back hits snowball):
+```
+scale(stacks) = 1.5^stacks
+```
+| Existing stacks | Next witherbolt damage (base 2) |
+|---|---|
+| 0 | 2 |
+| 1 | 3 |
+| 2 | 5 |
+| 3 | 7 |
+| 4 | 11 |
+| 5 | 16 |
+| 6 | 23 |
+
+Other-source amplification (red/blue/orange/etc. against withered target):
+```
+amp(stacks) = 1 + 0.6 × (1 - 0.75^stacks)   — asymptotic to +60%
+```
+| Stacks | Amp |
+|---|---|
+| 0 | 1.00× |
+| 1 | 1.15× |
+| 2 | 1.26× |
+| 3 | 1.35× |
+| 5 | 1.46× |
+| 10 | 1.57× |
+
+Design intent:
+- Mender builds a target's "wither" via repeated witherbolts, snowballing direct damage
+- Other party members' damage also benefits from the wither amp, making Mender a team buff — "I make everyone's damage hurt more"
+- Soft cap on amp (~+60%) prevents runaway; steep witherbolt self-scaling rewards committed focus fire
+- Refund-if-no-target makes the tap low-risk to experiment with
+
+Implementation:
+- State: `witherBolts[]` array + per-entity `witherStacks`, `witherTimer`
+- Helpers: `witherSelfScale(stacks)`, `witherOtherAmp(stacks)`, `decayWither(g, dt)`
+- `startWitherbolt(ox, oy)` returns `false` if no target → caller refunds brick
+- `damageEntity` applies wither amp for non-witherbolt sources via `_witherboltDamage` flag
+- Visuals: 3-layer bolt draw (outer glow + dark core + light highlight), sinusoidal trail particles
+- Updated CRIT_FLAVOR: black = ['DEEP WITHER!', 'CURSED!', 'DECAY UNLEASHED!', 'THE ROT SPREADS!']
+
+Orphaned: old `startBlackEffect` function is no longer called from any tap path (overload still uses fireOverloadBlack directly). Left in place in case we need it later.
+
+### Crit visual signature (fully implemented)
+
+Universal (fires for every crit):
+- **Screen flash** — color-tinted overlay tinted to the brick color, 180ms fade
+- **Banner text** — 26px bold Cinzel, color-matched glow, black stroke, gentle upward drift, 1.4s duration. Picks randomly from 4 flavor lines per color ("CRUSHING BLOW!" / "SHATTERING IMPACT!" / "BONE-BREAKER!" / "DEVASTATION!" etc.)
+- **Haptic ping** — `navigator.vibrate(30)` on mobile; silent no-op on desktop
+- **Triggered from** central dispatch via `triggerCritSignature(color, x, y)`
+
+Per-color flourish (layered on top of universal):
+- **Shockwave ring** — expanding color-tinted ring via `spawnCritShockwave(x, y, color, opts)`. Configurable start radius, max radius, thickness, growth speed, fade rate.
+- **Particle burst** — dense radial particles via `spawnCritFlourish(x, y, color, n)` using the existing purpleParticles buffer.
+
+Per-color palette choices:
+- **RED** — orange shockwave + red inner ring + gold particle storm
+- **BLUE** — cyan shockwave + pastel blue halo burst
+- **WHITE** — radiant white shockwave + pink-tinted sparkles
+- **GRAY** — silver shockwave + silver particle burst
+- **GREEN** — toxic green shockwave + virulent spore burst (two-shade)
+- **ORANGE** — trap-colored shockwave + firework-style particle explosion
+- **YELLOW** — electric yellow shockwave + static spark burst
+- **PURPLE** — arcane violet shockwave + wisp burst (deep violet + light violet)
+- **BLACK** — dark-violet shockwave + void particle burst (two-shade)
+
+Reset on battle start: `critFlash = null; critBanners = []; critShockwaves = [];`
+
 ### Blue overload impact burst (new mechanic)
 
 Blue overload bolts (2+ bricks) now create an AoE burst on impact that damages nearby entities for roughly half primary damage.
@@ -555,6 +781,30 @@ Design intent: the rumble module is a generic combat arena. Eventually it will h
 10. **Board state model** — per-tile state for orange traps, black caches, any tile-targeted effects.
 11. **Skill system rebuild** — class-specific abilities like Builder drawing walls, upgrade paths for out-of-battle brick uses (Bull Rush, Field Medic, Iron Hide, etc.). Deferred entirely from v1.
 
+### Enemy ideas (sketchbook)
+
+Ideas for future enemy types. None implemented yet. When we build the template-driven spawner, these become the first roster to wire in.
+
+**Blight Worm** (family: Malady? — resistance profile TBD)
+- Starts as one large worm: slow move speed, hits hard, moderate HP
+- **Split-on-death mechanic:** every time a worm dies, it spawns 2 child worms at the death location
+  - Child worms are **half size, half HP, double speed, half damage**
+  - Children can themselves split on death following the same rule (size/HP halve again, speed doubles again, damage halves again)
+- The 2× multiplier means a single parent produces 2 children → 4 grandchildren → 8 great-grandchildren if left unchecked — exponential swarm
+- Design tension: killing it feels bad (swarm grows) but ignoring it is worse (it keeps hitting)
+- **Counter strategies (design intent):**
+  - AoE damage (green poison zone, orange trap detonation, purple burst) — clear multiple children in one hit
+  - White healing field — weather the swarm
+  - Yellow daze — freeze a whole generation
+  - Black wither — stack it so the children die faster than they can split again (since stacks persist on death... or do they? design question: does wither stack transfer to spawned children?)
+- **Open design questions:**
+  - Resistance profile? Pure Malady family (naturally plague-adjacent) or split across families?
+  - Does the split count scale with zone/difficulty (3× at higher tiers)?
+  - Is there a minimum-size cap where smallest worms stop splitting, or does it go infinite until the smallest becomes 1-HP crumbs?
+  - Do children inherit parent state (wither stacks, poison stacks, daze, silence)?
+  - Does each split have a brief "birth" animation where children are invulnerable for 0.5s? Prevents AoE instantly killing the split.
+  - Visual: single large segmented worm body → splits into two smaller worms writhing outward?
+
 **Done this session (no longer pending):**
 - ✅ Out-of-battle brick uses designed (9 distinct verbs locked, per-tier debuff model locked)
 - ✅ Mender starting kit rebalanced (white + black, not white + purple)
@@ -568,18 +818,28 @@ Design intent: the rumble module is a generic combat arena. Eventually it will h
 - ✅ Split brick bar layout (signature right, secondary left, auto-distribute)
 - ✅ Goblin → entity rename (modular combat arena is now enemy-type-agnostic)
 - ✅ 1-brick overloads exempt from fatigue (only 2+ consume)
+- ✅ Overload stack bonus (Option E: +20% per stacked brick, all 9 colors, unbounded)
+- ✅ Pool caps stripped from code (inventory = rumble pool)
+- ✅ Tap inventory scaling (+10% base per owned brick past starting, uncapped, all 9 colors)
+- ✅ Crit roll system (mechanics + full implementation, tap + overload paths)
+- ✅ 9 threshold effects implemented (crushing blow, mark, blessing, reinforce, necrosis, shrapnel, daze, silence, singularity)
+- ✅ Crit visual signature (screen flash, banner with flavor text rotation, haptic)
+- ✅ 9 per-color visual flourishes (shockwave + particle burst per color)
+- ✅ Rumble test selection screen: side-by-side layout for mobile
 
 ### Locked design decisions
 
 - Refresh rates: 3s/5s/10s per signature/secondary/baseline tier, staggered at start.
-- Pool caps: 4/3/2 are ceilings. Battle max = min(starting kit, cap).
+- Inventory IS the rumble pool. No artificial ceiling. Own N bricks of a color → can fire up to N of them per battle (between refreshes). Progression directly scales rumble capability.
+- Tap inventory scaling: +10% base output per brick owned beyond starting kit. Uncapped. Applied to BOTH tap and overload (overload scales off the scaled base).
+- Crit roll: 10% + 8% per overload brick, signature +5% / baseline -3%. Every cast rolls. Crits fire color-specific threshold effects.
 - Fatigue curve `[1.0, 0.8, 0.6, 0.5, 0.4]`, hybrid penalty (+1 sig / +2 off-class), 1-brick exempt.
 - Starting kits: 3 bricks (2 sig + 1 sec) per class, locked per table above.
 - Mender kit: white + black (NOT white + purple). Purple-purple kits produced a class with no threat capability; black gives Mender defensive control to match their support.
 - Class identity: signature color refreshes fastest. Refresh tier is *latent identity* — surfaces once fragment/fusion lets you bring non-class bricks in.
 - Damage affinity: signature ×1.25, secondary ×1.0, baseline ×0.8. Applied to ALL 9 brick colors (amounts, durations, radii). Rewards class-thematic spending across every output.
 - Brick bar: always balanced, signature right, secondary left, alternating for extras.
-- Growth path: starting kits stay static in v1; progression is entirely board-side (fragments → fusion → expanded inventory → richer kits).
+- Growth path: starting kits stay static in v1 (3 bricks). Progression is entirely board-side (fragments → fusion → expanded inventory). Earning more bricks permanently increases rumble capability since inventory = pool.
 - Skill system: ripped out, pending redesign. Multiplier hooks reserved at gray armor + (future) other colors.
 - Arena generic-naming: internal identifiers use `entity`; specific creature types (goblin, future brute, etc.) are named via data, not function names.
 

@@ -9,13 +9,29 @@ const BRICK_COLORS = {
 };
 const BRICK_NAMES = Object.keys(BRICK_COLORS);
 
+// PLAYER_META — class definitions. Rumble combat values (hp, speed, signature/secondary bricks)
+// come from the Combat & Economy v1 spec (see NOTES.md).
+// Dash fields (weight, dashBreakChance, dashBreakDmg, dashDmgAlwaysRolls) power board-side
+// gate-break mechanics in the red dash flow.
 const PLAYER_META = {
-  warrior:     { name:'Warrior',     icon:'⚔️', color:'#993C1D', hp:12, die:'d8', weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
-  wizard:      { name:'Wizard',      icon:'🔮', color:'#3C3489', hp:8,  die:'d6', weight:'light', dashBreakChance:0.15, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  scout:       { name:'Scout',       icon:'🏃', color:'#085041', hp:10, die:'d6', weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  builder:     { name:'Builder',     icon:'🔧', color:'#854F0B', hp:10, die:'d6', weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
-  mender:      { name:'Mender',      icon:'💊', color:'#72243E', hp:10, die:'d4', weight:'mid',   dashBreakChance:0.50, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  beastcaller: { name:'Beastcaller', icon:'🐾', color:'#27500A', hp:10, die:'d6', weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
+  warrior:     { name:'Warrior',     icon:'⚔️', color:'#993C1D', hp:14, speed:150, die:'d8',
+                 signature:'red', secondary:'gray',
+                 weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
+  wizard:      { name:'Wizard',      icon:'🔮', color:'#3C3489', hp:6,  speed:180, die:'d6',
+                 signature:'blue', secondary:'purple',
+                 weight:'light', dashBreakChance:0.15, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
+  scout:       { name:'Scout',       icon:'🏃', color:'#085041', hp:9,  speed:260, die:'d6',
+                 signature:'orange', secondary:'red',
+                 weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
+  builder:     { name:'Builder',     icon:'🔧', color:'#854F0B', hp:12, speed:150, die:'d6',
+                 signature:'gray', secondary:'orange',
+                 weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
+  mender:      { name:'Mender',      icon:'💊', color:'#72243E', hp:8,  speed:160, die:'d4',
+                 signature:'white', secondary:'purple',
+                 weight:'mid',   dashBreakChance:0.50, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
+  beastcaller: { name:'Beastcaller', icon:'🐾', color:'#27500A', hp:10, speed:220, die:'d6',
+                 signature:'green', secondary:'yellow',
+                 weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
 };
 
 // Flavor text per class for dash gate-break outcomes
@@ -46,23 +62,57 @@ const DASH_FLAVOR = {
   },
 };
 
-const SELF_HEAL_AMT  = { mender:4, warrior:3, builder:3, scout:2, wizard:2, beastcaller:2 };
-// Shield (armor) rules:
-// Warrior+Builder: 1 gray = +1 shield (free). Others: 2 gray = +1 shield.
-// Max shield: Warrior base 75% hpMax, with Iron Hide 150% hpMax. All others 50% hpMax. Builder 50%.
+// Shield (armor) rules — simple per-class max-shield pct of HP.
+// Pre-battle "spend gray to gain armor" action will be redesigned as part of
+// the new economy out-of-battle brick uses.
 const SHIELD_MAX = {
-  warrior:     { base: 0.75, upgraded: 1.5, upgradeSkill: 'iron_hide' },
-  builder:     { base: 0.50, upgraded: 0.50 },
-  wizard:      { base: 0.50, upgraded: 0.50 },
-  scout:       { base: 0.50, upgraded: 0.50 },
-  mender:      { base: 0.50, upgraded: 0.50 },
-  beastcaller: { base: 0.50, upgraded: 0.50 },
+  warrior:     0.75,  // most armored
+  builder:     0.50,
+  wizard:      0.50,
+  scout:       0.50,
+  mender:      0.50,
+  beastcaller: 0.50,
 };
 const SHIELD_COST = {
   warrior: 1, builder: 1,    // 1 gray per shield
   wizard: 2, scout: 2, mender: 2, beastcaller: 2  // 2 gray per shield
 };
-const ALLY_HEAL_AMT  = { mender:4 }; // everyone else = 2
+
+// ── BRICK ECONOMY (Combat & Economy v1) ──────────────────
+// Governs in-rumble brick refresh, pool caps, and overload fatigue.
+// Each class has a signature color (fast refresh, large pool) and secondary
+// color (medium refresh). All other colors are baseline (slow refresh, small pool).
+// See NOTES.md for the full design doc.
+const BRICK_ECONOMY = {
+  // Seconds per one brick regenerated during active rumble combat.
+  refreshRates: {
+    signature: 3.0,
+    secondary: 5.0,
+    baseline: 10.0,
+  },
+  // Max bricks of a given color a player can hold during rumble combat.
+  poolCaps: {
+    signature: 4,
+    secondary: 3,
+    baseline: 2,
+  },
+  // Overload fatigue: each index is the damage multiplier when the counter
+  // reaches that value. Counter resets to 0 at battle end.
+  fatigueCurve: [1.0, 0.8, 0.6, 0.5, 0.4],
+  // Baseline-color overloads increment their counter by this much per use
+  // (signature/secondary overloads increment by 1).
+  offClassFatigueTicks: 2,
+};
+
+// Helper: get the refresh tier for a (class, color) pair.
+// Returns 'signature' | 'secondary' | 'baseline'.
+function brickTierFor(cls, color) {
+  const meta = PLAYER_META[cls];
+  if (!meta) return 'baseline';
+  if (color === meta.signature) return 'signature';
+  if (color === meta.secondary) return 'secondary';
+  return 'baseline';
+}
 
 // ── ZONES & SPACES ───────────────────────────────────────
 // Zone 1: 8 spaces, store at idx 3 (space 4)
@@ -391,10 +441,10 @@ function hpBar(hp,max,color='#1D9E75') {
   </div>`;
 }
 
-// ── ARENA BATTLE (real-time combat) ───────────────────────────
-// Enemy templates used by the arena battle system (distinct from the
+// ── RUMBLE (real-time combat) ───────────────────────────────
+// Enemy templates used by the rumble combat system (distinct from the
 // turn-based MONSTER_TEMPLATES). V1 has one hardcoded goblin.
-const ARENA_ENEMIES = {
+const RUMBLE_ENEMIES = {
   goblin: {
     type:     'goblin',
     name:     'Goblin',
@@ -405,13 +455,17 @@ const ARENA_ENEMIES = {
     attackCd: 1.8,       // seconds between attacks
     r:        22,
     color:    '#27500A',
+    // Family resistance profile. Baseline goblin is neutral to all families.
+    // Per-color overrides (e.g. { red: 1.5 }) would layer on top of family
+    // defaults; see resistMult() in rumble.js.
+    resistances: { physical: 1.0, ethereal: 1.0, malady: 1.0 },
   },
 };
 
 // Flavor text pool for battle initiation. One line is picked at random per
 // encounter and shown on the player's event card + logged to the DM.
 // Keyed by enemy type — each enemy has its own pool.
-const ARENA_BATTLE_FLAVOR = {
+const RUMBLE_FLAVOR = {
   goblin: [
     'A goblin leaps from the shadows, blade already swinging.',
     'You hear a snarl. A goblin steps into your path, grinning.',
@@ -423,5 +477,5 @@ const ARENA_BATTLE_FLAVOR = {
 
 // Node.js export (ignored in browser)
 if (typeof module !== 'undefined') {
-  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ARENA_ENEMIES, ARENA_BATTLE_FLAVOR, SHIELD_MAX, SHIELD_COST, RIDDLES };
+  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, RUMBLE_ENEMIES, RUMBLE_FLAVOR, SHIELD_MAX, SHIELD_COST, BRICK_ECONOMY, brickTierFor, RIDDLES };
 }

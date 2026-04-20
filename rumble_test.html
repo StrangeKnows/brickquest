@@ -26,13 +26,29 @@
     display:flex; flex-direction:column;
     align-items:center; justify-content:center;
     background:rgba(0,0,0,.88);
-    padding:20px;
+    padding:16px;
+    overflow-y:auto;
   }
-  #overlay h1 { font-size:24px; color:#F5D000; margin-bottom:6px; text-align:center; }
-  #overlay h2 { font-size:11px; color:#888; letter-spacing:.1em; margin:14px 0 8px; text-align:center; }
-  #overlay p  { font-size:12px; color:#888; margin-bottom:16px; text-align:center; max-width:300px; line-height:1.5; }
+  #overlay h1 { font-size:22px; color:#F5D000; margin-bottom:4px; text-align:center; }
+  #overlay h2 { font-size:11px; color:#888; letter-spacing:.1em; margin:10px 0 6px; text-align:center; }
+  #overlay p  { font-size:12px; color:#888; margin-bottom:10px; text-align:center; max-width:300px; line-height:1.4; }
 
-  .mode-toggle { display:flex; gap:6px; margin-bottom:10px; }
+  /* Two-column layout: controls on left, class grid on right.
+     Collapses to stacked on very narrow screens (< 480px). */
+  .picker-layout {
+    display:flex; flex-direction:row;
+    gap:18px; align-items:flex-start;
+    width:100%; max-width:640px;
+  }
+  .picker-controls { display:flex; flex-direction:column; align-items:stretch; flex:0 0 auto; }
+  .picker-classes  { display:flex; flex-direction:column; align-items:center; flex:1 1 auto; min-width:0; }
+
+  @media (max-width: 480px) {
+    .picker-layout { flex-direction:column; align-items:center; gap:8px; }
+    .picker-controls { align-items:center; }
+  }
+
+  .mode-toggle { display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; justify-content:center; }
   .mode-btn {
     padding:7px 14px; border-radius:8px; border:1px solid #333;
     background:#111; cursor:pointer; font-family:'Cinzel',serif;
@@ -71,6 +87,41 @@
   #readout .sig   { color:#F5D000; }
   #readout .off   { color:#ff9944; }
   #readout.hidden { display:none; }
+
+  /* Resistance dialer — compact 3x3 grid of color rows under ENTITIES.
+     Each row: tiny color swatch + 3-letter abbrev + numeric input.
+     All values are floats (e.g. 0, 0.5, 1, 1.5, 2) representing resist mult. */
+  .resist-grid {
+    display:grid; grid-template-columns:repeat(3, 1fr);
+    gap:4px;
+    margin-bottom:6px;
+  }
+  .resist-cell {
+    display:flex; align-items:center; gap:3px;
+    background:#111; border:1px solid #222; border-radius:5px;
+    padding:3px 4px;
+  }
+  .resist-swatch {
+    width:10px; height:10px; border-radius:2px;
+    flex:0 0 auto; border:1px solid rgba(255,255,255,0.15);
+  }
+  .resist-label {
+    font-size:8px; color:#888; letter-spacing:0.04em;
+    font-family:'Cinzel',serif;
+    flex:0 0 auto;
+  }
+  .resist-input {
+    flex:1 1 auto; width:100%; min-width:0;
+    background:#000; border:1px solid #333; border-radius:3px;
+    color:#eee; padding:2px 3px;
+    font-family:monospace; font-size:10px;
+    text-align:center;
+  }
+  .resist-input:focus { outline:none; border-color:#F5D000; }
+  .resist-hint {
+    font-size:8px; color:#555; margin-bottom:4px; text-align:center;
+    font-family:monospace; letter-spacing:0.02em;
+  }
 </style>
 </head>
 <body>
@@ -111,22 +162,32 @@
   <h1>BrickQuest Rumble Test</h1>
   <p>Pick a mode and class.</p>
 
-  <h2>MODE</h2>
-  <div class="mode-toggle">
-    <button class="mode-btn active" id="mode-sandbox" onclick="setMode('sandbox')">SANDBOX (random bricks)</button>
-    <button class="mode-btn"        id="mode-spec"    onclick="setMode('spec')">SPEC (starting kit)</button>
-  </div>
+  <div class="picker-layout">
+    <div class="picker-controls">
+      <h2>MODE</h2>
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="mode-sandbox" onclick="setMode('sandbox')">SANDBOX</button>
+        <button class="mode-btn"        id="mode-spec"    onclick="setMode('spec')">SPEC</button>
+      </div>
 
-  <h2>ENTITIES</h2>
-  <div class="mode-toggle">
-    <button class="mode-btn active" id="ent-1" onclick="setEntityCount(1)">1</button>
-    <button class="mode-btn"        id="ent-2" onclick="setEntityCount(2)">2</button>
-    <button class="mode-btn"        id="ent-3" onclick="setEntityCount(3)">3</button>
-    <button class="mode-btn"        id="ent-5" onclick="setEntityCount(5)">5</button>
-  </div>
+      <h2>ENTITIES</h2>
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="ent-1" onclick="setEntityCount(1)">1</button>
+        <button class="mode-btn"        id="ent-2" onclick="setEntityCount(2)">2</button>
+        <button class="mode-btn"        id="ent-3" onclick="setEntityCount(3)">3</button>
+        <button class="mode-btn"        id="ent-5" onclick="setEntityCount(5)">5</button>
+      </div>
 
-  <h2>CLASS</h2>
-  <div class="class-grid" id="class-grid"></div>
+      <h2>ENTITY RESISTANCES</h2>
+      <div class="resist-hint">0=imm 0.5=res 1=neut 1.5=vul 2=weak</div>
+      <div class="resist-grid" id="resist-grid"></div>
+    </div>
+
+    <div class="picker-classes">
+      <h2>CLASS</h2>
+      <div class="class-grid" id="class-grid"></div>
+    </div>
+  </div>
 </div>
 
 <script src="rumble.js"></script>
@@ -148,6 +209,40 @@ var SPEC_CLASSES = {
 
 var currentMode = 'sandbox';
 var currentEntityCount = 1;
+
+// Per-color resistance multipliers applied to every spawned entity.
+// All default to 1.0 (neutral). Integer or float input accepted.
+// Keyed by color; rumble.js will store these under entity.resistances.
+var BRICK_COLORS_ORDER = ['red','orange','gray','blue','purple','white','yellow','green','black'];
+var BRICK_HEX = {
+  red:'#E24B4A', orange:'#F57C00', gray:'#888888',
+  blue:'#4db8ff', purple:'#7B2FBE', white:'#eeeeee',
+  yellow:'#F5D000', green:'#1D9E75', black:'#2a2a2a',
+};
+var currentResistances = {};
+BRICK_COLORS_ORDER.forEach(function(c) { currentResistances[c] = 1; });
+
+function renderResistGrid() {
+  var grid = document.getElementById('resist-grid');
+  if (!grid) return;
+  var html = '';
+  BRICK_COLORS_ORDER.forEach(function(c) {
+    html += '<div class="resist-cell">'
+      +     '<span class="resist-swatch" style="background:' + BRICK_HEX[c] + ';"></span>'
+      +     '<span class="resist-label">' + c.substr(0,3).toUpperCase() + '</span>'
+      +     '<input type="number" class="resist-input" id="rz-' + c + '" '
+      +       'step="0.5" min="0" value="' + currentResistances[c] + '" '
+      +       'onchange="updateResist(\'' + c + '\', this.value)" '
+      +       'oninput="updateResist(\'' + c + '\', this.value)">'
+      +   '</div>';
+  });
+  grid.innerHTML = html;
+}
+function updateResist(color, raw) {
+  var v = parseFloat(raw);
+  if (isNaN(v) || v < 0) v = 1;
+  currentResistances[color] = v;
+}
 
 function setEntityCount(n) {
   currentEntityCount = n;
@@ -224,6 +319,9 @@ function startTestRumble(cls) {
     mode: currentMode,
     bricks: currentMode === 'spec' ? Object.assign({}, m.kit) : randomSandboxBricks(),
     entityCount: currentEntityCount,
+    // Per-color resistance overrides from the dialer UI. Applied to every
+    // spawned entity. See rumble.js startup code.
+    entityResistances: Object.assign({}, currentResistances),
   };
   Rumble.start(startConfig);
 
@@ -270,6 +368,7 @@ function showEndOverlay(reason) {
 
 // Build the class grid on first render.
 renderClassGrid();
+renderResistGrid();
 
 // URL ?debug=1 shows the debug overlay.
 if (/[?&]debug=1/.test(location.search)) {
