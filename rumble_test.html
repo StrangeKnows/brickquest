@@ -178,6 +178,22 @@
         <button class="mode-btn"        id="ent-5" onclick="setEntityCount(5)">5</button>
       </div>
 
+      <h2>ENTITY TYPE</h2>
+      <select id="entity-type-select" onchange="setEntityType(this.value)" style="width:100%;padding:6px 8px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-family:'Cinzel',serif;letter-spacing:.05em;">
+        <option value="random">RANDOM (per spawn)</option>
+        <option value="goblin">Goblin (Phys, grunt)</option>
+        <option value="skeleton">Skeleton (Phys, grunt)</option>
+        <option value="slinger">Slinger (Phys, ranged)</option>
+        <option value="shadow_wolf">Shadow Wolf (Ether, fast)</option>
+        <option value="creeping_vines">Creeping Vines (Mal, stationary pulse)</option>
+        <option value="rot_grub">Rot Grub (Mal, splitter)</option>
+        <option value="stone_troll">Stone Troll (Phys, heavy melee)</option>
+        <option value="cursed_knight">Cursed Knight (Phys, swing)</option>
+        <option value="void_wraith">Void Wraith (Ether, teleport)</option>
+        <option value="stone_colossus">Stone Colossus (Phys boss)</option>
+        <option value="blight_worm">Blight Worm (Mal boss)</option>
+      </select>
+
       <h2>ENTITY RESISTANCES</h2>
       <div class="resist-hint">0=imm 0.5=res 1=neut 1.5=vul 2=weak</div>
       <div class="resist-grid" id="resist-grid"></div>
@@ -199,16 +215,33 @@
 // Combat & Economy v1 — locked starting kits per class.
 // Each class starts with 3 bricks: 2 signature + 1 secondary.
 var SPEC_CLASSES = {
-  warrior:     { icon:'\u2694\uFE0F', name:'WARRIOR', hp:14, speed:150, sig:'red',    sec:'gray',   kit:{red:2, gray:1}     },
-  wizard:      { icon:'\uD83D\uDD2E', name:'WIZARD',  hp:6,  speed:180, sig:'blue',   sec:'purple', kit:{blue:2, purple:1}  },
-  scout:       { icon:'\uD83C\uDFC3', name:'SCOUT',   hp:9,  speed:260, sig:'orange', sec:'red',    kit:{orange:2, red:1}   },
-  builder:     { icon:'\uD83D\uDD27', name:'BUILDER', hp:12, speed:150, sig:'gray',   sec:'orange', kit:{gray:2, orange:1}  },
-  mender:      { icon:'\uD83D\uDC8A', name:'MENDER',  hp:8,  speed:160, sig:'white',  sec:'black', kit:{white:2, black:1} },
-  beastcaller: { icon:'\uD83D\uDC3E', name:'BEAST',   hp:10, speed:220, sig:'green',  sec:'yellow', kit:{green:2, yellow:1} },
+  breaker:     { icon:'\u2694\uFE0F', name:'BREAKER',    hp:14, speed:150, sig:'red',    sec:'gray',   kit:{red:2, gray:1}     },
+  formwright:  { icon:'\uD83D\uDD2E', name:'FORMWRIGHT', hp:6,  speed:180, sig:'blue',   sec:'purple', kit:{blue:2, purple:1}  },
+  snapstep:    { icon:'\uD83C\uDFC3', name:'SNAPSTEP',   hp:9,  speed:260, sig:'orange', sec:'red',    kit:{orange:2, red:1}   },
+  blocksmith:  { icon:'\uD83D\uDD27', name:'BLOCKSMITH', hp:12, speed:150, sig:'gray',   sec:'orange', kit:{gray:2, orange:1}  },
+  fixer:       { icon:'\uD83D\uDC8A', name:'FIXER',      hp:8,  speed:160, sig:'white',  sec:'black', kit:{white:2, black:1} },
+  wild_one:    { icon:'\uD83D\uDC3E', name:'WILD ONE',   hp:10, speed:220, sig:'green',  sec:'yellow', kit:{green:2, yellow:1} },
 };
 
 var currentMode = 'sandbox';
 var currentEntityCount = 1;
+// Entity-type selector — 'random' picks a fresh type per spawn from the
+// full registry; any other value (e.g. 'goblin', 'stone_troll') locks the
+// spawn to that type. Used by startTestRumble + the sandbox respawn loop.
+var currentEntityType = 'random';
+var ENTITY_TYPE_LIST = [
+  'goblin', 'skeleton', 'slinger', 'shadow_wolf', 'creeping_vines',
+  'rot_grub',
+  'stone_troll', 'cursed_knight', 'void_wraith',
+  'stone_colossus', 'blight_worm',
+];
+function setEntityType(v) { currentEntityType = v; }
+function pickEntityType() {
+  if (currentEntityType === 'random') {
+    return ENTITY_TYPE_LIST[Math.floor(Math.random() * ENTITY_TYPE_LIST.length)];
+  }
+  return currentEntityType;
+}
 
 // Per-color resistance multipliers applied to every spawned entity.
 // All default to 1.0 (neutral). Integer or float input accepted.
@@ -319,6 +352,11 @@ function startTestRumble(cls) {
     mode: currentMode,
     bricks: currentMode === 'spec' ? Object.assign({}, m.kit) : randomSandboxBricks(),
     entityCount: currentEntityCount,
+    // Entity type — either a specific type name from ENTITY_REGISTRY or
+    // the literal string 'random' which tells rumble.js to roll a fresh
+    // type per spawn (initial + respawns). See _resolveEntityType in
+    // rumble.js for the pick logic.
+    entityType: currentEntityType,
     // Per-color resistance overrides from the dialer UI. Applied to every
     // spawned entity. See rumble.js startup code.
     entityResistances: Object.assign({}, currentResistances),

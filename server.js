@@ -9,7 +9,7 @@ const WebSocket = require('ws');
 const os = require('os');
 
 // Shared game constants
-const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ARENA_ENEMIES, ARENA_BATTLE_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
+const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
 
 const PORT = 8080;
 const MIME = {
@@ -23,7 +23,7 @@ function freshState() {
     round: 1,
     phase: 'prepare',           // prepare|land|battle
     activePlayerIdx: 0,
-    turnOrder: ['warrior','wizard','scout','builder','mender','beastcaller'],
+    turnOrder: ['breaker','formwright','snapstep','blocksmith','fixer','wild_one'],
     battle: null,
     activeEvent: null,
     pendingTrade: null,       // { fromCls, toCls, color, id }
@@ -42,6 +42,7 @@ function freshState() {
     discoveredClues: [],      // [{ clue, solverCls, riddleQ }]
     usedRiddleIdxs: [],       // track used riddle indices per zone
     usedBlueVariants: {},     // track used Category B variants per player per zone
+    lingeringEvents: {},       // v4: { [spaceIdx]: { evType, variant, originCls, attemptsSoFar, createdAt } }
     orangeSpaces: {},         // { spaceIdx: trapCount } — persistent traps
     blueSpaces: {},           // { spaceIdx: 1 } — unresolved blue events
     yellowSpaces: {},          // { spaceIdx: true } — unclaimed yellow brick from expired riddle
@@ -49,16 +50,22 @@ function freshState() {
     allowBackward: false,     // DM toggle: allow players to move backward
     storeDisabled: false,     // DM toggle: disable store for all zones
     pendingDashRequest: null, // { cls, spaces, requestedAt } — awaits DM approval
-    pendingArenaBattle: null, // { cls, enemyType, enemy, flavor } — event card stage, awaits player or DM initiate
-    arenaBattle: null,        // active real-time battle state (see arena handlers below)
+    pendingRumbleBattle: null, // { cls, entityType, enemy, flavor } — event card stage, awaits player or DM initiate
+    rumbleBattle: null,        // active real-time battle state (see rumble handlers below)
     log: [],
     players: {
-      warrior:     mkPlayer('warrior',    '⚔️', '#993C1D', 12, 'd8',  {red:3,gray:2,white:1}),
-      wizard:      mkPlayer('wizard',     '🔮', '#3C3489',  8, 'd6',  {blue:4,purple:1,yellow:1}),
-      scout:       mkPlayer('scout',      '🏃', '#085041', 10, 'd6',  {red:2,yellow:2,orange:1,gray:1}),
-      builder:     mkPlayer('builder',    '🔧', '#854F0B', 10, 'd6',  {green:2,purple:1,gray:2,white:1}),
-      mender:      mkPlayer('mender',     '💊', '#72243E', 10, 'd4',  {white:4,purple:2,yellow:1}),
-      beastcaller: mkPlayer('beastcaller','🐾', '#27500A', 10, 'd6',  {green:4,yellow:2,orange:1,gray:1}),
+      // Starting state follows Combat & Economy v1 spec (canonical in
+      // rumble.js CLASS_META and game.js PLAYER_META):
+      //   HP: breaker 14, formwright 6, snapstep 9, blocksmith 12, fixer 8, wild_one 10
+      //   Starting bricks: 2 signature + 1 secondary (3 total per class).
+      // Players earn more bricks through play (loot drops, landing events,
+      // rewards); these are just the opening kit.
+      breaker:     mkPlayer('breaker',    '⚔️', '#993C1D', 14, 'd8',  {red:2,  gray:1}),
+      formwright:  mkPlayer('formwright', '🔮', '#3C3489',  6, 'd6',  {blue:2, purple:1}),
+      snapstep:    mkPlayer('snapstep',   '🏃', '#085041',  9, 'd6',  {orange:2, red:1}),
+      blocksmith:  mkPlayer('blocksmith', '🔧', '#C87800', 12, 'd6',  {gray:2, orange:1}),
+      fixer:       mkPlayer('fixer',      '💊', '#72243E',  8, 'd4',  {white:2, black:1}),
+      wild_one:    mkPlayer('wild_one',   '🐾', '#27500A', 10, 'd6',  {green:2, yellow:1}),
     }
   };
 }
@@ -67,10 +74,13 @@ function mkPlayer(cls, icon, color, hp, die, bricks) {
   const allBricks = {red:0,blue:0,green:0,white:0,gray:0,purple:0,yellow:0,orange:0,black:0};
   return {
     cls, icon, color,
-    name: {warrior:'Warrior',wizard:'Wizard',scout:'Scout',builder:'Builder',mender:'Mender',beastcaller:'Beastcaller'}[cls]||cls,
+    name: {breaker:'Breaker',formwright:'Formwright',snapstep:'Snapstep',blocksmith:'Blocksmith',fixer:'Fixer',wild_one:'Wild One'}[cls]||cls,
     hp, hpMax:hp, armor:0, gold:3,
     die, space:0, alive:true,
     bricks: {...allBricks,...bricks},
+    cheese: 0,             // v4: tradable food item (eat for +1 max HP, gift to ally)
+    queuedPoisonStacks: 0, // v4: cross-system poison from failed green/black events
+    queuedPoisonBattles: 0,// v4: how many rumble battles poison applies to
     statusEffects: [],     // ['poisoned','confused','cursed']
     connected: false,
     playerName: '',        // real player's name, set on login
@@ -113,8 +123,8 @@ function loadState() {
         });
       }
       if (G.pendingDashRequest === undefined) G.pendingDashRequest = null;
-      if (G.pendingArenaBattle === undefined) G.pendingArenaBattle = null;
-      if (G.arenaBattle === undefined) G.arenaBattle = null;
+      if (G.pendingRumbleBattle === undefined) G.pendingRumbleBattle = null;
+      if (G.rumbleBattle === undefined) G.rumbleBattle = null;
       console.log('[LOAD] Session restored from ' + data.savedAt);
       return true;
     }
@@ -163,7 +173,7 @@ if (process.stdin.isTTY) {
       console.log('--- GAME STATUS ---');
       console.log('Round:', G.round, '| Phase:', G.phase);
       console.log('Active player:', G.turnOrder[G.activePlayerIdx]);
-      console.log('Arena battle:', !!G.arenaBattle);
+      console.log('Rumble battle:', !!G.rumbleBattle);
       Object.values(G.players).forEach(function(p) {
         if (!p.playerName && p.hp === p.hpMax) return; // skip unjoined
         var brickTotal = Object.values(p.bricks).reduce(function(a,b){return a+b;},0);
@@ -424,14 +434,28 @@ wss.on('connection', (ws, req) => {
       const p = G.players[cls];
       let finalRoll = rawRoll;
       // Apply modifiers
-      if (cls==='scout') finalRoll += 1;
+      if (cls==='snapstep') finalRoll += 1;
       if (G.movementDebuffs[cls]) { finalRoll = Math.max(0, finalRoll - G.movementDebuffs[cls]); delete G.movementDebuffs[cls]; }
       // Enhanced movement doesn't add spaces — it adds action slots
       // destination is computed by DM screen after gate checks
       const prev = p.space;
       p.space = destination;
+      // v4 ZONE TRANSITION CLEANUP — WEAKNESS + SLOW TONGUE clear when entering new zone
+      const prevZone = SPACES[prev] ? SPACES[prev].zone : 0;
+      const newZone = SPACES[destination] ? SPACES[destination].zone : 0;
+      if (newZone !== prevZone) {
+        if (p.weaknessReduction && p.weaknessReduction > 0) {
+          p.hpMax = (p.hpMax||10) + p.weaknessReduction;
+          log((p.playerName||p.name)+' crosses into Zone '+(newZone+1)+' — weakness lifts (+'+p.weaknessReduction+' Max HP restored)','reward');
+          p.weaknessReduction = 0;
+        }
+        if (G.slowTongueZones && G.slowTongueZones[cls]) {
+          // Keep only non-expired zones (current + future)
+          G.slowTongueZones[cls] = G.slowTongueZones[cls].filter(z => z >= newZone);
+        }
+      }
       G.phase = 'land';
-      log(`${p.name} moved ${rawRoll}${cls==='scout'?'+scout bonus':''} → space ${destination+1}`,'move');
+      log(`${p.name} moved ${rawRoll}${cls==='snapstep'?'+snapstep bonus':''} → space ${destination+1}`,'move');
       // Check black brick pass-through (no stop = safe pickup)
       broadcastState(); return;
     }
@@ -495,26 +519,28 @@ wss.on('connection', (ws, req) => {
     }
 
     // ═══════════════════════════════════════════════════
-    // ARENA BATTLE HANDLERS
+    // RUMBLE BATTLE HANDLERS
     // ═══════════════════════════════════════════════════
-    // Shared helper: transition pendingArenaBattle → active arenaBattle state
-    function startArenaBattleFromPending(forced) {
-      if (!G.pendingArenaBattle) return false;
-      const pending = G.pendingArenaBattle;
+    // Shared helper: transition pendingRumbleBattle → active rumbleBattle state
+    function startRumbleBattleFromPending(forced) {
+      if (!G.pendingRumbleBattle) return false;
+      const pending = G.pendingRumbleBattle;
       const p = G.players[pending.cls];
-      if (!p) { G.pendingArenaBattle = null; return false; }
+      if (!p) { G.pendingRumbleBattle = null; return false; }
       // Seed the live battle state — snapshot of player's current HP, armor,
       // and bricks; the client reports back incrementally via battleTick.
-      G.arenaBattle = {
+      G.rumbleBattle = {
         cls: pending.cls,
-        enemyType: pending.enemyType,
+        entityType: pending.entityType,
         enemy: { ...pending.enemy },
         flavor: pending.flavor,
-        playerArena: {
+        playerRumble: {
           hp: p.hp,
           hpMax: p.hpMax,
           armor: p.armor || 0,
+          gold: p.gold || 0,
           bricks: { ...p.bricks },
+          queuedPoisonStacks: p.queuedPoisonStacks || 0, // v4: rumble applies these on start
         },
         startTime: Date.now(),
         elapsedMs: 0,
@@ -524,48 +550,58 @@ wss.on('connection', (ws, req) => {
           { t:0, actor:'system', text: pending.flavor },
         ],
       };
-      G.pendingArenaBattle = null;
-      log((p.playerName||p.name) + ' — arena battle begins vs ' + pending.enemy.name, 'battle');
+      // v4: decrement queued poison battles (this battle counts)
+      if ((p.queuedPoisonBattles||0) > 0) {
+        p.queuedPoisonBattles -= 1;
+        if (p.queuedPoisonBattles <= 0) {
+          p.queuedPoisonStacks = 0;
+          p.queuedPoisonBattles = 0;
+        }
+      }
+      G.pendingRumbleBattle = null;
+      log((p.playerName||p.name) + ' — rumble battle begins vs ' + pending.enemy.name, 'battle');
     }
 
-    // Player taps "Enter Arena" on their event card
+    // Player taps "Enter Rumble" on their event card
     if (type === 'battleReady') {
       const { cls } = P;
-      if (!G.pendingArenaBattle || G.pendingArenaBattle.cls !== cls) { broadcastState(); return; }
-      startArenaBattleFromPending(false);
+      if (!G.pendingRumbleBattle || G.pendingRumbleBattle.cls !== cls) { broadcastState(); return; }
+      startRumbleBattleFromPending(false);
       broadcastState(); return;
     }
 
     // DM taps "Start Battle" (same effect as battleReady, DM side)
     if (type === 'battleStartDM') {
-      if (!G.pendingArenaBattle) { broadcastState(); return; }
-      startArenaBattleFromPending(false);
+      if (!G.pendingRumbleBattle) { broadcastState(); return; }
+      startRumbleBattleFromPending(false);
       broadcastState(); return;
     }
 
-    // DM taps "Force Battle" — skips the event card, player drops straight to arena
+    // DM taps "Force Battle" — skips the event card, player drops straight to rumble
     if (type === 'battleForceDM') {
-      if (!G.pendingArenaBattle) { broadcastState(); return; }
-      startArenaBattleFromPending(true);
+      if (!G.pendingRumbleBattle) { broadcastState(); return; }
+      startRumbleBattleFromPending(true);
       broadcastState(); return;
     }
 
     // Client sends periodic ticks with HP/brick/enemy state + log entries
     if (type === 'battleTick') {
-      if (!G.arenaBattle) { broadcastState(); return; }
-      const { cls, playerHp, playerArmor, playerBricks, enemyHp, elapsedMs, logEntries } = P;
-      if (cls !== G.arenaBattle.cls) { broadcastState(); return; }
-      if (G.arenaBattle.paused) { broadcastState(); return; } // ignore ticks while paused
-      if (typeof playerHp === 'number') G.arenaBattle.playerArena.hp = playerHp;
-      if (typeof playerArmor === 'number') G.arenaBattle.playerArena.armor = playerArmor;
-      if (playerBricks && typeof playerBricks === 'object') G.arenaBattle.playerArena.bricks = playerBricks;
-      if (typeof enemyHp === 'number') G.arenaBattle.enemy.hp = enemyHp;
-      if (typeof elapsedMs === 'number') G.arenaBattle.elapsedMs = elapsedMs;
+      if (!G.rumbleBattle) { broadcastState(); return; }
+      const { cls, playerHp, playerHpMax, playerArmor, playerGold, playerBricks, enemyHp, elapsedMs, logEntries } = P;
+      if (cls !== G.rumbleBattle.cls) { broadcastState(); return; }
+      if (G.rumbleBattle.paused) { broadcastState(); return; } // ignore ticks while paused
+      if (typeof playerHp === 'number') G.rumbleBattle.playerRumble.hp = playerHp;
+      if (typeof playerHpMax === 'number') G.rumbleBattle.playerRumble.hpMax = playerHpMax;
+      if (typeof playerArmor === 'number') G.rumbleBattle.playerRumble.armor = playerArmor;
+      if (typeof playerGold === 'number') G.rumbleBattle.playerRumble.gold = playerGold;
+      if (playerBricks && typeof playerBricks === 'object') G.rumbleBattle.playerRumble.bricks = playerBricks;
+      if (typeof enemyHp === 'number') G.rumbleBattle.enemy.hp = enemyHp;
+      if (typeof elapsedMs === 'number') G.rumbleBattle.elapsedMs = elapsedMs;
       if (Array.isArray(logEntries) && logEntries.length) {
-        G.arenaBattle.log = G.arenaBattle.log.concat(logEntries);
+        G.rumbleBattle.log = G.rumbleBattle.log.concat(logEntries);
         // Cap log to last 60 entries
-        if (G.arenaBattle.log.length > 60) {
-          G.arenaBattle.log = G.arenaBattle.log.slice(-60);
+        if (G.rumbleBattle.log.length > 60) {
+          G.rumbleBattle.log = G.rumbleBattle.log.slice(-60);
         }
       }
       broadcastState(); return;
@@ -573,13 +609,20 @@ wss.on('connection', (ws, req) => {
 
     // Client reports battle end with final state + winner
     if (type === 'battleEnd') {
-      if (!G.arenaBattle) { broadcastState(); return; }
-      const { cls, victor, finalHp, finalArmor, finalBricks, reason } = P;
-      if (cls !== G.arenaBattle.cls) { broadcastState(); return; }
+      if (!G.rumbleBattle) { broadcastState(); return; }
+      const { cls, victor, finalHp, finalHpMax, finalArmor, finalGold, finalBricks, reason } = P;
+      if (cls !== G.rumbleBattle.cls) { broadcastState(); return; }
       const p = G.players[cls];
       if (p) {
         if (typeof finalHp === 'number') p.hp = Math.max(0, finalHp);
+        // Cheese pickups raise hpMax mid-battle — persist the new ceiling.
+        if (typeof finalHpMax === 'number') p.hpMax = Math.max(1, finalHpMax);
         if (typeof finalArmor === 'number') p.armor = Math.max(0, finalArmor);
+        // Coins picked up in rumble add to the existing board-side gold pool.
+        // finalGold is the rumble-end total (started from p.gold at battle
+        // start + any drops); we replace rather than add since rumble already
+        // has the running total.
+        if (typeof finalGold === 'number') p.gold = Math.max(0, finalGold);
         if (finalBricks && typeof finalBricks === 'object') {
           Object.keys(finalBricks).forEach(k => { p.bricks[k] = Math.max(0, finalBricks[k]); });
         }
@@ -587,29 +630,29 @@ wss.on('connection', (ws, req) => {
       }
       const pName = p ? (p.playerName||p.name) : cls;
       log(pName + ' battle ended — victor: ' + victor + (reason ? ' (' + reason + ')' : ''), 'battle');
-      G.arenaBattle = null;
+      G.rumbleBattle = null;
       G.phase = 'prepare';
       broadcastState(); return;
     }
 
     // DM toggles pause
     if (type === 'battlePause') {
-      if (!G.arenaBattle) { broadcastState(); return; }
-      G.arenaBattle.paused = !!P.paused;
-      log('Battle ' + (G.arenaBattle.paused ? 'paused' : 'resumed') + ' by DM', 'battle');
+      if (!G.rumbleBattle) { broadcastState(); return; }
+      G.rumbleBattle.paused = !!P.paused;
+      log('Battle ' + (G.rumbleBattle.paused ? 'paused' : 'resumed') + ' by DM', 'battle');
       broadcastState(); return;
     }
 
     // DM force-resets the battle to fresh state (both sides full HP, bricks back to snapshot)
     if (type === 'battleForceReset') {
-      if (!G.arenaBattle) { broadcastState(); return; }
-      const b = G.arenaBattle;
+      if (!G.rumbleBattle) { broadcastState(); return; }
+      const b = G.rumbleBattle;
       const p = G.players[b.cls];
       if (!p) { broadcastState(); return; }
-      const enemyTpl = ARENA_ENEMIES[b.enemyType] || { hp: 60, hpMax: 60 };
-      b.enemy.hp = enemyTpl.hpMax || enemyTpl.hp;
-      b.playerArena.hp = p.hpMax;
-      b.playerArena.armor = 0;
+      const enemyTpl = ENTITY_META[b.entityType] || { hpMax: 12 };
+      b.enemy.hp = enemyTpl.hpMax;
+      b.playerRumble.hp = p.hpMax;
+      b.playerRumble.armor = 0;
       // Don't reset bricks to original since those came from inventory at start;
       // give the player back a snapshot if available, otherwise leave current.
       b.startTime = Date.now();
@@ -622,18 +665,18 @@ wss.on('connection', (ws, req) => {
 
     // DM force-quits the battle — no consequences, player returns to board
     if (type === 'battleForceQuit') {
-      if (!G.arenaBattle) { broadcastState(); return; }
+      if (!G.rumbleBattle) { broadcastState(); return; }
       log('Battle force-quit by DM', 'battle');
-      G.arenaBattle = null;
+      G.rumbleBattle = null;
       G.phase = 'prepare';
       broadcastState(); return;
     }
 
-    // DM dismisses a pending arena battle without starting it (e.g. reroll, skip)
+    // DM dismisses a pending rumble battle without starting it (e.g. reroll, skip)
     if (type === 'battleDismissPending') {
-      if (!G.pendingArenaBattle) { broadcastState(); return; }
+      if (!G.pendingRumbleBattle) { broadcastState(); return; }
       log('Pending battle dismissed by DM', 'battle');
-      G.pendingArenaBattle = null;
+      G.pendingRumbleBattle = null;
       broadcastState(); return;
     }
 
@@ -650,7 +693,7 @@ wss.on('connection', (ws, req) => {
       const { cls, name } = P;
       if (G.players[cls]) {
         G.players[cls].playerName = (name||'').trim().slice(0,24);
-        const clsNames = {warrior:'Warrior',wizard:'Wizard',scout:'Scout',builder:'Builder',mender:'Mender',beastcaller:'Beastcaller'};
+        const clsNames = {breaker:'Breaker',formwright:'Formwright',snapstep:'Snapstep',blocksmith:'Blocksmith',fixer:'Fixer',wild_one:'Wild One'};
         log(`${clsNames[cls]||cls} registered as "${G.players[cls].playerName}"`, 'connect');
       }
     }
@@ -689,7 +732,7 @@ wss.on('connection', (ws, req) => {
         const variant = pool[Math.floor(Math.random()*pool.length)];
         G.usedBlueVariants[cls][zKey].push(variant);
         G.activeEvent.blueVariant = variant;
-        G.activeEvent.isWizard = (cls === 'wizard');
+        G.activeEvent.isFormwright = (cls === 'formwright');
         G.activeEvent.resolved = false;
         log(pName+' — forced blue: '+variant,'event');
       }
@@ -699,10 +742,99 @@ wss.on('connection', (ws, req) => {
 
       // ── WHITE — auto-give (same as natural) ──
       if (evType === 'white') {
-        const col = brickColor || 'white';
-        p.bricks[col] = (p.bricks[col]||0)+1;
-        log(pName+' got 1 '+col+' brick (forced)','reward');
-        G.activeEvent.resolved = true;
+        // v4: trigger Pilgrim's Rest card instead of auto-giving brick
+        G.activeEvent.whiteVariant = 'pilgrims_rest';
+        G.activeEvent.isFixer = (cls === 'fixer');
+        G.activeEvent.resolved = false;
+        log(pName+' — forced white: Pilgrim\'s Rest','event');
+      }
+
+      // ── v4 PURPLE — Fated Choice ──
+      if (evType === 'purple') {
+        G.activeEvent.purpleVariant = 'fated_choice';
+        G.activeEvent.isFixer = (cls === 'fixer');
+        G.activeEvent.resolved = false;
+        log(pName+' — forced purple: Fated Choice','event');
+      }
+
+      // ── v4 BLACK — Shadow Bargain ──
+      if (evType === 'black') {
+        G.activeEvent.blackVariant = 'shadow_bargain';
+        G.activeEvent.isFormwright = (cls === 'formwright');
+        G.activeEvent.isFixer = (cls === 'fixer');
+        const rT = Math.random();
+        let offer;
+        if (rT < 0.55) offer = 'blood_price';
+        else if (rT < 0.80) offer = 'brick_exchange';
+        else if (rT < 0.95) offer = 'poisoned_favor';
+        else offer = 'binding_pact';
+        G.activeEvent.blackOffer = offer;
+        G.activeEvent.resolved = false;
+        log(pName+' — forced black: Shadow Bargain ('+offer+')','event');
+      }
+
+      // ── v4 GREEN — Vine Path ──
+      if (evType === 'green') {
+        G.activeEvent.greenVariant = 'vine_path';
+        G.activeEvent.isWildOne = (cls === 'wild_one');
+        G.activeEvent.resolved = false;
+        log(pName+' — forced green: Vine Path','event');
+      }
+
+      // ── v4 RED — Trial of the Hand ──
+      if (evType === 'red') {
+        const redChallenges = [
+          { kind:'strength', text:'Arm-wrestle the DM or nearest player.' },
+          { kind:'strength', text:'Plank position for 30 seconds.' },
+          { kind:'strength', text:'Hold a book at arm\'s length for 20 seconds.' },
+          { kind:'strength', text:'Squat and hold for 15 seconds.' },
+          { kind:'dexterity', text:'Balance on one foot, eyes closed, 15 seconds.' },
+          { kind:'dexterity', text:'Stack 5 coins using only one hand.' },
+          { kind:'dexterity', text:'Flip and catch a coin 3 times in a row.' },
+          { kind:'mental', text:'Recite the alphabet backwards, no mistakes.' },
+          { kind:'mental', text:'Count down from 100 by 7s to zero.' },
+          { kind:'mental', text:'Name 10 animals starting with S in 15 seconds.' },
+          { kind:'social', text:'Make the DM laugh in one sentence.' },
+          { kind:'social', text:'Stare contest vs DM — 20 seconds no blink.' },
+          { kind:'social', text:'Compliment every player with a specific reason.' },
+          { kind:'social', text:'Impersonate another player for 10 seconds.' },
+        ];
+        G.activeEvent.redVariant = 'trial_of_hand';
+        G.activeEvent.isBreaker = (cls === 'breaker');
+        G.activeEvent.redChallenge = redChallenges[Math.floor(Math.random()*redChallenges.length)];
+        G.activeEvent.resolved = false;
+        log(pName+' — forced red: Trial ('+G.activeEvent.redChallenge.kind+')','event');
+      }
+
+      // ── v4 GRAY — Rubble Stacking ──
+      if (evType === 'gray') {
+        const GRAY_OUTLINES = [
+          ['XXXXX','.....','.....','.....','.....','.....'],
+          ['XXXXX','.XXX.','.....','.....','.....','.....'],
+          ['X...X','XXXXX','.....','.....','.....','.....'],
+          ['XXXXX','X...X','.....','.....','.....','.....'],
+          ['XXXX.','..XX.','.....','.....','.....','.....'],
+          ['.XXX.','XXXXX','.....','.....','.....','.....'],
+          ['XX.XX','XXXXX','.....','.....','.....','.....'],
+          ['XXXXX','.X.X.','.....','.....','.....','.....'],
+        ];
+        const GRAY_BLOCKS = [
+          [{dx:0,dy:0}],
+          [{dx:0,dy:0},{dx:1,dy:0}],
+          [{dx:0,dy:0},{dx:0,dy:1}],
+          [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0}],
+          [{dx:0,dy:0},{dx:1,dy:0},{dx:1,dy:1}],
+          [{dx:0,dy:0},{dx:1,dy:0},{dx:0,dy:1}],
+        ];
+        G.activeEvent.grayVariant = 'rubble_stacking';
+        G.activeEvent.isBlocksmith = (cls === 'blocksmith');
+        G.activeEvent.grayOutline = GRAY_OUTLINES[Math.floor(Math.random()*GRAY_OUTLINES.length)];
+        G.activeEvent.grayBlocks = [];
+        for (let bi = 0; bi < 3; bi++) {
+          G.activeEvent.grayBlocks.push(GRAY_BLOCKS[Math.floor(Math.random()*GRAY_BLOCKS.length)]);
+        }
+        G.activeEvent.resolved = false;
+        log(pName+' — forced gray: Rubble Stacking','event');
       }
 
       // ── TRAP / DOUBLETRAP — tap-burst game fires on player (same as natural) ──
@@ -711,25 +843,27 @@ wss.on('connection', (ws, req) => {
       // ── RIDDLE — DM reads aloud, player waits (same as natural) ──
       // No change needed
 
-      // ── PURPLE — trivia challenge (same as natural) ──
-      // No change needed
-
       // ── MONSTER / BOSS ──
       if (evType === 'monster' && mids && mids.length) {
         G.activeEvent = { cls, roll:'DM', zone:zone||0, resolved:false, evType:'monster', mids, forced:true };
-        // Force → pending arena battle: player will see red encounter card with Initiate button.
-        const enemyType = 'goblin'; // v1: all monster events become goblin
-        const enemyTpl = ARENA_ENEMIES[enemyType];
-        const flavorPool = ARENA_BATTLE_FLAVOR[enemyType] || [enemyTpl.name + ' appears!'];
+        // Force → pending rumble battle. Pick the entity type from the event's
+        // mids array. For multi-mob events (e.g. Knight + Goblin) the first
+        // mid drives the rumble entity choice; future work could spawn the
+        // full mids list as multiple entities. Fall back to goblin if the
+        // mid string isn't in the registry (defensive — shouldn't happen
+        // since LANDING_EVENTS uses validated names).
+        const entityType = ENTITY_META[mids[0]] ? mids[0] : 'goblin';
+        const entityTpl = ENTITY_META[entityType];
+        const flavorPool = RUMBLE_FLAVOR[entityType] || [entityTpl.name + ' appears!'];
         const flavor = flavorPool[Math.floor(Math.random() * flavorPool.length)];
-        G.pendingArenaBattle = {
+        G.pendingRumbleBattle = {
           cls,
-          enemyType,
-          enemy: { ...enemyTpl },
+          entityType,
+          enemy: { type: entityType, name: entityTpl.name, hp: entityTpl.hpMax, hpMax: entityTpl.hpMax },
           flavor,
           createdAt: Date.now(),
         };
-        log(pName + ' — DM forced encounter: ' + enemyTpl.name, 'event');
+        log(pName + ' — DM forced encounter: ' + entityTpl.name, 'event');
       }
       if (evType === 'boss') {
         G.activeEvent = { cls, roll:'DM', zone:zone||0, resolved:false, evType:'boss', isBoss:true, forced:true };
@@ -743,7 +877,7 @@ wss.on('connection', (ws, req) => {
 
     if (type === 'landingRoll') {
       const { cls, roll: rClient, zone } = P;
-      const r = roll(6); // server-side roll
+      const r = roll(7); // server-side roll — v4 tables have 7 event slots per zone
       if (G.activeEvent && G.activeEvent.riddleActive) { broadcastState(); return; }
       if (G.activeEvent && G.activeEvent.cls === cls && !G.activeEvent.resolved) { broadcastState(); return; }
       if (G.activeEvent && G.activeEvent.cls === cls && !G.activeEvent.resolved) {
@@ -766,6 +900,30 @@ wss.on('connection', (ws, req) => {
           G.activeEvent = { cls, roll:'SPACE', zone, resolved:false, evType:'riddle', forced:true };
           broadcastState(); return;
         }
+
+        // ── v4 LINGERING EVENTS (red/gray/green/purple/white/black) ──
+        if (G.lingeringEvents && G.lingeringEvents[spaceIdx]) {
+          const L = G.lingeringEvents[spaceIdx];
+          L.attemptsSoFar = (L.attemptsSoFar||1) + 1;
+          log(pName + ' lands on lingering ' + L.evType + ' — attempt #' + L.attemptsSoFar, 'event');
+          G.activeEvent = {
+            cls, roll:'SPACE', zone, resolved:false,
+            evType: L.evType,
+            lingering: true,
+            lingeringAttempt: L.attemptsSoFar,
+            lingeringOriginCls: L.originCls,
+            forced: true,
+          };
+          // Variant-specific re-roll: each event type produces fresh content per attempt
+          if (L.evType === 'purple') G.activeEvent.purpleVariant = 'fated_choice';
+          if (L.evType === 'gray')   G.activeEvent.grayVariant = 'rubble_stacking';
+          if (L.evType === 'green')  G.activeEvent.greenVariant = 'vine_path';
+          if (L.evType === 'white')  G.activeEvent.whiteVariant = 'pilgrims_rest';
+          if (L.evType === 'black')  G.activeEvent.blackVariant = 'shadow_bargain';
+          if (L.evType === 'red')    G.activeEvent.redVariant = 'trial_of_hand';
+          broadcastState(); return;
+        }
+
         if (orangeCount > 0) {
           log(`${pName} lands on persisted trap space (${orangeCount} trap${orangeCount>1?'s':''})`, 'event');
           const evType = orangeCount >= 2 ? 'doubletrap' : 'trap';
@@ -782,7 +940,7 @@ wss.on('connection', (ws, req) => {
           if (pool.length === 0) { G.usedBlueVariants[cls][zone] = []; pool = allVariants; }
           const variant = pool[Math.floor(Math.random()*pool.length)];
           G.usedBlueVariants[cls][zone].push(variant);
-          G.activeEvent = { cls, roll:'SPACE', zone, resolved:false, evType:'blue', blueVariant:variant, isWizard:(cls==='wizard'), forced:true };
+          G.activeEvent = { cls, roll:'SPACE', zone, resolved:false, evType:'blue', blueVariant:variant, isFormwright:(cls==='formwright'), forced:true };
           broadcastState(); return;
         }
         if (greenCount > 0) {
@@ -795,35 +953,40 @@ wss.on('connection', (ws, req) => {
       }
       const LANDING = {
         1:[
-          {roll:1,type:'nothing'},{roll:2,type:'nothing'},{roll:3,type:'gold',amount:1},
-          {roll:4,type:'gray'},{roll:5,type:'monster'},{roll:6,type:'riddle'}
+          {roll:1,type:'gray'},{roll:2,type:'red'},{roll:3,type:'gold',amount:1},
+          {roll:4,type:'riddle'},{roll:5,type:'monster',mids:['goblin']},{roll:6,type:'trap'},
+          {roll:7,type:'gray'}
         ],
         2:[
-          {roll:1,type:'trap'},{roll:2,type:'nothing'},{roll:3,type:'gold',amount:2},
-          {roll:4,type:'blue'},{roll:5,type:'monster'},{roll:6,type:'riddle'}
+          {roll:1,type:'white'},{roll:2,type:'green'},{roll:3,type:'gold',amount:2},
+          {roll:4,type:'blue'},{roll:5,type:'monster',mids:['skeleton']},{roll:6,type:'riddle'},
+          {roll:7,type:'trap'}
         ],
         3:[
-          {roll:1,type:'monster'},{roll:2,type:'trap'},{roll:3,type:'gold',amount:1},
-          {roll:4,type:'monster'},{roll:5,type:'riddle'},{roll:6,type:'creeper'}
+          {roll:1,type:'monster',mids:['goblin','goblin']},{roll:2,type:'black'},{roll:3,type:'purple'},
+          {roll:4,type:'green'},{roll:5,type:'riddle'},{roll:6,type:'red'},
+          {roll:7,type:'gold',amount:2}
         ],
         4:[
-          {roll:1,type:'monster'},{roll:2,type:'doubletrap'},{roll:3,type:'gold',amount:3},
-          {roll:4,type:'monster'},{roll:5,type:'purple'},{roll:6,type:'monster'}
+          {roll:1,type:'monster',mids:['stone_troll']},{roll:2,type:'gray'},{roll:3,type:'black'},
+          {roll:4,type:'purple'},{roll:5,type:'white'},{roll:6,type:'doubletrap'},
+          {roll:7,type:'red'}
         ],
         5:[
           {roll:1,type:'boss'},{roll:2,type:'boss'},{roll:3,type:'boss'},
-          {roll:4,type:'boss'},{roll:5,type:'boss'},{roll:6,type:'boss'}
+          {roll:4,type:'boss'},{roll:5,type:'boss'},{roll:6,type:'boss'},
+          {roll:7,type:'boss'}
         ]
       };
       const zoneTable = LANDING[zone+1] || LANDING[1];
       const evData = zoneTable[r-1] || {};
-      // Scout Trap Sense: if scout is in same zone, orange landing becomes red challenge
+      // Snapstep Trap Sense: if snapstep is in same zone, orange landing becomes red challenge
       let resolvedType = evData.type;
       if (resolvedType === 'trap' || resolvedType === 'doubletrap') {
-        const scoutP = G.players.scout;
+        const scoutP = G.players.snapstep;
         if (scoutP && scoutP.alive && SPACES[scoutP.space] && SPACES[scoutP.space].zone === zone) {
           resolvedType = 'challenge'; // treat as red challenge space instead
-          log('Scout Trap Sense! Orange trap converted to challenge for '+pName,'action');
+          log('Snapstep Trap Sense! Orange trap converted to challenge for '+pName,'action');
         }
       }
       // Store gold/blue amounts on event so DM screen can show them
@@ -860,26 +1023,123 @@ wss.on('connection', (ws, req) => {
         const variant = pool[Math.floor(Math.random()*pool.length)];
         G.usedBlueVariants[cls][zone].push(variant);
         eventMeta.blueVariant = variant;
-        eventMeta.isWizard = (cls === 'wizard');
+        eventMeta.isFormwright = (cls === 'formwright');
         log(pName+' found blue energy — '+variant+' event','event');
       }
+      // v4 PURPLE — Fated Choice (two-chest event)
+      if (evData.type === 'purple' && p) {
+        eventMeta.purpleVariant = 'fated_choice';
+        eventMeta.isFixer = (cls === 'fixer');
+        log(pName+' found a Fated Choice — two chests await','event');
+      }
+      // v4 WHITE — Pilgrim's Rest
+      if (evData.type === 'white' && p) {
+        eventMeta.whiteVariant = 'pilgrims_rest';
+        eventMeta.isFixer = (cls === 'fixer');
+        log(pName+' found a Pilgrim\'s Rest shrine','event');
+      }
+      // v4 BLACK — Shadow Bargain
+      if (evData.type === 'black' && p) {
+        eventMeta.blackVariant = 'shadow_bargain';
+        eventMeta.isFormwright = (cls === 'formwright');
+        eventMeta.isFixer = (cls === 'fixer');
+        // Roll offer at server so Formwright can see it up-front via isFormwright flag
+        const rT = Math.random();
+        let offer;
+        if (rT < 0.55) offer = 'blood_price';
+        else if (rT < 0.80) offer = 'brick_exchange';
+        else if (rT < 0.95) offer = 'poisoned_favor';
+        else offer = 'binding_pact';
+        eventMeta.blackOffer = offer;
+        log(pName+' meets the Shadow — a bargain awaits','event');
+      }
+      // v4 GREEN — Vine Path (replaces old 'creeper' landing)
+      if ((evData.type === 'green' || evData.type === 'creeper') && p) {
+        eventMeta.greenVariant = 'vine_path';
+        eventMeta.isWildOne = (cls === 'wild_one');
+        // normalize type so client renders the new card
+        eventMeta.evType = 'green';
+        log(pName+' faces the vines — Vine Path','event');
+      }
+      // v4 RED — Trial of the Hand
+      if ((evData.type === 'red' || evData.type === 'challenge') && p) {
+        eventMeta.redVariant = 'trial_of_hand';
+        eventMeta.isBreaker = (cls === 'breaker');
+        // Pick challenge from pool
+        const redChallenges = [
+          { kind:'strength', text:'Arm-wrestle the DM or nearest player.' },
+          { kind:'strength', text:'Plank position for 30 seconds.' },
+          { kind:'strength', text:'Hold a book at arm\'s length for 20 seconds.' },
+          { kind:'strength', text:'Squat and hold for 15 seconds.' },
+          { kind:'dexterity', text:'Balance on one foot, eyes closed, 15 seconds.' },
+          { kind:'dexterity', text:'Stack 5 coins using only one hand.' },
+          { kind:'dexterity', text:'Flip and catch a coin 3 times in a row.' },
+          { kind:'mental', text:'Recite the alphabet backwards, no mistakes.' },
+          { kind:'mental', text:'Count down from 100 by 7s to zero.' },
+          { kind:'mental', text:'Name 10 animals starting with S in 15 seconds.' },
+          { kind:'social', text:'Make the DM laugh in one sentence.' },
+          { kind:'social', text:'Stare contest vs DM — 20 seconds no blink.' },
+          { kind:'social', text:'Compliment every player with a specific reason.' },
+          { kind:'social', text:'Impersonate another player for 10 seconds.' },
+        ];
+        eventMeta.redChallenge = redChallenges[Math.floor(Math.random()*redChallenges.length)];
+        eventMeta.evType = 'red';
+        log(pName+' faces the Trial of the Hand — '+eventMeta.redChallenge.kind,'event');
+      }
+      // v4 GRAY — Rubble Stacking (when landing is 'gray' in zone 1+)
+      if (evData.type === 'gray' && p) {
+        eventMeta.grayVariant = 'rubble_stacking';
+        eventMeta.isBlocksmith = (cls === 'blocksmith');
+        // Server rolls 3 blocks + outline pattern so the mini-game is deterministic per attempt
+        const GRAY_OUTLINES = [
+          // each outline is a 5-wide × 6-tall grid, bottom-aligned filled cells (col,row from bottom)
+          // stored as string of 'XX..X' per row, rows 0 (bottom) to 5 (top)
+          ['XXXXX','.....','.....','.....','.....','.....'],  // flat 5
+          ['XXXXX','.XXX.','.....','.....','.....','.....'],  // pyramid-ish
+          ['X...X','XXXXX','.....','.....','.....','.....'],  // U shape
+          ['XXXXX','X...X','.....','.....','.....','.....'],  // frame base
+          ['XXXX.','..XX.','.....','.....','.....','.....'],  // L step
+          ['.XXX.','XXXXX','.....','.....','.....','.....'],  // T
+          ['XX.XX','XXXXX','.....','.....','.....','.....'],  // gap-top
+          ['XXXXX','.X.X.','.....','.....','.....','.....'],  // pillars
+        ];
+        const GRAY_BLOCKS = [
+          // each block is an array of {dx,dy} relative cell offsets
+          [{dx:0,dy:0}],                                       // 1x1 single
+          [{dx:0,dy:0},{dx:1,dy:0}],                           // horiz 2
+          [{dx:0,dy:0},{dx:0,dy:1}],                           // vert 2
+          [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0}],               // horiz 3
+          [{dx:0,dy:0},{dx:1,dy:0},{dx:1,dy:1}],               // L
+          [{dx:0,dy:0},{dx:1,dy:0},{dx:0,dy:1}],               // corner
+        ];
+        eventMeta.grayOutline = GRAY_OUTLINES[Math.floor(Math.random()*GRAY_OUTLINES.length)];
+        eventMeta.grayBlocks = [];
+        for (let bi = 0; bi < 3; bi++) {
+          eventMeta.grayBlocks.push(GRAY_BLOCKS[Math.floor(Math.random()*GRAY_BLOCKS.length)]);
+        }
+        eventMeta.evType = 'gray';
+        log(pName+' approaches fallen rubble — stacking challenge','event');
+      }
       // ── ARENA BATTLE HOOK ──
-      // If the landing event is a monster, set up a pending arena battle.
+      // If the landing event is a monster, set up a pending rumble battle.
       // The event card on the player's screen AND a panel on the DM's screen
-      // can both initiate the arena. Either party's initiate wins.
+      // can both initiate the rumble. Either party's initiate wins.
+      // Pick entity type from evData.mids[0]; this is the natural-roll path
+      // (the DM-force path is handled above and uses the same logic).
       if (evData.type === 'monster') {
-        const enemyType = 'goblin'; // v1: all monster events become goblin
-        const enemyTpl = ARENA_ENEMIES[enemyType];
-        const flavorPool = ARENA_BATTLE_FLAVOR[enemyType] || [enemyTpl.name + ' appears!'];
+        const evMids = evData.mids || ['goblin'];
+        const entityType = ENTITY_META[evMids[0]] ? evMids[0] : 'goblin';
+        const entityTpl = ENTITY_META[entityType];
+        const flavorPool = RUMBLE_FLAVOR[entityType] || [entityTpl.name + ' appears!'];
         const flavor = flavorPool[Math.floor(Math.random() * flavorPool.length)];
-        G.pendingArenaBattle = {
+        G.pendingRumbleBattle = {
           cls,
-          enemyType,
-          enemy: { ...enemyTpl }, // clone so mutations don't leak
+          entityType,
+          enemy: { type: entityType, name: entityTpl.name, hp: entityTpl.hpMax, hpMax: entityTpl.hpMax },
           flavor,
           createdAt: Date.now(),
         };
-        log(pName + ' encounter: ' + enemyTpl.name + ' — awaiting initiate', 'event');
+        log(pName + ' encounter: ' + entityTpl.name + ' — awaiting initiate', 'event');
       }
     }
 
@@ -932,7 +1192,14 @@ wss.on('connection', (ws, req) => {
     if (type === 'riddleAnswer') {
       const { cls, answer } = P;
       if (!G.activeEvent || !G.activeEvent.riddleActive || G.activeEvent.riddleWinner) { broadcastState(); return; }
-      if (answer === G.activeEvent.riddleA) {
+      // v4: normalize + accept a_alt array alongside canonical answer
+      const normalize = s => String(s||'').trim().toLowerCase();
+      const userAns = normalize(answer);
+      const canonical = normalize(G.activeEvent.riddleA);
+      const riddleObj = RIDDLES[G.activeEvent.riddleIdx] || {};
+      const altAnswers = (riddleObj.a_alt || []).map(normalize);
+      const isCorrect = (userAns === canonical) || altAnswers.includes(userAns);
+      if (isCorrect) {
         // Correct!
         const p = G.players[cls];
         const pNameR = p ? (p.playerName||p.name) : cls;
@@ -1033,7 +1300,7 @@ wss.on('connection', (ws, req) => {
         broadcastState(); return;
       }
       if (eventType === 'disarmTrap') {
-        // Scout disarms trap — costs 1 gray brick, gains 1 orange brick
+        // Snapstep disarms trap — costs 1 gray brick, gains 1 orange brick
         if ((p.bricks.gray||0) < 1) {
           ws.send(JSON.stringify({type:'error',msg:'Need 1 gray brick to disarm'}));
           broadcastState(); return;
@@ -1054,19 +1321,19 @@ wss.on('connection', (ws, req) => {
       }
       if (eventType === 'blueEventComplete') {
         const { success, bonus } = data||{};
-        const isWizard = cls === 'wizard';
-        const bricks = success && isWizard ? 2 : 1;
+        const isFormwright = cls === 'formwright';
+        const bricks = success && isFormwright ? 2 : 1;
         p.bricks.blue = (p.bricks.blue||0) + bricks;
         if (bonus === 'gold') p.gold = (p.gold||0) + 1;
         if (bonus === 'shield' && p.armor < Math.floor(p.hpMax * 0.5)) p.armor++;
         if (bonus === 'roll_bonus') { if (!G.rollBonuses) G.rollBonuses = {}; G.rollBonuses[cls] = (G.rollBonuses[cls]||0) + 1; }
         const pNameB = p.playerName||p.name;
         const label = bricks > 1 ? '+2 Blue Bricks!' : '+1 Blue Brick!';
-        log(pNameB+' completed blue event — '+label+(bonus?' +'+bonus:'')+(isWizard&&success?' (Wizard bonus!)':''),'reward');
+        log(pNameB+' completed blue event — '+label+(bonus?' +'+bonus:'')+(isFormwright&&success?' (Formwright bonus!)':''),'reward');
         // Clear persisted blue space
         if (!G.blueSpaces) G.blueSpaces = {};
         if (p.space !== undefined) delete G.blueSpaces[p.space];
-        G.activeEvent = { ...G.activeEvent, blueResult:{ success:true, msg: label+(bonus==='gold'?' +1 Gold':bonus==='shield'?' +Shield pip':bonus?' +'+bonus.replace('_',' '):'')+(isWizard?' (Wizard!)':'') }, resolved:false }; // DM must click resolve
+        G.activeEvent = { ...G.activeEvent, blueResult:{ success:true, msg: label+(bonus==='gold'?' +1 Gold':bonus==='shield'?' +Shield pip':bonus?' +'+bonus.replace('_',' '):'')+(isFormwright?' (Formwright!)':'') }, resolved:false }; // DM must click resolve
         broadcastState(); return;
       }
       if (eventType === 'blueEventFail') {
@@ -1095,13 +1362,13 @@ wss.on('connection', (ws, req) => {
         broadcastState(); return;
       }
       if (eventType === 'grayTake1') {
-        const amt = cls==='builder' ? 2 : 1;
+        const amt = cls==='blocksmith' ? 2 : 1;
         p.bricks.gray = (p.bricks.gray||0)+amt;
         G.activeEvent = { ...G.activeEvent, grayResult:{ took:amt, searched:false } };
         log((p.playerName||p.name)+' took '+amt+' gray brick'+(amt>1?'s':'')+' from rubble','reward');
         broadcastState(); return;
       }
-      if (eventType === 'builderScavenge') {
+      if (eventType === 'blocksmithScavenge') {
         const base = 2;
         const r = roll(6);
         const bonus = r>=6 ? 2 : r>=4 ? 1 : 0;
@@ -1114,21 +1381,21 @@ wss.on('connection', (ws, req) => {
       if (eventType === 'graySearch') {
         const r = roll(6);
         const found = r>=5?2:r>=3?1:0;
-        const builderBonus = cls==='builder' ? 1 : 0;
+        const builderBonus = cls==='blocksmith' ? 1 : 0;
         const total = found + builderBonus;
         p.bricks.gray = (p.bricks.gray||0)+total;
         G.activeEvent = { ...G.activeEvent, grayResult:{ found:total, roll:r, searched:true, builderBonus:builderBonus>0 } };
-        log((p.playerName||p.name)+' searched rubble — found '+total+' gray brick'+(total!==1?'s':'')+' (roll '+r+')'+(builderBonus?' +Builder bonus':''),'reward');
+        log((p.playerName||p.name)+' searched rubble — found '+total+' gray brick'+(total!==1?'s':'')+' (roll '+r+')'+(builderBonus?' +Blocksmith bonus':''),'reward');
         broadcastState(); return;
       }
       if (eventType === 'whitePickup') {
         // Standard white brick pickup + class bonus
         p.bricks.white = (p.bricks.white||0)+1;
-        if (cls==='mender') {
-          // Mender heals 2 HP to chosen target — sent as data.healTarget
+        if (cls==='fixer') {
+          // Fixer heals 2 HP to chosen target — sent as data.healTarget
           const tgt = data.healTarget||cls;
           const tp = G.players[tgt];
-          if(tp) { tp.hp = Math.min(tp.hpMax+3, tp.hp+2); log(`Mender white bonus: +2 HP to ${tp.name}`,'heal'); }
+          if(tp) { tp.hp = Math.min(tp.hpMax+3, tp.hp+2); log(`Fixer white bonus: +2 HP to ${tp.name}`,'heal'); }
         } else {
           // Self-heal 1 HP, overheal allowed
           p.hp = Math.min(p.hpMax+3, p.hp+1);
@@ -1136,19 +1403,434 @@ wss.on('connection', (ws, req) => {
         }
       }
       if (eventType === 'creeperSuccess') {
-        const amt = cls==='beastcaller'?2:1;
+        const amt = cls==='wild_one'?2:1;
         p.bricks.green = (p.bricks.green||0)+amt;
         log(`${p.name} cut the vine! +${amt} green brick${amt>1?'s':''}`,'reward');
       }
       if (eventType === 'creeperFail') {
-        if (cls!=='beastcaller') {
+        if (cls!=='wild_one') {
           G.movementDebuffs[cls] = 2;
           log(`${p.name} missed the vine — movement −2 next turn`,'damage');
         } else {
           p.bricks.green = (p.bricks.green||0)+1;
-          log(`Beastcaller missed but still gains 1 green brick`,'reward');
+          log(`Wild One missed but still gains 1 green brick`,'reward');
         }
       }
+
+      // ── v4 PURPLE FATED CHOICE ──
+      if (eventType === 'purpleChoose') {
+        // data.choice = 'left' | 'right' | 'pass'
+        const choice = (data && data.choice) || 'pass';
+        const pName = p.playerName||p.name;
+        if (choice === 'pass') {
+          // PASS: +1 cheese guaranteed; event lingers
+          p.cheese = (p.cheese||0) + 1;
+          // Store lingering
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = {
+            evType: 'purple',
+            variant: 'fated_choice',
+            originCls: cls,
+            attemptsSoFar: 1,
+            createdAt: Date.now(),
+          };
+          G.activeEvent = { ...G.activeEvent, purpleResult:{ outcome:'pass', lingered:true, msg:'+1 cheese — chests left for next traveler' }, resolved:false };
+          log(pName+' passed the Fated Choice — +1 cheese (event lingers)','event');
+          broadcastState(); return;
+        }
+        // Opened a chest — roll 67% blessed / 33% cursed
+        const rBless = Math.random();
+        if (rBless < 0.67) {
+          // BLESSED: +1 purple brick, +2-3 gold
+          const goldAmt = rollRange(2,3);
+          p.bricks.purple = (p.bricks.purple||0) + 1;
+          p.gold = (p.gold||0) + goldAmt;
+          // Clear lingering (this space is now done)
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, purpleResult:{ outcome:'blessed', chest:choice, goldGained:goldAmt, msg:'+1 Purple Brick, +'+goldAmt+' Gold' }, resolved:false };
+          log(pName+' chose '+choice+' — BLESSED! +1 purple, +'+goldAmt+' gold','reward');
+        } else {
+          // CURSED: random curse from 5-item pool
+          const curseRoll = Math.random();
+          let curse, msg;
+          if (curseRoll < 0.25) {
+            // LOST BRICK — random non-purple brick
+            const nonPurpleOwned = Object.entries(p.bricks||{}).filter(([c,n]) => c !== 'purple' && n > 0);
+            if (nonPurpleOwned.length > 0) {
+              const pick = nonPurpleOwned[Math.floor(Math.random()*nonPurpleOwned.length)];
+              p.bricks[pick[0]] = Math.max(0, p.bricks[pick[0]] - 1);
+              curse = 'lost_brick';
+              msg = 'Lost 1 '+pick[0]+' brick';
+            } else {
+              curse = 'lost_brick_empty';
+              msg = 'No bricks to lose — curse wasted';
+            }
+          } else if (curseRoll < 0.50) {
+            // WEAKNESS — -25% max HP until zone transition
+            const reduction = Math.max(1, Math.floor((p.hpMax||10) * 0.25));
+            p.weaknessReduction = (p.weaknessReduction||0) + reduction;
+            p.hpMax = Math.max(1, (p.hpMax||10) - reduction);
+            p.hp = Math.min(p.hpMax, p.hp);
+            curse = 'weakness';
+            msg = '−'+reduction+' Max HP until next zone';
+          } else if (curseRoll < 0.70) {
+            // SLOW TONGUE — no shop this zone
+            if (!G.slowTongueZones) G.slowTongueZones = {};
+            const currentZone = (SPACES[p.space]||{}).zone || 0;
+            if (!G.slowTongueZones[cls]) G.slowTongueZones[cls] = [];
+            if (!G.slowTongueZones[cls].includes(currentZone)) G.slowTongueZones[cls].push(currentZone);
+            curse = 'slow_tongue';
+            msg = 'Cannot buy at stores this zone';
+          } else if (curseRoll < 0.85) {
+            // THIN POCKETS — -2 gold
+            const lost = Math.min(2, p.gold||0);
+            p.gold = Math.max(0, (p.gold||0) - 2);
+            curse = 'thin_pockets';
+            msg = '−'+lost+' Gold';
+          } else {
+            // HEX MARK — -1 HP + 1 queued poison
+            p.hp = Math.max(0, (p.hp||0) - 1);
+            if (p.hp <= 0) p.alive = false;
+            p.queuedPoisonStacks = (p.queuedPoisonStacks||0) + 1;
+            p.queuedPoisonBattles = Math.max(p.queuedPoisonBattles||0, 1);
+            curse = 'hex_mark';
+            msg = '−1 HP + 1 poison stack next battle';
+          }
+          // Clear lingering (chest was opened)
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, purpleResult:{ outcome:'cursed', chest:choice, curse, msg, fixerCanCleanse:(cls==='fixer') }, resolved:false };
+          log(pName+' chose '+choice+' — CURSED: '+msg,'damage');
+        }
+        broadcastState(); return;
+      }
+
+      // ── v4 PURPLE CLEANSE (Fixer only — spend 1 black or 2 white to negate curse) ──
+      if (eventType === 'purpleCleanse') {
+        if (cls !== 'fixer') {
+          ws.send(JSON.stringify({type:'error',msg:'Only Fixer can cleanse curses'}));
+          return;
+        }
+        if (!G.activeEvent || !G.activeEvent.purpleResult || G.activeEvent.purpleResult.outcome !== 'cursed') {
+          ws.send(JSON.stringify({type:'error',msg:'No active curse to cleanse'}));
+          return;
+        }
+        const useBlack = (p.bricks.black||0) >= 1;
+        const useWhite = !useBlack && (p.bricks.white||0) >= 2;
+        if (!useBlack && !useWhite) {
+          ws.send(JSON.stringify({type:'error',msg:'Need 1 black or 2 white bricks to cleanse'}));
+          return;
+        }
+        // Revert the curse effect (tracked per-type)
+        const prev = G.activeEvent.purpleResult;
+        if (prev.curse === 'weakness' && p.weaknessReduction) {
+          p.hpMax = (p.hpMax||10) + p.weaknessReduction;
+          p.weaknessReduction = 0;
+        }
+        if (prev.curse === 'hex_mark') {
+          // Undo the HP loss
+          p.hp = Math.min(p.hpMax, (p.hp||0) + 1);
+          if (p.hp > 0) p.alive = true;
+          p.queuedPoisonStacks = Math.max(0, (p.queuedPoisonStacks||0) - 1);
+          if (p.queuedPoisonStacks === 0) p.queuedPoisonBattles = 0;
+        }
+        // SLOW_TONGUE — remove from list
+        if (prev.curse === 'slow_tongue' && G.slowTongueZones && G.slowTongueZones[cls]) {
+          const zoneNow = (SPACES[p.space]||{}).zone || 0;
+          G.slowTongueZones[cls] = G.slowTongueZones[cls].filter(z => z !== zoneNow);
+        }
+        // Deduct bricks
+        if (useBlack) {
+          p.bricks.black -= 1;
+          // And grant the blessed reward since Fixer paid black
+          const goldAmt = rollRange(2,3);
+          p.bricks.purple = (p.bricks.purple||0) + 1;
+          p.gold = (p.gold||0) + goldAmt;
+          G.activeEvent = { ...G.activeEvent, purpleResult:{ outcome:'cleansed_blessed', curse:prev.curse, goldGained:goldAmt, msg:'Fixer cleansed the curse — +1 purple, +'+goldAmt+' gold' }, resolved:false };
+          log((p.playerName||p.name)+' cleansed the '+prev.curse+' curse with 1 black — blessed reward applied','action');
+        } else {
+          p.bricks.white -= 2;
+          G.activeEvent = { ...G.activeEvent, purpleResult:{ outcome:'cleansed_negated', curse:prev.curse, msg:'Fixer cleansed the curse (2 white) — no blessing' }, resolved:false };
+          log((p.playerName||p.name)+' cleansed the '+prev.curse+' curse with 2 white','action');
+        }
+        broadcastState(); return;
+      }
+
+      // ── v4 WHITE PILGRIM'S REST ──
+      if (eventType === 'whitePilgrimChoose') {
+        const choice = (data && data.choice) || 'self';
+        const pName = p.playerName||p.name;
+        if (choice === 'heal_ally') {
+          const targetCls = data.healTarget;
+          const tgt = G.players[targetCls];
+          if (!tgt) { ws.send(JSON.stringify({type:'error',msg:'Invalid heal target'})); return; }
+          if ((p.bricks.white||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 white brick'})); return; }
+          p.bricks.white -= 1;
+          const isFixer = (cls === 'fixer');
+          const healAmt = isFixer ? 4 : 3;
+          tgt.hp = Math.min(tgt.hpMax, (tgt.hp||0) + healAmt);
+          const whiteBack = isFixer ? 3 : 2;
+          p.bricks.white = (p.bricks.white||0) + whiteBack;
+          p.gold = (p.gold||0) + 1;
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, whiteResult:{ outcome:'heal_ally', target:targetCls, healAmt, whiteBack, msg:'Healed '+(tgt.playerName||tgt.name)+' +'+healAmt+' HP · +'+whiteBack+' white, +1 gold' }, resolved:false };
+          log(pName+' healed '+(tgt.playerName||tgt.name)+' +'+healAmt+' HP (Pilgrim\'s Rest)','heal');
+        } else if (choice === 'heal_self') {
+          const wasFull = (p.hp||0) >= (p.hpMax||10);
+          if (wasFull) {
+            p.hpMax = (p.hpMax||10) + 1;
+            p.hp = p.hpMax;
+            p.bricks.white = (p.bricks.white||0) + 1;
+            if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+            G.activeEvent = { ...G.activeEvent, whiteResult:{ outcome:'self_maxhp', msg:'Already full — +1 Max HP, +1 white' }, resolved:false };
+            log(pName+' rests at the shrine — +1 Max HP (full HP), +1 white','reward');
+          } else {
+            p.hp = Math.min(p.hpMax, (p.hp||0) + 1);
+            p.bricks.white = (p.bricks.white||0) + 1;
+            if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+            G.activeEvent = { ...G.activeEvent, whiteResult:{ outcome:'self_heal', msg:'+1 HP, +1 white' }, resolved:false };
+            log(pName+' rests — +1 HP, +1 white','heal');
+          }
+        } else if (choice === 'self_rest') {
+          // Fallback: roll for reward; event lingers
+          const r = roll(6);
+          const strong = r >= 3;
+          const whiteGot = strong ? 2 : 1;
+          const hpGot = strong ? 1 : 0;
+          p.bricks.white = (p.bricks.white||0) + whiteGot;
+          if (hpGot) p.hp = Math.min(p.hpMax, (p.hp||0) + hpGot);
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = {
+            evType:'white', variant:'pilgrims_rest', originCls:cls,
+            attemptsSoFar:1, createdAt:Date.now(),
+          };
+          G.activeEvent = { ...G.activeEvent, whiteResult:{ outcome:'self_rest', roll:r, whiteGot, hpGot, lingered:true, msg:'Rolled '+r+' — +'+whiteGot+' white'+(hpGot?', +1 HP':'') }, resolved:false };
+          log(pName+' self-rest roll '+r+' — +'+whiteGot+' white (event lingers)','event');
+        } else if (choice === 'revive') {
+          if (cls !== 'fixer') { ws.send(JSON.stringify({type:'error',msg:'Only Fixer can revive'})); return; }
+          const targetCls = data.healTarget;
+          const tgt = G.players[targetCls];
+          if (!tgt || tgt.alive || (tgt.hp||0) > 0) { ws.send(JSON.stringify({type:'error',msg:'Target not downed'})); return; }
+          if ((p.bricks.white||0) < 1 || (p.bricks.purple||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 white + 1 purple'})); return; }
+          p.bricks.white -= 1;
+          p.bricks.purple -= 1;
+          tgt.hp = Math.max(1, Math.floor((tgt.hpMax||10) * 0.5));
+          tgt.alive = true;
+          p.bricks.white = (p.bricks.white||0) + 3;
+          p.gold = (p.gold||0) + 2;
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, whiteResult:{ outcome:'revive', target:targetCls, reviveHp:tgt.hp, msg:'Revived '+(tgt.playerName||tgt.name)+' to '+tgt.hp+' HP · +3 white, +2 gold' }, resolved:false };
+          log(pName+' (Fixer) revived '+(tgt.playerName||tgt.name)+' to '+tgt.hp+' HP','heal');
+        }
+        broadcastState(); return;
+      }
+
+      // ── v4 BLACK SHADOW BARGAIN ──
+      if (eventType === 'blackBargainChoose') {
+        const choice = (data && data.choice) || 'refuse';
+        const pName = p.playerName||p.name;
+        // Server rolls the trade type once when event starts; stored on G.activeEvent.blackOffer.
+        // For first landing, if blackOffer is missing, roll now.
+        if (!G.activeEvent.blackOffer) {
+          const rT = Math.random();
+          let offer;
+          if (rT < 0.55) offer = 'blood_price';
+          else if (rT < 0.80) offer = 'brick_exchange';
+          else if (rT < 0.95) offer = 'poisoned_favor';
+          else offer = 'binding_pact';
+          G.activeEvent.blackOffer = offer;
+        }
+        const offer = G.activeEvent.blackOffer;
+
+        if (choice === 'refuse') {
+          // 97% cheese, 3% black
+          const rG = Math.random();
+          let msg;
+          if (rG < 0.97) {
+            p.cheese = (p.cheese||0) + 1;
+            msg = 'Shadow hands you 1 cheese';
+          } else {
+            p.bricks.black = (p.bricks.black||0) + 1;
+            msg = 'Shadow respects your refusal — +1 black brick';
+          }
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = {
+            evType:'black', variant:'shadow_bargain', originCls:cls,
+            attemptsSoFar:1, createdAt:Date.now(),
+          };
+          G.activeEvent = { ...G.activeEvent, blackResult:{ outcome:'refused', offer, msg, lingered:true }, resolved:false };
+          log(pName+' refused the shadow bargain — '+msg,'event');
+          broadcastState(); return;
+        }
+
+        // ACCEPT path — apply offer effects
+        if (offer === 'blood_price') {
+          // Roll 1d10 distribution: 1-4→2, 5-7→3, 8-9→4, 10→5
+          const r = roll(10);
+          let amt = 2;
+          if (r <= 4) amt = 2;
+          else if (r <= 7) amt = 3;
+          else if (r <= 9) amt = 4;
+          else amt = 5;
+          // Floor at 1 (per Q4)
+          const newMax = Math.max(1, (p.hpMax||10) - amt);
+          const actual = (p.hpMax||10) - newMax;
+          p.hpMax = newMax;
+          p.hp = Math.min(p.hpMax, p.hp);
+          p.bricks.black = (p.bricks.black||0) + 2;
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, blackResult:{ outcome:'blood_price', amt:actual, roll:r, msg:'−'+actual+' Max HP (permanent) · +2 black' }, resolved:false };
+          log(pName+' paid BLOOD PRICE: −'+actual+' Max HP (permanent), +2 black','damage');
+        } else if (offer === 'brick_exchange') {
+          const color = (data && data.exchangeColor);
+          if (!color || color === 'black') { ws.send(JSON.stringify({type:'error',msg:'Pick a non-black brick to trade'})); return; }
+          if ((p.bricks[color]||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Not enough '+color+' bricks'})); return; }
+          p.bricks[color] -= 1;
+          p.bricks.black = (p.bricks.black||0) + 1;
+          p.gold = (p.gold||0) + 3;
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, blackResult:{ outcome:'brick_exchange', color, msg:'−1 '+color+' · +1 black, +3 gold' }, resolved:false };
+          log(pName+' traded 1 '+color+' for 1 black + 3 gold','reward');
+        } else if (offer === 'poisoned_favor') {
+          p.bricks.black = (p.bricks.black||0) + 1;
+          p.queuedPoisonStacks = (p.queuedPoisonStacks||0) + 1;
+          p.queuedPoisonBattles = Math.max(p.queuedPoisonBattles||0, 3);
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, blackResult:{ outcome:'poisoned_favor', msg:'+1 black · poisoned next 3 battles' }, resolved:false };
+          log(pName+' accepted POISONED FAVOR: +1 black, poisoned 3 battles','damage');
+        } else if (offer === 'binding_pact') {
+          p.bricks.black = (p.bricks.black||0) + 2;
+          const losses = [];
+          Object.keys(G.players||{}).forEach(allyCls => {
+            if (allyCls === cls) return;
+            const ally = G.players[allyCls];
+            if (!ally || !ally.alive) return;
+            const nonBlack = Object.entries(ally.bricks||{}).filter(([c,n]) => c !== 'black' && n > 0);
+            if (nonBlack.length === 0) return;
+            const pick = nonBlack[Math.floor(Math.random()*nonBlack.length)];
+            ally.bricks[pick[0]] = Math.max(0, ally.bricks[pick[0]] - 1);
+            losses.push((ally.playerName||ally.name)+' (−1 '+pick[0]+')');
+          });
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, blackResult:{ outcome:'binding_pact', losses, msg:'+2 black · allies lost: '+(losses.join(', ')||'none') }, resolved:false };
+          log(pName+' sealed BINDING PACT: +2 black; allies paid: '+(losses.join(', ')||'none'),'damage');
+        }
+        broadcastState(); return;
+      }
+
+      // ── v4 GREEN VINE PATH ──
+      if (eventType === 'greenVineResolve') {
+        // data.cutCount: 0-3 (number of vines successfully cut)
+        const cutCount = Math.max(0, Math.min(3, parseInt((data && data.cutCount) || 0)));
+        const pName = p.playerName||p.name;
+        const isWildOne = (cls === 'wild_one');
+        const wildBonus = (isWildOne && cutCount > 0) ? 1 : 0;
+        if (cutCount >= 3) {
+          const goldAmt = rollRange(2,3);
+          p.bricks.green = (p.bricks.green||0) + 1 + wildBonus;
+          p.gold = (p.gold||0) + goldAmt;
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, greenResult:{ outcome:'all_cut', cutCount, greenGained: 1+wildBonus, goldGained:goldAmt, msg:'+'+(1+wildBonus)+' green, +'+goldAmt+' gold' }, resolved:false };
+          log(pName+' cut all 3 vines — +'+(1+wildBonus)+' green, +'+goldAmt+' gold','reward');
+        } else if (cutCount === 2) {
+          const goldAmt = rollRange(1,2);
+          p.gold = (p.gold||0) + goldAmt;
+          if (wildBonus) p.bricks.green = (p.bricks.green||0) + 1;
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = { evType:'green', variant:'vine_path', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+          G.activeEvent = { ...G.activeEvent, greenResult:{ outcome:'partial_2', cutCount, goldGained:goldAmt, greenGained:wildBonus, lingered:true, msg:'+'+goldAmt+' gold'+(wildBonus?', +1 green':'')+' — vines remain' }, resolved:false };
+          log(pName+' cut 2 vines — +'+goldAmt+' gold (event lingers)','event');
+        } else if (cutCount === 1) {
+          p.hp = Math.max(0, (p.hp||0) - 1);
+          if (p.hp <= 0) p.alive = false;
+          if (wildBonus) p.bricks.green = (p.bricks.green||0) + 1;
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = { evType:'green', variant:'vine_path', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+          G.activeEvent = { ...G.activeEvent, greenResult:{ outcome:'partial_1', cutCount, greenGained:wildBonus, lingered:true, msg:'−1 HP'+(wildBonus?', +1 green':'')+' — vines remain' }, resolved:false };
+          log(pName+' cut 1 vine — −1 HP (event lingers)','damage');
+        } else {
+          // 0 cut — −1 HP + poison stack queued for next rumble
+          p.hp = Math.max(0, (p.hp||0) - 1);
+          if (p.hp <= 0) p.alive = false;
+          p.queuedPoisonStacks = (p.queuedPoisonStacks||0) + 1;
+          p.queuedPoisonBattles = Math.max(p.queuedPoisonBattles||0, 1);
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = { evType:'green', variant:'vine_path', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+          G.activeEvent = { ...G.activeEvent, greenResult:{ outcome:'total_fail', cutCount:0, lingered:true, msg:'−1 HP + 1 poison next battle — vines remain' }, resolved:false };
+          log(pName+' — thorns bit deep. −1 HP + 1 poison queued (event lingers)','damage');
+        }
+        broadcastState(); return;
+      }
+
+      // ── v4 RED TRIAL OF HAND (DM adjudicates) ──
+      if (eventType === 'redTrialResolve') {
+        // data.tier: 'perfect' | 'good' | 'failed' — DM taps the button
+        const tier = (data && data.tier) || 'failed';
+        const pName = p.playerName||p.name;
+        if (tier === 'perfect') {
+          p.bricks.red = (p.bricks.red||0) + 1;
+          p.gold = (p.gold||0) + 2;
+          p.cheese = (p.cheese||0) + 1;
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, redResult:{ outcome:'perfect', msg:'+1 red, +2 gold, +1 cheese' }, resolved:false };
+          log(pName+' nailed the Trial of the Hand — PERFECT','reward');
+        } else if (tier === 'good') {
+          p.bricks.red = (p.bricks.red||0) + 1;
+          p.gold = (p.gold||0) + 1;
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          G.activeEvent = { ...G.activeEvent, redResult:{ outcome:'good', msg:'+1 red, +1 gold' }, resolved:false };
+          log(pName+' passed the Trial — +1 red, +1 gold','reward');
+        } else {
+          p.cheese = (p.cheese||0) + 1;
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = { evType:'red', variant:'trial_of_hand', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+          G.activeEvent = { ...G.activeEvent, redResult:{ outcome:'failed', msg:'+1 cheese — the stones await a new challenger' }, resolved:false };
+          log(pName+' — Trial failed. Event lingers for next challenger.','event');
+        }
+        broadcastState(); return;
+      }
+
+      // ── v4 GRAY RUBBLE STACKING ──
+      if (eventType === 'grayRubbleResolve') {
+        // data.matchPct: 0-100, data.overhang: cells over outline
+        const matchPct = Math.max(0, Math.min(100, parseInt((data && data.matchPct) || 0)));
+        const overhang = Math.max(0, parseInt((data && data.overhang) || 0));
+        const pName = p.playerName||p.name;
+        const isBlocksmith = (cls === 'blocksmith');
+        const blocksmithBonus = isBlocksmith ? 1 : 0;
+        let tier, msg;
+        if (matchPct >= 90 && overhang === 0) {
+          tier = 'perfect';
+          p.bricks.gray = (p.bricks.gray||0) + 1 + blocksmithBonus;
+          p.cheese = (p.cheese||0) + 2;
+          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
+          msg = '+' + (1+blocksmithBonus) + ' gray, +2 cheese';
+          log(pName+' stacked the rubble perfectly — '+msg,'reward');
+        } else if (matchPct >= 70) {
+          tier = 'good';
+          p.cheese = (p.cheese||0) + 2;
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = { evType:'gray', variant:'rubble_stacking', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+          msg = '+2 cheese — the wall still has gaps';
+          log(pName+' stacked rubble (good) — +2 cheese (event lingers)','event');
+        } else if (matchPct >= 40) {
+          tier = 'miss';
+          p.cheese = (p.cheese||0) + 1;
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = { evType:'gray', variant:'rubble_stacking', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+          msg = '+1 cheese — rubble shifts (event lingers)';
+          log(pName+' stacked rubble (miss) — +1 cheese','event');
+        } else {
+          tier = 'fail';
+          p.cheese = (p.cheese||0) + 1;
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[p.space] = { evType:'gray', variant:'rubble_stacking', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+          msg = '+1 cheese — stones settle their own way';
+          log(pName+' fumbled the rubble — +1 cheese','event');
+        }
+        G.activeEvent = { ...G.activeEvent, grayRubbleResult:{ tier, matchPct, overhang, lingered: tier!=='perfect', msg }, resolved:false };
+        broadcastState(); return;
+      }
+
       if (eventType === 'triviaSuccess') {
         p.bricks.purple = (p.bricks.purple||0)+1;
         log(`${p.name} answered correctly — claimed purple brick!`,'reward');
@@ -1216,23 +1898,23 @@ wss.on('connection', (ws, req) => {
       const p = G.players[cls];
       if (!G.orangeSpaces) G.orangeSpaces = {};
 
-      if (cls === 'builder') {
+      if (cls === 'blocksmith') {
         // Costs 1 gray brick
         if ((p.bricks.gray||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 gray brick to disarm'})); broadcastState(); return; }
         p.bricks.gray--;
         G.orangeSpaces[spaceIdx] = Math.max(0, (G.orangeSpaces[spaceIdx]||1)-1);
         if (G.orangeSpaces[spaceIdx]<=0) delete G.orangeSpaces[spaceIdx];
-        log(`Builder disarmed trap at space ${spaceIdx+1} (1 gray spent)`,'action');
-      } else if (cls === 'scout') {
+        log(`Blocksmith disarmed trap at space ${spaceIdx+1} (1 gray spent)`,'action');
+      } else if (cls === 'snapstep') {
         // Spend yellow brick, disarm 1, then roll for more
         if ((p.bricks.yellow||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 yellow brick'})); broadcastState(); return; }
         p.bricks.yellow--;
         G.orangeSpaces[spaceIdx] = Math.max(0,(G.orangeSpaces[spaceIdx]||1)-1);
         if (G.orangeSpaces[spaceIdx]<=0) delete G.orangeSpaces[spaceIdx];
-        log(`Scout disarmed trap at space ${spaceIdx+1}`,'action');
+        log(`Snapstep disarmed trap at space ${spaceIdx+1}`,'action');
         // Check if more in zone — server sends back result, DM decides chain
         const r = roll(6);
-        ws.send(JSON.stringify({ type:'scoutDisarmChain', roll:r, continueDisarm: r%2!==0 }));
+        ws.send(JSON.stringify({ type:'snapstepDisarmChain', roll:r, continueDisarm: r%2!==0 }));
       } else {
         // Roll d6 4+ success, fail triggers trap
         const r = roll(6);
@@ -1275,6 +1957,66 @@ wss.on('connection', (ws, req) => {
     if (type === 'adjustGold') {
       G.players[P.cls].gold = Math.max(0, G.players[P.cls].gold+P.amount);
     }
+
+    // ── v4 CHEESE SYSTEM ──
+    if (type === 'adjustCheese') {
+      const p = G.players[P.cls];
+      if (!p) return;
+      p.cheese = Math.max(0, (p.cheese||0) + (P.amount||0));
+      broadcastState(); return;
+    }
+    if (type === 'consumeCheese') {
+      const p = G.players[P.cls];
+      if (!p) return;
+      const amt = Math.max(1, parseInt(P.amount||1) || 1);
+      const actual = Math.min(amt, p.cheese||0);
+      if (actual <= 0) { broadcastState(); return; }
+      p.cheese -= actual;
+      p.hpMax = (p.hpMax||10) + actual;
+      p.hp = Math.min(p.hpMax, (p.hp||0) + actual);
+      const pName = p.playerName||p.name;
+      log(pName+' ate '+actual+' cheese (+'+actual+' max HP)','reward');
+      broadcastState(); return;
+    }
+    if (type === 'giftCheese') {
+      const from = G.players[P.fromCls];
+      const to = G.players[P.toCls];
+      if (!from || !to) return;
+      const amt = Math.max(1, parseInt(P.amount||1) || 1);
+      const actual = Math.min(amt, from.cheese||0);
+      if (actual <= 0) { broadcastState(); return; }
+      // Require same-zone (matches brick trade proximity rule)
+      const fromZone = (SPACES[from.space]||{}).zone;
+      const toZone = (SPACES[to.space]||{}).zone;
+      if (fromZone !== toZone) {
+        ws.send(JSON.stringify({type:'error',msg:'Recipient must be in same zone'}));
+        return;
+      }
+      from.cheese -= actual;
+      to.cheese = (to.cheese||0) + actual;
+      log((from.playerName||from.name)+' gifted '+actual+' cheese to '+(to.playerName||to.name),'action');
+      broadcastState(); return;
+    }
+
+    // ── v4 POISON CLEANSE (board action, consumes 1 white brick) ──
+    if (type === 'cleansePoison') {
+      const p = G.players[P.cls];
+      if (!p) return;
+      if ((p.bricks.white||0) < 1) {
+        ws.send(JSON.stringify({type:'error',msg:'Need 1 white brick to cleanse'}));
+        return;
+      }
+      if ((p.queuedPoisonStacks||0) === 0 && (p.queuedPoisonBattles||0) === 0) {
+        ws.send(JSON.stringify({type:'error',msg:'No poison to cleanse'}));
+        return;
+      }
+      p.bricks.white -= 1;
+      const cleared = p.queuedPoisonStacks||0;
+      p.queuedPoisonStacks = 0;
+      p.queuedPoisonBattles = 0;
+      log((p.playerName||p.name)+' cleansed '+cleared+' poison stack'+(cleared!==1?'s':'')+' (1 white)','action');
+      broadcastState(); return;
+    }
     if (type === 'toggleMovement') {
       G.allowBackward = !!P.allowBackward;
       log('Movement direction: '+(G.allowBackward?'forward OR backward':'forward only'),'action');
@@ -1302,7 +2044,7 @@ wss.on('connection', (ws, req) => {
 
     // ── TRADING ──
     // Helper: is this player currently in an active battle?
-    const isInBattle = (cls) => !!(G.arenaBattle && G.arenaBattle.cls === cls);
+    const isInBattle = (cls) => !!(G.rumbleBattle && G.rumbleBattle.cls === cls);
 
     if (type === 'offerTrade') {
       if (isInBattle(P.fromCls) || isInBattle(P.toCls)) {

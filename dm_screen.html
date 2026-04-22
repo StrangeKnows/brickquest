@@ -197,47 +197,47 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
     <div class="card">
       <div class="card-title">Landing Events</div>
 
-      <!-- Arena battle — pending initiate -->
-      <div id="arena-pending-panel" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#2a0a0a;border:2px solid var(--red);">
+      <!-- Rumble battle — pending initiate -->
+      <div id="rumble-pending-panel" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#2a0a0a;border:2px solid var(--red);">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
           <span style="font-family:Cinzel,serif;font-size:10px;color:var(--red);letter-spacing:.08em;">⚔ BATTLE PENDING</span>
           <button class="btn btn-sm" style="background:#222;font-size:10px;padding:3px 8px;" onclick="client.send('battleDismissPending',{})">✕ Dismiss</button>
         </div>
-        <div id="arena-pending-text" style="font-size:12px;color:var(--text);margin-bottom:6px;">—</div>
+        <div id="rumble-pending-text" style="font-size:12px;color:var(--text);margin-bottom:6px;">—</div>
         <div style="display:flex;gap:6px;">
           <button class="btn P btn-sm" style="flex:1;" onclick="client.send('battleStartDM',{})">⚔ Start Battle</button>
         </div>
       </div>
 
-      <!-- Arena battle — active live view -->
-      <div id="arena-active-panel" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#0a1a0a;border:2px solid var(--green);">
+      <!-- Rumble battle — active live view -->
+      <div id="rumble-active-panel" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#0a1a0a;border:2px solid var(--green);">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
           <span style="font-family:Cinzel,serif;font-size:10px;color:var(--green);letter-spacing:.08em;">⚔ BATTLE ACTIVE</span>
-          <span id="arena-elapsed" style="font-family:ui-monospace,monospace;font-size:11px;color:var(--dim);">0:00</span>
+          <span id="rumble-elapsed" style="font-family:ui-monospace,monospace;font-size:11px;color:var(--dim);">0:00</span>
         </div>
         <div style="margin-bottom:4px;">
           <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px;">
-            <span id="arena-player-label" style="color:var(--text);">Player</span>
-            <span id="arena-player-hp-text" style="color:var(--dim);font-family:ui-monospace,monospace;">—</span>
+            <span id="rumble-player-label" style="color:var(--text);">Player</span>
+            <span id="rumble-player-hp-text" style="color:var(--dim);font-family:ui-monospace,monospace;">—</span>
           </div>
           <div style="height:8px;background:#1a1a1a;border-radius:4px;overflow:hidden;">
-            <div id="arena-player-hp-bar" style="height:100%;width:100%;background:var(--green);transition:width 0.3s;"></div>
+            <div id="rumble-player-hp-bar" style="height:100%;width:100%;background:var(--green);transition:width 0.3s;"></div>
           </div>
         </div>
         <div style="margin-bottom:6px;">
           <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px;">
-            <span id="arena-enemy-label" style="color:var(--text);">Enemy</span>
-            <span id="arena-enemy-hp-text" style="color:var(--dim);font-family:ui-monospace,monospace;">—</span>
+            <span id="rumble-enemy-label" style="color:var(--text);">Enemy</span>
+            <span id="rumble-enemy-hp-text" style="color:var(--dim);font-family:ui-monospace,monospace;">—</span>
           </div>
           <div style="height:8px;background:#1a1a1a;border-radius:4px;overflow:hidden;">
-            <div id="arena-enemy-hp-bar" style="height:100%;width:100%;background:var(--red);transition:width 0.3s;"></div>
+            <div id="rumble-enemy-hp-bar" style="height:100%;width:100%;background:var(--red);transition:width 0.3s;"></div>
           </div>
         </div>
-        <div id="arena-log" style="height:80px;overflow-y:auto;background:#080810;border:1px solid var(--border);border-radius:5px;padding:5px 7px;font-family:ui-monospace,'SF Mono',monospace;font-size:10px;line-height:1.5;margin-bottom:6px;"></div>
+        <div id="rumble-log" style="height:80px;overflow-y:auto;background:#080810;border:1px solid var(--border);border-radius:5px;padding:5px 7px;font-family:ui-monospace,'SF Mono',monospace;font-size:10px;line-height:1.5;margin-bottom:6px;"></div>
         <div style="display:flex;gap:5px;flex-wrap:wrap;">
-          <button id="arena-pause-btn" class="btn btn-sm" style="flex:1;min-width:80px;font-size:11px;" onclick="arenaPauseToggle()">⏸ Pause</button>
-          <button id="arena-reset-btn" class="btn btn-sm" style="flex:1;min-width:80px;background:#3a2a1a;border-color:var(--gold);display:none;font-size:11px;" onclick="if(confirm('Reset battle to full HP on both sides?')) client.send('battleForceReset',{})">↻ Reset</button>
-          <button id="arena-quit-btn" class="btn btn-sm" style="flex:1;min-width:80px;background:#3a1a1a;border-color:var(--red);display:none;font-size:11px;" onclick="if(confirm('Quit battle? No winner, no consequence.')) client.send('battleForceQuit',{})">✕ Quit</button>
+          <button id="rumble-pause-btn" class="btn btn-sm" style="flex:1;min-width:80px;font-size:11px;" onclick="rumblePauseToggle()">⏸ Pause</button>
+          <button id="rumble-reset-btn" class="btn btn-sm" style="flex:1;min-width:80px;background:#3a2a1a;border-color:var(--gold);display:none;font-size:11px;" onclick="if(confirm('Reset battle to full HP on both sides?')) client.send('battleForceReset',{})">↻ Reset</button>
+          <button id="rumble-quit-btn" class="btn btn-sm" style="flex:1;min-width:80px;background:#3a1a1a;border-color:var(--red);display:none;font-size:11px;" onclick="if(confirm('Quit battle? No winner, no consequence.')) client.send('battleForceQuit',{})">✕ Quit</button>
         </div>
       </div>
 
@@ -333,12 +333,12 @@ function initDMFontSize() {
 }
 
 var G = null;
-var BCOLORS_DM = {blue:'#006DB7',gray:'#AAAAAA',white:'#EFEFEF',orange:'#F57C00',purple:'#7B2FBE',yellow:'#F5D000',red:'#D01012',green:'#237841'};
+var BCOLORS_DM = {blue:'#006DB7',gray:'#AAAAAA',white:'#EFEFEF',orange:'#F57C00',purple:'#7B2FBE',yellow:'#F5D000',red:'#D01012',green:'#237841',black:'#1a1a1a'};
 var currentTriviaIdx = 0;
 var currentRiddleIdx = 0;
 var triviaTargetCls = null;
 
-var CLS_NAMES = {warrior:'Warrior',wizard:'Wizard',scout:'Scout',builder:'Builder',mender:'Mender',beastcaller:'Beastcaller'};
+var CLS_NAMES = {breaker:'Breaker',formwright:'Formwright',snapstep:'Snapstep',blocksmith:'Blocksmith',fixer:'Fixer',wild_one:'Wild One'};
 var ZONE_COLORS = ['#0a1a0a','#1a1a2e','#2a1500','#2a0a0a','#1a0a2a'];
 
 function pLabel(p) {
@@ -425,31 +425,31 @@ function renderTopBar() {
   var bwBtn = document.getElementById('backward-btn');
   if (bwBtn) bwBtn.style.display = G.allowBackward ? 'inline-block' : 'none';
 
-  // ═══════════════ ARENA BATTLE RENDER ═══════════════
-  renderArenaBattlePanel(G);
+  // ═══════════════ RUMBLE BATTLE RENDER ═══════════════
+  renderRumbleBattlePanel(G);
 }
 
-function renderArenaBattlePanel(G) {
-  var pending = document.getElementById('arena-pending-panel');
-  var active  = document.getElementById('arena-active-panel');
+function renderRumbleBattlePanel(G) {
+  var pending = document.getElementById('rumble-pending-panel');
+  var active  = document.getElementById('rumble-active-panel');
   if (!pending || !active) return;
 
   // Nothing happening — hide both panels
-  if (!G.pendingArenaBattle && !G.arenaBattle) {
+  if (!G.pendingRumbleBattle && !G.rumbleBattle) {
     pending.style.display = 'none';
     active.style.display = 'none';
     return;
   }
 
   // Pending state: player rolled a monster, waiting on initiate
-  if (G.pendingArenaBattle && !G.arenaBattle) {
+  if (G.pendingRumbleBattle && !G.rumbleBattle) {
     pending.style.display = 'block';
     active.style.display = 'none';
-    var pb = G.pendingArenaBattle;
+    var pb = G.pendingRumbleBattle;
     var p = G.players[pb.cls];
     var pName = p ? (p.playerName || p.name) : pb.cls;
     var pIcon = p ? p.icon : '';
-    var txt = document.getElementById('arena-pending-text');
+    var txt = document.getElementById('rumble-pending-text');
     if (txt) {
       txt.innerHTML =
         pIcon + ' <strong>' + pName + '</strong> vs <strong>' + pb.enemy.name + '</strong><br>' +
@@ -459,10 +459,10 @@ function renderArenaBattlePanel(G) {
   }
 
   // Active state: live combat
-  if (G.arenaBattle) {
+  if (G.rumbleBattle) {
     pending.style.display = 'none';
     active.style.display = 'block';
-    var b = G.arenaBattle;
+    var b = G.rumbleBattle;
     var ap = G.players[b.cls];
     var apName = ap ? (ap.playerName || ap.name) : b.cls;
     var apIcon = ap ? ap.icon : '';
@@ -471,15 +471,15 @@ function renderArenaBattlePanel(G) {
     var elapsed = b.elapsedMs || 0;
     var s = Math.floor(elapsed / 1000);
     var mm = Math.floor(s / 60), ss = s % 60;
-    var elEl = document.getElementById('arena-elapsed');
+    var elEl = document.getElementById('rumble-elapsed');
     if (elEl) elEl.textContent = mm + ':' + (ss<10?'0':'') + ss + (b.paused ? ' ⏸' : '');
 
     // Player HP
-    var pHp = b.playerArena.hp, pHpMax = b.playerArena.hpMax || 1;
-    var pLabel = document.getElementById('arena-player-label');
-    var pHpText = document.getElementById('arena-player-hp-text');
-    var pHpBar = document.getElementById('arena-player-hp-bar');
-    if (pLabel) pLabel.textContent = apIcon + ' ' + apName + (b.playerArena.armor ? ' 🛡' + b.playerArena.armor : '');
+    var pHp = b.playerRumble.hp, pHpMax = b.playerRumble.hpMax || 1;
+    var pLabel = document.getElementById('rumble-player-label');
+    var pHpText = document.getElementById('rumble-player-hp-text');
+    var pHpBar = document.getElementById('rumble-player-hp-bar');
+    if (pLabel) pLabel.textContent = apIcon + ' ' + apName + (b.playerRumble.armor ? ' 🛡' + b.playerRumble.armor : '');
     if (pHpText) pHpText.textContent = pHp + ' / ' + pHpMax + ' HP';
     if (pHpBar) {
       var pct = Math.max(0, Math.min(100, (pHp / pHpMax) * 100));
@@ -489,9 +489,9 @@ function renderArenaBattlePanel(G) {
 
     // Enemy HP
     var eHp = b.enemy.hp, eHpMax = b.enemy.hpMax || b.enemy.hp || 1;
-    var eLabel = document.getElementById('arena-enemy-label');
-    var eHpText = document.getElementById('arena-enemy-hp-text');
-    var eHpBar = document.getElementById('arena-enemy-hp-bar');
+    var eLabel = document.getElementById('rumble-enemy-label');
+    var eHpText = document.getElementById('rumble-enemy-hp-text');
+    var eHpBar = document.getElementById('rumble-enemy-hp-bar');
     if (eLabel) eLabel.textContent = '👺 ' + b.enemy.name;
     if (eHpText) eHpText.textContent = eHp + ' / ' + eHpMax + ' HP';
     if (eHpBar) {
@@ -500,7 +500,7 @@ function renderArenaBattlePanel(G) {
     }
 
     // Action log
-    var logEl = document.getElementById('arena-log');
+    var logEl = document.getElementById('rumble-log');
     if (logEl && Array.isArray(b.log)) {
       var rows = b.log.slice(-30).map(function(entry) {
         var color = '#aaa';
@@ -520,18 +520,18 @@ function renderArenaBattlePanel(G) {
     }
 
     // Pause button label + show/hide reset+quit
-    var pauseBtn = document.getElementById('arena-pause-btn');
-    var resetBtn = document.getElementById('arena-reset-btn');
-    var quitBtn  = document.getElementById('arena-quit-btn');
+    var pauseBtn = document.getElementById('rumble-pause-btn');
+    var resetBtn = document.getElementById('rumble-reset-btn');
+    var quitBtn  = document.getElementById('rumble-quit-btn');
     if (pauseBtn) pauseBtn.innerHTML = b.paused ? '▶ Resume' : '⏸ Pause';
     if (resetBtn) resetBtn.style.display = b.paused ? 'inline-block' : 'none';
     if (quitBtn)  quitBtn.style.display  = b.paused ? 'inline-block' : 'none';
   }
 }
 
-function arenaPauseToggle() {
-  if (!G || !G.arenaBattle) return;
-  client.send('battlePause', { paused: !G.arenaBattle.paused });
+function rumblePauseToggle() {
+  if (!G || !G.rumbleBattle) return;
+  client.send('battlePause', { paused: !G.rumbleBattle.paused });
 }
 
 client.on(function(event, data) {
@@ -765,7 +765,7 @@ function renderBoard() {
 }
 
 function movePlayerToSpace(spaceIdx) {
-  var cls = prompt('Move which player? (warrior/wizard/scout/builder/mender/beastcaller)');
+  var cls = prompt('Move which player? (breaker/formwright/snapstep/blocksmith/fixer/wild_one)');
   if (cls && G.players[cls]) client.send('dmMovePlayer', {cls:cls, roll:0, destination:spaceIdx});
 }
 
@@ -811,7 +811,7 @@ function processMove(backward) {
   if (!cls || !rawRoll) { document.getElementById('move-result').textContent = 'Enter the roll number first.'; return; }
   var p = G.players[cls];
   var finalRoll = rawRoll;
-  if (cls === 'scout' && !backward) finalRoll += (p.skills && p.skills.fleet_foot ? 3 : 1);
+  if (cls === 'snapstep' && !backward) finalRoll += (p.skills && p.skills.fleet_foot ? 3 : 1);
   var debuff = (G.movementDebuffs && G.movementDebuffs[cls]) || 0;
   if (debuff && !backward) finalRoll = Math.max(0, finalRoll - debuff);
   var dest;
@@ -963,7 +963,7 @@ function renderActiveEvent() {
     } else {
       body += '<span style="font-size:11px;color:#555;">nothing found</span>';
     }
-    if (gr.builderBonus) body += '<div style="font-size:10px;color:var(--gold);margin-top:3px;">+builder bonus</div>';
+    if (gr.builderBonus) body += '<div style="font-size:10px;color:var(--gold);margin-top:3px;">+blocksmith bonus</div>';
     body += '</div>';
   }
 
@@ -1071,6 +1071,22 @@ function renderActiveEvent() {
   if ((evData.type === 'trap' || evData.type === 'doubletrap') && !ev.trapResult) {
     body += '<button class="btn W btn-sm" style="margin-top:6px;width:100%;display:flex;align-items:center;justify-content:center;gap:6px;" onclick="placeTrap()"><span style="width:12px;height:12px;border-radius:2px;background:#F57C00;display:inline-block;"></span>Fire Trap'+(evData.type==='doubletrap'?' (\u00d72)':'')+'</button>';
   }
+  // v4 RED — Trial of the Hand: DM adjudication
+  if ((evData.type === 'red' || ev.evType === 'red' || ev.redVariant === 'trial_of_hand') && !ev.redResult) {
+    var challengeText = ev.redChallenge ? ev.redChallenge.text : 'Server has not set a challenge.';
+    var kind = ev.redChallenge ? ev.redChallenge.kind : '?';
+    var isBreaker = ev.cls === 'breaker';
+    var breakerAutoWin = isBreaker && kind === 'strength';
+    body += '<div style="margin-top:10px;padding:10px;background:#1a0505;border:1px solid #8a4a4a;border-radius:6px;">'
+      + '<div style="font-size:10px;color:#faa;text-align:center;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px;">⚔ '+kind+' CHALLENGE</div>'
+      + '<div style="font-size:13px;color:#fff;text-align:center;margin-bottom:10px;font-family:Cinzel,serif;line-height:1.4;">'+challengeText+'</div>'
+      + (breakerAutoWin ? '<div style="font-size:10px;color:#E8C868;text-align:center;margin-bottom:6px;letter-spacing:.06em;">🏋 BREAKER AUTO-WIN AVAILABLE</div>' : '')
+      + '<div style="display:flex;gap:4px;margin-top:8px;">'
+      +   '<button class="btn btn-sm" style="flex:1;background:#2a2000;border:1px solid #F5D000;color:#F5D000;" onclick="redTrialResolve(\'perfect\')">🏆 PERFECT</button>'
+      +   '<button class="btn btn-sm" style="flex:1;background:#1a2a10;border:1px solid #9ada9a;color:#9ada9a;" onclick="redTrialResolve(\'good\')">✓ GOOD</button>'
+      +   '<button class="btn btn-sm" style="flex:1;background:#2a1010;border:1px solid #d44;color:#d44;" onclick="redTrialResolve(\'failed\')">✗ FAILED</button>'
+      + '</div></div>';
+  }
   if (evData.type === 'monster' || evData.type === 'boss') {
     var mStr = evData.mids ? evData.mids.join(',') : '';
     var isB = evData.type === 'boss';
@@ -1082,6 +1098,12 @@ function renderActiveEvent() {
 function autoGoldResolve(amt) {
   if (!G || !G.activeEvent) return;
   client.resolveEvent(G.activeEvent.cls, 'gold', {amount: amt});
+}
+
+// v4: DM adjudicates Red Trial of Hand
+function redTrialResolve(tier) {
+  if (!G || !G.activeEvent) return;
+  client.resolveEvent(G.activeEvent.cls, 'redTrialResolve', { tier: tier });
 }
 
 function dmResolveEvent() {
@@ -1139,7 +1161,7 @@ function forceEventByIdx(idx) {
 
 function forceEvent(payload) {
   client.send('forceEvent', payload);
-  // NOTE: for monster events, the server now creates pendingArenaBattle directly,
+  // NOTE: for monster events, the server now creates pendingRumbleBattle directly,
   // which shows the red Battle Pending card on DM + red encounter card on player.
   // The old turn-based battle launcher (quickBattle) is no longer auto-triggered
   // from forced monster events.

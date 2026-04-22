@@ -970,3 +970,359 @@ No upgrades in v1. Skill system is a separate project.
 - Bricks under lockout should show a visual block on the board-spend UI
   (greyed out or "locked" icon) so players know they can't re-spend.
 
+
+---
+
+## FUSION / SKILL SYSTEM (redesign — replaces prior fragments→studs concept)
+
+### Core pivot
+The old fusion concept (fragments melt into studs, studs are currency) is
+**deprecated**. Replaced by direct-brick collection + physical-build skill
+assignment. The LEGO metaphor becomes load-bearing: your character's skills
+are **literally what you have built**.
+
+### Collection layer
+- **No fragments. No studs.** Every found object is a brick (colored).
+- Pickups add directly to the player's total brick inventory by color.
+- Brick inventory is persistent across battles (or per session — TBD based
+  on game loop design later).
+
+### Skill-unlock layer
+- To unlock a skill, the player arranges bricks into a **specific shape**.
+- Match is **exact footprint + exact color placement** (brick-by-brick
+  identical). No "any color in slot X" flex — the pattern IS the signature.
+- Single-color shapes yield color-aligned skills (e.g. an all-red pattern
+  might unlock a red-family skill).
+- Multi-color shapes combine color affinities and unlock hybrid skills
+  (e.g. red+orange = physical-family combo; red+green = toxic-strike).
+
+### Capacity
+- **Inventory of bricks** = how many shapes the player can have built
+  simultaneously = how many skills they can have active.
+- Bricks committed to a built shape are **locked** to that shape while
+  the skill is assigned.
+- Rearrangement is free: the player can tear down and rebuild in new
+  configurations to swap their active skill loadout.
+
+### Disassembly rule (HYBRID model)
+- Discovering a skill-shape is permanent. Once built, it appears in the
+  player's **recipe book** for reference and re-assembly.
+- Disassembly **unequips** the skill (active → inactive).
+- To use an unlocked skill again, the player must **rebuild** its shape
+  from their current brick inventory.
+- Recipe book shows: shape preview, color layout, skill description,
+  required brick count per color.
+- Implication: if a player's brick inventory lacks the colors/count needed
+  to reassemble a known skill, that skill is still "discovered" but
+  inaccessible until they find more bricks.
+
+### Assembly interface
+- Fusion/Build is a page accessible from **players.html** at any time
+  **out of battle**.
+- Tapping Fusion/Build opens an assembly grid.
+- Grid: empty cells, player drags bricks from their inventory into cells.
+- Colors shown on each brick match the color system (red/orange/gray/blue/
+  purple/white/yellow/green/black).
+- Each placed arrangement is checked against the skill-recipe library.
+- Match found → skill unlocked + assigned, entry added to recipe book.
+- No match → player sees "unknown arrangement" and can continue experimenting
+  or tear down.
+- Combat-phase lock: Fusion/Build is inaccessible during active battle so
+  players can't rearrange skills mid-fight. Battle-start takes a snapshot
+  of the current skill loadout.
+
+### Recipe book
+- Separate page on players.html, accessible anytime.
+- Lists every skill the player has ever discovered.
+- Each entry shows: skill name, effect description, exact shape + color
+  recipe, "currently built" status indicator.
+- Recipe entries are the lookup reference — players can study their book
+  to plan what to build next.
+- Future: recipe book could have a "research" mode where players study a
+  partial recipe (found in-world, dropped by bosses, etc.) and need to
+  complete the shape to unlock the skill. Not v1.
+
+### Implementation threads (future sessions)
+- **Shape canonicalization**: need a hash function that converts a grid
+  arrangement + color map into a unique identifier. Exact footprint means
+  rotational/reflective duplicates are DISTINCT shapes (turning a pattern
+  90° creates a new recipe unless we decide otherwise — might want to
+  make rotations equivalent).
+- **Recipe library**: data structure mapping canonical shape-hashes to
+  skill definitions. Starts small; grows per-skill as skills are designed.
+- **Inventory persistence**: brick counts need server-side storage so the
+  loadout survives session boundaries.
+- **Assembly grid UI**: drag-and-drop on players.html with touch support.
+- **Battle-start snapshot**: when battle begins, the current set of built
+  shapes freezes as the active skill loadout.
+- **Visual signature**: could render the player's avatar wearing /
+  showing their active-brick arrangement (long-term polish, not v1).
+
+### Design questions still open
+- **Shape rotation**: are rotational/reflective duplicates the same recipe
+  (symmetric) or different (strict)?
+- **Brick unit**: is a "brick" always a 1x1 cell, or are there 2x1 / 2x2
+  multi-cell bricks that snap into the grid like real LEGO?
+- **Skill complexity curve**: how many bricks for a starter skill (2-3?),
+  and how many for an endgame skill (10-20+?). Drives inventory pacing.
+- **Color rules**: are some shape-color combos "forbidden" (impossible
+  recipes), or is every combination either a discovered skill, undiscovered
+  skill, or just an invalid arrangement?
+- **Skill families**: does a shape's dominant color family determine the
+  skill's damage family (physical/ethereal/malady)? Or is it shape-first,
+  color-flavor-second?
+- **Transferability**: can a player share a recipe with another player
+  (co-op / teaching)? Or is discovery strictly individual?
+
+
+---
+
+## RUMBLE ↔ BOARD INTEGRATION (open threads)
+
+The rumble combat runtime (`rumble.js`) and the board game state (`server.js`
++ `game.js` + `players.html`) are currently two mostly-disconnected systems.
+The server-side has scaffolding for battle lifecycle (`pendingArenaBattle`
+→ `arenaBattle` → resolved), but rumble doesn't actually speak to it. This
+section catalogs the gaps in priority order.
+
+### Priority tiers
+- **[BLOCKER]** — rumble can't be tied to the board without this
+- **[CORE]** — needed for minimum viable end-to-end loop
+- **[POLISH]** — quality-of-life or late-game scope
+- **[DEFERRED]** — known open question, not v1
+
+### 1. Socket wire between rumble and server  [BLOCKER]
+Currently rumble is a self-contained sandbox. Needs:
+- Socket/WebSocket client attaching to the same server `players.html` uses
+- Handshake on load: identify as `cls` (class) + battle session id
+- Subscribe to battle state updates (paused/reset/quit from DM)
+- Publish `battleTick` at ~10 Hz with `{playerHp, playerArmor, playerBricks, enemyHp, elapsedMs, logEntries}`
+- Server already has the receive handler — this is all client-side plumbing
+
+### 2. Battle-end detection and resolver  [BLOCKER]
+Rumble's current `triggerVictory` is a sandbox auto-respawn loop. Needs real
+battle-end logic:
+- Distinguish "all enemies dead" (victor) from "player dead" (defeat) from "timeout"
+- Emit `battleEnd` message: `{cls, victor, finalHp, finalArmor, finalBricks, reason}`
+- Reason strings: `'victory' | 'player_killed' | 'timeout' | 'fled' | 'dm_force_quit'`
+- Server handler exists (see server.js:575), receives and resolves cleanly
+
+### 3. Battle-start payload: server → rumble  [BLOCKER]
+When server spins up an `arenaBattle`, rumble needs to initialize from it:
+- Read `cls`, `enemyType`, `playerArena.hp/hpMax/armor/bricks` from server state
+- Map `enemyType` string to a rumble-side entity template (see thread 4)
+- Rumble's current `start(config)` mostly has the right shape; wire the config
+  from server state instead of hardcoded defaults
+
+### 4. Enemy template library  [BLOCKER]
+Rumble has ONE enemy type (`makeEntity`: 50 HP, 165 speed, generic chase).
+Game design calls for: goblin, skeleton, slinger, shadow_wolf, creeping_vines,
+stone_troll, cursed_knight, void_wraith, stone_colossus, blight_worm. Need:
+- Registry (rumble-side) keyed by enemy type name
+- Per-enemy: hp, hpMax, speed, r, resistances, ai-behavior, attack pattern, visual tint/icon
+- AI variants — not all chase-and-melee:
+  - `slinger` → kites player, ranged attack
+  - `creeping_vines` → stationary, area-denial root attack
+  - `stone_colossus` → slow but heavy melee, telegraphed attacks
+  - `void_wraith` → teleport, phase-through walls
+  - `blight_worm` (boss) → multi-phase, burrowing
+- Attack patterns: currently entity does touch-damage bounce. Need telegraphed
+  swings, projectiles, aoe pulses, summons.
+
+### 5. Loot → brick award on kill  [CORE]
+Kills currently drop nothing. Economy expects bricks:
+- Per-enemy loot tables (e.g. goblin: `{green: 1}` guaranteed, `{red: 1}` 30%)
+- Visual: brick tokens spawn at death point, player walks over to collect
+  (or auto-collect on kill for v1 simplicity)
+- Collected bricks add to rumble's `player.bricks[color]` and propagate to
+  the server via `battleTick` so the board-side inventory stays synced
+- Future: multi-brick drops for bosses, rare-color drops from named enemies
+
+### 6. DM control honoring  [CORE]
+Server has `battlePause`, `battleForceReset`, `battleForceQuit` endpoints.
+Rumble needs to listen and respond:
+- `paused` state from server → rumble halts tick loop, shows "paused" overlay
+- Force-reset → rumble snapshots fresh state (player/enemy HP reset, bricks
+  restored to pre-battle snapshot that server provides)
+- Force-quit → rumble tears down and emits navigation event to return to board
+
+### 7. HP / armor / brick reconciliation  [CORE]
+Currently rumble ships whatever its local `player` thinks at `battleEnd`.
+Needs policy:
+- Server trusts rumble wholesale for v1 (simplest), add reconciliation later
+- Pre-battle snapshot + delta model: server knows starting bricks, rumble
+  reports what was spent / gained, server computes final state
+- Disconnect handling: if socket drops mid-battle, server force-quits after
+  15s timeout; any unsaved brick gains are lost (penalty for disconnect)
+
+### 8. Post-battle UX  [CORE]
+When `battleEnd` fires, what does the player see?
+- Rumble exit screen: damage dealt, damage taken, crits landed, bricks
+  gained, battle duration, victor/defeat banner
+- Transition animation back to board view (fade out rumble, fade in board)
+- Death handling: if player HP hit 0, are they permanently dead (`p.alive = false`
+  on server) or do they limp back at 1 HP? Probably "KO at 1 HP" for MVP;
+  permadeath as optional hardcore mode later.
+
+### 9. Multi-player arenas  [DEFERRED]
+Current server `arenaBattle` is single-`cls`. Design could support party combat:
+- Option A: everyone fights separately in their own rumble instance, stats
+  aggregate at board. Simpler; what server already supports.
+- Option B: shared arena with all heroes visible, friendly-fire off, shared
+  enemy pool. Much more complex — need position sync, shared timer, revive
+  mechanics.
+- Defer until single-player loop is polished.
+
+### 10. Board state → arena flavor  [POLISH]
+Arena should reflect the board-space the battle was triggered from:
+- Forest tile → more green bricks drop, grass-themed background
+- Cave tile → darkness biome (reduced visibility, black damage amplified)
+- Prep-phase buffs carry into rumble: gray shields as starting armor, green
+  poison pre-armed, yellow speed buff as first-30s haste, etc.
+- Board clocks tick during rumble (status effects on tile decay while in arena)
+
+### Sequencing suggestion
+Recommended build order to avoid getting stuck:
+1. Socket wire (thread 1) — prerequisite for everything else
+2. Battle-start payload (thread 3) — rumble can now INITIALIZE from server
+3. Battle-end resolver (thread 2) — rumble can now TERMINATE to server
+4. DM control honoring (thread 6) — battle is controllable
+5. Loot drops (thread 5) — economy comes alive
+6. Enemy templates (thread 4) — content expands
+7. Reconciliation policy (thread 7) — trust model settled
+8. Post-battle UX (thread 8) — loop feels complete
+9. Multi-player and board-flavor (threads 9, 10) — polish
+
+After step 4 you have a working end-to-end loop with a single enemy type. After
+step 6 the combat has real variety. After step 8 it feels like a game.
+
+
+---
+
+## Board Events v4 — Complete (April 21, 2026)
+
+Design + implementation spanning ~8 sessions. Full v4 spec at
+`design/board_events_proposal_v4.txt` (900 lines, 9 locked decisions).
+
+### Shipped event types (all working end-to-end)
+
+**New v4 minigames + cards:**
+- **GREEN Vine Path** — 3-vine SVG trace with ±14px tolerance, 25s timer,
+  stray-flash retry, Wild One 1s hold-to-tame (0.5 credit). Rewards:
+  3 cut = 1 green + 2-3 gold; 2 = 1-2 gold; 1 = -1 HP; 0 = -1 HP +
+  1 queued poison (next battle). Non-perfect results linger.
+- **RED Trial of the Hand** — 14-challenge pool tagged strength /
+  dexterity / mental / social. DM adjudicates via dm_screen panel
+  (PERFECT / GOOD / FAILED buttons). Breaker auto-win badge on
+  strength. Perfect = 1 red + 2 gold + 1 cheese; Good = 1 red +
+  1 gold; Failed = 1 cheese + event lingers.
+- **GRAY Rubble Stacking** — 5×6 canvas tetris with 8 outline patterns,
+  6 block shapes, 3 blocks per attempt, 25s timer. Support/landing
+  physics. Perfect (≥90% match, 0 overhang) = 1 gray + 2 cheese
+  (Blocksmith +1 gray); Good/Miss/Fail = 1-2 cheese + lingers.
+- **PURPLE Fated Choice** — 2-chest decision. 67% blessed (+1 purple,
+  2-3 gold); 33% cursed from 5-item pool (lost brick 25%, weakness 25%,
+  slow tongue 20%, thin pockets 15%, hex mark 15%). PASS = +1 cheese,
+  event lingers. Fixer cleanse: 1 black → negate + blessed; or
+  2 white → negate without blessing.
+- **WHITE Pilgrim's Rest** — heal-ally / heal-self / self-rest (fallback,
+  no bricks) / Fixer revive. 1 white → +3 HP target + 2 white + 1 gold
+  back (Fixer: +4 HP, +3 white). Self at full HP = +1 Max HP instead.
+  Fixer revive costs 1 white + 1 purple, target revives at 50% HP,
+  Fixer gains +3 white + 2 gold.
+- **BLACK Shadow Bargain** — 4 weighted offers (55% blood_price rolled
+  1d10 for 2-5 permanent max HP loss, 25% brick_exchange 1 non-black →
+  1 black + 3 gold, 15% poisoned_favor +1 black + 3 battles poison
+  queued, 5% binding_pact +2 black, all living allies lose 1 random
+  non-black brick). Formwright Scholar's Eye: sees offer type +
+  description before deciding. REFUSE: 97% → 1 cheese, 3% → 1 black,
+  event lingers.
+
+### Infrastructure added
+
+- **Lingering events** (`G.lingeringEvents[spaceIdx]`) — tracks partial
+  failures + passes so next player to land triggers fresh attempt.
+  Dispatched in `landingRoll` before rolling new event. Variant
+  re-rolled each attempt (new chest positions, new vines, new rubble
+  layout).
+- **Cheese** (`player.cheese`) — tradable inventory separate from
+  bricks. Eat 1 = +1 Max HP; gift 1 to ally (same-zone required).
+  No store mechanics in v4 (deferred). Flows from purple PASS, black
+  REFUSE, red/gray/green partial results.
+- **Queued poison** (`player.queuedPoisonStacks`, `queuedPoisonBattles`) —
+  cross-system poison from failed green/black events. Applied at
+  rumble `_internalStart` via `applyStatus('poison',{stacks,duration:6,
+  dmgPerTick:1})`. Cleansed on board for 1 white (any class, new
+  `cleansePoison` handler).
+- **Yellow riddles** expanded 13 → 25 with `a_alt` (case-insensitive
+  alternate answers). Bridge riddle removed (mechanic doesn't exist).
+  New riddles cover bricks, classes, events, bosses, entities.
+- **Zone transition cleanup** — WEAKNESS restores max HP; SLOW TONGUE
+  clears expired zones from `G.slowTongueZones`.
+
+### Event table rebalance (April 21 session)
+
+Stripped entirely:
+- `nothing` (3 slots across zones 1-2)
+- `creeper` (old rumble vines, 1 slot)
+- Old `purple` LEGO trivia (replaced by fated_choice)
+- Old `gray` take/search UI (replaced by rubble_stacking)
+
+Expanded to 7 slots per zone (was 6). Server landing roll changed
+from `roll(6)` to `roll(7)`. All zones balanced by theme:
+- **Z1** gentle: gray, red, gold, riddle, monster, trap, gray
+- **Z2** magic: white, green, gold, blue, monster, riddle, trap
+- **Z3** pressure: monster, black, purple, green, riddle, red, gold
+- **Z4** escalation: monster, gray, black, purple, white, doubletrap, red
+- **Z5** boss: all 7 slots → Stone Colossus
+
+**Critical bug fixed:** two landing tables existed (server.js LANDING
+drives natural rolls, game.js LANDING_EVENTS drives DM force-event).
+They had drifted out of sync — DM was forcing pre-v4 events.
+Rewrote both in sync, then extended server.js `forceEvent` handler
+to properly set v4 variant fields (purpleVariant, blackVariant,
+blackOffer, greenVariant, redVariant, redChallenge, grayVariant,
+grayOutline, grayBlocks, whiteVariant, class-flag hints).
+
+### Flavor + UI polish
+
+- Added 5-line pools for `green`, `red`, `black` to `LANDING_FLAVOR`
+  in players.html + test_players.html (they were falling back to
+  `nothing` pool).
+- Rewrote `purple` flavor (was LEGO trivia context, now 2-chest context).
+- Every event has:
+  - Styled card with Cinzel-serif title + icon + themed border
+  - Inline flavor text describing the encounter
+  - Interactive buttons / minigame
+  - Result state with outcome label + reward description
+  - Lingering badge when re-triggered
+- Cheese HUD chip added next to Gold in main player HUD (tap to
+  open eat/gift modal when > 0).
+- Queued poison warning badge appears below HUD with cleanse button
+  when `queuedPoisonStacks > 0` and player has ≥ 1 white brick.
+- DM has single **"✓ Mark Resolved"** button on active event panel
+  that handles every event type — advances turn, ticks poison damage
+  if round wraps, increments round counter + fortress decay.
+
+### File state
+
+Deliverables in `/mnt/user-data/outputs`:
+- server.js 114277 bytes
+- game.js 34051 bytes
+- rumble.js 351014 bytes
+- players.html 319535 bytes
+- test_players.html 321064 bytes
+- dm_screen.html 79066 bytes
+
+All syntax-verified. Ready for commit.
+
+### Deferred (post-v4)
+
+- Lingering event marker on board graphic (colored dot per space)
+- Cheese display on dm_screen.html per-player roster
+- Cheese store mechanics (buy/sell)
+- RED digital fallback (reflex minigame for remote play)
+- Event variant expansions (more chest types, more bargain offers)
+- **Class skills rework with fusion gating + achievement unlocks**
+  (queued as next major session)
+- **Board actions audit + consistency pass** (queued)

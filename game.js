@@ -14,49 +14,49 @@ const BRICK_NAMES = Object.keys(BRICK_COLORS);
 // Dash fields (weight, dashBreakChance, dashBreakDmg, dashDmgAlwaysRolls) power board-side
 // gate-break mechanics in the red dash flow.
 const PLAYER_META = {
-  warrior:     { name:'Warrior',     icon:'⚔️', color:'#993C1D', hp:14, speed:150, die:'d8',
+  breaker:     { name:'Breaker',     icon:'⚔️', color:'#993C1D', hp:14, speed:150, die:'d8',
                  signature:'red', secondary:'gray',
                  weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
-  wizard:      { name:'Wizard',      icon:'🔮', color:'#3C3489', hp:6,  speed:180, die:'d6',
+  formwright:  { name:'Formwright',  icon:'🔮', color:'#3C3489', hp:6,  speed:180, die:'d6',
                  signature:'blue', secondary:'purple',
                  weight:'light', dashBreakChance:0.15, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  scout:       { name:'Scout',       icon:'🏃', color:'#085041', hp:9,  speed:260, die:'d6',
+  snapstep:    { name:'Snapstep',    icon:'🏃', color:'#085041', hp:9,  speed:260, die:'d6',
                  signature:'orange', secondary:'red',
                  weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  builder:     { name:'Builder',     icon:'🔧', color:'#854F0B', hp:12, speed:150, die:'d6',
+  blocksmith:  { name:'Blocksmith',  icon:'🔧', color:'#C87800', hp:12, speed:150, die:'d6',
                  signature:'gray', secondary:'orange',
                  weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
-  mender:      { name:'Mender',      icon:'💊', color:'#72243E', hp:8,  speed:160, die:'d4',
-                 signature:'white', secondary:'purple',
+  fixer:       { name:'Fixer',       icon:'💊', color:'#72243E', hp:8,  speed:160, die:'d4',
+                 signature:'white', secondary:'black',
                  weight:'mid',   dashBreakChance:0.50, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  beastcaller: { name:'Beastcaller', icon:'🐾', color:'#27500A', hp:10, speed:220, die:'d6',
+  wild_one:    { name:'Wild One',    icon:'🐾', color:'#27500A', hp:10, speed:220, die:'d6',
                  signature:'green', secondary:'yellow',
                  weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
 };
 
 // Flavor text per class for dash gate-break outcomes
 const DASH_FLAVOR = {
-  warrior: {
+  breaker: {
     success: 'Shoulder first! The gate shatters like kindling.',
     fail:    'The gate holds. Impossible.',
   },
-  builder: {
+  blocksmith: {
     success: 'Iron boot meets brittle wood. The gate folds inward.',
     fail:    'The hinges refuse. That\'s not how I built them.',
   },
-  mender: {
+  fixer: {
     success: 'Faster than expected! The gate cracks under the charge.',
-    fail:    'The gate absorbs the blow. Mender falls back, winded.',
+    fail:    'The gate absorbs the blow. Fixer falls back, winded.',
   },
-  scout: {
+  snapstep: {
     success: 'Shoulder-rolled through the splinters.',
     fail:    'Bounced off. That\'s going to leave a mark.',
   },
-  beastcaller: {
+  wild_one: {
     success: 'The totem hums, the gate yields.',
     fail:    'The spirits decline this battle. The gate remains.',
   },
-  wizard: {
+  formwright: {
     success: 'Somehow... the gate gives way. A minor miracle.',
     fail:    'Why did I think these frail wrists could handle that?',
   },
@@ -66,16 +66,16 @@ const DASH_FLAVOR = {
 // Pre-battle "spend gray to gain armor" action will be redesigned as part of
 // the new economy out-of-battle brick uses.
 const SHIELD_MAX = {
-  warrior:     0.75,  // most armored
-  builder:     0.50,
-  wizard:      0.50,
-  scout:       0.50,
-  mender:      0.50,
-  beastcaller: 0.50,
+  breaker:     0.75,  // most armored
+  blocksmith:  0.50,
+  formwright:  0.50,
+  snapstep:    0.50,
+  fixer:       0.50,
+  wild_one:    0.50,
 };
 const SHIELD_COST = {
-  warrior: 1, builder: 1,    // 1 gray per shield
-  wizard: 2, scout: 2, mender: 2, beastcaller: 2  // 2 gray per shield
+  breaker: 1, blocksmith: 1,    // 1 gray per shield
+  formwright: 2, snapstep: 2, fixer: 2, wild_one: 2  // 2 gray per shield
 };
 
 // ── BRICK ECONOMY (Combat & Economy v1) ──────────────────
@@ -164,47 +164,55 @@ const GATE_RULES = {
 };
 
 // ── LANDING EVENT TABLES ─────────────────────────────────
-// roll: 1-6, type determines what DM places
+// roll: 1-6, type determines what DM places.
+// `mids` (monster IDs) on monster/creeper/boss events MUST match keys in
+// rumble.js ENTITY_REGISTRY exactly. Server reads mids[0] (or rolls from
+// the array for multi-spawn) to seed the rumble battle's entity type.
 const LANDING_EVENTS = {
-  1: [ // Zone 1 — Courtyard
-    { roll:1, type:'nothing',   icon:'💨', name:'Nothing',      desc:'The courtyard is still.' },
-    { roll:2, type:'nothing',   icon:'💨', name:'Nothing',      desc:'All clear.' },
-    { roll:3, type:'gold',      icon:'🪙', name:'Found Gold',   desc:'A coin among the rubble.', amount:1 },
-    { roll:4, type:'gray',      icon:null, name:'Gray Brick',   desc:'Rubble and scrap metal. Take it or search for more.', color:'gray' },
-    { roll:5, type:'monster',   icon:'👺', name:'Goblin Scout', desc:'A goblin leaps out!', mids:['goblin'] },
-    { roll:6, type:'riddle',    icon:null, name:'Clue Found!',  desc:'A yellow brick with a card beneath it.', zoneRiddlePool:0 },
+  1: [ // Zone 1 — Courtyard (tutorial)
+    { roll:1, type:'gray',     icon:null, name:'Rubble Stacking', desc:'Match the outline with 3 falling stones.', color:'gray' },
+    { roll:2, type:'red',      icon:null, name:'Trial of the Hand',desc:'The DM presents a challenge — perform or fail.', color:'red' },
+    { roll:3, type:'gold',     icon:'🪙', name:'Found Gold',       desc:'A coin among the rubble.', amount:1 },
+    { roll:4, type:'riddle',   icon:null, name:'Clue Found!',      desc:'A yellow brick with a card beneath it.', zoneRiddlePool:0 },
+    { roll:5, type:'monster',  icon:'👺', name:'Goblin Scout',     desc:'A goblin leaps out!', mids:['goblin'] },
+    { roll:6, type:'trap',     icon:null, name:'Trap!',            desc:'An orange brick snaps into place beneath your feet.' },
+    { roll:7, type:'gray',     icon:null, name:'Rubble Stacking',  desc:'More fallen stones — stack them before they settle wrong.', color:'gray' },
   ],
-  2: [ // Zone 2 — Corridor
-    { roll:1, type:'trap',      icon:null, name:'Trap!',         desc:'An orange brick snaps into place beneath your feet.' },
-    { roll:2, type:'nothing',   icon:'💨', name:'Nothing',       desc:'The corridor is empty.' },
-    { roll:3, type:'gold',      icon:'🪙', name:'Found Gold',    desc:'Coins scattered on the floor.', amount:2 },
-    { roll:4, type:'blue',      icon:null, name:'Blue Brick',    desc:'A magical residue crystallized into brick form.', color:'blue' },
-    { roll:5, type:'monster',   icon:'💀', name:'Skeleton Guard',desc:'Bones rattle to life!', mids:['skeleton'] },
-    { roll:6, type:'riddle',    icon:null, name:'Clue Found!',   desc:'A yellow brick resting against the wall.', zoneRiddlePool:1 },
+  2: [ // Zone 2 — Corridor (magic awakening)
+    { roll:1, type:'white',    icon:null, name:"Pilgrim's Rest",   desc:'A shrine. Heal yourself or an ally.', color:'white' },
+    { roll:2, type:'green',    icon:null, name:'Vine Path',        desc:'Three vines. Trace each without straying.', color:'green' },
+    { roll:3, type:'gold',     icon:'🪙', name:'Found Gold',       desc:'Coins scattered on the floor.', amount:2 },
+    { roll:4, type:'blue',     icon:null, name:'Arcane Shrine',    desc:'A magical residue crystallized into brick form.', color:'blue' },
+    { roll:5, type:'monster',  icon:'💀', name:'Skeleton Guard',   desc:'Bones rattle to life!', mids:['skeleton'] },
+    { roll:6, type:'riddle',   icon:null, name:'Clue Found!',      desc:'A yellow brick resting against the wall.', zoneRiddlePool:1 },
+    { roll:7, type:'trap',     icon:null, name:'Trap!',            desc:'A hidden pressure plate fires.' },
   ],
-  3: [ // Zone 3 — Guard Post
-    { roll:1, type:'monster',   icon:'👺', name:'Goblin Pair',   desc:'Two goblins on patrol!', mids:['goblin','goblin'] },
-    { roll:2, type:'trap',      icon:null, name:'Trap!',         desc:'A hidden pressure plate fires.' },
-    { roll:3, type:'gold',      icon:'🪙', name:'Found Gold',    desc:'A goblin dropped its purse.', amount:1 },
-    { roll:4, type:'monster',   icon:'🐺', name:'Shadow Wolf',   desc:'A wolf lunges from the shadows!', mids:['wolf'] },
-    { roll:5, type:'riddle',    icon:null, name:'Clue Found!',   desc:'A yellow brick on the elevated platform.', zoneRiddlePool:2 },
-    { roll:6, type:'creeper',   icon:'🌿', name:'Creeping Vines!',desc:'Vines surge across the path — cut them in time!' },
+  3: [ // Zone 3 — Guard Post (pressure)
+    { roll:1, type:'monster',  icon:'👺', name:'Goblin Pair',      desc:'Two goblins on patrol!', mids:['goblin','goblin'] },
+    { roll:2, type:'black',    icon:null, name:'Shadow Bargain',   desc:'A cloaked figure offers a pact.', color:'black' },
+    { roll:3, type:'purple',   icon:null, name:'Fated Choice',     desc:'Two sealed chests — one blesses, one curses.', color:'purple' },
+    { roll:4, type:'green',    icon:null, name:'Vine Path',        desc:'Another wall of vines blocks the path.', color:'green' },
+    { roll:5, type:'riddle',   icon:null, name:'Clue Found!',      desc:'A yellow brick on the elevated platform.', zoneRiddlePool:2 },
+    { roll:6, type:'red',      icon:null, name:'Trial of the Hand',desc:'The DM presents a harder challenge.', color:'red' },
+    { roll:7, type:'gold',     icon:'🪙', name:'Found Gold',       desc:'A goblin dropped its purse.', amount:2 },
   ],
-  4: [ // Zone 4 — Flood Chamber
-    { roll:1, type:'monster',   icon:'🧌', name:'Stone Troll',   desc:'A massive troll blocks the path.', mids:['troll'] },
-    { roll:2, type:'doubletrap',icon:null, name:'Double Trap!',  desc:'Two orange bricks snap into place!' },
-    { roll:3, type:'gold',      icon:'🪙', name:'Found Gold',    desc:'A waterlogged chest.', amount:3 },
-    { roll:4, type:'monster',   icon:'💀', name:'Knight + Goblin',desc:'A cursed knight with a goblin lackey!', mids:['knight','goblin'] },
-    { roll:5, type:'purple',    icon:null, name:'Purple Brick',  desc:'A rare fragment — but it\'s locked. Answer a LEGO question to claim it.', color:'purple' },
-    { roll:6, type:'monster',   icon:'👻', name:'Void Wraith',   desc:'A wraith materializes — AMBUSH!', mids:['wraith'] },
+  4: [ // Zone 4 — Flood Chamber (escalation)
+    { roll:1, type:'monster',  icon:'🧌', name:'Stone Troll',      desc:'A massive troll blocks the path.', mids:['stone_troll'] },
+    { roll:2, type:'gray',     icon:null, name:'Rubble Stacking',  desc:'The chamber walls collapsed — rebuild them.', color:'gray' },
+    { roll:3, type:'black',    icon:null, name:'Shadow Bargain',   desc:'The shadow offers a final pact.', color:'black' },
+    { roll:4, type:'purple',   icon:null, name:'Fated Choice',     desc:'Two sealed chests. Higher stakes now.', color:'purple' },
+    { roll:5, type:'white',    icon:null, name:"Pilgrim's Rest",   desc:'A shrine glowing even in dark water. Last blessing.', color:'white' },
+    { roll:6, type:'doubletrap',icon:null,name:'Double Trap!',     desc:'Two orange bricks snap into place!' },
+    { roll:7, type:'red',      icon:null, name:'Trial of the Hand',desc:'The final ceremonial challenge before the throne.', color:'red' },
   ],
   5: [ // Zone 5 — Throne Room (boss always)
-    { roll:1, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!' },
-    { roll:2, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!' },
-    { roll:3, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!' },
-    { roll:4, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!' },
-    { roll:5, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!' },
-    { roll:6, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!' },
+    { roll:1, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!', mids:['stone_colossus'] },
+    { roll:2, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!', mids:['stone_colossus'] },
+    { roll:3, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!', mids:['stone_colossus'] },
+    { roll:4, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!', mids:['stone_colossus'] },
+    { roll:5, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!', mids:['stone_colossus'] },
+    { roll:6, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!', mids:['stone_colossus'] },
+    { roll:7, type:'boss', icon:'💀', name:'BOSS', desc:'The Stone Colossus awakens!', mids:['stone_colossus'] },
   ],
 };
 
@@ -242,7 +250,7 @@ const RIDDLES = [
     q: "The more you take, the more you leave behind. What am I?",
     a: "footsteps",
     zone: 0,
-    clue: "GATE AHEAD: The Builder can deconstruct the Zone 1→2 gate using their Deconstruct skill — no damage taken. Others can force it open (roll 5+) but take 2 damage trying. Let Builder lead.",
+    clue: "GATE AHEAD: The Blocksmith can deconstruct the Zone 1→2 gate using their Deconstruct skill — no damage taken. Others can force it open (roll 5+) but take 2 damage trying. Let Blocksmith lead.",
     category: "Zone Progression"
   },
   {
@@ -256,7 +264,7 @@ const RIDDLES = [
     q: "The more you have of it, the less you see. What is it?",
     a: "darkness",
     zone: 0,
-    clue: "SHIELD UP: Warrior and Builder stack shields efficiently (1 gray = 1 shield). All others need 2 gray bricks per shield. Max shields = 50% of your HP. Get shields before fighting.",
+    clue: "SHIELD UP: Breaker and Blocksmith stack shields efficiently (1 gray = 1 shield). All others need 2 gray bricks per shield. Max shields = 50% of your HP. Get shields before fighting.",
     category: "Combat Tips"
   },
   // Zone 2 — Corridor
@@ -271,14 +279,14 @@ const RIDDLES = [
     q: "What gets wetter the more it dries?",
     a: "a towel",
     zone: 1,
-    clue: "WIZARD POWER: Stock up on blue and purple bricks now. In the Phase 2 boss fight, ONLY magic bricks deal damage. The Wizard's blue brick hits 4-8 ignoring armor — the hardest single hit in the game.",
+    clue: "FORMWRIGHT POWER: Stock up on blue and purple bricks now. In the Phase 2 boss fight, ONLY magic bricks deal damage. The Formwright's blue brick hits 4-8 ignoring armor — the hardest single hit in the game.",
     category: "Boss Preparation"
   },
   {
     q: "What has hands but cannot clap?",
     a: "a clock",
     zone: 1,
-    clue: "MENDER IS VITAL: Mender heals 4 HP per white brick — double everyone else. In battle, Mender can revive fallen players using 1 purple + 1 white brick. Keep Mender near the back of initiative order.",
+    clue: "FIXER IS VITAL: Fixer heals 4 HP per white brick — double everyone else. In battle, Fixer can revive fallen players using 1 purple + 1 white brick. Keep Fixer near the back of initiative order.",
     category: "Party Tips"
   },
   // Zone 3 — Guard Post
@@ -286,31 +294,24 @@ const RIDDLES = [
     q: "The man who made it doesn't need it. The man who bought it doesn't want it. The man who uses it doesn't know it. What is it?",
     a: "a coffin",
     zone: 2,
-    clue: "GATE AHEAD: Zone 3→4 is a structural gate. Builder can dismantle it free. Others must force it (roll 5+, take 2 damage). A Warrior with Fortress Stance gains +3 shield before attempting — worth doing first.",
+    clue: "GATE AHEAD: Zone 3→4 is a structural gate. Blocksmith can dismantle it free. Others must force it (roll 5+, take 2 damage). A Breaker with Fortress Stance gains +3 shield before attempting — worth doing first.",
     category: "Zone Progression"
   },
   {
     q: "What has one eye but cannot see?",
     a: "a needle",
     zone: 2,
-    clue: "BEASTCALLER SECRET: Tamed monsters fight alongside you every turn for 1 green brick. A tamed Shadow Wolf or Stone Troll hits with its full stats. Easy Tame skill lowers the capture roll from 3+ to 2+.",
+    clue: "WILD ONE SECRET: Tamed monsters fight alongside you every turn for 1 green brick. A tamed Shadow Wolf or Stone Troll hits with its full stats. Easy Tame skill lowers the capture roll from 3+ to 2+.",
     category: "Class Tips"
   },
   {
     q: "What can run but never walks, has a mouth but never talks, has a head but never weeps?",
     a: "a river",
     zone: 2,
-    clue: "SCOUT ADVANTAGE: Scout gets +1 to every movement roll automatically. Orange battle traps deal 2-4 damage (others do 1-2). Scout also finds bricks on 3+ while searching in battle — others need 5+.",
+    clue: "SNAPSTEP ADVANTAGE: Snapstep gets +1 to every movement roll automatically. Orange battle traps deal 2-4 damage (others do 1-2). Snapstep also finds bricks on 3+ while searching in battle — others need 5+.",
     category: "Class Tips"
   },
   // Zone 4 — Flood Chamber
-  {
-    q: "What word becomes shorter when you add two letters to it?",
-    a: "short",
-    zone: 3,
-    clue: "BRIDGE AHEAD: The Zone 4→5 bridge is destroyed. ONLY the Builder can rebuild it — costs 4 gray bricks. Trade gray bricks to Builder now. No one else can advance until the bridge is rebuilt.",
-    category: "Zone Progression"
-  },
   {
     q: "Feed me and I live. Give me water and I die. What am I?",
     a: "fire",
@@ -322,7 +323,7 @@ const RIDDLES = [
     q: "I have a head and a tail but no body. What am I?",
     a: "a coin",
     zone: 3,
-    clue: "WINNING COMBO: In Phase 2, use yellow brick to confuse the boss (skips attack), then Wizard hits with blue for 4-8 magic damage. Confused boss cannot retaliate. Chain this with Mender healing between rounds.",
+    clue: "WINNING COMBO: In Phase 2, use yellow brick to confuse the boss (skips attack), then Formwright hits with blue for 4-8 magic damage. Confused boss cannot retaliate. Chain this with Fixer healing between rounds.",
     category: "Boss Preparation"
   },
   // Zone 5 — Throne Room
@@ -332,6 +333,101 @@ const RIDDLES = [
     zone: 4,
     clue: "PHASE 2 WARNING: When the Shell's HP hits 0, the Void Core emerges. It has 3 armor and is immune to ALL physical damage. Only blue bricks, purple bricks, and yellow bricks can harm it. Hoard these now.",
     category: "Boss Warning"
+  },
+  // ── v4 NEW RIDDLES (gameplay + mechanics teaching pool) ──
+  {
+    q: "I turn a locked door to rubble in a single rush. What am I?",
+    a: "red",
+    zone: 0,
+    clue: "RED BRICK CHARGE: Breakers and Blocksmiths can SHOULDER-RUSH gates for guaranteed break using the red dash action. Other classes may force-gate (roll 5+, 2 damage on fail).",
+    category: "Bricks"
+  },
+  {
+    q: "Two of me stack as one shield pip for the armored. One of me is all others need, twice over. What am I?",
+    a: "gray",
+    zone: 0,
+    clue: "SHIELD ECONOMY: Gray becomes shield pips. Breaker and Blocksmith: 1 gray per pip. All others: 2 gray per pip. Max shields = 50% of your HP (Breaker with Iron Hide unlock: 75%).",
+    category: "Bricks"
+  },
+  {
+    q: "I heal the wounded and cleanse the cursed. What color drinks like water and burns like fire?",
+    a: "white",
+    zone: 0,
+    clue: "WHITE BRICK — HEAL & CLEANSE: Tap white for +3 HP (Fixer heals +4). White TAP also purges all debuffs. Spend 1 white on board to cleanse queued poison.",
+    category: "Bricks"
+  },
+  {
+    q: "I confuse the mind and steal the next attack. The boss will skip their turn when I strike true. What am I?",
+    a: "yellow",
+    zone: 1,
+    clue: "YELLOW BRICK — CONFUSE: Tap yellow to confuse a monster; it skips next attack. In Rumble Arena confuse also inverts player input — be careful casting on yourself.",
+    category: "Bricks"
+  },
+  {
+    q: "I scatter and sow. The path you walked becomes the path I burn. What color am I?",
+    a: "orange",
+    zone: 1,
+    clue: "ORANGE BRICK — SHRAPNEL: Orange tap throws shrapnel in an arc. Every 3rd slinger projectile leaves a shrapnel hazard — Snapstep can disarm these.",
+    category: "Bricks"
+  },
+  {
+    q: "The hungry one. Take as I give, give as I take. What color heals the caster while it harms the enemy?",
+    a: "purple",
+    zone: 2,
+    clue: "PURPLE BRICK — VAMPIRIC: Purple tap does 2-4 damage AND heals caster 3-4 HP. Colossus unlocks this mid-fight at 50% HP — he heals off every hit in phase 2.",
+    category: "Bricks"
+  },
+  {
+    q: "Two chests. One blesses. One curses. Which color forces this choice?",
+    a: "purple",
+    zone: 2,
+    clue: "PURPLE EVENT: Fated Choice offers 2 chests — 67% blessed (+1 purple +2-3 gold), 33% cursed (random curse from pool). PASS for safe 1 cheese. Fixer can spend 1 black to cleanse a cursed result.",
+    category: "Events"
+  },
+  {
+    q: "Three lines of thorn. Cut them or pay in poison. What color event am I?",
+    a: "green",
+    zone: 2,
+    clue: "GREEN EVENT: Vine Path — trace 3 vines without straying. All 3 cut = 1 green + 2-3 gold. 0 cut = damage + queued poison for next rumble battle.",
+    category: "Events"
+  },
+  {
+    q: "I am the shadow's offer. I take your blood, your bricks, sometimes your allies'. What color am I?",
+    a: "black",
+    zone: 3,
+    clue: "BLACK BARGAIN: Trade offers from the wraith. BLOOD PRICE costs permanent max HP. BINDING PACT (rare) costs ALL allies a random brick. Refuse for 97% cheese, 3% black.",
+    category: "Events"
+  },
+  {
+    q: "How many bricks max fit in a single overload?",
+    a: "5",
+    a_alt: ["five"],
+    zone: 3,
+    clue: "OVERLOAD HOLD: Press and hold a brick button to charge. Each tier (0.5s hold) consumes one more brick up to 5. Tier 5 = max damage, max radius, max crit chance.",
+    category: "Combat"
+  },
+  {
+    q: "At half HP I enrage. My speed jumps, my telegraph shrinks, my swings heal me. What beast am I?",
+    a: "colossus",
+    a_alt: ["stone colossus", "stone_colossus"],
+    zone: 3,
+    clue: "COLOSSUS ENRAGE: At 50% HP: speed 90→140, telegraph 0.75s→0.40s, swings heal +3 HP via purple vampirism. Burn him down fast or phase 2 wins.",
+    category: "Bosses"
+  },
+  {
+    q: "Poison. Slow. Daze. Confuse. Weaken. One brick tap cleanses all of me. Which?",
+    a: "white",
+    zone: 4,
+    clue: "STATUS CLEANSE: White brick TAP removes ALL active debuffs on player. Critical during worm and wraith fights. Also cleanses the queued poison from failed GREEN or BLACK bargains.",
+    category: "Combat"
+  },
+  {
+    q: "I split when I die. Two of me become four. What grub am I?",
+    a: "rot grub",
+    a_alt: ["rot_grub", "rotgrub", "grub"],
+    zone: 3,
+    clue: "MITOSIS: Rot grubs split on death into 2 half-size grubs (2-level recursion: 1 → 2 → 4). Big AoE overloads kill multiple clones efficiently.",
+    category: "Entities"
   },
 ];
 
@@ -442,29 +538,42 @@ function hpBar(hp,max,color='#1D9E75') {
 }
 
 // ── RUMBLE (real-time combat) ───────────────────────────────
-// Enemy templates used by the rumble combat system (distinct from the
-// turn-based MONSTER_TEMPLATES). V1 has one hardcoded goblin.
-const RUMBLE_ENEMIES = {
-  goblin: {
-    type:     'goblin',
-    name:     'Goblin',
-    hp:       60,
-    hpMax:    60,
-    speed:    120,       // pixels/sec
-    attackDmg:3,
-    attackCd: 1.8,       // seconds between attacks
-    r:        22,
-    color:    '#27500A',
-    // Family resistance profile. Baseline goblin is neutral to all families.
-    // Per-color overrides (e.g. { red: 1.5 }) would layer on top of family
-    // defaults; see resistMult() in rumble.js.
-    resistances: { physical: 1.0, ethereal: 1.0, malady: 1.0 },
-  },
+// The rumble runtime owns the actual entity stats / AI / loot tables in
+// rumble.js's ENTITY_REGISTRY. Game.js holds only:
+//   1. The list of valid entity TYPE NAMES so the server can validate
+//      what it sends to clients.
+//   2. Flavor-text pools keyed by type, used for the encounter-card
+//      narrative line. Story content lives here, not in combat code.
+// Adding a new entity: define stats in rumble.js, add the type name here,
+// optionally add flavor lines.
+
+// Valid entity types — must match keys in rumble.js ENTITY_REGISTRY.
+// 'goblin' is the safe-fallback default if no type is specified.
+const ENTITY_TYPES = [
+  'goblin', 'skeleton', 'slinger', 'shadow_wolf', 'creeping_vines',
+  'stone_troll', 'cursed_knight', 'void_wraith',
+  'stone_colossus', 'blight_worm',
+];
+
+// Thin server-side stat snapshot: hpMax per type. Used by the DM force-reset
+// path which needs to restore an entity's HP without loading the full
+// rumble registry. Must stay in sync with rumble.js ENTITY_REGISTRY.
+// Display-only "name" string for log lines; actual rendering uses rumble.js.
+const ENTITY_META = {
+  goblin:         { hpMax: 12,  name: 'Goblin' },
+  skeleton:       { hpMax: 18,  name: 'Skeleton' },
+  slinger:        { hpMax: 10,  name: 'Slinger' },
+  shadow_wolf:    { hpMax: 14,  name: 'Shadow Wolf' },
+  creeping_vines: { hpMax: 25,  name: 'Creeping Vines' },
+  stone_troll:    { hpMax: 40,  name: 'Stone Troll' },
+  cursed_knight:  { hpMax: 30,  name: 'Cursed Knight' },
+  void_wraith:    { hpMax: 20,  name: 'Void Wraith' },
+  stone_colossus: { hpMax: 80,  name: 'Stone Colossus' },
+  blight_worm:    { hpMax: 120, name: 'Blight Worm' },
 };
 
 // Flavor text pool for battle initiation. One line is picked at random per
 // encounter and shown on the player's event card + logged to the DM.
-// Keyed by enemy type — each enemy has its own pool.
 const RUMBLE_FLAVOR = {
   goblin: [
     'A goblin leaps from the shadows, blade already swinging.',
@@ -473,9 +582,55 @@ const RUMBLE_FLAVOR = {
     'Green-skinned and cackling, a goblin lunges.',
     'A goblin, half-starved and twice as mean, bares its teeth.',
   ],
+  skeleton: [
+    'Bones rattle to life — a skeleton guard rises.',
+    'A pile of bones reassembles itself into a snarling guard.',
+    'The skeleton draws its rusted blade with a dry rasp.',
+    'Hollow eye sockets fix on you. The skeleton charges.',
+  ],
+  slinger: [
+    'A goblin slinger crouches at range, sling already loaded.',
+    'You spot a slinger lining up a shot from a distance.',
+    'A wiry figure backs away, twirling a sling overhead.',
+  ],
+  shadow_wolf: [
+    'A shadow detaches from the wall — a wolf, eyes glinting.',
+    'A shadow wolf lunges from the dark, faster than thought.',
+    'You hear a low growl, then teeth flash in the darkness.',
+  ],
+  creeping_vines: [
+    'Vines surge across the path — cut them in time!',
+    'Thorned tendrils erupt from the ground, blocking the way.',
+    'A patch of cursed vines stirs, reaching toward you.',
+  ],
+  stone_troll: [
+    'A massive stone troll blocks the path, club in hand.',
+    'The ground trembles. A troll heaves itself upright.',
+    'A stone troll snorts, then lurches forward to crush you.',
+  ],
+  cursed_knight: [
+    'A cursed knight rises from the rubble, sword raised.',
+    'Black armor clatters as the knight steps forward.',
+    'The cursed knight\'s helm turns toward you. The duel begins.',
+  ],
+  void_wraith: [
+    'A void wraith materializes — AMBUSH!',
+    'Cold air. A wraith forms inches from your face.',
+    'The shadows ripple. A wraith fades into being beside you.',
+  ],
+  stone_colossus: [
+    'The stone colossus awakens — boss fight!',
+    'A mountain of stone lurches to its feet. The colossus has woken.',
+    'Cracks spread across the ancient stones. The colossus stirs.',
+  ],
+  blight_worm: [
+    'The earth churns. The Blight Worm surfaces.',
+    'A vast wormlike shape rises from the floor — the Blight Worm.',
+    'Decay floods the chamber. The Blight Worm has come.',
+  ],
 };
 
 // Node.js export (ignored in browser)
 if (typeof module !== 'undefined') {
-  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, RUMBLE_ENEMIES, RUMBLE_FLAVOR, SHIELD_MAX, SHIELD_COST, BRICK_ECONOMY, brickTierFor, RIDDLES };
+  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR, SHIELD_MAX, SHIELD_COST, BRICK_ECONOMY, brickTierFor, RIDDLES };
 }

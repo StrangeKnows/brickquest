@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Brick Quest — Player</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="rumble.css">
 <style>
 /* ── RESET & BASE ── */
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
@@ -52,6 +53,58 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   position:relative;
 }
 #game-screen.visible{display:flex;}
+
+/* ── RUMBLE (real-time combat runtime) ── */
+/* rumble-root fills the viewport when a battle is active. Hidden by default;
+   becomes visible when server state reports an active rumbleBattle. Takes
+   visual precedence over game-screen (z-index stacks above). */
+#rumble-root{
+  display:none;
+  position:fixed;
+  top:0;left:0;right:0;bottom:0;
+  background:#0a0a0a;
+  z-index:100;
+  overflow:hidden;
+}
+#rumble-root.visible{display:block;}
+#rumble-root #rumble-canvas{
+  position:absolute;
+  top:0;left:0;
+  width:100%;height:100%;
+  touch-action:none;
+  z-index:1;  /* override rumble.css's z-index:50 — bricks must layer above */
+}
+#rumble-root #rumble-hud{
+  position:absolute;top:8px;right:10px;
+  color:#e8e8e8;font-family:'Cinzel',serif;
+  font-size:14px;letter-spacing:.08em;
+  pointer-events:none;z-index:10;
+}
+#rumble-root #rumble-timer-display{font-size:22px;font-weight:700;}
+#rumble-root #rumble-timer-label{font-size:9px;color:#888;letter-spacing:.12em;}
+#rumble-root .rumble-brick-bar{
+  position:absolute;
+  top:50%;
+  transform:translateY(-50%);
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  padding:6px;
+  max-height:95vh;
+  overflow-y:auto;
+  z-index:60;  /* must beat canvas z-index */
+}
+#rumble-root #rumble-brick-bar-left{left:0;}
+#rumble-root #rumble-brick-bar-right{right:0;}
+/* Rumble exit overlay — shown briefly on battleEnd before handing back to board */
+#rumble-exit-overlay{
+  position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  background:rgba(0,0,0,.88);padding:24px 36px;
+  border:2px solid var(--yellow);border-radius:8px;
+  font-family:'Cinzel',serif;font-size:20px;letter-spacing:.08em;
+  text-align:center;color:#fff;z-index:20;display:none;
+}
+#rumble-exit-overlay.visible{display:block;}
 
 /* TOPBAR */
 .topbar{
@@ -387,12 +440,37 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   <div class="tab-content" id="tab-content"></div>
 </div>
 
+<!-- ── RUMBLE (real-time combat runtime) ──
+     Hidden by default; shown when server reports active rumbleBattle.
+     DOM structure matches rumble.js requirements (see rumble.js:40).
+     HUD with timer is optional but helpful for pacing. -->
+<div id="rumble-root">
+  <div id="rumble-hud">
+    <div id="rumble-hud-right">
+      <div id="rumble-timer-display">INF</div>
+      <div id="rumble-timer-label">SECS</div>
+    </div>
+  </div>
+  <canvas id="rumble-canvas"></canvas>
+  <div id="rumble-brick-bar-left" class="rumble-brick-bar"></div>
+  <div id="rumble-brick-bar-right" class="rumble-brick-bar"></div>
+  <div id="rumble-exit-overlay"></div>
+</div>
+
 <script src="game.js"></script>
+<script src="rumble.js"></script>
 <script>
 // ═══════════════════════════════════════════
 //  STATE
 // ═══════════════════════════════════════════
 let MY_CLASS = null;
+
+// SELF_HEAL_AMT — orphan from the ripped turn-based combat system. The
+// white-brick selfHeal button still references it. Defined here as a
+// fallback until the post-rip cleanup happens.
+var SELF_HEAL_AMT = {
+  breaker: 2, formwright: 2, snapstep: 2, blocksmith: 2, fixer: 4, wild_one: 2,
+};
 let client   = null;
 let G        = null; // full game state
 // Skills system was removed during cleanup — keep an empty stub so
@@ -414,12 +492,12 @@ let lastRoll = null;
 
 // ── CLASS COLORS / STYLES ──
 const CLS_STYLES = {
-  warrior:     { color:'#993C1D', bg:'rgba(153,60,29,0.15)', border:'rgba(153,60,29,0.4)' },
-  wizard:      { color:'#534AB7', bg:'rgba(83,74,183,0.15)', border:'rgba(83,74,183,0.4)' },
-  scout:       { color:'#1D9E75', bg:'rgba(29,158,117,0.15)',border:'rgba(29,158,117,0.4)' },
-  builder:     { color:'#EF9F27', bg:'rgba(239,159,39,0.15)',border:'rgba(239,159,39,0.4)' },
-  mender:      { color:'#D4537E', bg:'rgba(212,83,126,0.15)',border:'rgba(212,83,126,0.4)' },
-  beastcaller: { color:'#5DA831', bg:'rgba(93,168,49,0.15)', border:'rgba(93,168,49,0.4)' },
+  breaker:     { color:'#993C1D', bg:'rgba(153,60,29,0.15)', border:'rgba(153,60,29,0.4)' },
+  formwright:  { color:'#534AB7', bg:'rgba(83,74,183,0.15)', border:'rgba(83,74,183,0.4)' },
+  snapstep:    { color:'#1D9E75', bg:'rgba(29,158,117,0.15)',border:'rgba(29,158,117,0.4)' },
+  blocksmith:  { color:'#EF9F27', bg:'rgba(239,159,39,0.15)',border:'rgba(239,159,39,0.4)' },
+  fixer:       { color:'#D4537E', bg:'rgba(212,83,126,0.15)',border:'rgba(212,83,126,0.4)' },
+  wild_one:    { color:'#5DA831', bg:'rgba(93,168,49,0.15)', border:'rgba(93,168,49,0.4)' },
 };
 
 // ── BUILD CLASS SELECTOR ──
@@ -516,6 +594,9 @@ function connectWS() {
       G = data;
       // Clear pending trade if server has no active trade (accepted, declined, or expired)
       if (_pendingTradeSent && !G.pendingTrade) _pendingTradeSent = null;
+      // Rumble runtime hook: sync the local Rumble instance to the server's
+      // rumbleBattle state. See rumble-manager block below for transition logic.
+      syncRumbleFromState(G);
       render();
     }
     if (event === 'tradeOffer') { showTradeModal(data.offer); }
@@ -531,7 +612,7 @@ function connectWS() {
       var declinerName = G&&G.players[data.toCls]?(G.players[data.toCls].playerName||G.players[data.toCls].name):data.toCls;
       toast(declinerName + ' declined the trade', 'warn');
     }
-    if (event === 'scoutDisarmChain') { handleDisarmChain(data); }
+    if (event === 'snapstepDisarmChain') { handleDisarmChain(data); }
     if (event === 'attackResult') {
       showRollResult(data);
       pushBattleFeed('⚔️', data.note + ' → ' + data.net + ' damage on ' + (data.monsterName||'monster'), 'attack');
@@ -664,6 +745,188 @@ function connectWS() {
 
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  RUMBLE MANAGER — bridges server rumbleBattle state to the Rumble runtime
+// ═══════════════════════════════════════════════════════════════════════
+// Lifecycle:
+//   server state.rumbleBattle null → populated  ⇒  show rumble-root, Rumble.start()
+//   server state.rumbleBattle populated → null  ⇒  teardown, hide rumble-root
+//   server state.rumbleBattle.paused toggles    ⇒  Rumble.setPauseState()
+//
+// The Rumble runtime is initialized ONCE on first battle and reused across
+// battles via start()/teardown() cycles. Events from Rumble propagate to
+// the server via the existing GameClient.
+var _rumbleInited = false;
+var _rumbleActive = false;
+var _rumbleBattleId = null; // identifies the current battle instance
+var _rumbleTickThrottle = 0; // last tick sent time (ms)
+var _rumbleTickInterval = 100; // send battleTick at 10 Hz
+
+function initRumbleRuntime() {
+  if (_rumbleInited || typeof Rumble === 'undefined') return;
+  Rumble.init({
+    onEvent: function(type, data) {
+      handleRumbleEvent(type, data);
+    }
+  });
+  _rumbleInited = true;
+}
+
+function handleRumbleEvent(type, data) {
+  // Throttle tick forwarding — server doesn't need every frame.
+  if (type === 'tick') {
+    var now = Date.now();
+    if (now - _rumbleTickThrottle < _rumbleTickInterval) return;
+    _rumbleTickThrottle = now;
+    if (!_rumbleActive || !client) return;
+    client.send('battleTick', {
+      cls: MY_CLASS,
+      playerHp: data.playerHp,
+      playerHpMax: data.playerHpMax,
+      playerArmor: data.playerArmor,
+      playerGold: data.playerGold,
+      playerBricks: data.playerBricks,
+      enemyHp: data.enemyHp,
+      elapsedMs: data.elapsed || 0,
+    });
+    return;
+  }
+  // Terminal events — report to server and tear down locally.
+  if (type === 'end') {
+    if (!_rumbleActive || !client) return;
+    _rumbleActive = false;
+    var reason = (data && data.reason) || 'unknown';
+    var victor = reason === 'victory' ? MY_CLASS
+               : reason === 'defeat'  ? 'enemy'
+               : 'none';
+    var snap = Rumble.getState ? Rumble.getState() : {};
+    client.send('battleEnd', {
+      cls: MY_CLASS,
+      victor: victor,
+      reason: reason,
+      finalHp: snap.playerHp,
+      finalHpMax: snap.playerHpMax,
+      finalArmor: snap.playerArmor,
+      finalGold: snap.playerGold,
+      // Send brickMax (inventory total) — NOT current-available charges.
+      // Spec mode: inventory IS the pool. Mid-battle charge count is
+      // transient; what persists to the board is the owned total.
+      finalBricks: snap.playerBrickMax || snap.playerBricks,
+    });
+    // Victory already showed a full stats screen (dismissed via Continue button),
+    // so skip the brief "VICTORY" exit-card flash and hide the rumble immediately.
+    // Defeat/timeout/other reasons still show the brief exit card so the player
+    // gets a clear signal before returning to the board.
+    if (reason === 'victory') {
+      hideRumble();
+    } else {
+      showRumbleExitOverlay(reason);
+      setTimeout(function() { hideRumble(); }, 1200);
+    }
+    return;
+  }
+  // Other events (start, pause, resume, playerHit, enemyHit, etc.) can be
+  // forwarded as log entries if desired. Skipping for MVP.
+}
+
+function showRumble() {
+  var root = document.getElementById('rumble-root');
+  var gs = document.getElementById('game-screen');
+  if (root) root.classList.add('visible');
+  if (gs) gs.classList.remove('visible');
+}
+
+function hideRumble() {
+  var root = document.getElementById('rumble-root');
+  var gs = document.getElementById('game-screen');
+  if (root) root.classList.remove('visible');
+  if (gs) gs.classList.add('visible');
+  var ov = document.getElementById('rumble-exit-overlay');
+  if (ov) ov.classList.remove('visible');
+  // Release orientation lock so player can rotate back to portrait for board.
+  try {
+    if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
+  } catch(_) {}
+  // Exit fullscreen so board UI isn't cropped / app chrome returns.
+  try {
+    if (document.exitFullscreen && document.fullscreenElement) document.exitFullscreen().catch(function(){});
+    else if (document.webkitExitFullscreen && document.webkitFullscreenElement) document.webkitExitFullscreen();
+  } catch(_) {}
+}
+
+function showRumbleExitOverlay(reason) {
+  var ov = document.getElementById('rumble-exit-overlay');
+  if (!ov) return;
+  var label = reason === 'victory' ? 'VICTORY'
+            : reason === 'defeat'  ? 'DEFEATED'
+            : reason === 'timeout' ? 'TIMEOUT'
+            : reason === 'dm_force_quit' ? 'BATTLE ENDED'
+            : 'BATTLE ENDED';
+  ov.textContent = label;
+  ov.classList.add('visible');
+}
+
+// Called on every server state update. Detects transitions in/out of
+// rumbleBattle and drives the Rumble runtime accordingly.
+function syncRumbleFromState(state) {
+  if (!state) return;
+  var ab = state.rumbleBattle;
+  var myBattle = ab && ab.cls === MY_CLASS;
+
+  // Transition: no battle → my battle starts
+  if (myBattle && !_rumbleActive) {
+    initRumbleRuntime();
+    if (typeof Rumble === 'undefined') {
+      console.warn('[rumble-manager] Rumble runtime not loaded; cannot start battle');
+      return;
+    }
+    _rumbleActive = true;
+    _rumbleBattleId = ab.startTime;
+    showRumble();
+    // Build config from server-provided player + enemy state.
+    var startConfig = {
+      cls: ab.cls,
+      mode: 'spec',  // real battles use the spec inventory-is-pool model
+      hp: (ab.playerRumble && ab.playerRumble.hp) || 10,
+      hpMax: (ab.playerRumble && ab.playerRumble.hpMax) || 10,
+      armor: (ab.playerRumble && ab.playerRumble.armor) || 0,
+      gold: (ab.playerRumble && ab.playerRumble.gold) || 0,
+      bricks: (ab.playerRumble && ab.playerRumble.bricks) || {},
+      queuedPoisonStacks: (ab.playerRumble && ab.playerRumble.queuedPoisonStacks) || 0, // v4
+      entityCount: 1,
+      entityType: ab.entityType,
+      // Per-enemy resistances are baked into the rumble-side ENEMY_REGISTRY
+      // (NOTES thread 4 done). entityResistances overrides only used by
+      // the rumble_test dialer for tuning experiments.
+      entityResistances: (ab.enemy && ab.enemy.resistances) || undefined,
+    };
+    try {
+      Rumble.start(startConfig);
+    } catch(e) {
+      console.error('[rumble-manager] Rumble.start THREW:', e);
+    }
+    return;
+  }
+
+  // Transition: my battle ends
+  if (!myBattle && _rumbleActive) {
+    _rumbleActive = false;
+    if (typeof Rumble !== 'undefined' && Rumble.isActive && Rumble.isActive()) {
+      Rumble.forceEnd('dm_force_quit');
+    }
+    hideRumble();
+    return;
+  }
+
+  // Ongoing battle — mirror pause state from server.
+  if (myBattle && _rumbleActive && typeof Rumble !== 'undefined') {
+    if (Rumble.setPauseState) {
+      Rumble.setPauseState(!!ab.paused);
+    }
+  }
+}
+
 function setConn(on) {
   const el = document.getElementById('conn-pill');
   el.className = 'conn-pill '+(on?'on':'off');
@@ -775,11 +1038,11 @@ function render() {
 
 function restoreActiveEvent() {
   if (!G || !G.activeEvent) return;
-  // If this is a monster event and we have a pending arena battle for this player,
-  // the arena card handles the display instead. Skip the generic landing-result card.
-  if (G.activeEvent.evType === 'monster' && G.pendingArenaBattle && G.pendingArenaBattle.cls === MY_CLASS) return;
-  // Also skip during an active arena battle — arena card shows the state.
-  if (G.arenaBattle && G.arenaBattle.cls === MY_CLASS) return;
+  // If this is a monster event and we have a pending rumble battle for this player,
+  // the rumble card handles the display instead. Skip the generic landing-result card.
+  if (G.activeEvent.evType === 'monster' && G.pendingRumbleBattle && G.pendingRumbleBattle.cls === MY_CLASS) return;
+  // Also skip during an active rumble battle — rumble card shows the state.
+  if (G.rumbleBattle && G.rumbleBattle.cls === MY_CLASS) return;
   var isRiddleEvent = G.activeEvent.evType === 'riddle';
   if (!isRiddleEvent && G.activeEvent.cls !== MY_CLASS) return;
   // Allow re-render even if resolved:true, as long as there's a result to show
@@ -895,7 +1158,7 @@ function renderStatus(me) {
   const space = SPACES[me.space];
   const myKeys = Object.entries(G.magicKeys||{}).filter(([,cls])=>cls===MY_CLASS).map(([c])=>c);
 
-  const shieldMult = (MY_CLASS==='warrior' && me.skills && me.skills.iron_hide) ? 1.5 : (MY_CLASS==='warrior' ? 0.75 : 0.5);
+  const shieldMult = (MY_CLASS==='breaker' && me.skills && me.skills.iron_hide) ? 1.5 : (MY_CLASS==='breaker' ? 0.75 : 0.5);
   const shieldMax  = Math.floor(me.hpMax * shieldMult);
   const shieldPct  = shieldMax > 0 ? Math.min(100, Math.round((me.armor||0) / shieldMax * 100)) : 0;
   // Shield pip blocks — one per max shield point, filled = active
@@ -929,6 +1192,10 @@ function renderStatus(me) {
           <div class="stat-num" style="color:#F5D000;">${me.gold}</div>
           <div class="stat-lbl">Gold</div>
         </div>
+        <div class="stat-chip" onclick="showCheeseActions()" style="cursor:${(me.cheese||0)>0?'pointer':'default'};">
+          <div class="stat-num" style="color:#FFD96A;">🧀 ${me.cheese||0}</div>
+          <div class="stat-lbl">Cheese</div>
+        </div>
         <div class="stat-chip">
           <div class="stat-num" style="color:var(--text-dim);font-size:13px;">${space?.label||'Start'}</div>
           <div class="stat-lbl">Position</div>
@@ -939,6 +1206,10 @@ function renderStatus(me) {
         </div>
       </div>
       ${(statuses||enhBadge||debuffBadge)?`<div class="status-wrap">${statuses}${enhBadge}${debuffBadge}</div>`:''}
+      ${(me.queuedPoisonStacks||0)>0?`<div style="margin-top:6px;padding:6px 8px;background:#1a2a10;border:1px solid #4a7a2a;border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span style="font-size:11px;color:#bada7a;font-family:Cinzel,serif;letter-spacing:.04em;">☠ POISON QUEUED: ${me.queuedPoisonStacks} stack${me.queuedPoisonStacks!==1?'s':''} (${me.queuedPoisonBattles||1} battle${(me.queuedPoisonBattles||1)!==1?'s':''})</span>
+        ${(me.bricks.white||0)>=1?`<button class="btn" style="padding:4px 8px;font-size:10px;background:#3a3a5a;border:1px solid #8a8aaa;color:#dde;" onclick="cleansePoisonAction()">🩹 Cleanse (1 white)</button>`:''}
+      </div>`:''}
       ${myKeys.length?`<div style="font-size:12px;color:var(--yellow);margin-top:4px;">🗝 Keys: ${myKeys.join(', ')}</div>`:''}
     </div>
     ${tamed}
@@ -968,36 +1239,36 @@ function renderPendingClue() {
 
 function renderBaseAbilities() {
   var abilities = {
-    warrior: [
+    breaker: [
       ['Red Brick (base)', '3–5 armor-ignoring damage — server rolls in this range automatically'],
       ['Gray Armor (base)', 'Each armor pip absorbs 1 damage. 1 gray = +1 pip. Unlock Iron Hide (Tier 1) to get +2 pips per gray instead. Max shield = 75% of max HP (150% with Iron Hide).'],
-      ['White Brick (base)', 'Heal self 3 HP (Wizard/Scout/Beastcaller heal 2)'],
+      ['White Brick (base)', 'Heal self 3 HP (Formwright/Snapstep/Wild One heal 2)'],
     ],
-    wizard: [
+    formwright: [
       ['Blue Brick (base)', '4–8 magic damage — server rolls randomly in range when you tap the button'],
       ['Purple Brick (base)', '4–8 damage + 3–4 HP self-heal — both values rolled server-side'],
       ['Black Brick (base)', 'Curse monster −3 to −4 per attack (other classes do −2)'],
       ['Blue Landing (base)', 'Free Arcane Bolt when landing on a blue brick board event'],
     ],
-    scout: [
+    snapstep: [
       ['Movement (base)', '+1 to every movement roll always (Fleet Foot skill adds +2 more)'],
       ['Battle Search (base)', 'Find bricks on 3+ in battle (other classes need 5+)'],
       ['Orange Brick (base)', 'Battle trap deals 2–4 damage (other classes deal 1–2)'],
       ['Trap Sense (base)', 'While in zone: orange landing events convert to red challenge events'],
     ],
-    builder: [
+    blocksmith: [
       ['Gray Armor (base)', 'Each armor pip absorbs 1 damage. Only 1 gray brick needed per pip (others need 2). Max shield = 50% of max HP.'],
       ['Gray Landing (base)', 'Auto-collect 2 gray bricks from rubble event (others take 1 or risk)'],
       ['Trap Disarm (base)', 'Disarm traps as free action — costs 1 gray brick, no slot used'],
       ['Blueprint (base)', 'Duplicate 1 brick once per zone (costs 1 gray brick)'],
     ],
-    mender: [
-      ['White Self-Heal (base)', 'Heal self 4 HP per white brick (Warrior/Builder 3, others 2)'],
+    fixer: [
+      ['White Self-Heal (base)', 'Heal self 4 HP per white brick (Breaker/Blocksmith 3, others 2)'],
       ['White Ally-Heal (base)', 'Heal any ally 4 HP per white brick (all others heal 2)'],
       ['Cleanse (base)', 'Remove a status effect — free action, once per round, same zone'],
       ['White Landing (base)', 'Landing on white board event: give +2 HP to any player in zone'],
     ],
-    beastcaller: [
+    wild_one: [
       ['Tame (base)', 'Tame succeeds on 3+ (others need 5+; Easy Tame skill lowers to 2+)'],
       ['Creeping Vine (base)', 'Immune to movement penalty on fail; gains 1 green fail / 2 green success'],
       ['Yellow Brick (base)', 'When confusion dispels, monster takes −1 to next attack roll'],
@@ -1133,7 +1404,7 @@ function renderActions(me) {
     // ── 1. PLAYER STATS STRIP (always top) ──
     var hpPctB = Math.max(0, Math.round(me.hp/me.hpMax*100));
     var hcB = me.hp<=Math.floor(me.hpMax*.25)?'#E24B4A':me.hp<=Math.floor(me.hpMax*.5)?'#EF9F27':'var(--cls-color)';
-    var sMultB = (MY_CLASS==='warrior' && me.skills && me.skills.iron_hide) ? 1.5 : (MY_CLASS==='warrior' ? 0.75 : 0.5);
+    var sMultB = (MY_CLASS==='breaker' && me.skills && me.skills.iron_hide) ? 1.5 : (MY_CLASS==='breaker' ? 0.75 : 0.5);
     var sMaxB = Math.floor(me.hpMax * sMultB);
     var bkDotsB = '';
     BRICK_NAMES.forEach(function(k){ var qty=me.bricks[k]||0;if(!qty)return;var bg=BRICK_COLORS[k];var bdr=k==='white'?'border:1px solid #ccc;':'';for(var bi=0;bi<qty;bi++) bkDotsB+='<span style="width:14px;height:14px;border-radius:3px;background:'+bg+';'+bdr+'display:inline-block;margin:1px;box-shadow:0 1px 3px rgba(0,0,0,.4);flex-shrink:0;"></span>'; });
@@ -1265,8 +1536,8 @@ function renderActions(me) {
     if (G.phase === 'prepare') {
       html += renderPreparePanel(me);
     }
-    // Arena battle card — pending (event card) or active (placeholder arena screen)
-    html += renderArenaCard(me);
+    // Rumble card — pending (event card) or active (placeholder rumble screen)
+    html += renderRumbleCard(me);
     // Landing phase / event
     if (isMyTurn && G.phase === 'land' && !_pendingResult) {
       var hasActiveEvent = G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
@@ -1502,10 +1773,10 @@ function buildPrepareActions(me) {
 
   // ── ADD SHIELD — always shown ──
   {
-    var hasIronHide = MY_CLASS === 'warrior' && me.skills && me.skills.iron_hide;
-    var sCost = (MY_CLASS === 'warrior' || MY_CLASS === 'builder') ? 1 : 2;
+    var hasIronHide = MY_CLASS === 'breaker' && me.skills && me.skills.iron_hide;
+    var sCost = (MY_CLASS === 'breaker' || MY_CLASS === 'blocksmith') ? 1 : 2;
     var sGain = hasIronHide ? 2 : 1;
-    var sMult = hasIronHide ? 1.5 : (MY_CLASS === 'warrior' ? 0.75 : 0.5);
+    var sMult = hasIronHide ? 1.5 : (MY_CLASS === 'breaker' ? 0.75 : 0.5);
     var sMax = Math.floor(me.hpMax * sMult);
     var shieldHaveEnough = (me.bricks.gray || 0) >= sCost;
     var shieldAtMax = (me.armor || 0) >= sMax;
@@ -1526,8 +1797,8 @@ function buildPrepareActions(me) {
     });
   }
 
-  // ── MENDER-ONLY ABILITIES ──
-  if (MY_CLASS === 'mender') {
+  // ── FIXER-ONLY ABILITIES ──
+  if (MY_CLASS === 'fixer') {
     list.push({
       id: 'heal_ally',
       label: '💊 Heal Ally',
@@ -1559,8 +1830,8 @@ function buildPrepareActions(me) {
     }
   }
 
-  // ── BUILDER-ONLY (skill-gated) ──
-  if (MY_CLASS === 'builder' && me.skills) {
+  // ── BLOCKSMITH-ONLY (skill-gated) ──
+  if (MY_CLASS === 'blocksmith' && me.skills) {
     if (me.skills.forge) {
       var canForge = BRICK_NAMES.some(function(k){ return (me.bricks[k]||0) >= 2; });
       list.push({
@@ -1706,7 +1977,7 @@ function showDamageFlash(amount, source) {
 
 // ── SEARCH ──
 function doSearch() {
-  const isScout = MY_CLASS === 'scout';
+  const isScout = MY_CLASS === 'snapstep';
   const r = roll(6);
   const threshold = isScout ? 3 : 5;
   let found = '';
@@ -1742,7 +2013,7 @@ function renderBrickButtons(me, b, phase1Done) {
     gray:   { label:'+1 armor brick on minifig' },
     purple: { label:'3–5 dmg + 2–3 HP self', wizardLabel:'4–8 dmg + 3–4 HP self' },
     yellow: { label:'Confuse monster (1+ rounds)', scoutLabel:'Confuse + 1–3 damage/round' },
-    orange: { label:'Battle trap — fires this round', scoutLabel:'Scout trap 2–4 dmg' },
+    orange: { label:'Battle trap — fires this round', scoutLabel:'Snapstep trap 2–4 dmg' },
     black:  { label:'Curse: monster −2 per attack', wizardLabel:'−3 to −4, persists' },
     green:  { label:'Tame attempt (see class)' },
   };
@@ -1754,9 +2025,9 @@ function renderBrickButtons(me, b, phase1Done) {
     if (!def) return;
     // Phase 2 restriction
     if (phase2Active && !['blue','yellow'].includes(color)) return;
-    const label = (MY_CLASS==='warrior'&&def.warriorLabel)||
-                  (MY_CLASS==='wizard'&&def.wizardLabel)||
-                  (MY_CLASS==='scout'&&def.scoutLabel)||
+    const label = (MY_CLASS==='breaker'&&def.warriorLabel)||
+                  (MY_CLASS==='formwright'&&def.wizardLabel)||
+                  (MY_CLASS==='snapstep'&&def.scoutLabel)||
                   def.label;
     const bg = BRICK_COLORS[color]||'#888';
     const bdr = color==='white'?'border:1px solid #aaa;':'';
@@ -1831,7 +2102,7 @@ function renderClassAbilities(me, b) {
   });
 
   // Tame / command
-  if (MY_CLASS==='beastcaller') {
+  if (MY_CLASS==='wild_one') {
     if (!me.tamed) {
       const canTame = (me.bricks.green||0)>=2 && b.monsters?.some(m=>m.tameable&&m.hpCurrent>0);
       html += `<button class="btn" ${!canTame?'disabled':''} onclick="doTame()">🐾 Tame Monster (2 green bricks — uses both slots)</button>`;
@@ -1840,8 +2111,8 @@ function renderClassAbilities(me, b) {
     }
   }
 
-  // Mender heal / revive in battle
-  if (MY_CLASS==='mender') {
+  // Fixer heal / revive in battle
+  if (MY_CLASS==='fixer') {
     html += `<button class="btn success" onclick="showHealSelector(-1)">💊 Heal ally (1 white brick)</button>`;
     html += `<button class="btn primary" onclick="showReviveSelector()">✨ Revive (1 purple + 1 white)</button>`;
   }
@@ -1849,7 +2120,7 @@ function renderClassAbilities(me, b) {
   return html;
 }
 
-// ── WARRIOR ABILITIES ──
+// ── BREAKER ABILITIES ──
 function doRageBreak() {
   const b = G.battle;
   if (!b) return;
@@ -1861,7 +2132,7 @@ function doRageBreak() {
 }
 function doWhirlwind() { client.useBrick(MY_CLASS,'red',0); toast('Whirlwind — hits all monsters!','success'); }
 function doFortressStance() { client.adjustArmor(MY_CLASS,3); toast('+3 armor bricks (Fortress Stance)','success'); }
-function doLegendaryBastion() { client.addLog('LEGENDARY BASTION active — Warrior immune 2 rounds!','action'); toast('Legendary Bastion!','success'); }
+function doLegendaryBastion() { client.addLog('LEGENDARY BASTION active — Breaker immune 2 rounds!','action'); toast('Legendary Bastion!','success'); }
 function doWarlordsFury() {
   const mi=parseInt(document.getElementById('mon-sel')?.value||0);
   // Roll 3× d8
@@ -1871,7 +2142,7 @@ function doWarlordsFury() {
   toast(`Warlord's Fury: ${total} damage!`,'success');
 }
 
-// ── WIZARD ──
+// ── FORMWRIGHT ──
 function doTimeFreeze() { client.addLog('TIME FREEZE — all monsters skip 2 turns!','action'); toast('Time Freeze!','success'); }
 function doCataclysm() {
   const me=G.players[MY_CLASS];
@@ -1883,10 +2154,10 @@ function doCataclysm() {
   toast(`Cataclysm: ${dmg} damage!`,'success');
 }
 
-// ── SCOUT ──
-function doBlitz() { client.addLog('BLITZ — Scout takes 2 full turns in a row!','action'); toast('Blitz!','success'); }
+// ── SNAPSTEP ──
+function doBlitz() { client.addLog('BLITZ — Snapstep takes 2 full turns in a row!','action'); toast('Blitz!','success'); }
 
-// ── BEASTCALLER ──
+// ── WILD ONE ──
 function doTame() {
   const monIdx = parseInt(document.getElementById('mon-sel')?.value||0);
   client.tameAttempt(MY_CLASS, monIdx);
@@ -1898,11 +2169,11 @@ function showTameResult(data) {
 function doAlphaPredator() { client.addLog('Alpha Predator — tamed hits ALL monsters!','action'); toast('Alpha Predator!','success'); }
 function doNaturesWrath() { client.addLog("Nature's Wrath — 3-5 damage + poison to all monsters!","action"); toast("Nature's Wrath!",'success'); }
 
-// ── MENDER ──
+// ── FIXER ──
 function showReviveSelector() {
   const down = Object.values(G.players).filter(p=>!p.alive||p.hp<=0);
   if(!down.length){toast('No fallen players','warn');return;}
-  const opts=down.map(p=>`<button class="btn success" onclick="client.revivePlayer('mender','${p.cls}');document.getElementById('rev-modal').remove();">${p.icon} Revive ${p.name}</button>`).join('');
+  const opts=down.map(p=>`<button class="btn success" onclick="client.revivePlayer('fixer','${p.cls}');document.getElementById('rev-modal').remove();">${p.icon} Revive ${p.name}</button>`).join('');
   const modal=document.createElement('div');modal.id='rev-modal';
   modal.style.cssText='position:fixed;inset:0;background:#000a;z-index:150;display:flex;align-items:center;justify-content:center;padding:20px;';
   modal.innerHTML=`<div style="background:#1a1a1a;border:1px solid var(--cls-color);border-radius:14px;padding:16px;width:100%;max-width:300px;"><div style="font-family:Cinzel,serif;font-size:14px;color:var(--cls-color);margin-bottom:10px;">Revive who?</div>${opts}<button class="btn" onclick="document.getElementById('rev-modal').remove()">Cancel</button></div>`;
@@ -1915,10 +2186,10 @@ function doDivineShield(){client.addLog('DIVINE SHIELD — no damage this round!
 function renderMovePanel(me) {
   var enh = G.enhancedMovement && G.enhancedMovement[MY_CLASS];
   var debuff = (G.movementDebuffs && G.movementDebuffs[MY_CLASS]) || 0;
-  var scoutBonus = MY_CLASS==='scout' ? (me.skills && me.skills.fleet_foot ? 3 : 1) : 0;
+  var scoutBonus = MY_CLASS==='snapstep' ? (me.skills && me.skills.fleet_foot ? 3 : 1) : 0;
   var hasRed = (me.bricks.red||0)>0;
   var hasPurple = (me.bricks.purple||0)>0;
-  var mount = MY_CLASS==='beastcaller' && me.tamed;
+  var mount = MY_CLASS==='wild_one' && me.tamed;
   var die = mount ? 'd8' : 'd6';
 
   var enhBanner = '';
@@ -1933,7 +2204,7 @@ function renderMovePanel(me) {
   }
 
   var notes = [];
-  if (scoutBonus) notes.push('Scout +' + scoutBonus + ' always applied');
+  if (scoutBonus) notes.push('Snapstep +' + scoutBonus + ' always applied');
   if (debuff) notes.push('🐌 −' + debuff + ' this turn');
   if (!enh && hasPurple) notes.push('Tip: use purple brick before moving for Enhanced Movement');
 
@@ -1990,69 +2261,42 @@ function usePurpleEnhanced() {
   client.activateEnhanced(MY_CLASS);
 }
 
-// ── ARENA BATTLE CARD ──
+// ── RUMBLE CARD ──
 // Shown on the active player's screen when:
-//  (A) G.pendingArenaBattle targets them → event card with flavor + Enter Arena button
-//  (B) G.arenaBattle is active and they're the fighter → placeholder arena screen
-// Both are rendered here so the UI transition is seamless.
-function renderArenaCard(me) {
+//  (A) G.pendingRumbleBattle targets them → event card with flavor + Enter Rumble button
+//  (B) G.rumbleBattle active → handled by the rumble-manager + rumble runtime,
+//      NOT rendered here. The fullscreen rumble-root overlay takes over; this
+//      card only shows the PRE-battle event. The old "BATTLE ACTIVE placeholder"
+//      panel was Phase 1 stub before rumble integration existed — deleted now
+//      that syncRumbleFromState drives the actual combat UI.
+function renderRumbleCard(me) {
   if (!G) return '';
-  // Pending: event card with flavor text + Enter Arena button
-  if (G.pendingArenaBattle && G.pendingArenaBattle.cls === MY_CLASS && !G.arenaBattle) {
-    var pb = G.pendingArenaBattle;
-    return '<div id="arena-event-card" style="margin:12px 0;padding:16px;border-radius:12px;background:linear-gradient(180deg,#2a0a0a 0%,#1a0505 100%);border:2px solid var(--red);box-shadow:0 4px 16px rgba(226,75,74,.25);">'
+  // Pending: event card with flavor text + Enter Rumble button
+  if (G.pendingRumbleBattle && G.pendingRumbleBattle.cls === MY_CLASS && !G.rumbleBattle) {
+    var pb = G.pendingRumbleBattle;
+    return '<div id="rumble-event-card" style="margin:12px 0;padding:16px;border-radius:12px;background:linear-gradient(180deg,#2a0a0a 0%,#1a0505 100%);border:2px solid var(--red);box-shadow:0 4px 16px rgba(226,75,74,.25);">'
       + '<div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.12em;color:var(--red);margin-bottom:8px;text-align:center;">⚔ ENCOUNTER</div>'
       + '<div style="font-size:32px;text-align:center;margin-bottom:8px;">👺</div>'
       + '<div style="font-size:15px;color:var(--text);font-style:italic;text-align:center;line-height:1.5;margin-bottom:14px;">"' + escapeHtmlMin(pb.flavor) + '"</div>'
-      + '<div style="font-size:12px;color:var(--text-dim);text-align:center;margin-bottom:12px;">A <strong>' + escapeHtmlMin(pb.enemy.name) + '</strong> blocks your path. Enter the arena to fight.</div>'
-      + '<button class="btn" style="width:100%;padding:14px;font-size:15px;font-family:Cinzel,serif;letter-spacing:.1em;background:linear-gradient(180deg,var(--red) 0%,#8a2020 100%);border-color:var(--red);color:#fff;font-weight:700;" onclick="enterArenaClick()">⚔ ENTER ARENA</button>'
+      + '<div style="font-size:12px;color:var(--text-dim);text-align:center;margin-bottom:12px;">A <strong>' + escapeHtmlMin(pb.enemy.name) + '</strong> blocks your path. Enter the rumble to fight.</div>'
+      + '<button class="btn" style="width:100%;padding:14px;font-size:15px;font-family:Cinzel,serif;letter-spacing:.1em;background:linear-gradient(180deg,var(--red) 0%,#8a2020 100%);border-color:var(--red);color:#fff;font-weight:700;" onclick="enterRumbleClick()">⚔ ENTER RUMBLE</button>'
       + '<div style="font-size:10px;color:var(--text-faint);text-align:center;margin-top:8px;">Fullscreen landscape recommended</div>'
       + '</div>';
   }
-  // Active: battle running — placeholder screen for phase 1 (real arena comes in phase 2)
-  if (G.arenaBattle && G.arenaBattle.cls === MY_CLASS) {
-    var b = G.arenaBattle;
-    // If this battle was DM-forced, auto-enter fullscreen the first time we see it
-    // (can't actually request fullscreen here without a user gesture — but screen.orientation
-    // lock may succeed, and the user will see the battle screen either way).
-    if (b.forced && !_arenaForcedSeen) {
-      _arenaForcedSeen = true;
-      // Fullscreen request w/o user gesture will throw silently on most browsers.
-      // Best effort: try, log nothing if blocked.
-      try {
-        var el = document.documentElement;
-        if (el.requestFullscreen) el.requestFullscreen().catch(function(){});
-        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-      } catch(_) {}
-      try {
-        if (screen.orientation && screen.orientation.lock) {
-          screen.orientation.lock('landscape').catch(function(){});
-        }
-      } catch(_) {}
-    }
-    var secs = Math.floor((b.elapsedMs||0)/1000);
-    var mm = Math.floor(secs/60), ss = secs%60;
-    return '<div id="arena-active-placeholder" style="margin:12px 0;padding:20px;border-radius:12px;background:#0a1a0a;border:2px solid var(--green);text-align:center;">'
-      + '<div style="font-family:Cinzel,serif;font-size:11px;letter-spacing:.12em;color:var(--green);margin-bottom:10px;">⚔ BATTLE ACTIVE' + (b.forced ? ' (DM FORCED)' : '') + '</div>'
-      + '<div style="font-size:48px;margin-bottom:8px;">⚔️</div>'
-      + '<div style="font-size:14px;color:var(--text);margin-bottom:6px;">Fighting <strong>' + escapeHtmlMin(b.enemy.name) + '</strong></div>'
-      + '<div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">HP ' + b.playerArena.hp + '/' + b.playerArena.hpMax + ' · Enemy HP ' + b.enemy.hp + '/' + (b.enemy.hpMax||b.enemy.hp)
-      + ' · ' + mm + ':' + (ss<10?'0':'') + ss + (b.paused ? ' ⏸' : '') + '</div>'
-      + '<div style="font-size:11px;color:var(--text-faint);font-style:italic;">Arena visuals coming in phase 2. For now, use DM controls to end the battle.</div>'
-      + '</div>';
-  }
-  // Reset the forced-seen flag when no battle active (so next forced battle fires the trigger again)
-  _arenaForcedSeen = false;
+  // Active battles no longer render a card — the rumble runtime owns the UI
+  // via the fullscreen rumble-root overlay. syncRumbleFromState() handles the
+  // show/hide transition based on G.rumbleBattle state.
+  _rumbleForcedSeen = false;
   return '';
 }
 
-var _arenaForcedSeen = false;
+var _rumbleForcedSeen = false;
 
 function escapeHtmlMin(s) {
   return String(s || '').replace(/[<>&"]/g, function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c];});
 }
 
-function enterArenaClick() {
+function enterRumbleClick() {
   // Request fullscreen on button tap (valid user gesture)
   try {
     var el = document.documentElement;
@@ -2156,15 +2400,15 @@ function showLandingResult(ev, r, zone) {
   if(!el||!ev) return;
   var extra = '';
 
-  // Gray brick — show Take/Search choice (Builder gets 2 automatically)
+  // Gray brick — show Take/Search choice (Blocksmith gets 2 automatically)
   if (ev.type === 'gray' || ev.color === 'gray') {
     var alreadyChose = G.activeEvent && G.activeEvent.grayResult;
-    if (MY_CLASS === 'builder') {
+    if (MY_CLASS === 'blocksmith') {
       if (alreadyChose) {
         var gr = G.activeEvent.grayResult;
         var bonus = gr.scavengeRoll ? ' + Scavenge roll ' + gr.scavengeRoll + ' → ' + (gr.scavengeBonus||0) + ' bonus' : '';
         extra = '<div style="margin-top:8px;padding:12px;background:#1a1200;border:2px solid var(--gold);border-radius:10px;text-align:center;">'
-          + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.08em;color:var(--gold);margin-bottom:6px;">MASTER BUILDER</div>'
+          + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.08em;color:var(--gold);margin-bottom:6px;">MASTER BLOCKSMITH</div>'
           + '<div style="display:flex;justify-content:center;gap:6px;margin-bottom:8px;">'
           + '<span style="width:28px;height:28px;border-radius:5px;background:#AAAAAA;box-shadow:0 2px 6px rgba(0,0,0,.5);display:inline-block;"></span>'.repeat(gr.took + (gr.scavengeBonus||0))
           + '</div>'
@@ -2174,7 +2418,7 @@ function showLandingResult(ev, r, zone) {
       } else {
         var hasScavenge = G.players[MY_CLASS] && G.players[MY_CLASS].skills && G.players[MY_CLASS].skills.scavenge;
         extra = '<div style="margin-top:10px;padding:14px;background:#1a1200;border:2px solid var(--gold);border-radius:12px;text-align:center;">'
-          + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.1em;color:var(--gold);margin-bottom:4px;">🔧 MASTER BUILDER</div>'
+          + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.1em;color:var(--gold);margin-bottom:4px;">🔧 MASTER BLOCKSMITH</div>'
           + '<div style="font-size:15px;font-family:Cinzel,serif;color:var(--text);margin-bottom:8px;">Your eye for materials never fails</div>'
           + '<div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.5;">You recover <strong style="color:#aaa;">2 gray bricks</strong> from the debris — twice what others would find.</div>'
           + '<div style="display:flex;justify-content:center;gap:8px;margin-bottom:12px;">'
@@ -2182,7 +2426,7 @@ function showLandingResult(ev, r, zone) {
           + '<span style="width:28px;height:28px;border-radius:5px;background:#AAAAAA;box-shadow:0 2px 8px rgba(0,0,0,.6);display:inline-block;animation:brick-drop .3s ease .3s both;"></span>'
           + '</div>'
           + (hasScavenge
-            ? '<button class="btn warn" style="width:100%;margin-bottom:6px;" onclick="builderScavengeRoll()">🔍 Scavenge — Roll for Bonus Brick (4+)</button>'
+            ? '<button class="btn warn" style="width:100%;margin-bottom:6px;" onclick="blocksmithScavengeRoll()">🔍 Scavenge — Roll for Bonus Brick (4+)</button>'
             : '<div style="font-size:10px;color:var(--text-faint);">Unlock Scavenge (Tier 1) to roll for a bonus brick</div>')
           + '<button class="btn success" style="width:100%;margin-top:6px;" onclick="grayTake1()">✓ Collect 2 Bricks</button>'
           + '</div>';
@@ -2432,11 +2676,11 @@ function showLandingResult(ev, r, zone) {
     }
   }
 
-  // Trap event — show disarm option for Scout, Tap Burst for everyone, damage warning
+  // Trap event — show disarm option for Snapstep, Tap Burst for everyone, damage warning
   if (ev.type === 'trap' || ev.type === 'doubletrap') {
     var me2 = G.players[MY_CLASS];
     var hasGray = (me2 && (me2.bricks.gray||0) > 0);
-    var isScout = MY_CLASS === 'scout';
+    var isScout = MY_CLASS === 'snapstep';
     var double = ev.type === 'doubletrap';
     var trapResult = G.activeEvent && G.activeEvent.trapResult;
     if (trapResult) {
@@ -2510,9 +2754,9 @@ function showLandingResult(ev, r, zone) {
           + '</div>';
       }
     } else {
-      // Scout disarm button
+      // Snapstep disarm button
       var scoutBtn = (isScout && hasGray)
-        ? '<button class="btn success" style="width:100%;margin-bottom:8px;" onclick="disarmTrap()">🔧 Disarm Trap — Scout skill (1 gray → 1 orange)</button>'
+        ? '<button class="btn success" style="width:100%;margin-bottom:8px;" onclick="disarmTrap()">🔧 Disarm Trap — Snapstep skill (1 gray → 1 orange)</button>'
         : (isScout && !hasGray)
           ? '<div style="font-size:11px;color:var(--text-faint);margin-bottom:8px;">You could disarm this — but you need a gray brick.</div>'
           : '';
@@ -2521,6 +2765,48 @@ function showLandingResult(ev, r, zone) {
         + '<div id="tap-burst-container"></div>'
         + '</div>';
     }
+  }
+
+  // v4: PURPLE FATED CHOICE — render when server set purpleVariant
+  if ((ev.type === 'purple' || ev.evType === 'purple') && G.activeEvent && G.activeEvent.purpleVariant === 'fated_choice') {
+    extra = '<div style="margin-top:10px;padding:14px;background:#1a0a2a;border:2px solid #7B2FBE;border-radius:12px;">'
+      + renderPurpleFatedChoice(G.activeEvent, me)
+      + '</div>';
+  }
+
+  // v4: WHITE PILGRIM'S REST
+  if ((ev.type === 'white' || ev.evType === 'white') && G.activeEvent && G.activeEvent.whiteVariant === 'pilgrims_rest') {
+    extra = '<div style="margin-top:10px;padding:14px;background:#0a1a1a;border:2px solid #6aaaaa;border-radius:12px;">'
+      + renderWhitePilgrimsRest(G.activeEvent, me, G)
+      + '</div>';
+  }
+
+  // v4: BLACK SHADOW BARGAIN
+  if ((ev.type === 'black' || ev.evType === 'black') && G.activeEvent && G.activeEvent.blackVariant === 'shadow_bargain') {
+    extra = '<div style="margin-top:10px;padding:14px;background:#0a0a0a;border:2px solid #333;border-radius:12px;">'
+      + renderBlackShadowBargain(G.activeEvent, me, G)
+      + '</div>';
+  }
+
+  // v4: GREEN VINE PATH
+  if ((ev.type === 'green' || ev.evType === 'green') && G.activeEvent && G.activeEvent.greenVariant === 'vine_path') {
+    extra = '<div style="margin-top:10px;padding:14px;background:#061508;border:2px solid #5a8a5a;border-radius:12px;">'
+      + renderGreenVinePath(G.activeEvent, me, G)
+      + '</div>';
+  }
+
+  // v4: RED TRIAL OF HAND
+  if ((ev.type === 'red' || ev.evType === 'red') && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand') {
+    extra = '<div style="margin-top:10px;padding:14px;background:#1a0505;border:2px solid #8a4a4a;border-radius:12px;">'
+      + renderRedTrialOfHand(G.activeEvent, me, G)
+      + '</div>';
+  }
+
+  // v4: GRAY RUBBLE STACKING
+  if ((ev.type === 'gray' || ev.evType === 'gray') && G.activeEvent && G.activeEvent.grayVariant === 'rubble_stacking') {
+    extra = '<div style="margin-top:10px;padding:14px;background:#0a0a0a;border:2px solid #666;border-radius:12px;">'
+      + renderGrayRubbleStacking(G.activeEvent, me, G)
+      + '</div>';
   }
 
   // Brick square color mapping
@@ -2542,7 +2828,13 @@ function showLandingResult(ev, r, zone) {
   var alreadyRiddle = ev.type === 'riddle';
   var alreadyTrap = ev.type === 'trap' || ev.type === 'doubletrap';
   var alreadyGold = (ev.type === 'gold') && G.activeEvent && (G.activeEvent.goldResult || G.activeEvent.goldVariant);
-  var hideHeader = alreadyChoseGray || alreadyChoseBlue || alreadyRiddle || alreadyTrap || alreadyGold;
+  var alreadyPurple = (ev.type === 'purple' || ev.evType === 'purple') && G.activeEvent && G.activeEvent.purpleVariant === 'fated_choice';
+  var alreadyWhite = (ev.type === 'white' || ev.evType === 'white') && G.activeEvent && G.activeEvent.whiteVariant === 'pilgrims_rest';
+  var alreadyBlack = (ev.type === 'black' || ev.evType === 'black') && G.activeEvent && G.activeEvent.blackVariant === 'shadow_bargain';
+  var alreadyGreen = (ev.type === 'green' || ev.evType === 'green') && G.activeEvent && G.activeEvent.greenVariant === 'vine_path';
+  var alreadyRed = (ev.type === 'red' || ev.evType === 'red') && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand';
+  var alreadyGrayRubble = (ev.type === 'gray' || ev.evType === 'gray') && G.activeEvent && G.activeEvent.grayVariant === 'rubble_stacking';
+  var hideHeader = alreadyChoseGray || alreadyChoseBlue || alreadyRiddle || alreadyTrap || alreadyGold || alreadyPurple || alreadyWhite || alreadyBlack || alreadyGreen || alreadyRed || alreadyGrayRubble;
 
   el.innerHTML = '<div class="roll-display" style="margin-top:8px;text-align:center;">'
     + (!hideHeader ? '<div style="display:flex;justify-content:center;margin-bottom:6px;">' + brickSquare + '</div>' : '')
@@ -2563,6 +2855,14 @@ function showLandingResult(ev, r, zone) {
   if ((ev.type === 'blue' || ev.color === 'blue') && G.activeEvent && G.activeEvent.blueResult) {
     setTimeout(startResultShower, 100);
   }
+  // v4: Launch GREEN vine path minigame
+  if ((ev.type === 'green' || ev.evType === 'green') && G.activeEvent && G.activeEvent.greenVariant === 'vine_path' && !G.activeEvent.greenResult) {
+    setTimeout(startGreenVinePath, 400);
+  }
+  // v4: Launch GRAY rubble stacking minigame
+  if ((ev.type === 'gray' || ev.evType === 'gray') && G.activeEvent && G.activeEvent.grayVariant === 'rubble_stacking' && !G.activeEvent.grayRubbleResult) {
+    setTimeout(startGrayRubble, 400);
+  }
 }
 
 function grayTake1() {
@@ -2579,11 +2879,11 @@ function graySearch() {
   if (btn2) btn2.disabled=true;
   client.resolveEvent(MY_CLASS, 'graySearch', {});
 }
-function builderScavengeRoll() {
-  // Builder with Scavenge skill — roll for bonus brick then collect
-  var btn = document.querySelector('button[onclick="builderScavengeRoll()"]');
+function blocksmithScavengeRoll() {
+  // Blocksmith with Scavenge skill — roll for bonus brick then collect
+  var btn = document.querySelector('button[onclick="blocksmithScavengeRoll()"]');
   if (btn) { btn.disabled=true; btn.textContent='Rolling…'; }
-  client.resolveEvent(MY_CLASS, 'builderScavenge', {});
+  client.resolveEvent(MY_CLASS, 'blocksmithScavenge', {});
 }
 function disarmTrap() {
   var btn = document.querySelector('button[onclick="disarmTrap()"]');
@@ -2863,7 +3163,7 @@ function startBlueEvent(variant, isWizard) {
   };
 
   // Success reward icons — brick + bonus per variant
-  // Wizard gets 2 bricks on success
+  // Formwright gets 2 bricks on success
   var brickCount = isWizard ? 2 : 1;
   var BSQUARE = '<span style="width:20px;height:20px;border-radius:3px;background:#006DB7;display:inline-block;vertical-align:middle;box-shadow:0 1px 4px rgba(0,0,0,.5);margin:0 1px;"></span>';
   var brickIcons = BSQUARE.repeat(brickCount);
@@ -2881,7 +3181,7 @@ function startBlueEvent(variant, isWizard) {
   var wizardBadge = isWizard
     ? '<div style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:#0a0a1a;border:1px solid #F5D00088;border-radius:20px;margin-bottom:10px;">'
       + '<span style="font-size:14px;">🔮</span>'
-      + '<span style="font-family:Cinzel,serif;font-size:10px;color:#F5D000;letter-spacing:.06em;">WIZARD +2 BRICKS</span>'
+      + '<span style="font-family:Cinzel,serif;font-size:10px;color:#F5D000;letter-spacing:.06em;">FORMWRIGHT +2 BRICKS</span>'
       + '</div>'
     : '';
 
@@ -2893,7 +3193,7 @@ function startBlueEvent(variant, isWizard) {
     // Variant name
     + '<div style="font-family:Cinzel,serif;font-size:16px;color:#4db8ff;margin-bottom:6px;text-align:center;">✨ ' + (variantNames[variant]||variant) + '</div>'
 
-    // Wizard badge if applicable
+    // Formwright badge if applicable
     + '<div style="text-align:center;">' + wizardBadge + '</div>'
 
     // Flavor text — brief, italic
@@ -3206,7 +3506,7 @@ function startSingingStone(container, flavor, isWizard, extraTime) {
       var status = document.getElementById('stone-status');
       if (status) { status.textContent = ''; }
       cancelAnimationFrame(animFrame); animFrame = null;
-      setTimeout(function(){ finishBlueEvent(true, 'gold', isWizard ? '+2 Blue Bricks + 1 Gold (Wizard!)' : '+1 Blue Brick + 1 Gold'); }, 900);
+      setTimeout(function(){ finishBlueEvent(true, 'gold', isWizard ? '+2 Blue Bricks + 1 Gold (Formwright!)' : '+1 Blue Brick + 1 Gold'); }, 900);
     }
   };
 
@@ -3251,11 +3551,12 @@ var LANDING_FLAVOR = {
     'The fortress has been keeping this.'
   ],
   purple: [
-    'This one does not give itself up easily.',
-    'A fragment of something rare. It has a price.',
-    'Sealed. But not forever. Not if you know the answer.',
-    'Power crystallized into violet. Waiting for someone worthy.',
-    'The rarest things always ask something in return.'
+    'Two sealed chests rest on pedestals. One glows faintly.',
+    'A choice. No middle ground.',
+    'Fate favors the bold. Or punishes them.',
+    'Power crystallized into violet. But at what cost?',
+    'The rarest things always ask something in return.',
+    'Both chests hum. Only one is kind.'
   ],
   yellow: [
     'Something was written here before the battle started.',
@@ -3314,11 +3615,26 @@ var LANDING_FLAVOR = {
     'The brick remembers who listened.',
     'Some walls fall to force. This one fell to wit.'
   ],
-  creeper: [
-    'The walls are alive here. Not metaphorically.',
-    'Something green and fast and hungry.',
-    'The vines move with intention.',
-    'Cut through it or it cuts through your turn.'
+  green: [
+    'Three vines ripple across the path, thorns bristling.',
+    'The fortress wears its garden like armor.',
+    'Green things grew here. Some of them hungry.',
+    'Cut clean or do not cut at all.',
+    'The vines have opinions about intruders.'
+  ],
+  red: [
+    'A stone circle. Three standing stones mark the trial.',
+    'The fortress tests those who pass.',
+    'Prove you belong. Or leave.',
+    'The old ways still demand their price.',
+    'Skill. Wit. Will. Show one. Show all.'
+  ],
+  black: [
+    'A cloaked figure waits. Hood up. Hands empty.',
+    'The shadow has been expecting you.',
+    'A bargain. The terms are less kind than they sound.',
+    'Something stands where nothing should. Listening.',
+    'The fortress keeps darker merchants than most.'
   ],
   nothing: [
     'All clear. For now.',
@@ -3590,7 +3906,7 @@ function startSentryStone(container, flavor, isWizard, extraTime) {
         if (eye) eye.textContent = '✓';
         var status = document.getElementById('sentry-status');
         if (status) { status.textContent = ''; }
-        setTimeout(function(){ finishBlueEvent(true, 'shield', isWiz ? '+2 Blue Bricks + shield pip (Wizard!)' : '+1 Blue Brick + shield pip'); }, 900);
+        setTimeout(function(){ finishBlueEvent(true, 'shield', isWiz ? '+2 Blue Bricks + shield pip (Formwright!)' : '+1 Blue Brick + shield pip'); }, 900);
       } else {
         var status = document.getElementById('sentry-status');
         if (status) status.textContent = tapsRemaining + ' more…';
@@ -3734,7 +4050,7 @@ function onCipherPick(picked, correct) {
   var status = document.getElementById('cipher-status');
   if (picked === correct) {
     if (status) { status.textContent = ''; }
-    setTimeout(function(){ finishBlueEvent(true, 'gold', isWizard ? '+2 Blue Bricks + 1 Gold (Wizard!)' : '+1 Blue Brick + 1 Gold'); }, 700);
+    setTimeout(function(){ finishBlueEvent(true, 'gold', isWizard ? '+2 Blue Bricks + 1 Gold (Formwright!)' : '+1 Blue Brick + 1 Gold'); }, 700);
   } else {
     if (status) { status.textContent = '✗ Wrong rune — the lock resets.'; status.style.color = 'var(--red)'; }
     setTimeout(function(){ finishBlueEvent(false, 'shield', '+1 Shield pip consolation.'); }, 700);
@@ -4416,8 +4732,8 @@ function renderOutOfBattleActions(me) {
   let html = '<div class="card"><div class="card-title">Free Actions (Out of Battle)</div>';
   // Self heal
   if((me.bricks.white||0)>0) html+=`<button class="btn success" onclick="selfHeal()">💊 Spend white brick — heal self (${SELF_HEAL_AMT[MY_CLASS]||2} HP)</button>`;
-  // Mender special
-  if(MY_CLASS==='mender') {
+  // Fixer special
+  if(MY_CLASS==='fixer') {
     html+=`<button class="btn success" onclick="showHealSelector(-1)">💊 Heal ally (1 white brick)</button>`;
     html+=`<button class="btn success" onclick="client.massRepair()">💊 Mass Repair (2 white — all players)</button>`;
     const down=Object.values(G.players).filter(p=>!p.alive||p.hp<=0);
@@ -4426,10 +4742,10 @@ function renderOutOfBattleActions(me) {
   // Armor
   // Shield button — cost varies by class, shows current cap
   (function() {
-    var hasIronHide2 = MY_CLASS==='warrior' && me.skills && me.skills.iron_hide;
-    var sCost = (MY_CLASS==='warrior'||MY_CLASS==='builder') ? 1 : 2;
+    var hasIronHide2 = MY_CLASS==='breaker' && me.skills && me.skills.iron_hide;
+    var sCost = (MY_CLASS==='breaker'||MY_CLASS==='blocksmith') ? 1 : 2;
     var sGain2 = hasIronHide2 ? 2 : 1;
-    var sMult = hasIronHide2 ? 1.5 : (MY_CLASS==='warrior' ? 0.75 : 0.5);
+    var sMult = hasIronHide2 ? 1.5 : (MY_CLASS==='breaker' ? 0.75 : 0.5);
     var sMax = Math.floor(me.hpMax * sMult);
     var hasEnough = (me.bricks.gray||0) >= sCost;
     var atMax = (me.armor||0) >= sMax;
@@ -4439,10 +4755,10 @@ function renderOutOfBattleActions(me) {
       + (atMax ? ' (FULL)' : '')
       + '</button>';
   })();
-  // Builder forge
-  if(MY_CLASS==='builder'&&me.skills?.forge) html+=`<button class="btn warn" onclick="showForge()">🔧 Forge (2 same → 1 any)</button>`;
-  // Builder blueprint
-  if(MY_CLASS==='builder'&&me.skills?.blueprint) html+=`<button class="btn warn" onclick="showBlueprint()">📋 Blueprint (1 gray → duplicate 1 brick)</button>`;
+  // Blocksmith forge
+  if(MY_CLASS==='blocksmith'&&me.skills?.forge) html+=`<button class="btn warn" onclick="showForge()">🔧 Forge (2 same → 1 any)</button>`;
+  // Blocksmith blueprint
+  if(MY_CLASS==='blocksmith'&&me.skills?.blueprint) html+=`<button class="btn warn" onclick="showBlueprint()">📋 Blueprint (1 gray → duplicate 1 brick)</button>`;
   // Enhanced movement (purple)
   if((me.bricks.purple||0)>0) html+=`<button class="btn" onclick="usePurpleEnhanced()" style="display:flex;align-items:center;gap:6px;justify-content:center;"><span style="width:12px;height:12px;border-radius:2px;background:#7B2FBE;display:inline-block;"></span>Enhanced Movement (1 purple)</button>`;
 
@@ -4543,8 +4859,8 @@ function renderGateActions(me) {
     if(gateKey && gates[gateKey]==='locked') {
       html += `<div class="card" style="border-color:var(--orange);">
         <div class="card-title">🚪 Gate Ahead — ${gateMap[gateKey]}</div>`;
-      if(MY_CLASS==='builder'&&gateKey!=='z2z3') {
-        html += `<button class="btn primary" onclick="client.deconstructGate('builder','${gateKey}')">🔧 Deconstruct Gate (2 gray bricks)</button>`;
+      if(MY_CLASS==='blocksmith'&&gateKey!=='z2z3') {
+        html += `<button class="btn primary" onclick="client.deconstructGate('blocksmith','${gateKey}')">🔧 Deconstruct Gate (2 gray bricks)</button>`;
         if(gateKey==='z4z5') html+=`<button class="btn warn" onclick="client.rebuildBridge()">🔧 Rebuild Bridge (4 gray bricks)</button>`;
       }
       if(gateKey==='z2z3') {
@@ -5189,6 +5505,670 @@ function handleDisarmChain(data) {
   } else {
     toast(`Disarm stopped (rolled ${data.roll} — even)`, 'normal');
   }
+}
+
+// ═══════════════════════════════════════════════════════
+// v4 CHEESE / POISON / PURPLE FATED CHOICE FUNCTIONS
+// ═══════════════════════════════════════════════════════
+
+function showCheeseActions() {
+  const G = client.state; if (!G) return;
+  const me = G.players[MY_CLASS]; if (!me) return;
+  const cheese = me.cheese || 0;
+  if (cheese < 1) { toast('No cheese yet — earn some from events', 'normal'); return; }
+  const myZone = (typeof SPACES !== 'undefined' && SPACES[me.space]) ? SPACES[me.space].zone : 0;
+  const nearbyAllies = Object.values(G.players||{}).filter(p =>
+    p.cls !== MY_CLASS && p.alive &&
+    (SPACES[p.space]||{}).zone === myZone
+  );
+  const bg = '#0f0f12', gold = '#F5D000', cheeseColor = '#FFD96A';
+  var allyBtns = nearbyAllies.length
+    ? nearbyAllies.map(p =>
+        `<button class="btn" style="width:100%;margin-bottom:6px;background:#1a1a1f;border:1px solid #333;color:#eee;" onclick="giftCheeseTo('${p.cls}');">🎁 Gift 1 🧀 to ${p.icon} ${p.name}</button>`
+      ).join('')
+    : '<div style="font-size:11px;color:#888;text-align:center;font-style:italic;margin:6px 0;">No allies in your zone to gift</div>';
+  const html =
+    '<div id="cheese-modal" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;" onclick="if(event.target.id===\'cheese-modal\')document.getElementById(\'cheese-modal\').remove()">'
+    + '<div style="background:'+bg+';border:2px solid '+cheeseColor+';border-radius:10px;padding:18px;max-width:320px;width:90%;">'
+    + '<div style="font-family:Cinzel,serif;font-size:14px;color:'+cheeseColor+';text-align:center;margin-bottom:10px;letter-spacing:.08em;">🧀 CHEESE ACTIONS</div>'
+    + '<div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:12px;">You have '+cheese+' cheese</div>'
+    + '<button class="btn success" style="width:100%;margin-bottom:10px;" onclick="consumeCheese1()">🧀 Eat 1 (+1 Max HP)</button>'
+    + '<div style="font-size:10px;color:#888;text-align:center;margin:8px 0 6px;letter-spacing:.08em;">── GIFT TO ALLY (SAME ZONE) ──</div>'
+    + allyBtns
+    + '<button class="btn" style="width:100%;margin-top:8px;background:#222;color:#888;" onclick="document.getElementById(\'cheese-modal\').remove()">Cancel</button>'
+    + '</div></div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function consumeCheese1() {
+  client.send({ type:'consumeCheese', cls: MY_CLASS, amount: 1 });
+  const m = document.getElementById('cheese-modal'); if (m) m.remove();
+  toast('Ate 1 cheese — +1 Max HP', 'success');
+}
+
+function giftCheeseTo(toCls) {
+  client.send({ type:'giftCheese', fromCls: MY_CLASS, toCls: toCls, amount: 1 });
+  const m = document.getElementById('cheese-modal'); if (m) m.remove();
+  toast('Gifted 1 cheese', 'success');
+}
+
+function cleansePoisonAction() {
+  const G = client.state; if (!G) return;
+  const me = G.players[MY_CLASS]; if (!me) return;
+  if ((me.bricks.white||0) < 1) { toast('Need 1 white brick', 'warn'); return; }
+  if ((me.queuedPoisonStacks||0) === 0) { toast('No queued poison to cleanse', 'normal'); return; }
+  client.send({ type:'cleansePoison', cls: MY_CLASS });
+  toast('Cleansed queued poison (−1 white)', 'success');
+}
+
+// ── PURPLE FATED CHOICE CARD ──
+function renderPurpleFatedChoice(ev, me) {
+  const isLingering = ev.lingering;
+  const lingerHeader = isLingering
+    ? '<div style="background:#2a1a3a;border:1px solid #7B2FBE88;border-radius:4px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:#c89ef0;text-align:center;letter-spacing:.06em;">LINGERING — attempt #' + (ev.lingeringAttempt||2) + '</div>'
+    : '';
+  const alreadyChose = !!ev.purpleResult;
+  if (alreadyChose) {
+    const R = ev.purpleResult;
+    let resultHtml = '';
+    if (R.outcome === 'blessed') {
+      resultHtml = '<div style="font-family:Cinzel,serif;font-size:20px;color:#E8C868;text-align:center;margin-bottom:10px;">✨ BLESSED ✨</div>'
+        + '<div style="font-size:13px;color:#ddd;text-align:center;margin-bottom:12px;">' + R.msg + '</div>';
+    } else if (R.outcome === 'cursed') {
+      resultHtml = '<div style="font-family:Cinzel,serif;font-size:20px;color:#d44;text-align:center;margin-bottom:10px;">🗡 CURSED</div>'
+        + '<div style="font-size:13px;color:#eaa;text-align:center;margin-bottom:12px;">' + R.msg + '</div>';
+      if (MY_CLASS === 'fixer' && R.fixerCanCleanse) {
+        const haveBlack = (me.bricks.black||0) >= 1;
+        const haveWhite = (me.bricks.white||0) >= 2;
+        if (haveBlack) {
+          resultHtml += '<button class="btn success" style="width:100%;margin-bottom:6px;" onclick="purpleCleanse()">🩹 Cleanse Curse (1 black — receive blessed reward)</button>';
+        } else if (haveWhite) {
+          resultHtml += '<button class="btn" style="width:100%;margin-bottom:6px;background:#1a3a2a;border:1px solid #4a8a6a;color:#8ac;" onclick="purpleCleanse()">🩹 Cleanse Curse (2 white — no blessing)</button>';
+        } else {
+          resultHtml += '<div style="font-size:11px;color:#888;text-align:center;font-style:italic;">(Need 1 black or 2 white to cleanse)</div>';
+        }
+      }
+    } else if (R.outcome === 'pass') {
+      resultHtml = '<div style="font-family:Cinzel,serif;font-size:18px;color:#aaa;text-align:center;margin-bottom:10px;">The chests remain.</div>'
+        + '<div style="font-size:13px;color:#ddd;text-align:center;margin-bottom:12px;">' + R.msg + '</div>';
+    } else if (R.outcome === 'cleansed_blessed' || R.outcome === 'cleansed_negated') {
+      resultHtml = '<div style="font-family:Cinzel,serif;font-size:20px;color:#8ac;text-align:center;margin-bottom:10px;">🩹 CLEANSED</div>'
+        + '<div style="font-size:13px;color:#ddd;text-align:center;margin-bottom:12px;">' + R.msg + '</div>';
+    }
+    return lingerHeader + resultHtml;
+  }
+  // Not yet chosen — show the chest decision UI
+  return lingerHeader
+    + '<div style="font-family:Cinzel,serif;font-size:18px;color:#c89ef0;text-align:center;margin-bottom:4px;">✨ FATED CHOICE ✨</div>'
+    + '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:14px;font-style:italic;">Two sealed chests. One blesses. One curses.</div>'
+    + '<div style="display:flex;gap:10px;margin-bottom:10px;">'
+    +   '<button class="btn" style="flex:1;padding:18px 10px;background:linear-gradient(135deg,#2a1a3a,#4a2a6a);border:2px solid #7B2FBE;color:#e4c4f4;font-family:Cinzel,serif;font-size:13px;" onclick="purpleChoose(\'left\')">📦 LEFT</button>'
+    +   '<button class="btn" style="flex:1;padding:18px 10px;background:linear-gradient(135deg,#2a1a3a,#4a2a6a);border:2px solid #7B2FBE;color:#e4c4f4;font-family:Cinzel,serif;font-size:13px;" onclick="purpleChoose(\'right\')">📦 RIGHT</button>'
+    + '</div>'
+    + '<button class="btn" style="width:100%;background:#1a1a1f;border:1px solid #444;color:#888;font-size:12px;" onclick="purpleChoose(\'pass\')">↩ Pass (+1 🧀, chests linger)</button>';
+}
+
+function purpleChoose(choice) {
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType: 'purpleChoose', data: { choice: choice } });
+}
+
+function purpleCleanse() {
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType: 'purpleCleanse' });
+}
+
+// ── v4 WHITE PILGRIM'S REST ──
+function renderWhitePilgrimsRest(ev, me, G) {
+  const isLingering = ev.lingering;
+  const lingerHeader = isLingering
+    ? '<div style="background:#1a2a2a;border:1px solid #8acccc88;border-radius:4px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:#9adada;text-align:center;letter-spacing:.06em;">LINGERING — attempt #' + (ev.lingeringAttempt||2) + '</div>'
+    : '';
+  const R = ev.whiteResult;
+  if (R) {
+    let label, color = '#E8F4F4';
+    if (R.outcome === 'heal_ally') { label = '🤝 HEALED ALLY'; color = '#9adada'; }
+    else if (R.outcome === 'self_heal') { label = '💊 SELF HEAL'; color = '#bde'; }
+    else if (R.outcome === 'self_maxhp') { label = '✨ MAX HP UP'; color = '#E8C868'; }
+    else if (R.outcome === 'self_rest') { label = '🛏 SELF REST'; color = '#8ca'; }
+    else if (R.outcome === 'revive') { label = '✨ REVIVED ALLY ✨'; color = '#E8C868'; }
+    return lingerHeader
+      + '<div style="font-family:Cinzel,serif;font-size:18px;color:'+color+';text-align:center;margin-bottom:10px;">'+label+'</div>'
+      + '<div style="font-size:13px;color:#ddd;text-align:center;margin-bottom:12px;">'+R.msg+'</div>';
+  }
+  const isFixer = (MY_CLASS === 'fixer');
+  const hasWhite = (me.bricks.white||0) >= 1;
+  const hasPurple = (me.bricks.purple||0) >= 1;
+  const myZone = SPACES[me.space] ? SPACES[me.space].zone : 0;
+  const livingAllies = Object.values(G.players||{}).filter(p =>
+    p.cls !== MY_CLASS && p.alive && p.hp > 0
+  );
+  const downedAllies = Object.values(G.players||{}).filter(p =>
+    p.cls !== MY_CLASS && (!p.alive || p.hp <= 0)
+  );
+  let buttons = '';
+  if (hasWhite && livingAllies.length > 0) {
+    buttons += '<div style="font-size:10px;color:#888;text-align:center;margin:6px 0 4px;letter-spacing:.08em;">── HEAL ALLY (1 white) ──</div>';
+    livingAllies.forEach(a => {
+      buttons += '<button class="btn success" style="width:100%;margin-bottom:5px;" onclick="whitePilgrimHealAlly(\'' + a.cls + '\')">🤝 Heal ' + a.icon + ' ' + a.name + ' (+' + (isFixer?4:3) + ' HP)</button>';
+    });
+  }
+  // Self heal or Max HP
+  buttons += '<button class="btn" style="width:100%;margin-bottom:5px;background:#1a2a3a;border:1px solid #4a6a8a;color:#bde;" onclick="whitePilgrimHealSelf()">💊 Rest (+1 HP or +1 Max HP if full, +1 white)</button>';
+  // Fixer revive
+  if (isFixer && hasWhite && hasPurple && downedAllies.length > 0) {
+    buttons += '<div style="font-size:10px;color:#F5D000;text-align:center;margin:6px 0 4px;letter-spacing:.08em;">── FIXER REVIVE (1 white + 1 purple) ──</div>';
+    downedAllies.forEach(a => {
+      buttons += '<button class="btn" style="width:100%;margin-bottom:5px;background:#3a2a1a;border:1px solid var(--gold);color:var(--gold);" onclick="whitePilgrimRevive(\'' + a.cls + '\')">✨ Revive ' + a.icon + ' ' + a.name + ' (50% HP)</button>';
+    });
+  }
+  if (!hasWhite) {
+    buttons += '<button class="btn" style="width:100%;margin-bottom:5px;background:#1a1a1f;border:1px solid #444;color:#aaa;" onclick="whitePilgrimSelfRest()">🛏 Self-Rest (roll 1d6, no brick cost)</button>';
+  }
+  return lingerHeader
+    + '<div style="font-family:Cinzel,serif;font-size:18px;color:#E8F4F4;text-align:center;margin-bottom:4px;">🕊 PILGRIM\'S REST</div>'
+    + '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:14px;font-style:italic;">A shrine. A blessing. Give or receive care.</div>'
+    + buttons;
+}
+
+function whitePilgrimHealAlly(targetCls) {
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType: 'whitePilgrimChoose', data: { choice: 'heal_ally', healTarget: targetCls } });
+}
+function whitePilgrimHealSelf() {
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType: 'whitePilgrimChoose', data: { choice: 'heal_self' } });
+}
+function whitePilgrimSelfRest() {
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType: 'whitePilgrimChoose', data: { choice: 'self_rest' } });
+}
+function whitePilgrimRevive(targetCls) {
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType: 'whitePilgrimChoose', data: { choice: 'revive', healTarget: targetCls } });
+}
+
+// ── v4 BLACK SHADOW BARGAIN ──
+const BLACK_OFFER_TEXT = {
+  blood_price:     { title:'⚱ BLOOD PRICE',     desc:'Pay permanent Max HP (2-5, rolled) for 2 black bricks.' },
+  brick_exchange:  { title:'🔀 BRICK EXCHANGE',  desc:'Trade 1 non-black brick for 1 black + 3 gold.' },
+  poisoned_favor:  { title:'☠ POISONED FAVOR',   desc:'Free: +1 black. Cost: poisoned next 3 rumble battles.' },
+  binding_pact:    { title:'⛓ BINDING PACT',     desc:'+2 black. All living allies lose 1 random non-black brick.' },
+};
+
+function renderBlackShadowBargain(ev, me, G) {
+  const isLingering = ev.lingering;
+  const lingerHeader = isLingering
+    ? '<div style="background:#1a1a1a;border:1px solid #88888888;border-radius:4px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:#aaa;text-align:center;letter-spacing:.06em;">LINGERING — attempt #' + (ev.lingeringAttempt||2) + '</div>'
+    : '';
+  const R = ev.blackResult;
+  if (R) {
+    const label = R.outcome === 'refused' ? '↩ REFUSED'
+      : R.outcome === 'blood_price' ? '⚱ BLOOD PRICE PAID'
+      : R.outcome === 'brick_exchange' ? '🔀 TRADE COMPLETE'
+      : R.outcome === 'poisoned_favor' ? '☠ POISONED FAVOR'
+      : R.outcome === 'binding_pact' ? '⛓ BINDING PACT' : 'BARGAIN';
+    const color = R.outcome === 'refused' ? '#aaa' : '#d44';
+    return lingerHeader
+      + '<div style="font-family:Cinzel,serif;font-size:18px;color:'+color+';text-align:center;margin-bottom:10px;">'+label+'</div>'
+      + '<div style="font-size:13px;color:#ddd;text-align:center;margin-bottom:12px;">'+R.msg+'</div>';
+  }
+  const offer = ev.blackOffer;
+  const isFormwright = (MY_CLASS === 'formwright');
+  let offerBlock;
+  if (isFormwright && offer) {
+    const info = BLACK_OFFER_TEXT[offer] || { title:'?', desc:'?' };
+    offerBlock = '<div style="background:#1a1a2a;border:1px solid #6a6a8a;border-radius:6px;padding:10px;margin-bottom:14px;">'
+      + '<div style="font-size:10px;color:#F5D000;letter-spacing:.08em;margin-bottom:4px;">🔮 SCHOLAR\'S EYE — '+info.title+'</div>'
+      + '<div style="font-size:12px;color:#ddd;">'+info.desc+'</div>'
+      + '</div>';
+  } else {
+    offerBlock = '<div style="background:#0a0a0a;border:1px dashed #444;border-radius:6px;padding:10px;margin-bottom:14px;text-align:center;font-style:italic;color:#888;font-size:12px;">A bargain awaits. The shadow waits.</div>';
+  }
+  let exchangePicker = '';
+  if (offer === 'brick_exchange' && isFormwright) {
+    // Show picker so Formwright can choose color. Others pick on accept.
+    const nonBlackOwned = Object.entries(me.bricks||{}).filter(([c,n]) => c !== 'black' && n > 0);
+    if (nonBlackOwned.length > 0) {
+      exchangePicker = '<div style="margin-bottom:10px;">'
+        + '<div style="font-size:10px;color:#aaa;margin-bottom:4px;">Choose brick to trade:</div>'
+        + '<select id="black-ex-color" style="width:100%;padding:6px;background:#1a1a1f;color:#eee;border:1px solid #444;border-radius:4px;">'
+        + nonBlackOwned.map(([c,n]) => '<option value="'+c+'">'+c+' (you have '+n+')</option>').join('')
+        + '</select></div>';
+    }
+  }
+  return lingerHeader
+    + '<div style="font-family:Cinzel,serif;font-size:18px;color:#c8c;text-align:center;margin-bottom:4px;">🗡 SHADOW BARGAIN</div>'
+    + '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:14px;font-style:italic;">A cloaked figure extends a pact.</div>'
+    + offerBlock
+    + exchangePicker
+    + '<button class="btn" style="width:100%;margin-bottom:6px;background:#2a1020;border:2px solid #8a2a6a;color:#fcc;font-family:Cinzel,serif;" onclick="blackBargainAccept()">✓ ACCEPT</button>'
+    + '<button class="btn" style="width:100%;background:#1a1a1f;border:1px solid #444;color:#888;font-size:12px;" onclick="blackBargainRefuse()">↩ Refuse (97% cheese, 3% black)</button>';
+}
+
+function blackBargainAccept() {
+  const ev = client.state && client.state.activeEvent;
+  const isFormwright = (MY_CLASS === 'formwright');
+  const offer = ev && ev.blackOffer;
+  const data = { choice: 'accept' };
+  if (offer === 'brick_exchange' && isFormwright) {
+    const sel = document.getElementById('black-ex-color');
+    if (sel) data.exchangeColor = sel.value;
+  } else if (offer === 'brick_exchange' && !isFormwright) {
+    // Non-Formwright: pop prompt to pick color
+    const me = client.state && client.state.players && client.state.players[MY_CLASS];
+    if (!me) return;
+    const nonBlackOwned = Object.entries(me.bricks||{}).filter(([c,n]) => c !== 'black' && n > 0);
+    if (nonBlackOwned.length === 0) { toast('No bricks to trade', 'warn'); return; }
+    const color = prompt('Trade which brick? ('+nonBlackOwned.map(e=>e[0]).join(', ')+')');
+    if (!color) return;
+    data.exchangeColor = color.toLowerCase().trim();
+  }
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType: 'blackBargainChoose', data });
+}
+function blackBargainRefuse() {
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType: 'blackBargainChoose', data: { choice: 'refuse' } });
+}
+
+// ══════════════════════════════════════════════════════════
+// v4 GREEN VINE PATH — 3-vine SVG trace mini-game
+// ══════════════════════════════════════════════════════════
+// Each vine is an SVG path. Player drags finger along it staying within
+// tolerance band. On stray → vine snaps red briefly, retry. Three vines,
+// 25s total budget.
+
+const GREEN_VINE_PATHS = [
+  // Vine 1: gentle S-curve
+  'M 20 40 Q 80 20 140 40 T 260 40',
+  // Vine 2: spiral-ish loop
+  'M 20 40 Q 60 0 100 40 Q 140 80 180 40 Q 220 0 260 40',
+  // Vine 3: zigzag
+  'M 20 40 L 70 10 L 120 70 L 170 10 L 220 70 L 260 40',
+];
+const GREEN_TOLERANCE = 14; // px
+
+let _greenState = null;
+
+function renderGreenVinePath(ev, me, G) {
+  const isLingering = ev.lingering;
+  const lingerHeader = isLingering
+    ? '<div style="background:#0a2a1a;border:1px solid #4a8a5a88;border-radius:4px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:#9ada9a;text-align:center;letter-spacing:.06em;">LINGERING — attempt #' + (ev.lingeringAttempt||2) + '</div>'
+    : '';
+  const R = ev.greenResult;
+  if (R) {
+    let label, color = '#9adb9a';
+    if (R.outcome === 'all_cut') { label = '🌿 ALL VINES CUT 🌿'; color = '#b6e89a'; }
+    else if (R.outcome === 'partial_2') { label = '✂ 2 CUT'; color = '#b6e89a'; }
+    else if (R.outcome === 'partial_1') { label = '✂ 1 CUT'; color = '#aaa'; }
+    else if (R.outcome === 'total_fail') { label = '☠ OVERWHELMED'; color = '#d44'; }
+    return lingerHeader
+      + '<div style="font-family:Cinzel,serif;font-size:18px;color:'+color+';text-align:center;margin-bottom:10px;">'+label+'</div>'
+      + '<div style="font-size:13px;color:#ddd;text-align:center;margin-bottom:12px;">'+R.msg+'</div>';
+  }
+  return lingerHeader
+    + '<div style="font-family:Cinzel,serif;font-size:18px;color:#9adb9a;text-align:center;margin-bottom:4px;">🌿 VINE PATH</div>'
+    + '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:10px;font-style:italic;">Trace each vine without straying. Thorns punish the imprecise.</div>'
+    + '<div style="font-size:11px;color:#8ac;text-align:center;margin-bottom:8px;">⏱ <span id="green-timer">25</span>s · cut <span id="green-cut">0</span>/3</div>'
+    + '<div id="green-vine-stage" style="background:#081a0a;border:1px solid #3a5a3a;border-radius:6px;padding:10px;"></div>'
+    + (MY_CLASS === 'wild_one' ? '<div style="font-size:10px;color:#F5D000;text-align:center;margin-top:6px;letter-spacing:.04em;">🐺 WILD ONE: TAP-AND-HOLD a vine to tame it (0.5 credit)</div>' : '')
+    + '<div style="display:flex;gap:6px;margin-top:10px;">'
+    +   '<button class="btn" style="flex:1;background:#1a3a1a;border:1px solid #5a8a5a;color:#9ada9a;font-size:12px;" onclick="greenVineGiveUp()">Give Up (submit current progress)</button>'
+    + '</div>';
+}
+
+function startGreenVinePath() {
+  const stage = document.getElementById('green-vine-stage');
+  if (!stage) return;
+  _greenState = { cut: 0, timeLeft: 25, done: [false, false, false], current: 0, dragging: false, strayUntil: 0, tamedHolds: 0 };
+  renderVineStage();
+  if (_greenState._interval) clearInterval(_greenState._interval);
+  _greenState._interval = setInterval(greenVineTick, 100);
+}
+
+function renderVineStage() {
+  const stage = document.getElementById('green-vine-stage');
+  if (!stage || !_greenState) return;
+  let svg = '<svg viewBox="0 0 280 260" style="width:100%;height:260px;display:block;touch-action:none;" id="green-svg">';
+  for (let i = 0; i < 3; i++) {
+    const yOff = i * 80;
+    const strayFlash = (_greenState.strayUntil > Date.now() && _greenState.current === i);
+    const stroke = _greenState.done[i] ? '#5a8a5a' : (strayFlash ? '#d44' : (_greenState.current === i ? '#9adb9a' : '#3a5a3a'));
+    const sw = _greenState.done[i] ? 3 : 8;
+    svg += '<g transform="translate(0,' + yOff + ')">';
+    svg += '<path d="' + GREEN_VINE_PATHS[i] + '" stroke="' + stroke + '" stroke-width="' + sw + '" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="' + (_greenState.done[i] ? 0.4 : 1) + '" data-vine="' + i + '"/>';
+    if (_greenState.done[i]) svg += '<text x="140" y="45" text-anchor="middle" fill="#b6e89a" font-size="14" font-family="Cinzel,serif">✓ cut</text>';
+    svg += '</g>';
+  }
+  svg += '</svg>';
+  stage.innerHTML = svg;
+  const svgEl = document.getElementById('green-svg');
+  if (!svgEl) return;
+  const onMove = function(e) {
+    if (!_greenState || _greenState.done[_greenState.current]) return;
+    const pt = eventToSvgPoint(svgEl, e);
+    if (!pt) return;
+    const vi = _greenState.current;
+    const yOff = vi * 80;
+    const adjustedY = pt.y - yOff;
+    const dist = pathDistance(GREEN_VINE_PATHS[vi], pt.x, adjustedY);
+    if (dist > GREEN_TOLERANCE) {
+      _greenState.strayUntil = Date.now() + 300;
+      _greenState.traceProgress = 0;
+      renderVineStage();
+      return;
+    }
+    _greenState.traceProgress = (_greenState.traceProgress || 0) + 1;
+    if (_greenState.traceProgress > 20 && pt.x > 240) {
+      _greenState.done[vi] = true;
+      _greenState.cut++;
+      _greenState.current = Math.min(2, vi + 1);
+      _greenState.traceProgress = 0;
+      const cutEl = document.getElementById('green-cut');
+      if (cutEl) cutEl.textContent = _greenState.cut;
+      renderVineStage();
+      if (_greenState.cut >= 3) greenVineFinish(3);
+    }
+  };
+  const onHold = function(e) {
+    if (MY_CLASS !== 'wild_one') return;
+    if (!_greenState) return;
+    const vi = _greenState.current;
+    if (_greenState.done[vi]) return;
+    _greenState._holdTimer = setTimeout(function() {
+      if (!_greenState || _greenState.done[vi]) return;
+      _greenState.done[vi] = true;
+      _greenState.cut += 1;
+      _greenState.tamedHolds += 1;
+      _greenState.current = Math.min(2, vi + 1);
+      const cutEl = document.getElementById('green-cut');
+      if (cutEl) cutEl.textContent = _greenState.cut;
+      renderVineStage();
+      if (_greenState.cut >= 3) greenVineFinish(3);
+    }, 1000);
+  };
+  const cancelHold = function() {
+    if (_greenState && _greenState._holdTimer) { clearTimeout(_greenState._holdTimer); _greenState._holdTimer = null; }
+  };
+  svgEl.addEventListener('pointerdown', function(e) { onMove(e); onHold(e); });
+  svgEl.addEventListener('pointermove', onMove);
+  svgEl.addEventListener('pointerup', cancelHold);
+  svgEl.addEventListener('pointercancel', cancelHold);
+  svgEl.addEventListener('pointerleave', cancelHold);
+}
+
+function eventToSvgPoint(svg, e) {
+  const rect = svg.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / rect.width) * 280;
+  const y = ((e.clientY - rect.top) / rect.height) * 260;
+  return { x, y };
+}
+
+function pathDistance(d, x, y) {
+  // Simple sample-based distance from path. Approximate.
+  const svgNS = 'http://www.w3.org/2000/svg';
+  let path = pathDistance._cache && pathDistance._cache[d];
+  if (!path) {
+    path = document.createElementNS(svgNS, 'path');
+    path.setAttribute('d', d);
+    if (!pathDistance._cache) pathDistance._cache = {};
+    pathDistance._cache[d] = path;
+  }
+  const len = path.getTotalLength();
+  let best = Infinity;
+  for (let t = 0; t <= len; t += 3) {
+    const p = path.getPointAtLength(t);
+    const dd = Math.hypot(p.x - x, p.y - y);
+    if (dd < best) best = dd;
+  }
+  return best;
+}
+
+function greenVineTick() {
+  if (!_greenState) return;
+  _greenState.timeLeft -= 0.1;
+  const t = document.getElementById('green-timer');
+  if (t) t.textContent = Math.max(0, Math.ceil(_greenState.timeLeft));
+  if (_greenState.timeLeft <= 0) greenVineFinish(_greenState.cut);
+}
+
+function greenVineGiveUp() {
+  if (!_greenState) return;
+  greenVineFinish(_greenState.cut);
+}
+
+function greenVineFinish(cutCount) {
+  if (!_greenState) return;
+  if (_greenState._interval) clearInterval(_greenState._interval);
+  _greenState = null;
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType:'greenVineResolve', data: { cutCount } });
+}
+
+// ══════════════════════════════════════════════════════════
+// v4 RED TRIAL OF THE HAND — DM adjudicates
+// ══════════════════════════════════════════════════════════
+
+function renderRedTrialOfHand(ev, me, G) {
+  const isLingering = ev.lingering;
+  const lingerHeader = isLingering
+    ? '<div style="background:#2a0a0a;border:1px solid #8a4a4a88;border-radius:4px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:#f4a;text-align:center;letter-spacing:.06em;">LINGERING — attempt #' + (ev.lingeringAttempt||2) + '</div>'
+    : '';
+  const R = ev.redResult;
+  if (R) {
+    let label, color = '#faa';
+    if (R.outcome === 'perfect') { label = '🏆 PERFECT 🏆'; color = '#E8C868'; }
+    else if (R.outcome === 'good') { label = '✓ GOOD'; color = '#9adb9a'; }
+    else if (R.outcome === 'failed') { label = '✗ FAILED'; color = '#d66'; }
+    return lingerHeader
+      + '<div style="font-family:Cinzel,serif;font-size:18px;color:'+color+';text-align:center;margin-bottom:10px;">'+label+'</div>'
+      + '<div style="font-size:13px;color:#ddd;text-align:center;margin-bottom:12px;">'+R.msg+'</div>';
+  }
+  const challenge = ev.redChallenge || { kind:'mystery', text:'The trial stones await.' };
+  const kindColor = { strength:'#d44', dexterity:'#F5D000', mental:'#6af', social:'#c8c' }[challenge.kind] || '#faa';
+  const isBreaker = MY_CLASS === 'breaker';
+  const canAutoWin = isBreaker && challenge.kind === 'strength';
+  return lingerHeader
+    + '<div style="font-family:Cinzel,serif;font-size:18px;color:#faa;text-align:center;margin-bottom:4px;">⚔ TRIAL OF THE HAND</div>'
+    + '<div style="font-size:11px;color:'+kindColor+';text-align:center;margin-bottom:10px;letter-spacing:.12em;text-transform:uppercase;">'+challenge.kind+'</div>'
+    + '<div style="font-size:14px;color:#fff;text-align:center;margin-bottom:14px;padding:14px;background:#1a0a0a;border:2px solid #8a4a4a;border-radius:8px;font-family:Cinzel,serif;line-height:1.5;">'+challenge.text+'</div>'
+    + (canAutoWin
+      ? '<div style="font-size:11px;color:#E8C868;text-align:center;margin-bottom:8px;padding:6px;background:#2a2000;border:1px solid #F5D00088;border-radius:4px;letter-spacing:.06em;">🏋 BREAKER AUTO-WIN AVAILABLE</div>'
+      : '')
+    + '<div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:10px;font-style:italic;">The DM adjudicates. Awaiting their call.</div>'
+    + '<div style="font-size:10px;color:#888;text-align:center;">(DM buttons appear on DM screen; this card updates when resolved.)</div>';
+}
+
+// ══════════════════════════════════════════════════════════
+// v4 GRAY RUBBLE STACKING — canvas mini-game
+// ══════════════════════════════════════════════════════════
+// 5-wide × 6-tall grid. 3 blocks drop. Tap column to place. Match outline.
+
+let _grayState = null;
+
+function renderGrayRubbleStacking(ev, me, G) {
+  const isLingering = ev.lingering;
+  const lingerHeader = isLingering
+    ? '<div style="background:#1a1a1a;border:1px solid #88888888;border-radius:4px;padding:6px 10px;margin-bottom:10px;font-size:11px;color:#aaa;text-align:center;letter-spacing:.06em;">LINGERING — attempt #' + (ev.lingeringAttempt||2) + '</div>'
+    : '';
+  const R = ev.grayRubbleResult;
+  if (R) {
+    let label, color;
+    if (R.tier === 'perfect') { label = '🏛 PERFECT STACK 🏛'; color = '#E8C868'; }
+    else if (R.tier === 'good') { label = '🧱 GOOD'; color = '#9adada'; }
+    else if (R.tier === 'miss') { label = '⚠ MISS'; color = '#aaa'; }
+    else { label = '💥 FUMBLE'; color = '#d44'; }
+    return lingerHeader
+      + '<div style="font-family:Cinzel,serif;font-size:18px;color:'+color+';text-align:center;margin-bottom:10px;">'+label+'</div>'
+      + '<div style="font-size:12px;color:#888;text-align:center;margin-bottom:4px;">Match: '+R.matchPct+'%'+(R.overhang?' · overhang: '+R.overhang:'')+'</div>'
+      + '<div style="font-size:13px;color:#ddd;text-align:center;margin-bottom:12px;">'+R.msg+'</div>';
+  }
+  const outline = ev.grayOutline || ['XXXXX','.....','.....','.....','.....','.....'];
+  const blocks = ev.grayBlocks || [];
+  const isBlocksmith = MY_CLASS === 'blocksmith';
+  return lingerHeader
+    + '<div style="font-family:Cinzel,serif;font-size:18px;color:#ccc;text-align:center;margin-bottom:4px;">🧱 RUBBLE STACKING</div>'
+    + '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:10px;font-style:italic;">Match the gap outline with 3 falling stones.</div>'
+    + '<div style="font-size:11px;color:#8ac;text-align:center;margin-bottom:8px;">⏱ <span id="gray-timer">25</span>s · block <span id="gray-block-idx">1</span>/3</div>'
+    + '<canvas id="gray-canvas" style="background:#0a0a0a;border:1px solid #333;border-radius:6px;display:block;width:100%;height:300px;image-rendering:pixelated;" width="200" height="240"></canvas>'
+    + (isBlocksmith
+      ? '<div style="font-size:10px;color:#F5D000;text-align:center;margin-top:6px;letter-spacing:.04em;">🔧 BLOCKSMITH: next block shown + perfect bonus</div>'
+      : '')
+    + '<div style="font-size:10px;color:#888;text-align:center;margin-top:6px;">Tap a column to place the falling block.</div>';
+}
+
+function startGrayRubble() {
+  const ev = client.state && client.state.activeEvent;
+  if (!ev || !ev.grayOutline || !ev.grayBlocks) return;
+  const canvas = document.getElementById('gray-canvas');
+  if (!canvas) return;
+  _grayState = {
+    W: 5, H: 6,
+    cellSize: 40,
+    outline: ev.grayOutline,
+    blocks: ev.grayBlocks,
+    blockIdx: 0,
+    grid: Array(6).fill(null).map(() => Array(5).fill(0)),
+    fallingBlock: ev.grayBlocks[0],
+    fallingCol: 2,
+    fallingRow: 5,
+    fallTimer: 0,
+    timeLeft: 25,
+    finished: false,
+  };
+  const onTap = function(e) {
+    if (!_grayState || _grayState.finished) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX)) - rect.left) / rect.width;
+    const col = Math.max(0, Math.min(4, Math.floor(x * 5)));
+    placeGrayBlock(col);
+  };
+  canvas.addEventListener('click', onTap);
+  canvas.addEventListener('touchend', function(e) { e.preventDefault(); onTap(e.changedTouches[0]); });
+  if (_grayState._interval) clearInterval(_grayState._interval);
+  _grayState._interval = setInterval(grayRubbleTick, 100);
+  drawGrayCanvas();
+}
+
+function drawGrayCanvas() {
+  const canvas = document.getElementById('gray-canvas');
+  if (!canvas || !_grayState) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const cs = _grayState.cellSize;
+  // Draw grid background
+  for (let r = 0; r < 6; r++) {
+    for (let c = 0; c < 5; c++) {
+      ctx.strokeStyle = '#2a2a2a';
+      ctx.strokeRect(c * cs, (5 - r) * cs, cs, cs);
+    }
+  }
+  // Draw outline (target)
+  ctx.fillStyle = 'rgba(255,215,0,0.15)';
+  ctx.strokeStyle = '#F5D00066';
+  for (let r = 0; r < 6; r++) {
+    const row = _grayState.outline[r] || '.....';
+    for (let c = 0; c < 5; c++) {
+      if (row[c] === 'X') {
+        ctx.fillRect(c * cs, (5 - r) * cs, cs, cs);
+        ctx.strokeRect(c * cs + 0.5, (5 - r) * cs + 0.5, cs - 1, cs - 1);
+      }
+    }
+  }
+  // Draw placed blocks
+  ctx.fillStyle = '#888';
+  ctx.strokeStyle = '#ccc';
+  for (let r = 0; r < 6; r++) {
+    for (let c = 0; c < 5; c++) {
+      if (_grayState.grid[r][c]) {
+        ctx.fillRect(c * cs + 2, (5 - r) * cs + 2, cs - 4, cs - 4);
+        ctx.strokeRect(c * cs + 2, (5 - r) * cs + 2, cs - 4, cs - 4);
+      }
+    }
+  }
+  // Draw falling block preview at top
+  if (_grayState.fallingBlock && _grayState.blockIdx < 3) {
+    ctx.fillStyle = '#aaf';
+    _grayState.fallingBlock.forEach(offset => {
+      const c = _grayState.fallingCol + offset.dx;
+      const r = _grayState.fallingRow + offset.dy;
+      if (c >= 0 && c < 5 && r >= 0 && r < 6) {
+        ctx.fillRect(c * cs + 2, (5 - r) * cs + 2, cs - 4, cs - 4);
+      }
+    });
+  }
+}
+
+function placeGrayBlock(col) {
+  if (!_grayState || _grayState.finished) return;
+  // Find landing row for this column + block shape
+  const block = _grayState.fallingBlock;
+  let landingRow = 0;
+  // Try rows top-down, find first where all cells are free AND supported
+  for (let r = 0; r < 6; r++) {
+    let fits = true;
+    for (const off of block) {
+      const c = col + off.dx;
+      const rr = r + off.dy;
+      if (c < 0 || c >= 5 || rr < 0 || rr >= 6) { fits = false; break; }
+      if (_grayState.grid[rr][c]) { fits = false; break; }
+    }
+    if (fits) {
+      // Check support: each block cell must rest on grid bottom or another placed cell
+      let supported = false;
+      for (const off of block) {
+        const c = col + off.dx;
+        const rr = r + off.dy;
+        if (rr === 0) { supported = true; break; }
+        // cell below this part must be filled
+        const belowR = rr - 1;
+        const isSelfPart = block.some(o2 => (col + o2.dx) === c && (r + o2.dy) === belowR);
+        if (!isSelfPart && _grayState.grid[belowR][c]) { supported = true; break; }
+      }
+      if (supported) { landingRow = r; break; }
+    }
+  }
+  // Place block
+  block.forEach(off => {
+    const c = col + off.dx;
+    const rr = landingRow + off.dy;
+    if (c >= 0 && c < 5 && rr >= 0 && rr < 6) _grayState.grid[rr][c] = 1;
+  });
+  _grayState.blockIdx++;
+  if (_grayState.blockIdx < 3) {
+    _grayState.fallingBlock = _grayState.blocks[_grayState.blockIdx];
+    _grayState.fallingCol = 2;
+    const blockIdxEl = document.getElementById('gray-block-idx');
+    if (blockIdxEl) blockIdxEl.textContent = _grayState.blockIdx + 1;
+    drawGrayCanvas();
+  } else {
+    grayRubbleFinish();
+  }
+}
+
+function grayRubbleTick() {
+  if (!_grayState) return;
+  _grayState.timeLeft -= 0.1;
+  const t = document.getElementById('gray-timer');
+  if (t) t.textContent = Math.max(0, Math.ceil(_grayState.timeLeft));
+  if (_grayState.timeLeft <= 0) grayRubbleFinish();
+}
+
+function grayRubbleFinish() {
+  if (!_grayState || _grayState.finished) return;
+  _grayState.finished = true;
+  if (_grayState._interval) clearInterval(_grayState._interval);
+  // Compute match percentage
+  let outlineCells = 0, matchedCells = 0, overhangCells = 0;
+  for (let r = 0; r < 6; r++) {
+    const row = _grayState.outline[r] || '.....';
+    for (let c = 0; c < 5; c++) {
+      const wantFilled = row[c] === 'X';
+      const isFilled = !!_grayState.grid[r][c];
+      if (wantFilled) {
+        outlineCells++;
+        if (isFilled) matchedCells++;
+      } else {
+        if (isFilled) overhangCells++;
+      }
+    }
+  }
+  const matchPct = outlineCells > 0 ? Math.round(matchedCells / outlineCells * 100) : 0;
+  client.send({ type:'resolveEvent', cls: MY_CLASS, eventType:'grayRubbleResolve', data: { matchPct, overhang: overhangCells } });
+  _grayState = null;
 }
 
 // ── TOAST ──
