@@ -7946,14 +7946,38 @@ var _CPR_BLIPS = [
   'Pump it, friend',
 ];
 
-function _pickCPRBlip(usedSet) {
+// S013.6: LAST CHANCE (retry) blip pool — dire, desperate tone.
+// Dad jokes removed. These play during the second/final revive attempt
+// where failure = actual defeat. Whisper-of-doom feel.
+var _CPR_BLIPS_DIRE = [
+  'Fading...',
+  'Almost gone',
+  'Slipping',
+  'Please',
+  'Not here',
+  'Too far',
+  'Hold on',
+  'One more',
+  "Don't go",
+  'Come on',
+  'Barely',
+  'Still here?',
+  'Harder',
+  'Stay',
+  'Now',
+];
+
+function _pickCPRBlip(usedSet, isRetry) {
   // No-repeat within a revive session. When every blip has been used, clear
   // the set so we can cycle through again (rare — 15 blips vs 4 per session).
-  var pool = _CPR_BLIPS.filter(function(b) { return !usedSet[b]; });
+  // On retry (LAST CHANCE), pull from the DIRE pool — dad jokes replaced
+  // with desperate, whispered urgency.
+  var sourcePool = isRetry ? _CPR_BLIPS_DIRE : _CPR_BLIPS;
+  var pool = sourcePool.filter(function(b) { return !usedSet[b]; });
   if (!pool.length) {
     // Exhausted — clear and restart
     Object.keys(usedSet).forEach(function(k) { delete usedSet[k]; });
-    pool = _CPR_BLIPS.slice();
+    pool = sourcePool.slice();
   }
   return pool[Math.floor(Math.random() * pool.length)];
 }
@@ -7963,7 +7987,7 @@ function _fireCPRBlip() {
   var stack = document.getElementById('revive-heart-stack');
   if (!stack) return;
   if (!_reviveState.usedBlips) _reviveState.usedBlips = {};
-  var blip = _pickCPRBlip(_reviveState.usedBlips);
+  var blip = _pickCPRBlip(_reviveState.usedBlips, _reviveState.isRetry);
   _reviveState.usedBlips[blip] = true;
   _reviveState.lastBlip = blip;
 
@@ -8171,17 +8195,21 @@ function _showReviveOverlay() {
   // stroke-dashoffset from 0 upward — the outline retreats from its own
   // starting point.
   //
-  // Heart SVG path. Starts at top-center dip (between lobes), traces
-  // right lobe over top, down right side to bottom cusp, up left side,
-  // left lobe over top back to dip. Drain erases from start point first
-  // so outline visibly recedes from the top as time runs out.
-  // Path geometry centered at origin (0,0): x:[-9,9], y:[-8,8]. When the
-  // inner heart scales from origin, it grows from actual geometric center.
-  var heartPath = 'M 0 -4 '
-               + 'C 1 -8, 4 -8, 5 -6 '     // right lobe: dip over top to right peak
-               + 'C 9 -2, 6 5, 0 8 '       // right side: peak down to bottom cusp
-               + 'C -6 5, -9 -2, -5 -6 '   // left side: cusp up to left peak
-               + 'C -4 -8, -1 -8, 0 -4 Z'; // left lobe: peak back to dip
+  // Heart SVG path — canonical shape matching a classic heart silhouette.
+  // Path geometry: width 22 (x:[-11,11]), height 18 (y:[-9,9]), centered
+  // on origin. Lobes flat-rounded at top with deep dip. Sharp bottom cusp.
+  // viewBox is -13 -13 26 26 for small padding around the heart.
+  //
+  // Path traces: cusp → left side up → left lobe over top to dip → right
+  // lobe over top → right side down to cusp. Drain starts at the cusp
+  // so outline erases from the bottom first.
+  var heartPath = 'M 0 9 '
+               + 'C 0 9, -11 3, -11 -2 '    // left side: cusp up to shoulder
+               + 'C -11 -7, -8 -9, -5 -9 '  // left lobe outer curve to peak
+               + 'C -2 -9, 0 -7, 0 -5 '     // left lobe to top dip
+               + 'C 0 -7, 2 -9, 5 -9 '      // right lobe from dip to peak
+               + 'C 8 -9, 11 -7, 11 -2 '    // right lobe outer curve
+               + 'C 11 3, 0 9, 0 9 Z';      // right side back down to cusp
 
   var heartStackHtml =
         '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);overflow:visible;'
@@ -8189,7 +8217,7 @@ function _showReviveOverlay() {
       // Outer heart — SVG outline, bone white at whisper-thin stroke.
       // Acts as a timer: starts at full perimeter, drains to zero as time
       // runs out. stroke-width 0.3 (in 22-unit viewBox ≈ 3.5px actual).
-      +   '<svg id="revive-heart-outer-svg" viewBox="-11 -11 22 22" '
+      +   '<svg id="revive-heart-outer-svg" viewBox="-13 -13 26 26" '
       +     'style="position:absolute;top:50%;left:50%;'
       +     'transform:translate(-50%,-50%);'
       +     'width:min(260px,60vmin);height:min(260px,60vmin);'
@@ -8198,7 +8226,7 @@ function _showReviveOverlay() {
       +     '<path id="revive-heart-outer-path" d="' + heartPath + '" '
       +       'fill="none" '
       +       'stroke="#e8dcc0" '
-      +       'stroke-width="0.3" '
+      +       'stroke-width="0.1" '
       +       'stroke-linejoin="round" '
       +       'style="filter:drop-shadow(0 0 1.2px rgba(0,0,0,0.95));'
       +       'transition:stroke-dashoffset 0.1s linear;" />'
@@ -8208,7 +8236,7 @@ function _showReviveOverlay() {
       // SVG transform attribute (not CSS) because it resolves in viewBox
       // coordinates reliably across browsers — CSS transform-origin on
       // SVG <g> behaves inconsistently.
-      +   '<svg id="revive-heart-inner-svg" viewBox="-11 -11 22 22" '
+      +   '<svg id="revive-heart-inner-svg" viewBox="-13 -13 26 26" '
       +     'style="position:absolute;top:50%;left:50%;'
       +     'transform:translate(-50%,-50%);'
       +     'width:min(260px,60vmin);height:min(260px,60vmin);'
