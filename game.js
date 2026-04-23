@@ -497,16 +497,16 @@ const ENTITY_TYPES = [
 // rumble registry. Must stay in sync with rumble.js ENTITY_REGISTRY.
 // Display-only "name" string for log lines; actual rendering uses rumble.js.
 const ENTITY_META = {
-  goblin:         { hpMax: 12,  name: 'Goblin' },
-  skeleton:       { hpMax: 18,  name: 'Skeleton' },
-  slinger:        { hpMax: 10,  name: 'Slinger' },
-  shadow_wolf:    { hpMax: 14,  name: 'Shadow Wolf' },
-  creeping_vines: { hpMax: 25,  name: 'Creeping Vines' },
-  stone_troll:    { hpMax: 40,  name: 'Stone Troll' },
-  cursed_knight:  { hpMax: 30,  name: 'Cursed Knight' },
-  void_wraith:    { hpMax: 20,  name: 'Void Wraith' },
-  stone_colossus: { hpMax: 80,  name: 'Stone Colossus' },
-  blight_worm:    { hpMax: 120, name: 'Blight Worm' },
+  goblin:         { hpMax: 12,  name: 'Goblin',         icon: '👺', family: 'physical' },
+  skeleton:       { hpMax: 18,  name: 'Skeleton',       icon: '💀', family: 'physical' },
+  slinger:        { hpMax: 10,  name: 'Slinger',        icon: '🏹', family: 'physical' },
+  shadow_wolf:    { hpMax: 14,  name: 'Shadow Wolf',    icon: '🐺', family: 'ethereal' },
+  creeping_vines: { hpMax: 25,  name: 'Creeping Vines', icon: '🌿', family: 'malady' },
+  stone_troll:    { hpMax: 40,  name: 'Stone Troll',    icon: '🪨', family: 'physical' },
+  cursed_knight:  { hpMax: 30,  name: 'Cursed Knight',  icon: '⚔️', family: 'physical' },
+  void_wraith:    { hpMax: 20,  name: 'Void Wraith',    icon: '👻', family: 'ethereal' },
+  stone_colossus: { hpMax: 80,  name: 'Stone Colossus', icon: '🗿', family: 'physical' },
+  blight_worm:    { hpMax: 120, name: 'Blight Worm',    icon: '🪱', family: 'malady' },
 };
 
 // Flavor text pool for battle initiation. One line is picked at random per

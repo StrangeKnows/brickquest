@@ -18,6 +18,21 @@ const BQ_VERSION = (() => {
 // Shared game constants
 const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR } = require('./game.js');
 
+// Family palette per doc §2.1 Per-Color Role Matrix — 3 brick colors per
+// expression family. Called at rumble-event initiate so each encounter rolls
+// fresh; same goblin can show red one time, gray the next, orange after that.
+const _ENCOUNTER_PALETTE = {
+  physical: ['red',    'orange', 'gray'],
+  ethereal: ['blue',   'yellow', 'white'],
+  malady:   ['green',  'purple', 'black'],
+};
+function rollEncounterColor(entityType) {
+  const meta = ENTITY_META[entityType];
+  const fam = (meta && meta.family) || 'physical';
+  const palette = _ENCOUNTER_PALETTE[fam] || _ENCOUNTER_PALETTE.physical;
+  return palette[Math.floor(Math.random() * palette.length)];
+}
+
 const PORT = 8080;
 const MIME = {
   '.html':'text/html','.js':'application/javascript',
@@ -1199,7 +1214,7 @@ wss.on('connection', (ws, req) => {
         G.pendingRumbleBattle = {
           cls,
           entityType,
-          enemy: { type: entityType, name: entityTpl.name, hp: entityTpl.hpMax, hpMax: entityTpl.hpMax },
+          enemy: { type: entityType, name: entityTpl.name, hp: entityTpl.hpMax, hpMax: entityTpl.hpMax, encounterColor: rollEncounterColor(entityType) },
           flavor,
           createdAt: Date.now(),
         };
@@ -1441,7 +1456,7 @@ wss.on('connection', (ws, req) => {
         G.pendingRumbleBattle = {
           cls,
           entityType,
-          enemy: { type: entityType, name: entityTpl.name, hp: entityTpl.hpMax, hpMax: entityTpl.hpMax },
+          enemy: { type: entityType, name: entityTpl.name, hp: entityTpl.hpMax, hpMax: entityTpl.hpMax, encounterColor: rollEncounterColor(entityType) },
           flavor,
           createdAt: Date.now(),
         };
@@ -2279,7 +2294,7 @@ wss.on('connection', (ws, req) => {
         G.pendingRumbleBattle = {
           cls: mcls,
           entityType: mEntity,
-          enemy: { type: mEntity, name: mTpl.name, hp: mTpl.hpMax, hpMax: mTpl.hpMax },
+          enemy: { type: mEntity, name: mTpl.name, hp: mTpl.hpMax, hpMax: mTpl.hpMax, encounterColor: rollEncounterColor(mEntity) },
           flavor: mFlavor,
           createdAt: Date.now(),
         };
@@ -2387,7 +2402,7 @@ wss.on('connection', (ws, req) => {
         G.pendingRumbleBattle = {
           cls: evCls,
           entityType,
-          enemy: { name: entityTpl.name, hp: entityTpl.hp, hpMax: entityTpl.hp, damageType: entityTpl.dmgType || 'phys' },
+          enemy: { type: entityType, name: entityTpl.name, hp: entityTpl.hp, hpMax: entityTpl.hp, damageType: entityTpl.dmgType || 'phys', encounterColor: rollEncounterColor(entityType) },
           flavor,
         };
       }

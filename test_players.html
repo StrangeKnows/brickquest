@@ -2291,12 +2291,30 @@ function renderRumbleCard(me) {
   // Pending: event card with flavor text + Enter Rumble button
   if (G.pendingRumbleBattle && G.pendingRumbleBattle.cls === MY_CLASS && !G.rumbleBattle) {
     var pb = G.pendingRumbleBattle;
-    return '<div id="rumble-event-card" style="margin:12px 0;padding:16px;border-radius:12px;background:linear-gradient(180deg,#2a0a0a 0%,#1a0505 100%);border:2px solid var(--red);box-shadow:0 4px 16px rgba(226,75,74,.25);">'
-      + '<div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.12em;color:var(--red);margin-bottom:8px;text-align:center;">⚔ ENCOUNTER</div>'
-      + '<div style="font-size:32px;text-align:center;margin-bottom:8px;">👺</div>'
+    var entityType = (pb.enemy && pb.enemy.type) || 'goblin';
+    var meta = (typeof ENTITY_META !== 'undefined' && ENTITY_META[entityType]) || { icon: '👺', family: 'physical' };
+    var entityIcon = meta.icon || '👺';
+    var family = meta.family || 'physical';
+    var FAMILY_PALETTE = {
+      physical: ['red',    'orange', 'gray'],
+      ethereal: ['blue',   'yellow', 'white'],
+      malady:   ['green',  'purple', 'black'],
+    };
+    var palette = FAMILY_PALETTE[family] || FAMILY_PALETTE.physical;
+    var pickColor = (pb.enemy && pb.enemy.encounterColor) || null;
+    if (!pickColor || palette.indexOf(pickColor) < 0) {
+      var h = 0; for (var ci = 0; ci < entityType.length; ci++) h = (h * 31 + entityType.charCodeAt(ci)) | 0;
+      pickColor = palette[Math.abs(h) % palette.length];
+    }
+    var accent = (typeof BRICK_COLORS !== 'undefined' && BRICK_COLORS[pickColor]) || '#E24B4A';
+    var bgStart = accent + '22';
+    var bgEnd   = '#1a0505';
+    return '<div id="rumble-event-card" style="margin:12px 0;padding:16px;border-radius:12px;background:linear-gradient(180deg,' + bgStart + ' 0%,' + bgEnd + ' 100%);border:2px solid ' + accent + ';box-shadow:0 4px 16px ' + accent + '44;">'
+      + '<div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.12em;color:' + accent + ';margin-bottom:8px;text-align:center;">⚔ ENCOUNTER</div>'
+      + '<div style="font-size:40px;text-align:center;margin-bottom:8px;line-height:1;">' + entityIcon + '</div>'
       + '<div style="font-size:15px;color:var(--text);font-style:italic;text-align:center;line-height:1.5;margin-bottom:14px;">"' + escapeHtmlMin(pb.flavor) + '"</div>'
       + '<div style="font-size:12px;color:var(--text-dim);text-align:center;margin-bottom:12px;">A <strong>' + escapeHtmlMin(pb.enemy.name) + '</strong> blocks your path. Enter the rumble to fight.</div>'
-      + '<button class="btn" style="width:100%;padding:14px;font-size:15px;font-family:Cinzel,serif;letter-spacing:.1em;background:linear-gradient(180deg,var(--red) 0%,#8a2020 100%);border-color:var(--red);color:#fff;font-weight:700;" onclick="enterRumbleClick()">⚔ ENTER RUMBLE</button>'
+      + '<button class="btn" style="width:100%;padding:14px;font-size:15px;font-family:Cinzel,serif;letter-spacing:.1em;background:linear-gradient(180deg,' + accent + ' 0%,' + accent + 'bb 100%);border-color:' + accent + ';color:#fff;font-weight:700;" onclick="enterRumbleClick()">⚔ ENTER RUMBLE</button>'
       + '<div style="font-size:10px;color:var(--text-faint);text-align:center;margin-top:8px;">Fullscreen landscape recommended</div>'
       + '</div>';
   }
