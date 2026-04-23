@@ -494,6 +494,7 @@ function makePlayer(cls) {
     brickMax: brickMax,            // max charges
     brickRecharge: brickRecharge,  // seconds until next recharge
     overloadCount: 0,              // total overloads this battle (any color)
+    reviveCount: 0,                // S013.3: heart-revives this run (drives loot penalty)
     armor: 0,                      // shield pips
     gold: 0,                       // coins picked up in rumble; surfaces to server
     cheese: 0,                     // cheese picked up in rumble; surfaces to server
@@ -3615,8 +3616,16 @@ var LOOT_VISUAL_R = 8;        // rendered size — kept small so drops don't dom
 function rollLoot(entity) {
   if (!entity.loot) return [];
   var drops = [];
+  // S013.3: revive loot penalty. Each heart-revive this run cuts drop chance
+  // by 10% (multiplicative), floored at 10% of normal. reviveCount carries
+  // across rumbles on player state; cheese-revives reset it to 0.
+  var reviveMult = 1.0;
+  if (player && player.reviveCount > 0) {
+    reviveMult = Math.max(0.1, 1.0 - 0.1 * player.reviveCount);
+  }
   entity.loot.forEach(function(entry) {
-    if (Math.random() >= entry.chance) return;
+    var effectiveChance = entry.chance * reviveMult;
+    if (Math.random() >= effectiveChance) return;
     var kind = entry.kind || 'brick';
     if (kind === 'brick') {
       var n = entry.min + Math.floor(Math.random() * (entry.max - entry.min + 1));
@@ -3703,6 +3712,10 @@ function updateDroppedBricks(dt) {
           if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
           _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
           showFloatingText(player.x, player.y - 40, '+1 🧀 CHEESE', '#FFD96A', player);
+          // S013.3: occasional flavor line for cheese pickups — every 3rd to avoid spam
+          if (player.cheese % 3 === 1) {
+            showFloatingText(player.x, player.y - 70, _pickCheeseEventFlavor(), '#FFD96A', player);
+          }
         } else if (p.kind === 'gold') {
           // Coins accumulate on player.gold; battleTick surfaces to server.
           var amt = p.amount || 1;
@@ -7669,6 +7682,8 @@ function _internalStart(config) {
   clearStatuses();
   player.overloadCount = 0;
   _currentCrit = false;
+  _wasRevivedThisFight = false;
+  _lastReviveWasCheese = false;
   critFlash = null;
   critBanners = [];
   critShockwaves = [];
@@ -7931,12 +7946,26 @@ function _reviveTick() {
   var now = performance.now();
   var pct = Math.min(1, (now - _reviveState.startedAt) / _reviveState.windowMs);
   var tapPct = Math.min(1, _reviveState.taps / _reviveState.tapsNeeded);
-  // Update UI progress bars
-  var timeEl = document.getElementById('revive-time-bar');
-  if (timeEl) timeEl.style.width = ((1 - pct) * 100).toFixed(1) + '%';
-  var progEl = document.getElementById('revive-prog-bar');
-  if (progEl) progEl.style.width = (tapPct * 100).toFixed(1) + '%';
+
+  // S013.3: Inner heart scale grows 0.2 → 1.0 as taps accumulate. Outer
+  // boundary shrinks 1.0 → 0.2 as time runs out. If the player out-taps
+  // the timer, inner matches outer and revive triggers.
+  var innerEl = document.getElementById('revive-heart-inner');
+  var outerEl = document.getElementById('revive-heart-outer');
   var tapCountEl = document.getElementById('revive-tap-count');
+  if (innerEl) {
+    // Inner heart: scale 0.2 → 1.0 based on tap progress
+    var innerScale = 0.2 + 0.8 * tapPct;
+    innerEl.style.transform = 'translate(-50%,-50%) scale(' + innerScale.toFixed(3) + ')';
+    // Pulse speed accelerates with tap progress (life returning)
+    var pulseSpeed = Math.max(0.3, 1.0 - 0.7 * tapPct); // seconds per cycle
+    innerEl.style.animationDuration = pulseSpeed.toFixed(2) + 's';
+  }
+  if (outerEl) {
+    // Outer boundary: scale 1.0 → 0.2 based on time elapsed (shrinks inward)
+    var outerScale = 1.0 - 0.8 * pct;
+    outerEl.style.transform = 'translate(-50%,-50%) scale(' + outerScale.toFixed(3) + ')';
+  }
   if (tapCountEl) tapCountEl.textContent = _reviveState.taps + '/' + _reviveState.tapsNeeded;
 
   // Success?
@@ -7960,15 +7989,13 @@ function _reviveTapHandler(e) {
   if (!_reviveState) return;
   if (e && e.preventDefault) e.preventDefault();
   _reviveState.taps++;
-  // Tap feedback — scale the heart icon (not the button itself, which has
-  // its own pulse animation that we don't want to fight).
-  var btn = document.getElementById('revive-tap-btn');
-  if (btn) {
-    var heart = btn.querySelector('span:first-child');
-    if (heart) {
-      heart.style.transform = 'scale(0.85)';
-      setTimeout(function() { if (heart) heart.style.transform = 'scale(1)'; }, 80);
-    }
+  // S013.3: CPR feel — inner heart gives a quick extra squeeze on tap.
+  // Overall scale is driven by _reviveTick; this is a brief impulse on top.
+  var innerEl = document.getElementById('revive-heart-inner');
+  if (innerEl) {
+    innerEl.classList.remove('revive-tap-impulse');
+    void innerEl.offsetWidth; // restart animation
+    innerEl.classList.add('revive-tap-impulse');
   }
 }
 
@@ -7982,40 +8009,55 @@ function _showReviveOverlay() {
   var title = isRetry ? 'LAST CHANCE' : 'DEFEATED';
   var subtitle = isRetry ? 'Tap fast — final attempt' : 'Tap rapidly to revive!';
 
+  // S013.3: Two-heart design.
+  //   outer: faint heart at baseline — represents time remaining, shrinks inward
+  //   inner: small red beating heart — represents life returning, grows with taps
+  // Revive succeeds when taps fill the inner heart (scale 1.0).
+  // Revive fails when the time-driven outer scale reaches 0.2 before taps catch up.
+  // Entire overlay is the tap target (huge area) — no small button to miss.
+
   var html =
     '<div id="revive-overlay" style="position:absolute;top:0;left:0;right:0;bottom:0;'
       + 'background:rgba(10,0,0,0.88);display:flex;flex-direction:column;align-items:center;justify-content:center;'
-      + 'z-index:250;padding:20px;pointer-events:auto;font-family:\'Cinzel\',serif;">'
+      + 'z-index:250;padding:20px;pointer-events:auto;font-family:\'Cinzel\',serif;'
+      + 'touch-action:manipulation;user-select:none;-webkit-user-select:none;cursor:pointer;">'
       // Title
       + '<div style="font-size:clamp(22px,6vw,38px);font-weight:700;color:' + titleColor
       +   ';letter-spacing:.15em;text-shadow:0 0 20px ' + titleColor + ';margin-bottom:4px;text-align:center;">'
       +   title + '</div>'
-      + '<div style="font-size:clamp(12px,3vw,15px);color:#ddd;margin-bottom:20px;font-family:\'Crimson Pro\',serif;font-style:italic;">'
+      + '<div style="font-size:clamp(12px,3vw,15px);color:#ddd;margin-bottom:16px;font-family:\'Crimson Pro\',serif;font-style:italic;">'
       +   subtitle + '</div>'
-      // Time-remaining bar
-      + '<div style="width:min(320px,90%);margin-bottom:8px;font-size:10px;color:#888;letter-spacing:.1em;display:flex;justify-content:space-between;">'
-      +   '<span>TIME</span><span id="revive-tap-count">0/20</span></div>'
-      + '<div style="width:min(320px,90%);height:6px;background:#2a0a0a;border-radius:3px;overflow:hidden;margin-bottom:16px;">'
-      +   '<div id="revive-time-bar" style="height:100%;background:linear-gradient(90deg,#d44,#d4a44a);width:100%;transition:width 0.1s linear;"></div>'
+      // Tap count readout
+      + '<div style="font-size:11px;color:#888;letter-spacing:.2em;margin-bottom:10px;">'
+      +   '<span id="revive-tap-count">0/20</span> TAPS'
       + '</div>'
-      // Progress bar
-      + '<div style="width:min(320px,90%);margin-bottom:8px;font-size:10px;color:#888;letter-spacing:.1em;">PROGRESS</div>'
-      + '<div style="width:min(320px,90%);height:14px;background:#1a0a0a;border:1px solid #444;border-radius:8px;overflow:hidden;margin-bottom:24px;">'
-      +   '<div id="revive-prog-bar" style="height:100%;background:linear-gradient(90deg,#4a9a35,#9adb9a);width:0%;transition:width 0.08s ease;box-shadow:0 0 10px #9adb9a;"></div>'
+      // Two-heart stack — relative container sized around the max outer scale
+      + '<div id="revive-heart-stack" style="position:relative;width:min(260px,70vw);height:min(260px,70vw);'
+      +   'display:flex;align-items:center;justify-content:center;">'
+      // Outer heart (time boundary — shrinks as time runs out)
+      +   '<div id="revive-heart-outer" style="position:absolute;top:50%;left:50%;'
+      +     'transform:translate(-50%,-50%) scale(1);transform-origin:center;'
+      +     'font-size:min(240px,65vw);line-height:1;'
+      +     'color:' + titleColor + '44;'
+      +     'text-shadow:0 0 30px ' + titleColor + '33;'
+      +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
+      // Inner heart (tap progress — grows)
+      +   '<div id="revive-heart-inner" style="position:absolute;top:50%;left:50%;'
+      +     'transform:translate(-50%,-50%) scale(0.2);transform-origin:center;'
+      +     'font-size:min(240px,65vw);line-height:1;'
+      +     'color:' + titleColor + ';'
+      +     'filter:drop-shadow(0 0 20px ' + titleColor + ');'
+      +     'animation:reviveInnerPulse 1s ease-in-out infinite;'
+      +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
       + '</div>'
-      // Pulsing heart button — life force returning. ~120px tap target.
-      + '<button id="revive-tap-btn" style="'
-      +   'width:min(120px,40vw);height:min(120px,40vw);border-radius:8px;'
-      +   'background:transparent;border:none;padding:0;'
-      +   'color:#fff;font-family:\'Cinzel\',serif;font-weight:700;letter-spacing:.1em;'
-      +   'cursor:pointer;touch-action:manipulation;user-select:none;-webkit-user-select:none;'
-      +   'display:flex;align-items:center;justify-content:center;position:relative;'
-      +   'animation:reviveHeartPulse 0.9s ease-in-out infinite;'
-      +   '">'
-      +   '<span style="font-size:min(90px,30vw);line-height:1;filter:drop-shadow(0 0 14px ' + titleColor + '99);transition:transform 0.08s ease;">❤</span>'
-      +   '<span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:clamp(11px,3vw,14px);color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.9);pointer-events:none;">TAP!</span>'
-      + '</button>'
-      + '<style>@keyframes reviveHeartPulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.08); } }</style>'
+      // Style: inner pulse + tap impulse (layered)
+      + '<style>'
+      +   '@keyframes reviveInnerPulse { 0%,100% { filter:drop-shadow(0 0 14px ' + titleColor + '); }'
+      +     ' 50% { filter:drop-shadow(0 0 26px ' + titleColor + ') brightness(1.2); } }'
+      +   '.revive-tap-impulse { animation: reviveInnerPulse 1s ease-in-out infinite, reviveTapBurst 0.18s ease-out; }'
+      +   '@keyframes reviveTapBurst { 0% { filter:drop-shadow(0 0 40px #fff) brightness(1.8); }'
+      +     ' 100% { filter:drop-shadow(0 0 20px ' + titleColor + ') brightness(1); } }'
+      + '</style>'
     + '</div>';
 
   var wrapper = document.createElement('div');
@@ -8023,11 +8065,11 @@ function _showReviveOverlay() {
   var node = wrapper.firstChild;
   root.appendChild(node);
 
-  var btn = document.getElementById('revive-tap-btn');
-  if (btn) {
-    // pointerdown fires faster than click; prevents double-fire via touch→click simulation
-    btn.addEventListener('pointerdown', _reviveTapHandler);
-    btn.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); });
+  var overlay = document.getElementById('revive-overlay');
+  if (overlay) {
+    // Whole overlay is the tap target — player can't miss.
+    overlay.addEventListener('pointerdown', _reviveTapHandler);
+    overlay.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); });
   }
 }
 
@@ -8036,6 +8078,15 @@ function _offerReviveRetry() {
   if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
   _startReviveMinigame(1);
 }
+
+// S013.3: Revive tracking state.
+//   _wasRevivedThisFight = true after any successful revive this rumble
+//   (drives the REVIVED flavor pool on victory).
+//   player.reviveCount = stacking counter for loot-drop penalty. Heart-revive
+//   increments; cheese-revive resets to 0 (cheese revive is the "clean save").
+//   Loot mult = max(0.1, 1.0 - 0.1 * player.reviveCount).
+var _wasRevivedThisFight = false;
+var _lastReviveWasCheese = false;
 
 function _resolveRevive(success) {
   if (!_reviveState) return;
@@ -8050,11 +8101,21 @@ function _resolveRevive(success) {
     if (hadCheese) {
       player.cheese -= 1;
       player.hp = player.hpMax;
+      // Cheese revive is a clean save — resets the stacking loot penalty.
+      player.reviveCount = 0;
+      _lastReviveWasCheese = true;
       showFloatingText(player.x, player.y - 50, '🧀 REVIVED', '#FFD96A', player);
+      // Cheese-specific flavor float
+      var cFlavor = _pickCheeseReviveFlavor();
+      showFloatingText(player.x, player.y - 80, cFlavor, '#FFD96A', player);
     } else {
       player.hp = Math.max(1, Math.floor(player.hpMax * 0.5));
+      // Heart-tap revive stacks the loot penalty (-10% per revive, floor 10%).
+      player.reviveCount = (player.reviveCount || 0) + 1;
+      _lastReviveWasCheese = false;
       showFloatingText(player.x, player.y - 50, 'REVIVED', '#9adb9a', player);
     }
+    _wasRevivedThisFight = true;
     player.iframes = 2.5;
     clearStatuses();
     _revivePaused = false;
@@ -8089,11 +8150,60 @@ var _VICTORY_FLAVORS = {
     'You stagger forward, leaving a trail of blood behind you.',
     'The fight is won. Whether you will live is another question.',
   ],
+  // Revived mid-fight (heart-tap) and went on to win. Flavor acknowledges
+  // the near-death comeback.
+  REVIVED: [
+    'You were gone. You came back. The enemy is worse off.',
+    'Your heart started again, and you started swinging.',
+    'Resurrected by sheer stubbornness — and vengeance.',
+    'The darkness almost took you. You took the enemy instead.',
+    'A second breath, a second chance, and one more kill.',
+    'You woke up angry. It showed.',
+    'The fall gave you clarity. The getting-up gave you fury.',
+    'You were half-ghost when the killing blow landed. The other half was plenty.',
+  ],
 };
 
-function _pickFlavor(tierLabel) {
+// Cheese saved you at the edge of death. Flavor leans warm, almost silly,
+// because cheese is a warm-silly resource. The fight continues.
+var _CHEESE_REVIVE_FLAVORS = [
+  'A crumb of cheese, a full heart. That is how the old stories go.',
+  'You bit down. The cheese bit back — into your chest, straight to the soul.',
+  'The cheese remembered you. It always does.',
+  'Rinded and ready. You rise from the floor mid-chew.',
+  'A small mercy in a dairy shape. You live.',
+  'Cheese is not magic. But it is close enough today.',
+];
+
+// Any event that grants or discovers cheese. Flavor celebrates the find.
+// Used for purple chest cheese drops, green cleanse rewards, market finds, etc.
+var _CHEESE_EVENT_FLAVORS = [
+  'The wheel turns in your favor — cheese.',
+  'You smell it before you see it. Real cheese, wrapped in cloth.',
+  'A gift of dairy, older than the road itself.',
+  'Something round and fragrant rolls into your pack.',
+  'The cheese finds you. It tends to, in this land.',
+  'An aged wedge, heavy with promise.',
+  'Someone left this for a traveler. That traveler is you.',
+  'A small and ancient kindness, shaped like cheese.',
+];
+
+function _pickFlavor(tierLabel, opts) {
+  // opts.revived: was the player revived mid-fight via heart-tap?
+  if (opts && opts.revived) {
+    var rPool = _VICTORY_FLAVORS.REVIVED;
+    return rPool[Math.floor(Math.random() * rPool.length)];
+  }
   var pool = _VICTORY_FLAVORS[tierLabel] || _VICTORY_FLAVORS.SURVIVED;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function _pickCheeseReviveFlavor() {
+  return _CHEESE_REVIVE_FLAVORS[Math.floor(Math.random() * _CHEESE_REVIVE_FLAVORS.length)];
+}
+
+function _pickCheeseEventFlavor() {
+  return _CHEESE_EVENT_FLAVORS[Math.floor(Math.random() * _CHEESE_EVENT_FLAVORS.length)];
 }
 
 // Auto-vacuum any remaining loot onto the player. Used when the safety
@@ -8211,7 +8321,7 @@ function _showVictoryScreen() {
   var dps = Math.round(_battleStats.damageDealt / (durMs / 1000) * 10) / 10;
   var tier = _perfTier();
   var fav = _favoriteMove();
-  var flavor = _pickFlavor(tier.label);
+  var flavor = _pickFlavor(tier.label, { revived: _wasRevivedThisFight });
 
   // Bricks-gained summary (just the counts by color)
   var gainedLines = Object.keys(_battleStats.bricksGained).map(function(c) {
