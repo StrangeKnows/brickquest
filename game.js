@@ -447,7 +447,8 @@ class GameClient {
   rebuildBridge()     { this._legacy('rebuildBridge'); }
   blueprint()         { this._legacy('blueprint'); }
   forge()             { this._legacy('forge'); }
-  activateEnhanced()  { this._legacy('activateEnhanced'); }
+  // 0.14.0: activateEnhanced stub removed. Enhanced Movement (purple d3-turn
+  // bonus actions) is deprecated in favor of per-color board overload menus.
 }
 
 // ── UTILITY ───────────────────────────────────────────────

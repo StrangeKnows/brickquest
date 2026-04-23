@@ -716,8 +716,7 @@ wss.on('connection', (ws, req) => {
       // Apply modifiers
       if (cls==='snapstep') finalRoll += 1;
       if (G.movementDebuffs[cls]) { finalRoll = Math.max(0, finalRoll - G.movementDebuffs[cls]); delete G.movementDebuffs[cls]; }
-      // Enhanced movement doesn't add spaces — it adds action slots
-      // destination is computed by DM screen after gate checks
+      // Destination is computed by DM screen after gate checks.
       const prev = p.space;
       p.space = destination;
       // v4 ZONE TRANSITION CLEANUP — WEAKNESS + SLOW TONGUE clear when entering new zone

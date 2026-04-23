@@ -365,7 +365,6 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .status-badge.poisoned{background:#1a0a00;color:var(--orange);}
 .status-badge.cursed{background:#1a0a1a;color:#7B2FBE;}
 .status-badge.confused{background:#1a1500;color:var(--yellow);}
-.status-badge.enhanced{background:#0a1a0a;color:var(--green);}
 .status-badge.down{background:#1a0505;color:var(--red);}
 
 /* DIVIDER */
@@ -1042,9 +1041,6 @@ function renderStatus(me) {
 
   // Status effects
   const statuses = (me.statusEffects||[]).map(s=>`<span class="status-badge ${s}">${s}</span>`).join('');
-  // Enhanced movement
-  const enh = G.enhancedMovement?.[MY_CLASS];
-  const enhBadge = enh ? `<span class="status-badge enhanced">⚡ Enhanced ×${enh}</span>` : '';
   // Movement debuff
   const debuff = G.movementDebuffs?.[MY_CLASS];
   const debuffBadge = debuff ? `<span class="status-badge poisoned">🐌 −${debuff} Move</span>` : '';
@@ -1103,7 +1099,7 @@ function renderStatus(me) {
           <div class="stat-lbl">Position</div>
         </div>
       </div>
-      ${(statuses||enhBadge||debuffBadge)?`<div class="status-wrap">${statuses}${enhBadge}${debuffBadge}</div>`:''}
+      ${(statuses||debuffBadge)?`<div class="status-wrap">${statuses}${debuffBadge}</div>`:''}
       ${(me.queuedPoisonStacks||0)>0?`<div style="margin-top:6px;padding:6px 8px;background:#1a2a10;border:1px solid #4a7a2a;border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
         <span style="font-size:11px;color:#bada7a;font-family:Cinzel,serif;letter-spacing:.04em;">☠ POISON QUEUED: ${me.queuedPoisonStacks} stack${me.queuedPoisonStacks!==1?'s':''} (${me.queuedPoisonBattles||1} battle${(me.queuedPoisonBattles||1)!==1?'s':''})</span>
         ${(me.bricks.white||0)>=1?`<button class="btn" style="padding:4px 8px;font-size:10px;background:#3a3a5a;border:1px solid #8a8aaa;color:#dde;" onclick="cleansePoisonAction()">🩹 Cleanse (1 white)</button>`:''}
@@ -1695,38 +1691,21 @@ function showReviveSelector() {
 
 // ── MOVE PANEL ──
 function renderMovePanel(me) {
-  var enh = G.enhancedMovement && G.enhancedMovement[MY_CLASS];
   var debuff = (G.movementDebuffs && G.movementDebuffs[MY_CLASS]) || 0;
   var scoutBonus = MY_CLASS==='snapstep' ? (me.skills && me.skills.fleet_foot ? 3 : 1) : 0;
-  var hasRed = (me.bricks.red||0)>0;
-  var hasPurple = (me.bricks.purple||0)>0;
   var mount = MY_CLASS==='wild_one' && me.tamed;
   var die = mount ? 'd8' : 'd6';
-
-  var enhBanner = '';
-  if (enh) {
-    enhBanner = '<div style="padding:10px 14px;border-radius:10px;background:#0a1a0a;border:2px solid var(--green);margin-bottom:10px;">'
-      + '<div style="font-family:Cinzel,serif;font-size:12px;color:var(--green);margin-bottom:5px;">⚡ ENHANCED MOVEMENT — ' + enh + ' turn(s) left</div>'
-      + '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">You may use 2 actions of the same type this turn. Select how to use your extra action:</div>'
-      + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
-      + '<button class="btn success" style="flex:1;" onclick="useEnhancedExtra(\'move\')">⚡ Extra Move Action</button>'
-      + '<button class="btn primary" style="flex:1;" onclick="useEnhancedExtra(\'attack\')">⚡ Extra Attack Action</button>'
-      + '</div></div>';
-  }
 
   var notes = [];
   if (scoutBonus) notes.push('Snapstep +' + scoutBonus + ' always applied');
   if (debuff) notes.push('🐌 −' + debuff + ' this turn');
-  if (!enh && hasPurple) notes.push('Tip: use purple brick before moving for Enhanced Movement');
 
   var html = '<div class="card" style="border-color:var(--cls-color)44;">'
     + '<div style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.1em;color:var(--cls-color);margin-bottom:4px;">YOUR TURN</div>'
     + '<div style="font-family:Cinzel,serif;font-size:17px;font-weight:700;color:var(--text);margin-bottom:8px;">🎲 Move Phase — Roll ' + die + '</div>'
-    + enhBanner
     + (notes.length ? '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">' + notes.join(' · ') + '</div>' : '')
     + '<div style="font-size:13px;color:var(--text-dim);padding:10px;background:var(--surface3);border-radius:8px;margin-bottom:8px;">📣 Call your roll aloud — DM will move you on the board map.</div>'
     + renderDashControl(me, 'move')
-    + (hasPurple && !enh ? '<button class="btn warn" onclick="usePurpleEnhanced()">🟣 Enhanced Movement — d3 turns bonus actions (1 purple brick)</button>' : '')
     + '<button class="btn" onclick="client.setPhase(\'land\')">Skip movement</button>'
     + '</div>';
   return html;
@@ -1750,11 +1729,6 @@ function renderDashControl(me, phaseCtx) {
   return '<button class="btn warn" style="'+widthStyle+'" onclick="useRedBrickMove()">'+label+'</button>';
 }
 
-function useEnhancedExtra(actionType) {
-  client.send('consumeEnhanced', {cls: MY_CLASS});
-  toast('Using extra ' + actionType + ' action this turn — ' + actionType + ' again!', 'success');
-}
-
 function useRedBrickMove() {
   var me = G.players[MY_CLASS];
   if(!me || (me.bricks.red||0)<1){toast('No red bricks — dash not possible','warn');return;}
@@ -1766,10 +1740,6 @@ function useRedBrickMove() {
   if(!(spaces>=1 && spaces<=4)){toast('Invalid — enter 1, 2, 3, or 4','warn');return;}
   client.send('requestRedDash', {cls: MY_CLASS, spaces: spaces});
   toast('Charging... waiting for DM','info');
-}
-function usePurpleEnhanced() {
-  if((G.players[MY_CLASS].bricks.purple||0)<1){toast('No purple bricks','warn');return;}
-  client.activateEnhanced(MY_CLASS);
 }
 
 // ── RUMBLE CARD ──
@@ -4167,8 +4137,6 @@ function renderOutOfBattleActions(me) {
   if(MY_CLASS==='blocksmith'&&me.skills?.forge) html+=`<button class="btn warn" onclick="showForge()">🔧 Forge (2 same → 1 any)</button>`;
   // Blocksmith blueprint
   if(MY_CLASS==='blocksmith'&&me.skills?.blueprint) html+=`<button class="btn warn" onclick="showBlueprint()">📋 Blueprint (1 gray → duplicate 1 brick)</button>`;
-  // Enhanced movement (purple)
-  if((me.bricks.purple||0)>0) html+=`<button class="btn" onclick="usePurpleEnhanced()" style="display:flex;align-items:center;gap:6px;justify-content:center;"><span style="width:12px;height:12px;border-radius:2px;background:#7B2FBE;display:inline-block;"></span>Enhanced Movement (1 purple)</button>`;
 
   // Market button — collapsible
   var isMarketSpace = (function(){

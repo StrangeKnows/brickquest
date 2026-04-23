@@ -549,9 +549,6 @@ client.on(function(event, data) {
     G = data;
     renderAll();
   }
-  if (event === 'enhancedResult') {
-    showDMBanner('Enhanced Movement', data.playerName + ' activated Enhanced Movement — ' + data.duration + ' turn(s)! They may use 2 actions of the same type per turn.', 'var(--green)');
-  }
   if (event === 'forceGateResult') {
     var p2 = G && G.players && G.players[data.cls];
     var nm = p2 ? (p2.playerName || p2.name) : (data.cls || '?');
@@ -644,7 +641,6 @@ function renderPlayers() {
     var isActive = p.cls === activeClass;
     var isKO = !p.alive || p.hp <= 0;
     var spaceLabel = SPACES[p.space] ? SPACES[p.space].label : 'Start';
-    var enhAmt = G.enhancedMovement && G.enhancedMovement[p.cls];
 
     html += '<div class="p-card' + (isActive ? ' active-p' : '') + (isKO ? ' ko-p' : '') + '">';
 
@@ -652,7 +648,6 @@ function renderPlayers() {
 
     html += '<div class="p-name" style="color:' + p.color + ';">'
       + p.icon + ' ' + pLabel(p)
-      + (enhAmt ? '<span style="font-size:9px;color:var(--green);margin-left:4px;">⚡x'+enhAmt+'</span>' : '')
       + '<span style="margin-left:auto;display:flex;align-items:center;gap:5px;">'
       + '<span style="font-size:10px;color:var(--faint);" id="expand-arrow-'+p.cls+'">▾</span>'
       + '<span class="dot ' + (p.connected ? 'on' : 'off') + '"></span>'

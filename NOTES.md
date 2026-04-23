@@ -1,5 +1,47 @@
 # BrickQuest — Project Notes
 
+## Versioning & Commit Conventions (as of 0.14.0)
+
+The game has THREE related but distinct numbering systems that have drifted before. This section is the authority.
+
+**Build numbers** come from `DESIGN_S012_PROPOSAL_V2.txt` §8 roadmap:
+- 0.12.0 "Foundations" — shipped
+- 0.13.0 "Charge Visible" — shipped (+ extensive 0.13.x polish arc)
+- 0.14.0 "Action Hub" — in progress
+- 0.15.0 "Class Identity: Rumble"
+- 0.16.0 "Class Identity: Board"
+- 0.17.0 "Cheese System"
+- 0.18.0 "Achievements & Unlocks"
+- 0.19.0 "Multiplayer Proximity Join"
+- 0.20.0 "Entity Overload"
+- 0.21.0+ "Rares, Polish, Ship"
+
+**Session codes** (S011, S012, S013, ...) are the design/development session labels. They live ONLY in the design doc header and in `/mnt/transcripts/journal.txt`. They do NOT go into commit messages or package.json — this has caused confusion before.
+
+**package.json version** reflects the current in-flight build. Bump rules:
+- `./save.sh -v "msg"` — patch bump (0.14.0 → 0.14.1) for incremental commits inside a build
+- `./save.sh -V "msg"` — minor bump (0.14.x → 0.15.0) when starting a new build milestone
+- Plain `./save.sh "msg"` — no version bump (rare, for docs/notes-only commits)
+
+**Commit message format**: save.sh auto-prepends `v<version>: ` to whatever message is passed. So the message itself should NOT include the version. Use this plain-English format:
+
+```
+./save.sh -v "item 2/7 — strip Enhanced Movement"
+```
+
+Produces:
+```
+v0.14.1: item 2/7 — strip Enhanced Movement
+```
+
+For work inside a specific build's roadmap (like 0.14.0's 7 sub-items), include `item N/M — <description>`. For polish/bugfixes outside a feature build's scope, just describe what changed.
+
+When a build is complete (all items shipped, exit criteria met), the NEXT commit uses `-V` to bump minor and open the next build.
+
+**The old "s012" / "s013" session prefixes in commit messages are deprecated.** They conflicted with version numbers visually and weren't what the roadmap or save.sh expected. Use clean build-item format going forward.
+
+---
+
 ## Major Cleanup — April 2026
 
 The turn-based battle system and all class skills were ripped out to make room for the real-time rumble system (v1 shipped Phase 1, Phase 2 next). Removed server-side: all `startBattle`, `rollAttack`, `useBrickInBattle`, `monsterAttack`, `endBattle`, `resolveBattle*`, `advanceBattleTurn`, `nextBattleRound`, `setComplication`, `bossPhase2`, `monsterHPDelta`, `battleTrapPersist`, plus all skill handlers (`unlockSkill`, `activateEnhanced`, `consumeEnhanced`, `deconstructGate`, `rebuildBridge`, `blueprint`, `forge`, `infiniteBlueprint`, `salvage`, `wrecking_ball`, `tameAttempt`, `commandTamed`, `catapult`), plus the legacy out-of-battle brick actions (`addShield`, `healPlayer`, `massRepair`, `revivePlayer`). Game.js lost `MONSTER_TEMPLATES`, `COMPLICATIONS`, and the entire `SKILLS` block. Player state no longer has `skills`, `tamed`, `scavengeRolled` fields; global no longer has `enhancedMovement` or `battleResult`.
