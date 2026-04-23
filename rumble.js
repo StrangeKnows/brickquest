@@ -2799,17 +2799,22 @@ function _playerEffects() {
 function showFloatingText(x, y, text, color, parent) {
   var now = performance.now();
   // Spawn-position rule tied to what this text is:
-  //   • Numeric heal/shield (contains ✚, ✨, ♥, or 🛡) → LEFT of parent
+  //   • Heal/shield numeric (contains ✚, ✨, ♥, or 🛡) → LEFT of parent
   //     hitbox at vertical center. Left-of-entity is the reserved "good
   //     stuff happening" lane.
-  //   • Numeric damage floater (no heal icon, leading digit) → RIGHT of
-  //     parent hitbox at vertical center. Mirrors showDamageNumber.
+  //   • Damage OR pickup numeric ("+1", "12", "3 🧀", etc) → RIGHT of parent
+  //     hitbox at vertical center. Mirrors showDamageNumber.
   //   • Status banners (EVADE!, FELLED!, FATIGUE 50%, etc) → keep the
   //     passed-in (x, y), which is typically player.y - 50 (above head).
-  var isNumeric = /^[0-9]/.test(text);
+  // Detection: starts with digit OR with +/- followed by a digit. Prior
+  // version only matched leading digit, so "+1 🧀 CHEESE" fell through
+  // to the raw (x,y) spawn and clipped against HP bars.
+  var isNumeric = /^[+\-−]?\d/.test(text);
   var isHeal = /[✚✨♥🛡]/.test(text);
   if (parent && parent.r !== undefined && isNumeric) {
-    var offset = parent.r + 14;
+    // Larger spawn offset so pickup/damage/heal text sits clear of the
+    // sprite AND the HP bar (which is drawn above the entity).
+    var offset = parent.r + 18;
     if (isHeal) {
       x = parent.x - offset;
       y = parent.y;
@@ -2844,8 +2849,18 @@ function showFloatingText(x, y, text, color, parent) {
     }
   }
   var num2 = parseFloat(text.replace(/[^0-9.]/g, '')) || 0;
-  var hasIcon = /[☠🩸💀✚✨🛡♥]/.test(text);
-  var scale2 = num2 > 0 ? Math.min(2.6, 0.72 + Math.log2(num2 + 1) * 0.38) : (hasIcon ? 1.0 : 0.9);
+  var hasIcon = /[☠🩸💀✚✨🛡♥🧀🪙]/.test(text);
+  // Font scale: numeric hits use log curve; icon-bearing text (pickups)
+  // gets a fixed boost; pure flavor text (no digits, no icons) renders
+  // largest so it reads cleanly against the canvas.
+  var scale2;
+  if (num2 > 0) {
+    scale2 = Math.min(2.6, 0.72 + Math.log2(num2 + 1) * 0.38);
+  } else if (hasIcon) {
+    scale2 = 1.4; // was 1.0 — pickup icons need presence
+  } else {
+    scale2 = 1.5; // was 0.9 — flavor text was sub-10px and unreadable
+  }
   var fontSize2 = Math.round(10 * scale2);
   var fadeRate2 = Math.max(0.005, 0.02 / scale2);
   var riseSpeed2 = 60 + scale2 * 24;
@@ -2860,6 +2875,34 @@ function showFloatingText(x, y, text, color, parent) {
     vy: -riseSpeed2, fadeRate: fadeRate2, fontSize: fontSize2,
     mergeable: !!isDmg, accum: num2, spawnTime: now,
     parent: par, offX: offX0, offY: offY0, side: _side });
+}
+
+// Fizzle sparks — sparse grey-white embers projecting outward from a hit
+// point in all directions. Used for RESIST/IMMUNE tiers to read as "the
+// attack scattered harmlessly". Riffs on the green-overload-field particle
+// style (small sparks, slight drift) but muted color + sparser count.
+//   ex, ey: hit center
+//   count:  particle count (IMMUNE uses more than RESIST)
+//   color:  grey-white shade; pass '#d8d8d8' or similar
+function _spawnFizzleSparks(ex, ey, count, color) {
+  count = count || 8;
+  color = color || '#d8d8d8';
+  for (var i = 0; i < count; i++) {
+    var a = Math.random() * Math.PI * 2;
+    var s = 35 + Math.random() * 55;       // slower than deflection sparks
+    var life = 0.6 + Math.random() * 0.5;  // persist longer (handled by alpha)
+    purpleParticles.push({
+      x: ex + (Math.random() - 0.5) * 6,   // slight spawn jitter
+      y: ey + (Math.random() - 0.5) * 6,
+      vx: Math.cos(a) * s,
+      vy: Math.sin(a) * s - 20,            // slight upward bias — "fizzling up"
+      r: 1.0 + Math.random() * 1.3,
+      alpha: 0.75 + Math.random() * 0.2,
+      color: color,
+      shadowColor: color,                   // glow matches fill (not purple)
+      fadeRate: 0.02 / life,               // longer-life particles fade slower
+    });
+  }
 }
 
 // Tiered damage number display. Pure numeric, no text suffix.
@@ -2911,43 +2954,44 @@ function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, 
   var witherFontScale = 1 + 0.25 * wbClamped;   // 1 → 1.25, 11 → 3.75
   var witherFadeScale = Math.max(0.18, Math.pow(0.55, Math.min(wbClamped, 6)));
   if (tier === 'IMMUNE') {
-    // Fizzle-out "0" — shrinks to nothing, wobbles slightly, never rises far.
+    // Fizzle-out "0" — grows a touch then shrinks to nothing. Larger than
+    // before (11 → 15) so it reads against the canvas. Parent-anchored
+    // RIGHT of the target to match the damage-right convention.
+    var immX = par ? par.x + par.r + 18 : ex;
+    var immY = par ? par.y : ey - 10;
+    var immOffX = par ? par.r + 18 : offExX0;
+    var immOffY = par ? 0 : offExY0 - 10;
     floatingTexts.push({
-      x: ex, y: ey - 10, text: '0' + (icon ? ' ' + icon : ''), color: '#777',
-      alpha: 0.9, vy: 0, fadeRate: 0.05, fontSize: 11,
+      x: immX, y: immY, text: '0' + (icon ? ' ' + icon : ''), color: '#bfbfbf',
+      alpha: 0.95, vy: 0, fadeRate: 0.04, fontSize: 15,
       mergeable: false, accum: 0, spawnTime: now,
       tier: 'IMMUNE', shrink: true, wobbleAmp: 2,
-      parent: par, offX: offExX0, offY: offExY0 - 10, side: 'right',
+      parent: par, offX: immOffX, offY: immOffY, side: 'right',
     });
-    // Grey puff particles sucked back INTO the entity (implosion effect).
-    for (var i = 0; i < 4; i++) {
-      var pa = Math.random() * Math.PI * 2;
-      var pd = 15 + Math.random() * 10;
-      purpleParticles.push({
-        x: ex + Math.cos(pa) * pd, y: ey + Math.sin(pa) * pd,
-        vx: -Math.cos(pa) * 40, vy: -Math.sin(pa) * 40,
-        r: 2 + Math.random() * 1.5, alpha: 0.8, color: '#888',
-      });
-    }
+    // FIZZLE sparks: grey-white embers projecting outward from the hit
+    // zone in a sparse burst. Matches the "attack scattered harmlessly"
+    // read. Particles fade fast.
+    _spawnFizzleSparks(ex, ey, 10, '#d8d8d8');
     return;
   }
   var text = '' + applied + (icon ? ' ' + icon : '');
   if (tier === 'RESIST') {
     // Bounce OUTWARD off the entity — spawn at offset from entity center,
     // initial velocity carries it away, then gravity pulls it back down.
+    // Font bumped 10 → 14 so the resisted number reads clearly.
     var dx = x - ex, dy = y - ey;
     var dist = Math.sqrt(dx*dx + dy*dy) || 1;
     var nx = dx / dist, ny = dy / dist;
     floatingTexts.push({
-      x: ex + nx * 20, y: ey + ny * 20, text: text, color: _muteColor(baseColor),
-      alpha: 0.9, vy: ny * 80 - 20, vx: nx * 80,
-      fadeRate: 0.035, fontSize: 10,
+      x: ex + nx * 22, y: ey + ny * 22, text: text, color: _muteColor(baseColor),
+      alpha: 0.95, vy: ny * 80 - 20, vx: nx * 80,
+      fadeRate: 0.03, fontSize: 14,
       mergeable: false, accum: applied, spawnTime: now,
       tier: 'RESIST', glowMult: 0.3,
       // Bounce physics: gravity pulls it down, arc ends fast
       gravity: 220,
     });
-    // Deflection sparks
+    // Deflection sparks — directional burst along the bounce vector
     for (var si = 0; si < 3; si++) {
       var sa = Math.atan2(ny, nx) + (Math.random() - 0.5) * 0.7;
       var ss = 60 + Math.random() * 60;
@@ -2957,6 +3001,10 @@ function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, 
         r: 1.5 + Math.random() * 1.5, alpha: 0.8, color: _muteColor(baseColor),
       });
     }
+    // FIZZLE sparks layer — sparse grey-white embers in all directions,
+    // reinforces "scattered harmlessly" read without overwhelming the
+    // deflection vector. Slightly smaller than IMMUNE count.
+    _spawnFizzleSparks(ex, ey, 7, '#d0d0d0');
     return;
   }
   // NEUTRAL / VULN / WEAK use "rising number" style
@@ -3716,10 +3764,12 @@ function updateDroppedBricks(dt) {
           if (_battleStats) _battleStats.cheeseEaten++;
           if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
           _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
-          showFloatingText(player.x, player.y - 40, '+1 🧀 CHEESE', '#FFD96A', player);
+          showFloatingText(player.x, player.y, '+1 🧀', '#FFD96A', player);
           // S013.3: occasional flavor line for cheese pickups — every 3rd to avoid spam
           if (player.cheese % 3 === 1) {
-            showFloatingText(player.x, player.y - 70, _pickCheeseEventFlavor(), '#FFD96A', player);
+            // Spawn ABOVE the player (not parented) so it floats independently
+            // and doesn't stack on top of the pickup number.
+            showFloatingText(player.x, player.y - (player.r + 48), _pickCheeseEventFlavor(), '#FFD96A');
           }
         } else if (p.kind === 'gold') {
           // Coins accumulate on player.gold; battleTick surfaces to server.
@@ -7408,6 +7458,10 @@ function updatePurpleParticles(dt) {
     if (p.isRed) {
       p.vx *= 0.95; p.vy *= 0.95;
       p.alpha -= 1.2 * dt;
+    } else if (p.fadeRate !== undefined) {
+      // Per-particle fade (e.g. fizzle sparks) — honor the supplied rate.
+      p.vx *= 0.94; p.vy *= 0.94;
+      p.alpha -= p.fadeRate * 60 * dt; // fadeRate is per-frame @60fps
     } else {
       p.vx *= 0.92; p.vy *= 0.92;
       p.alpha -= 1.8 * dt;
@@ -7431,7 +7485,9 @@ function drawPurpleBursts() {
     ctx.save();
     ctx.globalAlpha = p.alpha;
     ctx.fillStyle = p.color;
-    ctx.shadowColor = '#7B2FBE'; ctx.shadowBlur = 8 * p.alpha;
+    // Per-particle shadow color (for fizzle sparks) or default purple bloom
+    ctx.shadowColor = p.shadowColor || '#7B2FBE';
+    ctx.shadowBlur = 8 * p.alpha;
     ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
     ctx.restore();
   });
@@ -8408,17 +8464,29 @@ var _CHEESE_REVIVE_FLAVORS = [
   'Cheese is not magic. But it is close enough today.',
 ];
 
-// Any event that grants or discovers cheese. Flavor celebrates the find.
-// Used for purple chest cheese drops, green cleanse rewards, market finds, etc.
+// Any event that grants or discovers cheese. Kept CONCISE — 1-3 word phrases
+// so the text reads cleanly as a rumble floater. A few 5-word dad jokes mixed
+// in because cheese is inherently silly. Rendered larger than damage text.
 var _CHEESE_EVENT_FLAVORS = [
-  'The wheel turns in your favor — cheese.',
-  'You smell it before you see it. Real cheese, wrapped in cloth.',
-  'A gift of dairy, older than the road itself.',
-  'Something round and fragrant rolls into your pack.',
-  'The cheese finds you. It tends to, in this land.',
-  'An aged wedge, heavy with promise.',
-  'Someone left this for a traveler. That traveler is you.',
-  'A small and ancient kindness, shaped like cheese.',
+  // Concise
+  'Cheesy!',
+  'Fresh wheel!',
+  'Big find.',
+  'Dairy won.',
+  'Gouda day.',
+  'Mmm.',
+  'Smell that?',
+  'Aged well.',
+  'Creamy!',
+  'Rind of joy.',
+  'Hole-y moly.',
+  'Cheese dreams.',
+  // Dad-joke tier
+  'A grate discovery.',
+  'That is nacho cheese.',
+  'You brie-long here.',
+  'Cheddar believe it.',
+  'Feta late than never.',
 ];
 
 function _pickFlavor(tierLabel, opts) {

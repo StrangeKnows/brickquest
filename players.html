@@ -4855,6 +4855,25 @@ function buildResolutionCard(opts) {
   var shower      = opts.shower !== false;
   var showerTint  = opts.showerTint  || themeColor;
 
+  // S013.6: Strip parsed reward tokens from flavor text so they don't
+  // double-render (icon row already shows them). Keeps narrative tail.
+  // Mirrors DM-side dm_screen.html v4DmResultBlock de-dup logic.
+  if (flavor && rewardIcons) {
+    flavor = flavor
+      .replace(/\+\d+\s*(?:red|blue|gray|green|white|yellow|orange|purple|black)(?:\s+brick)?s?/gi, '')
+      .replace(/\+\d+\s*(?:🧀|cheese)/gi, '')
+      .replace(/\+\d+\s*🧀/gi, '')
+      .replace(/\+\d+\s*gold/gi, '')
+      .replace(/\+\d+\s*🪙/gi, '')
+      .replace(/[-−]\d+\s*(?:max\s*)?HP(?!\s*max)/gi, '')
+      .replace(/[-−]\d+\s*max\s*HP/gi, '')
+      .replace(/\+1\s*shield\s*pip?/gi, '')
+      .replace(/^[\s,·\-—]+/, '')
+      .replace(/[\s,·\-—]+$/, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
   var html = '<div style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;">';
   if (shower) {
     html += '<canvas id="result-shower" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;opacity:0.2;"></canvas>';
