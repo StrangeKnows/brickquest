@@ -2739,9 +2739,10 @@ function _playerEffects() {
       fx.push({ icon:'▼', color:'#553366', timer: s.weaken.timer });
     }
   }
-  // Buffs / resource timers
+  // Buffs / resource timers. Regen is triggered by WHITE (brick) overload
+  // or tap, so the icon color stays white (matches source).
   if (playerRegen && playerRegen.timer > 0)
-    fx.push({ icon:'✚', color:'#9B6FD4', timer: playerRegen.timer });
+    fx.push({ icon:'✚', color:'#EFEFEF', timer: playerRegen.timer });
   if (player.iframes > 0)
     fx.push({ icon:'🛡', color:'#88aaff', timer: player.iframes });
   if (dashCooldown > 0)
@@ -2765,31 +2766,35 @@ function _playerEffects() {
 
 function showFloatingText(x, y, text, color, parent) {
   var now = performance.now();
-  // Spawn-position rule — unified via semantic classification:
-  //   • Heal/shield numeric (contains ✚, ✨, ♥, or 🛡) → LEFT of parent
-  //     at parent.r + 22 offset, vertical center.
-  //   • Damage/pickup numeric (digit anywhere in text) → RIGHT of parent
-  //     at parent.r + 22, vertical center. Mirrors showDamageNumber.
-  //   • Non-numeric (EVADE!, DAZED, flavor text) → keep passed-in (x, y),
-  //     typically parent.y - 50 (above the head), center-aligned.
-  // Detection: for numeric classification, we check if the text contains
-  // a digit at all. Previously only leading digit or leading +/-digit.
-  // Catches "☠ 1" (poison damage), "🛡 +3" (shield gain), etc.
-  var hasDigit = /\d/.test(text);
-  var leadsWithSymbol = /^[+\-−]/.test(text);
-  var isHeal = /[✚✨♥🛡]/.test(text);
-  // Numeric IF text has digits AND isn't a banner-like thing
-  // (banner detection: starts with letter AND has no digit prefix or -)
+  // ── Semantic lane classification ────────────────────────────────────
+  // Three lanes relative to parent:
+  //   RIGHT — damage numbers ("6", "12 ✦"), pickup numbers ("+1 🧀")
+  //   LEFT  — heal numbers ("3 ✚", "+1 ♥", "2 🛡"), entity self-heal ("+1")
+  //   CENTER-ABOVE — banners ("EVADE!", "DAZED", "Well aged.")
+  //
+  // Decision tree (ordered): Letter-led + no digit → banner. Presence of
+  // heal icon (✚✨♥🛡) → heal-left. Presence of pickup icon (🧀🪙) → pickup-right.
+  // Leading "+" with nothing else → treat as heal-left (it's a gain applied
+  // to self — used by entity regen "+1" and similar). Otherwise damage-right.
   var startsWithLetter = /^[A-Za-z]/.test(text);
-  var isNumeric = hasDigit && !(startsWithLetter && !leadsWithSymbol);
-  if (parent && parent.r !== undefined && isNumeric) {
-    // Unified offset: sprite radius + 22 = clear of sprite edge + HP bar.
+  var hasDigit = /\d/.test(text);
+  var isHealIcon = /[✚✨♥🛡]/.test(text);
+  var isPickupIcon = /[🧀🪙]/.test(text);
+  var isPlainPlus = /^\+\d+\s*$/.test(text); // "+1", "+3 " (no icon) → self-heal tick
+  // Banner: letters, no digits (e.g. "DAZED", "EVADE!", "Well aged.")
+  // OR letters-then-digits like "HP LOW" patterns don't appear in the callers.
+  var isBanner = startsWithLetter && !hasDigit;
+  // Numeric routing:
+  var isNumeric = hasDigit || /^[+\-−]/.test(text);
+  var isHeal = isHealIcon || isPlainPlus;
+  if (parent && parent.r !== undefined && isNumeric && !isBanner) {
+    // Fixed-offset placement relative to parent, matching showDamageNumber.
     var offset = parent.r + 22;
     if (isHeal) {
-      x = parent.x - offset;
+      x = parent.x - offset;  // LEFT lane
       y = parent.y;
     } else {
-      x = parent.x + offset;
+      x = parent.x + offset;  // RIGHT lane (damage + pickup)
       y = parent.y;
     }
   }
@@ -3668,6 +3673,7 @@ function _applyEnemyMeleeDamage(g, dmg, dx, dy, dist) {
 //   cheese  — permanent +1 max HP and +1 current HP
 //   gold    — adds amount to player.gold (surfaces to server on battleEnd)
 var droppedBricks = [];
+                               // Used by victory flow to skip grace period when no loot existed.
 var LOOT_MAGNET_RANGE = 80;   // player must be this close before magnet kicks in
 var LOOT_PICKUP_RADIUS = 24;  // actual contact radius for collection (generous)
 var LOOT_VISUAL_R = 8;        // rendered size — kept small so drops don't dominate the scene
@@ -7948,11 +7954,21 @@ function triggerVictory() {
     // player doesn't get dragged into the revive minigame while waiting
     // for loot collection. Heals/regen remain active.
     if (typeof clearStatuses === 'function') clearStatuses();
-    var victoryDeadline = performance.now() + 15000;
-    // S013.6: Grace period — after the LAST piece of loot is collected
-    // (either naturally or via vacuum sweep), wait this long before showing
-    // the victory screen. Gives the player a beat to register what they
-    // picked up before the card appears.
+    // S013.7: Clear lingering combat effects that outlive entity death.
+    // Gray walls in particular render an HP bar and read as "still a target",
+    // holding up visual resolution even though they block no gameplay. Same
+    // for orange aura, bleeds (their targets are gone), poison puddles, etc.
+    grayWalls = [];
+    if (typeof orangeAura !== 'undefined') orangeAura = null;
+    bleeds = [];
+    if (typeof poisonPuddles !== 'undefined') poisonPuddles = [];
+    if (typeof greenBurst !== 'undefined') greenBurst = null;
+    var victoryDeadline = performance.now() + 5000;
+    // Victory always follows a 2s grace period after the last loot pickup
+    // (or after vacuum sweep, whichever comes first). The victory overlay
+    // itself fades in over 1s after that. Consistent flow, no exceptions —
+    // loot-zero fights still get the beat because it reads as "the dust
+    // settling" before the scoreboard appears.
     var VICTORY_GRACE_MS = 2000;
     var waitLoot = function() {
       if (!running) { entityRespawnPending = false; return; }
