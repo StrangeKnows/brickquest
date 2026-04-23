@@ -443,6 +443,10 @@ function spawnCritFlourish(x, y, color, n) {
 var canvas, ctx, W, H;
 var running = false;
 var rafId = null;
+// v4: While the revive minigame overlay is active, gameplay systems (movement,
+// enemy AI, damage, timer, loot) are frozen. `running` stays true (so _internalEnd
+// isn't triggered prematurely) but _revivePaused gates every per-tick side-effect.
+var _revivePaused = false;
 var lastTs = 0;
 var cfg = null; // last start(config) object
 
@@ -502,6 +506,7 @@ function makePlayer(cls) {
     overloadCount: 0,              // total overloads this battle (any color)
     armor: 0,                      // shield pips
     gold: 0,                       // coins picked up in rumble; surfaces to server
+    cheese: 0,                     // cheese picked up in rumble; surfaces to server
     // PHASE B — status effect slots.
     // Each slot tracks timer (>0 = active). Applied via applyStatus(),
     // ticked in updateStatusEffects() once per frame.
@@ -591,7 +596,14 @@ function updateStatusEffects(dt) {
         if (player.hp < _battleStats.hpLow) _battleStats.hpLow = player.hp;
       }
       showFloatingText(player.x, player.y - 40, '☠ ' + dmg, '#1D9E75', player);
-      if (player.hp <= 0) break;
+      if (player.hp <= 0) {
+        // v4: Poison DoT killed the player — trigger defeat/revive minigame.
+        // Without this, HP sits at 0 until another enemy hit routes through
+        // the normal death path. Short-circuit the poison damage loop here
+        // and let respawnPlayer handle the state transition.
+        if (typeof respawnPlayer === 'function') respawnPlayer();
+        break;
+      }
     }
     if (s.poison.timer <= 0) { s.poison.stacks = 0; s.poison.tickTimer = 0; }
   }
@@ -618,9 +630,22 @@ function playerSpeedMult() {
 }
 
 function playerRefreshMult() {
-  // Called by brick refresh tick. daze halves refresh speed.
-  if (!player || !player.status) return 1;
-  return hasStatus('daze') ? 0.5 : 1;
+  // Called by brick refresh tick.
+  // Base: 1.0
+  // × FW refresh boost (e.g. 2.0 for first 10s of next rumble after FW blue success)
+  // × 0.5 if dazed
+  if (!player) return 1;
+  var m = 1;
+  if (player.refreshBoost) {
+    if (performance.now() < player.refreshBoost.endsAt) {
+      m *= player.refreshBoost.multiplier;
+    } else {
+      // Expired — clear so we skip the check on subsequent ticks
+      player.refreshBoost = null;
+    }
+  }
+  if (player.status && hasStatus('daze')) m *= 0.5;
+  return m;
 }
 
 function playerDamageTakenMult() {
@@ -1598,7 +1623,7 @@ function roundRect(ctx, x, y, w, h, r) {
 function loop(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.05);
   lastTs = ts;
-  update(dt);
+  if (!_revivePaused) update(dt);
   draw();
   updateHUD();
   renderBrickBar();
@@ -3676,13 +3701,14 @@ function updateDroppedBricks(dt) {
       if (dist < contactR) {
         // Collect by kind. Each pickup type has its own effect.
         if (p.kind === 'cheese') {
-          // Permanent stat upgrade — +1 max HP and +1 current HP. Always
-          // pushes both even if HP is full (cheese is rare; the bonus
-          // shouldn't waste).
-          player.hpMax = (player.hpMax || 10) + 1;
-          player.hp = Math.min(player.hpMax, (player.hp || 0) + 1);
+          // v4: Cheese loot goes into player's cheese inventory (+1 per pickup).
+          // Previously cheese gave permanent +1 max HP + +1 HP — replaced so cheese
+          // is a tradeable consumable, eaten via the out-of-battle menu for +1 Max HP.
+          player.cheese = (player.cheese || 0) + 1;
           if (_battleStats) _battleStats.cheeseEaten++;
-          showFloatingText(player.x, player.y - 40, '+1 HP MAX 🧀', '#F5C800', player);
+          if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+          _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+          showFloatingText(player.x, player.y - 40, '+1 🧀 CHEESE', '#FFD96A', player);
         } else if (p.kind === 'gold') {
           // Coins accumulate on player.gold; battleTick surfaces to server.
           var amt = p.amount || 1;
@@ -5160,18 +5186,23 @@ function drawDeadEntity(g) {
   ctx.beginPath();
   ctx.arc(0, 0, g.r - 4, 0, Math.PI*2);
   ctx.fill();
-  // Icon sideways
-  ctx.font = '16px serif';
+  // Icon sideways — use the entity's own icon (not hardcoded goblin).
+  // Scale icon the same way the living entity scaled it, so bosses remain
+  // imposing in death; small entities look compact.
+  var deadIconPx = Math.max(12, Math.round(g.r * 0.9));
+  ctx.font = deadIconPx + 'px serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.globalAlpha = fadeAlpha * 0.7;
-  ctx.fillText('👺', 0, 0);
-  // X eyes
+  ctx.fillText(g.visIcon || '👺', 0, 0);
+  // X eyes — sized with entity radius
   ctx.globalAlpha = fadeAlpha;
-  ctx.font = 'bold 10px sans-serif';
+  var xPx = Math.max(9, Math.round(g.r * 0.55));
+  ctx.font = 'bold ' + xPx + 'px sans-serif';
   ctx.fillStyle = '#ffffff88';
-  ctx.fillText('✕', -5, -4);
-  ctx.fillText('✕', 5, -4);
+  var xOff = Math.max(4, Math.round(g.r * 0.3));
+  ctx.fillText('✕', -xOff, -Math.round(xPx * 0.4));
+  ctx.fillText('✕', xOff, -Math.round(xPx * 0.4));
   ctx.restore();
 }
 
@@ -7319,14 +7350,14 @@ function updatePurpleBursts(dt) {
       }
       purpleBurst._hitIds.push(gId);
       // Purple lifesteal: heal player for 1/3 of damage dealt (rounded up).
-      // Overheal allowed up to 3× hpMax. The overheal floater (♥) only
+      // Overheal allowed up to 2× hpMax. The overheal floater (♥) only
       // surfaces when the hit actually pushes HP past hpMax — regular
       // top-up back to full shouldn't flag overheal. If the hit spans
       // the max boundary (e.g. 8/10 HP + 5 lifesteal → 13/10), show only
       // the overheal portion (3) on the floater so the number matches
       // what's actually going into overheal storage.
       var healAmt = Math.ceil(actualDmg / 3);
-      var overhealCap = player.hpMax * 3;
+      var overhealCap = player.hpMax * 2;
       if (healAmt > 0 && player.hp < overhealCap) {
         var preHp = player.hp;
         player.hp = Math.min(overhealCap, player.hp + healAmt);
@@ -7648,6 +7679,20 @@ function _internalStart(config) {
   _startedAt = performance.now();
   renderBrickBar();
 
+  // v4: FW Formwright buff — 2× brick refresh speed for first 10s (from blue-event success).
+  // Server sends refreshBoost = { multiplier, durationMs }; we stash the expiry time and
+  // playerRefreshMult() checks it on every tick.
+  var _rb = cfg.refreshBoost;
+  if (_rb && typeof _rb.multiplier === 'number' && _rb.durationMs > 0) {
+    player.refreshBoost = {
+      multiplier: _rb.multiplier,
+      endsAt: performance.now() + _rb.durationMs,
+    };
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(player.x, player.y - 30, '⚡ FORMWRIGHT CHARGE', '#4db8ff');
+    }
+  }
+
   // v4: Apply queued poison from failed green/black board events.
   // Each stack adds a poison tick; the duration is 6s (standard arsenal poison).
   // Server already decremented queuedPoisonBattles for this battle.
@@ -7740,6 +7785,16 @@ var entityRespawnPending = false;
 
 function triggerVictory() {
   if (!running || entityRespawnPending) return;
+
+  // Guard: if any entity has a pending bone-rise queued (skeleton small-hit
+  // death → will revive this frame), don't declare victory. The rise
+  // happens in the dead-entity sweep AFTER callers have already hit 0 HP,
+  // so we could easily declare victory one frame too early.
+  var bonePending = entities.some(function(g) {
+    return g._boneRiseQueued && !g._boneRisen;
+  });
+  if (bonePending) return;
+
   // Drop loot for every entity that just died but hasn't been processed yet.
   // This handles multi-entity kills on the same frame (e.g. black AoE
   // finishing off a cluster). Each entity drops at most once via the
@@ -7765,10 +7820,6 @@ function triggerVictory() {
   if (cfg && cfg.mode === 'spec') {
     entityRespawnPending = true;
     _battleStats.endedAt = performance.now();
-    // Poll until all loot collected (or 15s safety cap for uncollectable TTL)
-    // before showing victory screen + ending. If safety cap hits with loot
-    // still on the ground, auto-vacuum sweeps it all to the player so nothing
-    // is wasted.
     var victoryDeadline = performance.now() + 15000;
     var waitLoot = function() {
       if (!running) { entityRespawnPending = false; return; }
@@ -7780,7 +7831,6 @@ function triggerVictory() {
       }
       if (now >= victoryDeadline) {
         _autoVacuumLoot();
-        // Give a brief moment for the AUTO-COLLECT floater to register visually
         setTimeout(function() {
           if (!running) return;
           _showVictoryScreen();
@@ -7816,19 +7866,169 @@ function triggerVictory() {
 
 function respawnPlayer() {
   if (!running) return;
-  showFloatingText(player.x, player.y - 60, 'RESPAWNING...', '#888', player);
-  player.iframes = 3.0;
-  var bounds = getRumbleBounds();
-  setTimeout(function() {
-    if (!running || !player) return;
-    player.hp = player.hpMax;
-    player.x = bounds.x + bounds.w / 2;
-    player.y = bounds.y + bounds.h / 2;
-    player.iframes = 3.0;
-    // PHASE B — respawn purges all debuffs (fresh slate).
+  if (_revivePaused) return; // already in minigame
+  // v4: Player hit 0 HP. Show defeat overlay + revive minigame. Battle state is
+  // preserved; `_revivePaused` gates gameplay updates while the overlay is up.
+  _revivePaused = true;
+  showFloatingText(player.x, player.y - 60, 'DEFEATED', '#d44', player);
+  player.iframes = 999;  // invulnerable during minigame
+  // Attempt 0 = first try (full speed). Attempt 1 = retry at 80% speed.
+  _startReviveMinigame(0);
+}
+
+// ── REVIVE MINIGAME STATE ──
+var _reviveState = null;
+
+function _startReviveMinigame(attemptIdx) {
+  // attemptIdx: 0 = first attempt, 1 = retry at reduced difficulty
+  var isRetry = attemptIdx > 0;
+  var windowMs = isRetry ? 6000 / 0.8 : 6000;   // retry window is 80% speed → 7500ms
+  var targetTaps = 20;
+  _reviveState = {
+    attempt: attemptIdx,
+    startedAt: performance.now(),
+    endsAt: performance.now() + windowMs,
+    windowMs: windowMs,
+    tapsNeeded: targetTaps,
+    taps: 0,
+    isRetry: isRetry,
+    tickId: null,
+  };
+  _showReviveOverlay();
+  // Poll every 100ms to update UI + check time
+  _reviveState.tickId = setInterval(_reviveTick, 100);
+}
+
+function _reviveTick() {
+  if (!_reviveState) return;
+  var now = performance.now();
+  var pct = Math.min(1, (now - _reviveState.startedAt) / _reviveState.windowMs);
+  var tapPct = Math.min(1, _reviveState.taps / _reviveState.tapsNeeded);
+  // Update UI progress bars
+  var timeEl = document.getElementById('revive-time-bar');
+  if (timeEl) timeEl.style.width = ((1 - pct) * 100).toFixed(1) + '%';
+  var progEl = document.getElementById('revive-prog-bar');
+  if (progEl) progEl.style.width = (tapPct * 100).toFixed(1) + '%';
+  var tapCountEl = document.getElementById('revive-tap-count');
+  if (tapCountEl) tapCountEl.textContent = _reviveState.taps + '/' + _reviveState.tapsNeeded;
+
+  // Success?
+  if (_reviveState.taps >= _reviveState.tapsNeeded) {
+    _resolveRevive(true);
+    return;
+  }
+  // Time out?
+  if (now >= _reviveState.endsAt) {
+    if (!_reviveState.isRetry) {
+      // Offer retry
+      _offerReviveRetry();
+    } else {
+      // Final failure → defeat
+      _resolveRevive(false);
+    }
+  }
+}
+
+function _reviveTapHandler(e) {
+  if (!_reviveState) return;
+  if (e && e.preventDefault) e.preventDefault();
+  _reviveState.taps++;
+  // Tiny visual feedback — pulse the button
+  var btn = document.getElementById('revive-tap-btn');
+  if (btn) {
+    btn.style.transform = 'scale(0.95)';
+    setTimeout(function() { if (btn) btn.style.transform = 'scale(1)'; }, 80);
+  }
+}
+
+function _showReviveOverlay() {
+  var root = document.getElementById('rumble-root') || document.body;
+  var existing = document.getElementById('revive-overlay');
+  if (existing) existing.remove();
+
+  var isRetry = _reviveState.isRetry;
+  var titleColor = isRetry ? '#ff884d' : '#d44';
+  var title = isRetry ? 'LAST CHANCE' : 'DEFEATED';
+  var subtitle = isRetry ? 'Tap fast — final attempt' : 'Tap rapidly to revive!';
+
+  var html =
+    '<div id="revive-overlay" style="position:absolute;top:0;left:0;right:0;bottom:0;'
+      + 'background:rgba(10,0,0,0.88);display:flex;flex-direction:column;align-items:center;justify-content:center;'
+      + 'z-index:250;padding:20px;pointer-events:auto;font-family:\'Cinzel\',serif;">'
+      // Title
+      + '<div style="font-size:clamp(22px,6vw,38px);font-weight:700;color:' + titleColor
+      +   ';letter-spacing:.15em;text-shadow:0 0 20px ' + titleColor + ';margin-bottom:4px;text-align:center;">'
+      +   title + '</div>'
+      + '<div style="font-size:clamp(12px,3vw,15px);color:#ddd;margin-bottom:20px;font-family:\'Crimson Pro\',serif;font-style:italic;">'
+      +   subtitle + '</div>'
+      // Time-remaining bar
+      + '<div style="width:min(320px,90%);margin-bottom:8px;font-size:10px;color:#888;letter-spacing:.1em;display:flex;justify-content:space-between;">'
+      +   '<span>TIME</span><span id="revive-tap-count">0/20</span></div>'
+      + '<div style="width:min(320px,90%);height:6px;background:#2a0a0a;border-radius:3px;overflow:hidden;margin-bottom:16px;">'
+      +   '<div id="revive-time-bar" style="height:100%;background:linear-gradient(90deg,#d44,#d4a44a);width:100%;transition:width 0.1s linear;"></div>'
+      + '</div>'
+      // Progress bar
+      + '<div style="width:min(320px,90%);margin-bottom:8px;font-size:10px;color:#888;letter-spacing:.1em;">PROGRESS</div>'
+      + '<div style="width:min(320px,90%);height:14px;background:#1a0a0a;border:1px solid #444;border-radius:8px;overflow:hidden;margin-bottom:28px;">'
+      +   '<div id="revive-prog-bar" style="height:100%;background:linear-gradient(90deg,#4a9a35,#9adb9a);width:0%;transition:width 0.08s ease;box-shadow:0 0 10px #9adb9a;"></div>'
+      + '</div>'
+      // Tap button (large target)
+      + '<button id="revive-tap-btn" style="'
+      +   'width:min(220px,70vw);height:min(220px,70vw);border-radius:50%;'
+      +   'background:radial-gradient(circle,' + titleColor + 'dd 0%,' + titleColor + '88 55%,' + titleColor + '44 100%);'
+      +   'border:4px solid ' + titleColor + ';color:#fff;font-family:\'Cinzel\',serif;'
+      +   'font-size:clamp(18px,5vw,28px);font-weight:700;letter-spacing:.1em;'
+      +   'box-shadow:0 0 40px ' + titleColor + '88, inset 0 0 20px rgba(0,0,0,0.3);'
+      +   'cursor:pointer;touch-action:manipulation;user-select:none;-webkit-user-select:none;'
+      +   'transition:transform 0.08s ease;'
+      +   '">REVIVE</button>'
+    + '</div>';
+
+  var wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  var node = wrapper.firstChild;
+  root.appendChild(node);
+
+  var btn = document.getElementById('revive-tap-btn');
+  if (btn) {
+    // pointerdown fires faster than click; prevents double-fire via touch→click simulation
+    btn.addEventListener('pointerdown', _reviveTapHandler);
+    btn.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); });
+  }
+}
+
+function _offerReviveRetry() {
+  // Time expired on first attempt — swap to retry mode
+  if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
+  _startReviveMinigame(1);
+}
+
+function _resolveRevive(success) {
+  if (!_reviveState) return;
+  if (_reviveState.tickId) clearInterval(_reviveState.tickId);
+  var overlay = document.getElementById('revive-overlay');
+  if (overlay) overlay.remove();
+  _reviveState = null;
+
+  if (success) {
+    // Restore player
+    var hadCheese = (player.cheese || 0) > 0;
+    if (hadCheese) {
+      player.cheese -= 1;
+      player.hp = player.hpMax;
+      showFloatingText(player.x, player.y - 50, '🧀 REVIVED', '#FFD96A', player);
+    } else {
+      player.hp = Math.max(1, Math.floor(player.hpMax * 0.5));
+      showFloatingText(player.x, player.y - 50, 'REVIVED', '#9adb9a', player);
+    }
+    player.iframes = 2.5;
     clearStatuses();
-    showFloatingText(player.x, player.y - 50, 'RESPAWNED', '#4a9a35', player);
-  }, 1500);
+    _revivePaused = false;
+  } else {
+    // True defeat — end battle
+    _revivePaused = false;
+    _internalEnd('defeat');
+  }
 }
 
 // Internal — called by Rumble.forceEnd or via in-combat end conditions.
@@ -7920,7 +8120,10 @@ function _favoriteMove() {
 // _internalEnd('victory'). Has a 1-second pointer-events guard so the same
 // click that killed the enemy doesn't also dismiss the overlay.
 function _showVictoryScreen() {
-  if (!player || !_battleStats) { _internalEnd('victory'); return; }
+  if (!player || !_battleStats) {
+    console.warn('[BQ-RUMBLE] _showVictoryScreen bailing — missing player or _battleStats');
+    _internalEnd('victory'); return;
+  }
   var durMs = Math.max(1, _battleStats.endedAt - _battleStats.startedAt);
   var durSec = Math.round(durMs / 1000);
   var mm = Math.floor(durSec / 60), ss = durSec % 60;
@@ -7938,7 +8141,7 @@ function _showVictoryScreen() {
       + '</span>';
   }).join('');
   if (_battleStats.cheeseEaten > 0) {
-    gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5C80033;border:1px solid #F5C800;font-size:11px;">🧀 +' + _battleStats.cheeseEaten + ' HP Max</span>';
+    gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5C80033;border:1px solid #F5C800;font-size:11px;">🧀 +' + _battleStats.cheeseEaten + ' cheese</span>';
   }
   if (_battleStats.goldGained > 0) {
     gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5D00033;border:1px solid #F5D000;font-size:11px;">🪙 +' + _battleStats.goldGained + ' gold</span>';
@@ -8061,6 +8264,12 @@ function _showVictoryScreen() {
 // event ('victory' | 'defeat' | 'timeout' | 'quit').
 function _internalEnd(reason) {
   running = false;
+  // v4: tear down revive minigame if still active
+  if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
+  _reviveState = null;
+  _revivePaused = false;
+  var reviveOverlay = document.getElementById('revive-overlay');
+  if (reviveOverlay && reviveOverlay.parentNode) reviveOverlay.parentNode.removeChild(reviveOverlay);
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
   if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
@@ -8085,6 +8294,7 @@ function _computeState() {
     playerHpMax: player.hpMax,
     playerArmor: player.armor || 0,
     playerGold:  player.gold || 0,
+    playerCheese: player.cheese || 0,
     playerBricks: Object.assign({}, player.bricks),
     playerBrickMax: Object.assign({}, player.brickMax || {}),
     enemyHp:     first ? first.hp : 0,
@@ -8094,6 +8304,19 @@ function _computeState() {
     mode:        (cfg && cfg.mode) || 'sandbox',
     fatigue:     player.fatigue ? Object.assign({}, player.fatigue) : { signature: 0, offClass: 0 },
     overloadCount: player.overloadCount || 0,
+    battleStats: _battleStats ? {
+      damageDealt:    _battleStats.damageDealt || 0,
+      damageTaken:    _battleStats.damageTaken || 0,
+      armorAbsorbed:  _battleStats.armorAbsorbed || 0,
+      bricksUsed:     Object.assign({}, _battleStats.bricksUsed || {}),
+      bricksGained:   Object.assign({}, _battleStats.bricksGained || {}),
+      goldGained:     _battleStats.goldGained || 0,
+      cheeseEaten:    _battleStats.cheeseEaten || 0,
+      critsLanded:    _battleStats.critsLanded || 0,
+      overloadsFired: _battleStats.overloadsFired || 0,
+      hpLow:          _battleStats.hpLow === 9999 ? (player.hpMax||0) : _battleStats.hpLow,
+      enemiesKilled:  (_battleStats.enemiesKilled || []).slice(),
+    } : null,
   };
 }
 
@@ -8229,6 +8452,10 @@ window.Rumble = {
     if (!player) return;
     player.hp = Math.max(0, Math.min(player.hpMax, n|0));
     updateHUD();
+    // v4: if the setter drops player to 0, trigger the defeat/revive minigame
+    if (player.hp <= 0 && running && !_revivePaused && typeof respawnPlayer === 'function') {
+      respawnPlayer();
+    }
   },
   setEnemyHP: function(n) {
     var g = entities.find(function(x){ return x.hp > 0; });

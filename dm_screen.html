@@ -75,10 +75,6 @@ html,body{height:100%;font-family:'Crimson Pro',Georgia,serif;background:var(--b
 .init-pill{padding:3px 9px;border-radius:9px;font-size:11px;border:1px solid transparent;display:inline-block;margin:2px;}
 .init-pill.active{border-width:2px;}
 select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--border);background:var(--surface3);color:var(--text);font-size:12px;margin-bottom:6px;}
-.diff-badge{font-size:9px;padding:1px 6px;border-radius:8px;}
-.diff-badge.easy{background:#051a0f;color:var(--green);}
-.diff-badge.medium{background:#1a1000;color:var(--orange);}
-.diff-badge.hard{background:#1a0505;color:var(--red);}
 .fortress-brick{width:18px;height:18px;border-radius:3px;background:#888;border:1px solid #aaa;display:inline-block;margin:2px;}
 .fortress-brick.gone{background:#1a1a1a;border-color:#222;}
 ::-webkit-scrollbar{width:3px;height:3px;}
@@ -244,7 +240,11 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
       <div id="active-event-panel" style="display:none;margin-bottom:10px;padding:10px;border-radius:10px;background:#0a0a1a;border:2px solid var(--gold);">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
           <span style="font-family:Cinzel,serif;font-size:11px;color:var(--gold);">&#9889; ACTIVE LANDING EVENT</span>
-          <button class="btn G btn-sm" onclick="dmResolveEvent()">&#10003; Mark Resolved</button>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;">
+            <button class="btn btn-sm" style="font-size:10px;padding:4px 8px;background:#1a2020;border:1px solid #588;color:#8bb;" onclick="dmResetEvent()" title="Reset current event with fresh content">&#8634; Reset</button>
+            <button class="btn btn-sm" style="font-size:10px;padding:4px 8px;background:#1a1020;border:1px solid #858;color:#b8b;" onclick="dmRerollEvent()" title="Roll a new random event on this space">&#9860; Re-roll</button>
+            <button class="btn G btn-sm" onclick="dmResolveEvent()">&#10003; Mark Resolved</button>
+          </div>
         </div>
         <div id="active-event-body"></div>
       </div>
@@ -259,15 +259,6 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
         <button class="btn P btn-sm" id="view-table-btn" onclick="toggleEventTable()">View Table</button>
       </div>
       <div id="event-table"></div>
-      <div id="trivia-panel" style="margin-top:8px;display:none;">
-        <div style="font-family:Cinzel,serif;font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:6px;">LEGO Trivia</div>
-        <div id="trivia-content"></div>
-        <div class="btn-row">
-          <button class="btn P btn-sm" onclick="nextTrivia()">Different</button>
-          <button class="btn G btn-sm" onclick="triviaCorrect()">&#10003; Correct</button>
-          <button class="btn btn-sm" onclick="document.getElementById('trivia-panel').style.display='none'">Close</button>
-        </div>
-      </div>
       <div id="riddle-panel" style="margin-top:8px;display:none;">
         <div style="font-family:Cinzel,serif;font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:6px;">Riddle</div>
         <div id="riddle-content"></div>
@@ -334,9 +325,7 @@ function initDMFontSize() {
 
 var G = null;
 var BCOLORS_DM = {blue:'#006DB7',gray:'#AAAAAA',white:'#EFEFEF',orange:'#F57C00',purple:'#7B2FBE',yellow:'#F5D000',red:'#D01012',green:'#237841',black:'#1a1a1a'};
-var currentTriviaIdx = 0;
 var currentRiddleIdx = 0;
-var triviaTargetCls = null;
 
 var CLS_NAMES = {breaker:'Breaker',formwright:'Formwright',snapstep:'Snapstep',blocksmith:'Blocksmith',fixer:'Fixer',wild_one:'Wild One'};
 var ZONE_COLORS = ['#0a1a0a','#1a1a2e','#2a1500','#2a0a0a','#1a0a2a'];
@@ -367,6 +356,18 @@ function renderAll() {
     }
   } else if (window._dmRiddleTimer) {
     clearInterval(window._dmRiddleTimer); window._dmRiddleTimer = null;
+  }
+  // v4 Red Trial timer tick — re-render the active event panel every second during joining/active
+  if (G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand' && (G.activeEvent.redPhase === 'joining' || G.activeEvent.redPhase === 'active')) {
+    if (!window._dmRedTimer) {
+      window._dmRedTimer = setInterval(function() {
+        if (!G.activeEvent || G.activeEvent.redVariant !== 'trial_of_hand') { clearInterval(window._dmRedTimer); window._dmRedTimer = null; return; }
+        if (G.activeEvent.redPhase !== 'joining' && G.activeEvent.redPhase !== 'active') { clearInterval(window._dmRedTimer); window._dmRedTimer = null; return; }
+        renderActiveEvent();
+      }, 1000);
+    }
+  } else if (window._dmRedTimer) {
+    clearInterval(window._dmRedTimer); window._dmRedTimer = null;
   }
   renderClues();
   renderLog();
@@ -614,8 +615,13 @@ function renderPlayers() {
   var activeClass = G.turnOrder[G.activePlayerIdx];
   var html = '';
   Object.values(G.players).forEach(function(p) {
-    var pct = Math.max(0, Math.round(p.hp / p.hpMax * 100));
-    var hc = p.hp <= Math.floor(p.hpMax * .25) ? '#E24B4A' : p.hp <= Math.floor(p.hpMax * .5) ? '#EF9F27' : '#1D9E75';
+    var isOh = p.hp > p.hpMax;
+    var pct = Math.min(100, Math.max(0, Math.round(p.hp / p.hpMax * 100)));
+    var hc = isOh ? '#b06fef'
+      : p.hp <= Math.floor(p.hpMax * .25) ? '#E24B4A'
+      : p.hp <= Math.floor(p.hpMax * .5) ? '#EF9F27'
+      : '#1D9E75';
+    var hpBg = isOh ? 'linear-gradient(90deg,#7B2FBE,#b06fef)' : hc;
     var bkHtml = '';
     Object.entries(p.bricks).forEach(function(entry) {
       var color = entry[0]; var qty = entry[1];
@@ -646,10 +652,10 @@ function renderPlayers() {
       + '<span class="dot ' + (p.connected ? 'on' : 'off') + '"></span>'
       + '</span></div>';
 
-    html += '<div class="p-hpbar"><div class="p-hpfill" style="width:' + pct + '%;background:' + hc + ';"></div></div>';
+    html += '<div class="p-hpbar"><div class="p-hpfill" style="width:' + pct + '%;background:' + hpBg + ';' + (isOh?'box-shadow:0 0 6px #b06fef88;':'') + '"></div></div>';
 
     html += '<div class="p-stats">'
-      + '<span style="color:' + hc + ';font-weight:700;">' + p.hp + '/' + p.hpMax + 'HP</span>'
+      + '<span style="color:' + hc + ';font-weight:700;">' + p.hp + '/' + p.hpMax + 'HP' + (isOh?' <span style="color:#b06fef;font-size:10px;">(+'+(p.hp-p.hpMax)+')</span>':'') + '</span>'
       + '<span>🛡 ' + (p.armor || 0) + '</span>'
       + '<span><span style="width:12px;height:12px;border-radius:50%;background:#F5D000;display:inline-block;vertical-align:middle;box-shadow:0 1px 3px #F5D00066;"></span> ' + p.gold + '</span>'
       + '<span style="color:var(--faint);font-size:9px;">' + spaceLabel + '</span>'
@@ -657,6 +663,15 @@ function renderPlayers() {
       + '</div>';
 
     if (statuses) html += '<div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:3px;">' + statuses + '</div>';
+    // v4: persistent board-state buffs/debuffs
+    var vBadges = '';
+    if (p.nextRumbleBuff && p.nextRumbleBuff.refreshBoost) {
+      vBadges += '<span style="display:inline-flex;align-items:center;gap:2px;font-size:9px;padding:1px 5px;border-radius:6px;background:#0a2540;border:1px solid #4db8ff;color:#4db8ff;">⚡ FW charge</span>';
+    }
+    if ((p.queuedPoisonStacks||0) > 0) {
+      vBadges += '<span style="display:inline-flex;align-items:center;gap:2px;font-size:9px;padding:1px 5px;border-radius:6px;background:#1a2a10;border:1px solid #4a7a2a;color:#bada7a;">☠ ' + p.queuedPoisonStacks + '</span>';
+    }
+    if (vBadges) html += '<div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:3px;">' + vBadges + '</div>';
     html += '<div class="p-bricks">' + (bkHtml || '<span style="font-size:9px;color:var(--faint);">No bricks</span>') + '</div>';
 
     html += '</div>'; // end clickable header
@@ -861,10 +876,11 @@ function forceDashClick() {
 function renderActiveEvent() {
   var ev = G.activeEvent;
   var panel = document.getElementById('active-event-panel');
-  if (!panel) return;
+  if (!panel) { return; }
   if (!ev) { panel.style.display = 'none'; return; }
-  // Monster events are now handled by the red Battle Pending card — hide the yellow one.
-  if (ev.evType === 'monster' || ev.evType === 'boss') { panel.style.display = 'none'; return; }
+  // Monster/boss events: hide the active-event panel while the pending rumble card or live rumble is in control.
+  // Show it post-rumble (ev.rumbleResult set) so DM can review + Mark Resolved.
+  if ((ev.evType === 'monster' || ev.evType === 'boss') && !ev.rumbleResult) { panel.style.display = 'none'; return; }
   if (ev.resolved && !ev.blueResult && !ev.trapResult && !ev.grayResult && !ev.goldResult) { panel.style.display = 'none'; return; }
   panel.style.display = 'block';
   var p = G.players[ev.cls];
@@ -987,6 +1003,13 @@ function renderActiveEvent() {
     if (brHpDmg > 0) brItems.push({html:'<span style="font-size:13px;color:#E24B4A;font-weight:700;vertical-align:middle;">\u2212'+brHpDmg+' \u2764\ufe0f</span>'});
     body += brItems.length ? dmIconRow(brItems) : '<div style="font-size:11px;color:'+(br.success?'#4db8ff':'#888')+';">'+(br.success?'Success':'Consolation')+'</div>';
     if (!br.success) body += '<div style="font-size:10px;color:#4db8ff55;margin-top:3px;font-style:italic;">Arcane energy remains</div>';
+    // v4: FW Formwright charge
+    if (br.fwRefreshBuff) {
+      body += '<div style="margin-top:6px;padding:6px 8px;background:linear-gradient(90deg,#0a2540,#0a1a30);border:1px solid #4db8ff;border-radius:6px;text-align:center;">'
+        +   '<div style="font-family:Cinzel,serif;font-size:10px;color:#4db8ff;letter-spacing:.1em;">\u26a1 FORMWRIGHT CHARGE \u26a1</div>'
+        +   '<div style="font-size:9px;color:#7ac7ff;margin-top:2px;">2\u00d7 brick refresh · first 10s of next rumble</div>'
+        + '</div>';
+    }
     body += '</div>';
   }
 
@@ -1043,7 +1066,6 @@ function renderActiveEvent() {
   }
 
   // BUTTONS
-  if (evData.type === 'purple') body += '<button class="btn P btn-sm" style="margin-top:6px;" onclick="showTrivia(null)">Open Trivia</button>';
   if (evData.type === 'riddle') {
     if (ev.riddleActive) {
       // Live riddle — show Q, answer, options for DM
@@ -1071,26 +1093,203 @@ function renderActiveEvent() {
   if ((evData.type === 'trap' || evData.type === 'doubletrap') && !ev.trapResult) {
     body += '<button class="btn W btn-sm" style="margin-top:6px;width:100%;display:flex;align-items:center;justify-content:center;gap:6px;" onclick="placeTrap()"><span style="width:12px;height:12px;border-radius:2px;background:#F57C00;display:inline-block;"></span>Fire Trap'+(evData.type==='doubletrap'?' (\u00d72)':'')+'</button>';
   }
-  // v4 RED — Trial of the Hand: DM adjudication
-  if ((evData.type === 'red' || ev.evType === 'red' || ev.redVariant === 'trial_of_hand') && !ev.redResult) {
-    var challengeText = ev.redChallenge ? ev.redChallenge.text : 'Server has not set a challenge.';
-    var kind = ev.redChallenge ? ev.redChallenge.kind : '?';
-    var isBreaker = ev.cls === 'breaker';
-    var breakerAutoWin = isBreaker && kind === 'strength';
-    body += '<div style="margin-top:10px;padding:10px;background:#1a0505;border:1px solid #8a4a4a;border-radius:6px;">'
-      + '<div style="font-size:10px;color:#faa;text-align:center;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px;">⚔ '+kind+' CHALLENGE</div>'
-      + '<div style="font-size:13px;color:#fff;text-align:center;margin-bottom:10px;font-family:Cinzel,serif;line-height:1.4;">'+challengeText+'</div>'
-      + (breakerAutoWin ? '<div style="font-size:10px;color:#E8C868;text-align:center;margin-bottom:6px;letter-spacing:.06em;">🏋 BREAKER AUTO-WIN AVAILABLE</div>' : '')
-      + '<div style="display:flex;gap:4px;margin-top:8px;">'
-      +   '<button class="btn btn-sm" style="flex:1;background:#2a2000;border:1px solid #F5D000;color:#F5D000;" onclick="redTrialResolve(\'perfect\')">🏆 PERFECT</button>'
-      +   '<button class="btn btn-sm" style="flex:1;background:#1a2a10;border:1px solid #9ada9a;color:#9ada9a;" onclick="redTrialResolve(\'good\')">✓ GOOD</button>'
-      +   '<button class="btn btn-sm" style="flex:1;background:#2a1010;border:1px solid #d44;color:#d44;" onclick="redTrialResolve(\'failed\')">✗ FAILED</button>'
-      + '</div></div>';
+  // v4 RED — Trial of the Hand: phase-based party race
+  if ((evData.type === 'red' || ev.evType === 'red' || ev.redVariant === 'trial_of_hand')) {
+    var challenge = ev.redChallenge || { name:'TRIAL', kind:'?', text:'(no challenge set)', digital:false };
+    var kindColor = { strength:'#d44', dexterity:'#F5D000', focus:'#6af' }[challenge.kind] || '#faa';
+    var phase = ev.redPhase || 'joining';
+    var joined = ev.redJoined || [];
+
+    body += '<div style="margin-top:10px;padding:10px;background:#1a0505;border:1px solid #8a4a4a;border-radius:6px;">';
+    // Challenge header — always shown
+    body += '<div style="font-size:12px;color:#faa;text-align:center;font-family:Cinzel,serif;letter-spacing:.08em;margin-bottom:2px;">⚔ ' + challenge.name + '</div>';
+    body += '<div style="font-size:9px;color:' + kindColor + ';text-align:center;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px;">' + challenge.kind + (challenge.digital ? ' · digital' : '') + '</div>';
+    body += '<div style="font-size:11px;color:#ddd;text-align:center;margin-bottom:8px;font-family:Cinzel,serif;line-height:1.4;">' + challenge.text + '</div>';
+
+    // Joined roster
+    var rosterHtml = joined.map(function(c) {
+      var jp = G.players[c];
+      if (!jp) return '';
+      var score = (ev.redDigitalScores||{})[c];
+      var scoreTxt = score && score.finishedAt
+        ? ' <span style="color:#9adb9a;font-size:9px;">· ' + (score.taps ? score.taps + 'taps' : score.reactionMs + 'ms') + '</span>'
+        : '';
+      return '<span style="display:inline-block;margin:2px 3px;padding:2px 6px;background:#2a0a0a;border:1px solid #8a4a4a;border-radius:10px;font-size:10px;color:#fcc;">' + jp.icon + ' ' + jp.name + scoreTxt + '</span>';
+    }).join('');
+
+    if (phase === 'joining') {
+      var secsLeft = Math.max(0, Math.ceil((ev.redJoinEndsAt - Date.now())/1000));
+      body += '<div style="font-size:10px;color:#F5D000;text-align:center;margin-bottom:4px;letter-spacing:.08em;">⏱ JOIN · ' + secsLeft + 's</div>';
+      body += '<div style="text-align:center;margin-bottom:6px;">' + (rosterHtml || '<span style="font-size:10px;color:#666;font-style:italic;">No challengers yet</span>') + '</div>';
+      body += '<div style="display:flex;gap:4px;margin-top:6px;">'
+        +   '<button class="btn btn-sm" style="flex:2;background:#2a2000;border:1px solid #F5D000;color:#F5D000;' + (joined.length === 0 ? 'opacity:0.4;pointer-events:none;' : '') + '" onclick="redTrialBegin()">▶ START CHALLENGE</button>'
+        +   '<button class="btn btn-sm" style="flex:1;background:#2a0a0a;border:1px solid #666;color:#888;" onclick="redTrialCancel()">⊘ CANCEL</button>'
+        + '</div>';
+    } else if (phase === 'active') {
+      var secsLeft = Math.max(0, Math.ceil((ev.redEndsAt - Date.now())/1000));
+      body += '<div style="font-size:12px;color:#d44;text-align:center;margin-bottom:6px;letter-spacing:.08em;font-family:Cinzel,serif;">⏱ ACTIVE · ' + secsLeft + 's</div>';
+      body += '<div style="text-align:center;margin-bottom:6px;">' + rosterHtml + '</div>';
+      body += renderRedPickerHtml(joined);
+    } else if (phase === 'picking') {
+      body += '<div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:6px;font-style:italic;">Time\'s up — pick the winner</div>';
+      body += '<div style="text-align:center;margin-bottom:6px;">' + rosterHtml + '</div>';
+      body += renderRedPickerHtml(joined);
+    } else if (phase === 'done') {
+      var R = ev.redResult;
+      if (R) {
+        if (R.winnerCls) {
+          var wp = G.players[R.winnerCls];
+          body += '<div style="font-size:14px;color:#E8C868;text-align:center;letter-spacing:.08em;font-family:Cinzel,serif;margin-bottom:6px;padding:8px;background:#2a2000;border:2px solid #F5D000;border-radius:6px;">🏆 ' + (wp ? wp.icon + ' ' + wp.name : R.winnerCls) + ' WON</div>';
+        } else if (R.cancelled) {
+          body += '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:6px;padding:8px;background:#1a1a1a;border:1px solid #666;border-radius:6px;">⊘ Cancelled — event lingers, red brick stays</div>';
+        } else {
+          body += '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:6px;padding:8px;background:#1a1a1a;border:1px solid #666;border-radius:6px;">✗ No winner — event lingers, red brick stays</div>';
+        }
+        // Participation breakdown
+        var participationHtml = '';
+        (R.participants||[]).forEach(function(c) {
+          if (c === R.winnerCls) return;
+          var pp = G.players[c];
+          var res = (R.results||{})[c];
+          if (!pp || !res) return;
+          var rewardTxt = res.gold ? ('+' + res.gold + ' 🪙') : ('+' + (res.cheese||1) + ' 🧀');
+          participationHtml += '<span style="display:inline-block;margin:2px 3px;padding:2px 6px;background:#1a2a1a;border:1px solid #4a8a5a;border-radius:10px;font-size:10px;color:#9adb9a;">' + pp.icon + ' ' + pp.name + ' ' + rewardTxt + '</span>';
+        });
+        if (participationHtml) {
+          body += '<div style="font-size:9px;color:#888;letter-spacing:.08em;text-align:center;margin-bottom:4px;">PARTICIPATION</div>'
+            + '<div style="text-align:center;margin-bottom:8px;">' + participationHtml + '</div>';
+        }
+      }
+    }
+    body += '</div>';
   }
   if (evData.type === 'monster' || evData.type === 'boss') {
-    var mStr = evData.mids ? evData.mids.join(',') : '';
-    var isB = evData.type === 'boss';
-    body += '<button class="btn D btn-sm" style="margin-top:6px;" onclick="quickBattle(\'' + mStr + '\',' + isB + ')">Start Battle</button>';
+    if (ev.rumbleResult) {
+      // Post-rumble result card — DM reviews outcome, then clicks Mark Resolved to pass turn
+      var rr = ev.rumbleResult;
+      var rp = G.players[rr.cls];
+      var pre = ev.preRumbleSnap || {};
+      var pName = rp ? (rp.icon + ' ' + rp.name) : rr.cls;
+      var victorColor, victorLabel, victorIcon;
+      // Rumble sends: victor = player's cls on win, 'enemy' on defeat, 'none' on force-quit
+      if (rr.victor && rr.victor !== 'enemy' && rr.victor !== 'none') {
+        victorColor = '#9adb9a'; victorLabel = 'VICTORY'; victorIcon = '🏆';
+      } else if (rr.victor === 'enemy' || rr.playerDied) {
+        victorColor = '#d44'; victorLabel = (rr.playerDied ? 'PLAYER DOWN' : 'DEFEAT'); victorIcon = '💀';
+      } else {
+        victorColor = '#aaa'; victorLabel = 'FORCE QUIT'; victorIcon = '⊘';
+      }
+
+      // Compute deltas (may be null if preRumbleSnap missing, e.g. save/reload mid-battle)
+      function fmtDelta(cur, prev, emoji) {
+        if (cur == null) return '<span style="color:#666;">' + emoji + ' ?</span>';
+        if (prev == null) return '<span>' + emoji + ' ' + cur + '</span>';
+        var d = cur - prev;
+        var dStr = d === 0 ? '' : (d > 0 ? ' <span style="color:#9adb9a;font-size:10px;">(+' + d + ')</span>' : ' <span style="color:#d44;font-size:10px;">(' + d + ')</span>');
+        return '<span>' + emoji + ' ' + cur + dStr + '</span>';
+      }
+
+      var hpLine = '<span>❤️ ' + (rr.finalHp != null ? rr.finalHp : '?') + '/' + (rr.finalHpMax != null ? rr.finalHpMax : '?');
+      if (pre.hp != null && rr.finalHp != null) {
+        var hpD = rr.finalHp - pre.hp;
+        if (hpD !== 0) hpLine += (hpD > 0 ? ' <span style="color:#9adb9a;font-size:10px;">(+' + hpD + ')</span>' : ' <span style="color:#d44;font-size:10px;">(' + hpD + ')</span>');
+      }
+      hpLine += '</span>';
+      var goldLine = fmtDelta(rr.finalGold, pre.gold, '🪙');
+      var armorLine = (rr.finalArmor != null && rr.finalArmor > 0) ? ' · <span>🛡 ' + rr.finalArmor + '</span>' : '';
+
+      // Brick deltas — only show colors that changed
+      var brickDeltas = '';
+      if (rr.finalBricks && pre.bricks) {
+        var brickBg = { red:'#D01012', blue:'#006DB7', gray:'#AAAAAA', green:'#237841', white:'#EFEFEF', yellow:'#F5D000', orange:'#F57C00', purple:'#7B2FBE', black:'#1a1a1a' };
+        ['red','blue','gray','green','white','yellow','orange','purple','black'].forEach(function(col) {
+          var before = pre.bricks[col] || 0;
+          var after = rr.finalBricks[col] || 0;
+          if (after !== before) {
+            var diff = after - before;
+            var sign = diff > 0 ? '+' : '';
+            var diffColor = diff > 0 ? '#9adb9a' : '#d44';
+            var brdr = col === 'white' ? 'border:1px solid #ccc;' : '';
+            brickDeltas += '<span style="display:inline-flex;align-items:center;gap:3px;margin:2px 4px;padding:2px 6px;background:#0a0a0a;border-radius:6px;font-size:10px;">'
+              + '<span style="width:10px;height:10px;border-radius:2px;background:' + brickBg[col] + ';' + brdr + 'display:inline-block;"></span>'
+              + '<span style="color:' + diffColor + ';font-weight:700;">' + sign + diff + '</span>'
+              + '</span>';
+          }
+        });
+      }
+
+      // Enemy info
+      var enemyLine = pre.enemyName
+        ? '<div style="font-size:11px;color:#888;text-align:center;margin-bottom:6px;">vs <span style="color:#ccc;">' + pre.enemyName + '</span></div>'
+        : '';
+
+      body += '<div style="margin-top:10px;padding:12px;background:#1a0505;border:2px solid ' + victorColor + ';border-radius:8px;">'
+        + '<div style="font-size:16px;color:' + victorColor + ';text-align:center;font-family:Cinzel,serif;letter-spacing:.08em;margin-bottom:6px;">' + victorIcon + ' ' + victorLabel + '</div>'
+        + enemyLine
+        + '<div style="font-size:12px;color:#ddd;text-align:center;margin-bottom:8px;">' + pName + (rr.reason ? ' <span style="color:#888;font-size:10px;">(' + rr.reason + ')</span>' : '') + '</div>'
+        + '<div style="display:flex;justify-content:center;align-items:center;gap:14px;font-size:11px;color:#ddd;margin-bottom:6px;">'
+        +   hpLine
+        +   goldLine
+        +   armorLine
+        + '</div>'
+        + (brickDeltas
+          ? '<div style="text-align:center;margin-top:6px;">'
+            + '<div style="font-size:9px;color:#888;letter-spacing:.08em;margin-bottom:2px;">BRICK CHANGES</div>'
+            + brickDeltas
+          + '</div>'
+          : '');
+
+      // ── Battle stats block (crits, damage, etc) ──
+      var bs = rr.battleStats;
+      if (bs) {
+        var statChips = '';
+        if (bs.damageDealt > 0)    statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #8a4a4a;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">DMG</span> <strong style="color:#d44;">' + bs.damageDealt + '</strong></span>';
+        if (bs.damageTaken > 0)    statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #666;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">TAKEN</span> <strong style="color:#ccc;">' + bs.damageTaken + '</strong></span>';
+        if (bs.armorAbsorbed > 0)  statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #4a6a8a;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">🛡 ABSORB</span> <strong style="color:#9ac;">' + bs.armorAbsorbed + '</strong></span>';
+        if (bs.critsLanded > 0)    statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #8a6a4a;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">CRITS</span> <strong style="color:#F5D000;">' + bs.critsLanded + '</strong></span>';
+        if (bs.overloadsFired > 0) statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #7B2FBE;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">OVERLOAD</span> <strong style="color:#c8c;">' + bs.overloadsFired + '</strong></span>';
+        if (bs.hpLow != null && bs.hpLow < (rr.finalHpMax || 99)) statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #666;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">HP LOW</span> <strong style="color:#d88;">' + bs.hpLow + '</strong></span>';
+        if (bs.enemiesKilled && bs.enemiesKilled.length > 0) statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #5a8a5a;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">KILLS</span> <strong style="color:#9adb9a;">' + bs.enemiesKilled.length + '</strong></span>';
+
+        if (statChips) {
+          body += '<div style="text-align:center;margin-top:8px;padding-top:6px;border-top:1px solid ' + victorColor + '44;">'
+            + '<div style="font-size:9px;color:#888;letter-spacing:.08em;margin-bottom:3px;">BATTLE STATS</div>'
+            + '<div style="font-size:10px;">' + statChips + '</div>'
+            + '</div>';
+        }
+
+        // Bricks used / gained (if any)
+        var usedChips = '';
+        var gainedChips = '';
+        var brickBg2 = { red:'#D01012', blue:'#006DB7', gray:'#AAAAAA', green:'#237841', white:'#EFEFEF', yellow:'#F5D000', orange:'#F57C00', purple:'#7B2FBE', black:'#1a1a1a' };
+        if (bs.bricksUsed) {
+          Object.keys(bs.bricksUsed).forEach(function(c) {
+            if (!bs.bricksUsed[c]) return;
+            var brdr = c === 'white' ? 'border:1px solid #ccc;' : '';
+            usedChips += '<span style="display:inline-flex;align-items:center;gap:3px;margin:1px 2px;padding:1px 4px;background:#0a0a0a;border-radius:4px;font-size:10px;"><span style="width:8px;height:8px;border-radius:2px;background:' + (brickBg2[c]||'#888') + ';' + brdr + 'display:inline-block;"></span><span style="color:#ccc;">' + bs.bricksUsed[c] + '</span></span>';
+          });
+        }
+        if (bs.bricksGained) {
+          Object.keys(bs.bricksGained).forEach(function(c) {
+            if (!bs.bricksGained[c]) return;
+            var brdr2 = c === 'white' ? 'border:1px solid #ccc;' : '';
+            gainedChips += '<span style="display:inline-flex;align-items:center;gap:3px;margin:1px 2px;padding:1px 4px;background:#0a0a0a;border-radius:4px;font-size:10px;"><span style="width:8px;height:8px;border-radius:2px;background:' + (brickBg2[c]||'#888') + ';' + brdr2 + 'display:inline-block;"></span><span style="color:#9adb9a;">+' + bs.bricksGained[c] + '</span></span>';
+          });
+        }
+        if (usedChips || gainedChips) {
+          body += '<div style="display:flex;justify-content:center;gap:10px;margin-top:6px;flex-wrap:wrap;">'
+            + (usedChips ? '<div><span style="font-size:8px;color:#888;letter-spacing:.08em;">USED </span>' + usedChips + '</div>' : '')
+            + (gainedChips ? '<div><span style="font-size:8px;color:#888;letter-spacing:.08em;">LOOT </span>' + gainedChips + '</div>' : '')
+            + '</div>';
+        }
+      }
+
+      body += '</div>';
+    } else {
+      var mStr = evData.mids ? evData.mids.join(',') : '';
+      var isB = evData.type === 'boss';
+      body += '<button class="btn D btn-sm" style="margin-top:6px;" onclick="quickBattle(\'' + mStr + '\',' + isB + ')">Start Battle</button>';
+    }
   }
   document.getElementById('active-event-body').innerHTML = body;
 }
@@ -1100,15 +1299,59 @@ function autoGoldResolve(amt) {
   client.resolveEvent(G.activeEvent.cls, 'gold', {amount: amt});
 }
 
-// v4: DM adjudicates Red Trial of Hand
-function redTrialResolve(tier) {
+// v4: DM phase-based Red Trial controls
+function redTrialBegin() {
   if (!G || !G.activeEvent) return;
-  client.resolveEvent(G.activeEvent.cls, 'redTrialResolve', { tier: tier });
+  client.resolveEvent(G.activeEvent.cls, 'redTrialBegin', {});
+}
+function redTrialCancel() {
+  if (!G || !G.activeEvent) return;
+  if (!confirm('Cancel the trial? Event will linger for next challenger.')) return;
+  client.resolveEvent(G.activeEvent.cls, 'redTrialCancel', {});
+}
+function redTrialPickWinner(winnerCls) {
+  if (!G || !G.activeEvent) return;
+  client.resolveEvent(G.activeEvent.cls, 'redTrialPickWinner', { winnerCls: winnerCls });
+}
+function redTrialPickNoWinner() {
+  if (!G || !G.activeEvent) return;
+  if (!confirm('No winner? Event lingers, red brick stays on the space.')) return;
+  client.resolveEvent(G.activeEvent.cls, 'redTrialPickWinner', { winnerCls: null });
+}
+
+// Helper: picker HTML for DM (shown during active/picking phases)
+function renderRedPickerHtml(joined) {
+  if (!joined || joined.length === 0) {
+    return '<div style="font-size:10px;color:#aaa;text-align:center;font-style:italic;">No joined players to pick from</div>';
+  }
+  var html = '<div style="font-size:9px;color:#aaa;letter-spacing:.1em;text-align:center;margin-bottom:4px;">PICK WINNER</div>';
+  html += '<div style="display:flex;flex-direction:column;gap:3px;">';
+  joined.forEach(function(c) {
+    var jp = G.players[c];
+    if (!jp) return;
+    var breakerBonus = (c === 'breaker') ? ' <span style="color:#E8C868;font-size:9px;">+🧀 bonus</span>' : '';
+    html += '<button class="btn btn-sm" style="background:#2a2000;border:1px solid #F5D000;color:#F5D000;font-size:11px;padding:6px 8px;" onclick="redTrialPickWinner(\'' + c + '\')">🏆 ' + jp.icon + ' ' + jp.name + breakerBonus + '</button>';
+  });
+  html += '<button class="btn btn-sm" style="background:#1a0a0a;border:1px solid #666;color:#888;font-size:10px;padding:4px 8px;margin-top:4px;" onclick="redTrialPickNoWinner()">✗ No Winner (event lingers)</button>';
+  html += '</div>';
+  return html;
 }
 
 function dmResolveEvent() {
   if (!G || !G.activeEvent) return;
   client.send('dm_resolved', {});
+}
+
+function dmResetEvent() {
+  if (!G || !G.activeEvent) return;
+  if (!confirm('Reset this event? Current mini-game state clears; fresh content rolled for same event type.')) return;
+  client.send('dm_resetEvent', {});
+}
+
+function dmRerollEvent() {
+  if (!G || !G.activeEvent) return;
+  if (!confirm('Re-roll this space? A new event is drawn from the zone table, replacing the current event.')) return;
+  client.send('dm_rerollEvent', {});
 }
 
 function toggleEventTable() {
@@ -1177,33 +1420,6 @@ function placeTrap() {
   var ev = G.activeEvent;
   var evType = (ev && ev.evType === 'doubletrap') ? 'doubletrap' : 'trap';
   if (activeCls) client.resolveEvent(activeCls, evType, {});
-}
-
-function showTrivia(cls) {
-  triviaTargetCls = cls || G.turnOrder[G.activePlayerIdx];
-  currentTriviaIdx = Math.floor(Math.random() * LEGO_TRIVIA.length);
-  displayTrivia();
-  document.getElementById('trivia-panel').style.display = 'block';
-}
-
-function displayTrivia() {
-  var t = LEGO_TRIVIA[currentTriviaIdx];
-  document.getElementById('trivia-content').innerHTML =
-    '<div style="background:#0a0a1a;border:1px solid var(--purple);border-radius:8px;padding:10px;">'
-    + '<span class="diff-badge ' + t.diff + '">' + t.diff + '</span>'
-    + '<div style="font-size:13px;margin:6px 0;line-height:1.5;">' + t.q + '</div>'
-    + '<div id="trivia-answer" style="display:none;font-size:12px;color:var(--green);font-weight:700;margin-bottom:6px;">Answer: ' + t.a + '</div>'
-    + '<button class="btn btn-sm" onclick="document.getElementById(\'trivia-answer\').style.display=\'block\'">Reveal Answer</button>'
-    + '</div>';
-}
-
-function nextTrivia() { currentTriviaIdx = (currentTriviaIdx + 1) % LEGO_TRIVIA.length; displayTrivia(); }
-
-function triviaCorrect() {
-  if (triviaTargetCls && G.players[triviaTargetCls]) {
-    client.resolveEvent(triviaTargetCls, 'triviaSuccess', {});
-    document.getElementById('trivia-panel').style.display = 'none';
-  }
 }
 
 function showRiddle(cls) {

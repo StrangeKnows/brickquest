@@ -92,6 +92,241 @@ function mkPlayer(cls, icon, color, hp, die, bricks) {
 
 let G = freshState();
 
+// ── v4 RED TRIAL CHALLENGES (party race) ────────────────────
+// All 9 challenges are physical. Each lasts up to 30s.
+// `digital=true` means the minigame adjudicates via client input
+// (frenzy tap race, reflex GO-tap). Others require DM to pick winner.
+const RED_CHALLENGES = [
+  { id:'trial_of_hand',    name:'TRIAL OF THE HAND', kind:'dexterity', digital:false,
+    text:'Flip a coin from one hand to the other three times in a row without dropping. First to finish wins.' },
+  { id:'iron_hold',        name:'IRON HOLD', kind:'strength', digital:false,
+    text:'Most push-ups in 30 seconds. DM counts. Highest count wins.' },
+  { id:'crown_of_stillness',name:'CROWN OF STILLNESS', kind:'dexterity', digital:false,
+    text:'Balance on one foot, eyes closed. Last standing wins.' },
+  { id:'silver_stare',     name:'SILVER STARE', kind:'focus', digital:false,
+    text:'Stare contest. No blinking for 30 seconds. Last eye open wins.' },
+  { id:'hammer_throw',     name:'HAMMER THROW', kind:'strength', digital:false,
+    text:'Toss a crumpled paper ball into a container placed by the DM. Farthest successful throw wins.' },
+  { id:'smooth_tower',     name:'SMOOTH TOWER', kind:'dexterity', digital:false,
+    text:'Stack 7 Lego bricks end-to-end, studs outward, resting on their smooth sides. First stable tower wins.' },
+  { id:'featherfall',      name:'FEATHERFALL', kind:'dexterity', digital:false,
+    text:'Hold a light object flat in your open hand. Race to a finish line set by the DM. First to arrive without dropping wins.' },
+  { id:'frenzy',           name:'FRENZY', kind:'strength', digital:true,
+    text:'Rapid-tap the button. First to 50 taps wins.' },
+  { id:'reflex_hawk',      name:'REFLEX OF THE HAWK', kind:'dexterity', digital:true,
+    text:'Tap GO when it appears. First valid tap wins.' },
+];
+
+// ── v4 GRAY RUBBLE TETRIS ──────────────────────────
+// Outlines are 5-wide × 6-tall grids, stored as strings of 'X.....' per row.
+// Row 0 = bottom. All outlines must be gravity-valid: every X cell at row > 0
+// must have an X directly below it (so a block placed there has something to rest on).
+const GRAY_OUTLINES = [
+  ['XXXXX','.....','.....','.....','.....','.....'],  // flat 5
+  ['XXXXX','.XXX.','.....','.....','.....','.....'],  // low pyramid
+  ['XXXXX','X...X','.....','.....','.....','.....'],  // frame base (open top)
+  ['XXXX.','XXXX.','.....','.....','.....','.....'],  // 2x4 block left-aligned
+  ['XXXXX','.X.X.','.....','.....','.....','.....'],  // pillars (supported by bottom)
+  ['XXXXX','XX.XX','.....','.....','.....','.....'],  // base + split upper
+  ['XXX..','XX...','X....','.....','.....','.....'],  // staircase left
+  ['..XXX','...XX','....X','.....','.....','.....'],  // staircase right
+  ['XXXXX','XXXXX','.....','.....','.....','.....'],  // solid 2x5
+  ['XXXXX','XXXXX','.XXX.','.....','.....','.....'],  // bulky pyramid
+  ['XXXXX','XXXXX','XX.XX','.....','.....','.....'],  // fortress-ish (row 2 gap supported by full row 1)
+  ['XXXXX','X.XXX','..XXX','.....','.....','.....'],  // right ramp
+  ['XXXXX','XXX.X','XXX..','.....','.....','.....'],  // left ramp
+];
+
+// Block shape palette. Each block is an array of {dx,dy} relative to anchor at (0,0).
+// Anchor convention: the block MUST contain (0,0) — this is the lowest-leftmost cell,
+// used by the solver as the placement anchor during bottom-up scan.
+// Includes 1-3 cell pieces AND standard 4-cell tetrominoes (S and Z normalized so
+// their lowest-leftmost cell sits at (0,0)).
+const GRAY_BLOCKS = [
+  // 1-cell
+  [{dx:0,dy:0}],                                                    // single
+  // 2-cell
+  [{dx:0,dy:0},{dx:1,dy:0}],                                        // horiz 2
+  [{dx:0,dy:0},{dx:0,dy:1}],                                        // vert 2
+  // 3-cell
+  [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0}],                            // horiz 3
+  [{dx:0,dy:0},{dx:0,dy:1},{dx:0,dy:2}],                            // vert 3
+  [{dx:0,dy:0},{dx:1,dy:0},{dx:1,dy:1}],                            // L3 (step up right)
+  [{dx:0,dy:0},{dx:1,dy:0},{dx:0,dy:1}],                            // corner3
+  // 4-cell tetrominoes
+  [{dx:0,dy:0},{dx:1,dy:0},{dx:0,dy:1},{dx:1,dy:1}],                // O (square)
+  [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0},{dx:3,dy:0}],                // I (flat 4)
+  [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0},{dx:2,dy:1}],                // L
+  [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0},{dx:0,dy:1}],                // J
+  [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0},{dx:1,dy:1}],                // T
+  // S-tetromino: normalized so anchor is bottom-left. Shape:
+  //   .XX
+  //   XX.
+  // Anchor at (0,0) is the bottom-left X. Offsets: (0,0)(1,0)(1,1)(2,1)
+  // Wait — that's Z, not S. Let me pick one canonical orientation and keep it.
+  // Using "Z" shape (top-left to bottom-right):
+  //   XX.
+  //   .XX
+  // Bottom-left X at (1,0), so anchor (1,0)... but we want anchor at (0,0).
+  // We'll skip S/Z entirely — they can't satisfy the (0,0) anchor constraint in any
+  // orientation without overlapping themselves or producing holes.
+];
+
+// Parse outline strings → set of "c,r" cell keys for cells the player must fill.
+function _outlineCells(outline) {
+  const cells = [];
+  for (let r = 0; r < outline.length; r++) {
+    const row = outline[r] || '.....';
+    for (let c = 0; c < row.length; c++) {
+      if (row[c] === 'X') cells.push([c, r]);
+    }
+  }
+  return cells;
+}
+
+// Backtracking tiler: returns array of {blockIdx, col, row} that exactly covers outline.
+// Uses lowest-row-then-leftmost-col scan order so placements match gravity reality.
+function _tileOutline(outline) {
+  const targetSet = new Set();
+  _outlineCells(outline).forEach(([c,r]) => targetSet.add(c+','+r));
+  const totalNeeded = targetSet.size;
+  const filled = new Set();
+  const placements = [];
+
+  function nextAnchor() {
+    for (let r = 0; r < 6; r++) {
+      const row = outline[r] || '.....';
+      for (let c = 0; c < 5; c++) {
+        if (row[c] === 'X' && !filled.has(c+','+r)) return [c, r];
+      }
+    }
+    return null;
+  }
+
+  function tryBlock(block, anchorCol, anchorRow) {
+    const covered = [];
+    for (let i = 0; i < block.length; i++) {
+      const c = anchorCol + block[i].dx;
+      const r = anchorRow + block[i].dy;
+      const key = c+','+r;
+      if (!targetSet.has(key)) return null;
+      if (filled.has(key)) return null;
+      covered.push(key);
+    }
+    return covered;
+  }
+
+  function solve() {
+    const anchor = nextAnchor();
+    if (!anchor) return filled.size === totalNeeded;
+    const [ac, ar] = anchor;
+    // Randomize block try order so we get varied tilings
+    const order = GRAY_BLOCKS.map((_, i) => i);
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    for (const bIdx of order) {
+      const block = GRAY_BLOCKS[bIdx];
+      const covered = tryBlock(block, ac, ar);
+      if (!covered) continue;
+      covered.forEach(k => filled.add(k));
+      placements.push({ blockIdx: bIdx, col: ac, row: ar });
+      if (solve()) return true;
+      covered.forEach(k => filled.delete(k));
+      placements.pop();
+    }
+    return false;
+  }
+
+  return solve() ? placements : null;
+}
+
+// Gravity-aware topological sort of placements.
+// A block at row R is "supported" if, for every cell (c, R_bottom) in its bottom row,
+// either R_bottom === 0 (floor) OR (c, R_bottom - 1) is already filled by an earlier placement.
+// Returns a valid placement ORDER respecting gravity, or null if none exists.
+function _orderByGravity(placements) {
+  // For each placement, compute the set of cells it occupies + its bottom-row cells.
+  const meta = placements.map(function(p, i) {
+    const block = GRAY_BLOCKS[p.blockIdx];
+    const cells = block.map(function(o) { return [p.col+o.dx, p.row+o.dy]; });
+    // Find minimum dy in the block
+    let minDy = Infinity;
+    block.forEach(function(o) { if (o.dy < minDy) minDy = o.dy; });
+    const bottomCells = block
+      .filter(function(o) { return o.dy === minDy; })
+      .map(function(o) { return [p.col+o.dx, p.row+o.dy]; });
+    return { idx: i, cells, bottomCells, placement: p };
+  });
+  // cellOwner: "c,r" → placement index that fills it
+  const cellOwner = new Map();
+  meta.forEach(function(m) {
+    m.cells.forEach(function(cell) {
+      cellOwner.set(cell[0]+','+cell[1], m.idx);
+    });
+  });
+  // For each placement, compute its dependencies (other placements whose cells it rests on)
+  meta.forEach(function(m) {
+    m.deps = new Set();
+    m.bottomCells.forEach(function(cell) {
+      const c = cell[0], r = cell[1];
+      if (r === 0) return; // on floor, no dep
+      const below = c + ',' + (r - 1);
+      if (cellOwner.has(below)) {
+        const depIdx = cellOwner.get(below);
+        if (depIdx !== m.idx) m.deps.add(depIdx);
+      } else {
+        // Cell directly below is not part of the solution — means this placement would
+        // float mid-air with nothing underneath. That's an unbuildable plan.
+        m.deps.add(-1); // sentinel: impossible
+      }
+    });
+  });
+  // Check for impossible placements
+  for (const m of meta) {
+    if (m.deps.has(-1)) return null;
+  }
+  // Kahn's topological sort with random sibling order
+  const inDeg = meta.map(function(m) { return m.deps.size; });
+  const ready = [];
+  for (let i = 0; i < meta.length; i++) if (inDeg[i] === 0) ready.push(i);
+  const order = [];
+  const dependents = meta.map(function() { return []; });
+  meta.forEach(function(m) {
+    m.deps.forEach(function(d) { dependents[d].push(m.idx); });
+  });
+  while (ready.length > 0) {
+    // Shuffle ready queue so independent siblings come out in random order
+    const pick = Math.floor(Math.random() * ready.length);
+    const cur = ready.splice(pick, 1)[0];
+    order.push(cur);
+    dependents[cur].forEach(function(dep) {
+      inDeg[dep]--;
+      if (inDeg[dep] === 0) ready.push(dep);
+    });
+  }
+  if (order.length !== meta.length) return null; // cycle (shouldn't happen but safety)
+  return order.map(function(i) { return placements[i]; });
+}
+
+function initGrayRubble(eventMeta) {
+  // Try multiple outlines/solutions until we find one that's (a) tileable and (b) gravity-orderable
+  for (let tries = 0; tries < 20; tries++) {
+    const outline = GRAY_OUTLINES[Math.floor(Math.random()*GRAY_OUTLINES.length)];
+    const solution = _tileOutline(outline);
+    if (!solution || solution.length < 1) continue;
+    const ordered = _orderByGravity(solution);
+    if (!ordered) continue;
+    eventMeta.grayOutline = outline;
+    eventMeta.grayBlocks = ordered.map(function(p) { return GRAY_BLOCKS[p.blockIdx]; });
+    return;
+  }
+  // Fallback: flat-5 outline with 5 singles (trivially gravity-safe)
+  eventMeta.grayOutline = GRAY_OUTLINES[0];
+  eventMeta.grayBlocks = [GRAY_BLOCKS[0], GRAY_BLOCKS[0], GRAY_BLOCKS[0], GRAY_BLOCKS[0], GRAY_BLOCKS[0]];
+}
+
 // ── SAVE / LOAD ───────────────────────────────────────────
 const SAVE_FILE = path.join(__dirname, 'brickquest-save.json');
 let _saveTimer = null;
@@ -189,25 +424,6 @@ if (process.stdin.isTTY) {
     }
   });
 }
-
-// ── LEGO TRIVIA ───────────────────────────────────────────
-const LEGO_TRIVIA = [
-  { q:"What year was LEGO founded?", a:"1932", diff:"easy" },
-  { q:"What does LEGO mean in Danish?", a:"play well", diff:"easy" },
-  { q:"What color was the first LEGO brick?", a:"red", diff:"easy" },
-  { q:"How many LEGO sets are sold per second worldwide (approx)?", a:"7", diff:"medium" },
-  { q:"What is the most produced LEGO element of all time?", a:"brick", diff:"medium" },
-  { q:"What year did LEGO Mindstorms launch?", a:"1998", diff:"medium" },
-  { q:"How many studs does a standard 2×4 LEGO brick have?", a:"8", diff:"easy" },
-  { q:"What country is LEGO headquartered in?", a:"denmark", diff:"easy" },
-  { q:"What was the first licensed LEGO theme?", a:"star wars", diff:"medium" },
-  { q:"Approximately how many LEGO pieces are produced each year?", a:"36 billion", diff:"hard" },
-  { q:"What is the name of LEGO's fictional city/world theme?", a:"lego city", diff:"easy" },
-  { q:"In what decade did LEGO minifigures first appear?", a:"1970s", diff:"medium" },
-  { q:"What material are LEGO bricks made from?", a:"abs plastic", diff:"medium" },
-  { q:"What is the clutch power of a LEGO stud?", a:"4.4 newtons", diff:"hard" },
-  { q:"How many possible combinations exist with 6 standard 2×4 LEGO bricks?", a:"915 million", diff:"hard" },
-];
 
 // ── RIDDLES ───────────────────────────────────────────────
 const RIDDLES = require('./game.js').RIDDLES;
@@ -541,6 +757,8 @@ wss.on('connection', (ws, req) => {
           gold: p.gold || 0,
           bricks: { ...p.bricks },
           queuedPoisonStacks: p.queuedPoisonStacks || 0, // v4: rumble applies these on start
+          // v4: FW blue-success buff — 2× brick refresh for first 10s of this rumble
+          refreshBoost: (p.nextRumbleBuff && p.nextRumbleBuff.refreshBoost) || null,
         },
         startTime: Date.now(),
         elapsedMs: 0,
@@ -558,7 +776,25 @@ wss.on('connection', (ws, req) => {
           p.queuedPoisonBattles = 0;
         }
       }
+      // v4: FW refresh buff is one-shot — consume it on this battle start
+      if (p.nextRumbleBuff && p.nextRumbleBuff.refreshBoost) {
+        delete p.nextRumbleBuff.refreshBoost;
+        if (Object.keys(p.nextRumbleBuff).length === 0) p.nextRumbleBuff = null;
+      }
       G.pendingRumbleBattle = null;
+      // v4: Snapshot starting stats on the active event so DM can show deltas post-battle
+      if (G.activeEvent && (G.activeEvent.evType === 'monster' || G.activeEvent.evType === 'boss')) {
+        G.activeEvent.preRumbleSnap = {
+          hp: p.hp,
+          hpMax: p.hpMax,
+          armor: p.armor || 0,
+          gold: p.gold || 0,
+          bricks: { ...p.bricks },
+          enemyName: pending.enemy.name,
+          enemyHp: pending.enemy.hp,
+          enemyHpMax: pending.enemy.hpMax,
+        };
+      }
       log((p.playerName||p.name) + ' — rumble battle begins vs ' + pending.enemy.name, 'battle');
     }
 
@@ -610,7 +846,7 @@ wss.on('connection', (ws, req) => {
     // Client reports battle end with final state + winner
     if (type === 'battleEnd') {
       if (!G.rumbleBattle) { broadcastState(); return; }
-      const { cls, victor, finalHp, finalHpMax, finalArmor, finalGold, finalBricks, reason } = P;
+      const { cls, victor, finalHp, finalHpMax, finalArmor, finalGold, finalCheese, finalBricks, reason, battleStats } = P;
       if (cls !== G.rumbleBattle.cls) { broadcastState(); return; }
       const p = G.players[cls];
       if (p) {
@@ -623,6 +859,10 @@ wss.on('connection', (ws, req) => {
         // start + any drops); we replace rather than add since rumble already
         // has the running total.
         if (typeof finalGold === 'number') p.gold = Math.max(0, finalGold);
+        // v4: Rumble cheese loot — add to board cheese inventory (rumble starts at 0 cheese, any loot is new).
+        if (typeof finalCheese === 'number' && finalCheese > 0) {
+          p.cheese = (p.cheese||0) + Math.max(0, finalCheese);
+        }
         if (finalBricks && typeof finalBricks === 'object') {
           Object.keys(finalBricks).forEach(k => { p.bricks[k] = Math.max(0, finalBricks[k]); });
         }
@@ -631,6 +871,24 @@ wss.on('connection', (ws, req) => {
       const pName = p ? (p.playerName||p.name) : cls;
       log(pName + ' battle ended — victor: ' + victor + (reason ? ' (' + reason + ')' : ''), 'battle');
       G.rumbleBattle = null;
+
+      // v4: Populate rumbleResult on the active event so DM can see outcome + press Mark Resolved
+      // Turn does NOT auto-advance; DM's Mark Resolved button handles that (via dm_resolved handler).
+      if (G.activeEvent && (G.activeEvent.evType === 'monster' || G.activeEvent.evType === 'boss')) {
+        G.activeEvent.rumbleResult = {
+          cls: cls,
+          victor: victor,
+          reason: reason || null,
+          finalHp: p ? p.hp : null,
+          finalHpMax: p ? p.hpMax : null,
+          finalArmor: p ? (p.armor || 0) : null,
+          finalGold: p ? p.gold : null,
+          finalBricks: p ? { ...p.bricks } : null,
+          playerDied: p ? !p.alive : false,
+          battleStats: battleStats || null,
+        };
+      } else {
+      }
       G.phase = 'prepare';
       broadcastState(); return;
     }
@@ -667,7 +925,22 @@ wss.on('connection', (ws, req) => {
     if (type === 'battleForceQuit') {
       if (!G.rumbleBattle) { broadcastState(); return; }
       log('Battle force-quit by DM', 'battle');
+      const fqCls = G.rumbleBattle.cls;
+      const fqP = G.players[fqCls];
       G.rumbleBattle = null;
+      if (G.activeEvent && (G.activeEvent.evType === 'monster' || G.activeEvent.evType === 'boss')) {
+        G.activeEvent.rumbleResult = {
+          cls: fqCls,
+          victor: 'none',
+          reason: 'force-quit',
+          finalHp: fqP ? fqP.hp : null,
+          finalHpMax: fqP ? fqP.hpMax : null,
+          finalArmor: fqP ? (fqP.armor || 0) : null,
+          finalGold: fqP ? fqP.gold : null,
+          finalBricks: fqP ? { ...fqP.bricks } : null,
+          playerDied: false,
+        };
+      }
       G.phase = 'prepare';
       broadcastState(); return;
     }
@@ -781,58 +1054,25 @@ wss.on('connection', (ws, req) => {
         log(pName+' — forced green: Vine Path','event');
       }
 
-      // ── v4 RED — Trial of the Hand ──
+      // ── v4 RED — Trial of the Hand (party race) ──
       if (evType === 'red') {
-        const redChallenges = [
-          { kind:'strength', text:'Arm-wrestle the DM or nearest player.' },
-          { kind:'strength', text:'Plank position for 30 seconds.' },
-          { kind:'strength', text:'Hold a book at arm\'s length for 20 seconds.' },
-          { kind:'strength', text:'Squat and hold for 15 seconds.' },
-          { kind:'dexterity', text:'Balance on one foot, eyes closed, 15 seconds.' },
-          { kind:'dexterity', text:'Stack 5 coins using only one hand.' },
-          { kind:'dexterity', text:'Flip and catch a coin 3 times in a row.' },
-          { kind:'mental', text:'Recite the alphabet backwards, no mistakes.' },
-          { kind:'mental', text:'Count down from 100 by 7s to zero.' },
-          { kind:'mental', text:'Name 10 animals starting with S in 15 seconds.' },
-          { kind:'social', text:'Make the DM laugh in one sentence.' },
-          { kind:'social', text:'Stare contest vs DM — 20 seconds no blink.' },
-          { kind:'social', text:'Compliment every player with a specific reason.' },
-          { kind:'social', text:'Impersonate another player for 10 seconds.' },
-        ];
         G.activeEvent.redVariant = 'trial_of_hand';
         G.activeEvent.isBreaker = (cls === 'breaker');
-        G.activeEvent.redChallenge = redChallenges[Math.floor(Math.random()*redChallenges.length)];
+        G.activeEvent.redChallenge = RED_CHALLENGES[Math.floor(Math.random()*RED_CHALLENGES.length)];
+        G.activeEvent.redPhase = 'joining';       // joining → active → picking → done
+        G.activeEvent.redJoined = [cls];          // landing player auto-joined
+        G.activeEvent.redJoinEndsAt = Date.now() + 30000;
+        G.activeEvent.redStartedAt = null;
+        G.activeEvent.redDigitalScores = {};      // { cls: { taps, finishedAt } } for digital challenges
         G.activeEvent.resolved = false;
-        log(pName+' — forced red: Trial ('+G.activeEvent.redChallenge.kind+')','event');
+        log(pName+' — forced red: '+G.activeEvent.redChallenge.name,'event');
       }
 
       // ── v4 GRAY — Rubble Stacking ──
       if (evType === 'gray') {
-        const GRAY_OUTLINES = [
-          ['XXXXX','.....','.....','.....','.....','.....'],
-          ['XXXXX','.XXX.','.....','.....','.....','.....'],
-          ['X...X','XXXXX','.....','.....','.....','.....'],
-          ['XXXXX','X...X','.....','.....','.....','.....'],
-          ['XXXX.','..XX.','.....','.....','.....','.....'],
-          ['.XXX.','XXXXX','.....','.....','.....','.....'],
-          ['XX.XX','XXXXX','.....','.....','.....','.....'],
-          ['XXXXX','.X.X.','.....','.....','.....','.....'],
-        ];
-        const GRAY_BLOCKS = [
-          [{dx:0,dy:0}],
-          [{dx:0,dy:0},{dx:1,dy:0}],
-          [{dx:0,dy:0},{dx:0,dy:1}],
-          [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0}],
-          [{dx:0,dy:0},{dx:1,dy:0},{dx:1,dy:1}],
-          [{dx:0,dy:0},{dx:1,dy:0},{dx:0,dy:1}],
-        ];
         G.activeEvent.grayVariant = 'rubble_stacking';
         G.activeEvent.isBlocksmith = (cls === 'blocksmith');
-        G.activeEvent.grayOutline = GRAY_OUTLINES[Math.floor(Math.random()*GRAY_OUTLINES.length)];
-        G.activeEvent.grayBlocks = [];
-        for (let bi = 0; bi < 3; bi++) {
-          G.activeEvent.grayBlocks.push(GRAY_BLOCKS[Math.floor(Math.random()*GRAY_BLOCKS.length)]);
-        }
+        initGrayRubble(G.activeEvent);
         G.activeEvent.resolved = false;
         log(pName+' — forced gray: Rubble Stacking','event');
       }
@@ -869,10 +1109,6 @@ wss.on('connection', (ws, req) => {
         G.activeEvent = { cls, roll:'DM', zone:zone||0, resolved:false, evType:'boss', isBoss:true, forced:true };
       }
 
-      // ── NOTHING ──
-      if (evType === 'nothing') {
-        G.activeEvent.resolved = true;
-      }
     }
 
     if (type === 'landingRoll') {
@@ -920,7 +1156,16 @@ wss.on('connection', (ws, req) => {
           if (L.evType === 'green')  G.activeEvent.greenVariant = 'vine_path';
           if (L.evType === 'white')  G.activeEvent.whiteVariant = 'pilgrims_rest';
           if (L.evType === 'black')  G.activeEvent.blackVariant = 'shadow_bargain';
-          if (L.evType === 'red')    G.activeEvent.redVariant = 'trial_of_hand';
+          if (L.evType === 'red') {
+            G.activeEvent.redVariant = 'trial_of_hand';
+            G.activeEvent.redChallenge = RED_CHALLENGES[Math.floor(Math.random()*RED_CHALLENGES.length)];
+            G.activeEvent.redPhase = 'joining';
+            G.activeEvent.redJoined = [cls];   // landing player auto-joined
+            G.activeEvent.redJoinEndsAt = Date.now() + 30000;
+            G.activeEvent.redStartedAt = null;
+            G.activeEvent.redDigitalScores = {};
+            G.activeEvent.isBreaker = (cls === 'breaker');
+          }
           broadcastState(); return;
         }
 
@@ -1053,70 +1298,31 @@ wss.on('connection', (ws, req) => {
         eventMeta.blackOffer = offer;
         log(pName+' meets the Shadow — a bargain awaits','event');
       }
-      // v4 GREEN — Vine Path (replaces old 'creeper' landing)
-      if ((evData.type === 'green' || evData.type === 'creeper') && p) {
+      // v4 GREEN — Vine Path
+      if (evData.type === 'green' && p) {
         eventMeta.greenVariant = 'vine_path';
         eventMeta.isWildOne = (cls === 'wild_one');
-        // normalize type so client renders the new card
         eventMeta.evType = 'green';
         log(pName+' faces the vines — Vine Path','event');
       }
-      // v4 RED — Trial of the Hand
-      if ((evData.type === 'red' || evData.type === 'challenge') && p) {
+      // v4 RED — Trial of the Hand (party race)
+      if (evData.type === 'red' && p) {
         eventMeta.redVariant = 'trial_of_hand';
         eventMeta.isBreaker = (cls === 'breaker');
-        // Pick challenge from pool
-        const redChallenges = [
-          { kind:'strength', text:'Arm-wrestle the DM or nearest player.' },
-          { kind:'strength', text:'Plank position for 30 seconds.' },
-          { kind:'strength', text:'Hold a book at arm\'s length for 20 seconds.' },
-          { kind:'strength', text:'Squat and hold for 15 seconds.' },
-          { kind:'dexterity', text:'Balance on one foot, eyes closed, 15 seconds.' },
-          { kind:'dexterity', text:'Stack 5 coins using only one hand.' },
-          { kind:'dexterity', text:'Flip and catch a coin 3 times in a row.' },
-          { kind:'mental', text:'Recite the alphabet backwards, no mistakes.' },
-          { kind:'mental', text:'Count down from 100 by 7s to zero.' },
-          { kind:'mental', text:'Name 10 animals starting with S in 15 seconds.' },
-          { kind:'social', text:'Make the DM laugh in one sentence.' },
-          { kind:'social', text:'Stare contest vs DM — 20 seconds no blink.' },
-          { kind:'social', text:'Compliment every player with a specific reason.' },
-          { kind:'social', text:'Impersonate another player for 10 seconds.' },
-        ];
-        eventMeta.redChallenge = redChallenges[Math.floor(Math.random()*redChallenges.length)];
+        eventMeta.redChallenge = RED_CHALLENGES[Math.floor(Math.random()*RED_CHALLENGES.length)];
+        eventMeta.redPhase = 'joining';
+        eventMeta.redJoined = [cls];             // landing player auto-joined
+        eventMeta.redJoinEndsAt = Date.now() + 30000;
+        eventMeta.redStartedAt = null;
+        eventMeta.redDigitalScores = {};
         eventMeta.evType = 'red';
-        log(pName+' faces the Trial of the Hand — '+eventMeta.redChallenge.kind,'event');
+        log(pName+' faces the Trial — '+eventMeta.redChallenge.name+' (joining phase)','event');
       }
       // v4 GRAY — Rubble Stacking (when landing is 'gray' in zone 1+)
       if (evData.type === 'gray' && p) {
         eventMeta.grayVariant = 'rubble_stacking';
         eventMeta.isBlocksmith = (cls === 'blocksmith');
-        // Server rolls 3 blocks + outline pattern so the mini-game is deterministic per attempt
-        const GRAY_OUTLINES = [
-          // each outline is a 5-wide × 6-tall grid, bottom-aligned filled cells (col,row from bottom)
-          // stored as string of 'XX..X' per row, rows 0 (bottom) to 5 (top)
-          ['XXXXX','.....','.....','.....','.....','.....'],  // flat 5
-          ['XXXXX','.XXX.','.....','.....','.....','.....'],  // pyramid-ish
-          ['X...X','XXXXX','.....','.....','.....','.....'],  // U shape
-          ['XXXXX','X...X','.....','.....','.....','.....'],  // frame base
-          ['XXXX.','..XX.','.....','.....','.....','.....'],  // L step
-          ['.XXX.','XXXXX','.....','.....','.....','.....'],  // T
-          ['XX.XX','XXXXX','.....','.....','.....','.....'],  // gap-top
-          ['XXXXX','.X.X.','.....','.....','.....','.....'],  // pillars
-        ];
-        const GRAY_BLOCKS = [
-          // each block is an array of {dx,dy} relative cell offsets
-          [{dx:0,dy:0}],                                       // 1x1 single
-          [{dx:0,dy:0},{dx:1,dy:0}],                           // horiz 2
-          [{dx:0,dy:0},{dx:0,dy:1}],                           // vert 2
-          [{dx:0,dy:0},{dx:1,dy:0},{dx:2,dy:0}],               // horiz 3
-          [{dx:0,dy:0},{dx:1,dy:0},{dx:1,dy:1}],               // L
-          [{dx:0,dy:0},{dx:1,dy:0},{dx:0,dy:1}],               // corner
-        ];
-        eventMeta.grayOutline = GRAY_OUTLINES[Math.floor(Math.random()*GRAY_OUTLINES.length)];
-        eventMeta.grayBlocks = [];
-        for (let bi = 0; bi < 3; bi++) {
-          eventMeta.grayBlocks.push(GRAY_BLOCKS[Math.floor(Math.random()*GRAY_BLOCKS.length)]);
-        }
+        initGrayRubble(eventMeta);
         eventMeta.evType = 'gray';
         log(pName+' approaches fallen rubble — stacking challenge','event');
       }
@@ -1243,34 +1449,27 @@ wss.on('connection', (ws, req) => {
         const pNameGold = p.playerName||p.name||cls;
         const wrongTap = P.wrongTap || (data && data.wrongTap);
         const totalPlaced = parseInt(P.total || (data && data.total) || 0) || 0;
-        // wrongTap behavior differs by variant:
-        // crack = rat bite → -1 HP
-        // torch = tapped decoy → +1 HP consolation
-        if (wrongTap) {
-          const variant = G.activeEvent?.goldVariant;
-          if (variant === 'crack') {
-            p.hp = Math.max(0, (p.hp||0) - 1);
-            if (p.hp <= 0) p.alive = false;
-            log(pNameGold+' found the rat — -1 HP (rat bite)','damage');
-          } else {
-            // Torch decoy — found crumb/cheese: +1 HP, or +1 max HP if already full
-            let maxHpUp = false;
-            if (p.hp >= p.hpMax) {
-              p.hpMax = (p.hpMax||10) + 1;
-              p.hp = p.hpMax;
-              maxHpUp = true;
-              log(pNameGold+' found something nourishing — max HP +1 (was full)','reward');
-            } else {
-              p.hp = Math.min(p.hpMax, (p.hp||0)+1);
-              log(pNameGold+' found something nourishing — +1 HP','reward');
-            }
-            G.activeEvent = { ...G.activeEvent, goldResult: { amount: awarded, wrongTap: true, maxHpUp, totalPlaced }, resolved: false };
-            broadcastState(); return;
-          }
-        } else {
+        const cheeseFound = Math.max(0, parseInt((data && data.cheeseFound) || 0) || 0);
+        const variant = G.activeEvent?.goldVariant;
+
+        // v4: Torch cheese pickups add to cheese inventory directly. Game no longer ends on cheese tap.
+        // The torch event ends only when all coins found OR torch burns out.
+        if (cheeseFound > 0 && variant === 'torch') {
+          p.cheese = (p.cheese||0) + cheeseFound;
+          log(pNameGold+' found '+cheeseFound+' 🧀 cheese in the torchlight','reward');
+        }
+
+        // Crack variant still has the rat bite on wrongTap (kept)
+        if (wrongTap && variant === 'crack') {
+          p.hp = Math.max(0, (p.hp||0) - 1);
+          if (p.hp <= 0) p.alive = false;
+          log(pNameGold+' found the rat — -1 HP (rat bite)','damage');
+        }
+
+        if (awarded > 0) {
           log(pNameGold+' found '+awarded+' gold (mini-game)','reward');
         }
-        G.activeEvent = { ...G.activeEvent, goldResult: { amount: awarded, wrongTap: wrongTap||false, totalPlaced }, resolved: false };
+        G.activeEvent = { ...G.activeEvent, goldResult: { amount: awarded, wrongTap: wrongTap||false, totalPlaced, cheeseFound }, resolved: false };
       }
       if (eventType === 'brick')  {
         const d = data||{};
@@ -1322,18 +1521,23 @@ wss.on('connection', (ws, req) => {
       if (eventType === 'blueEventComplete') {
         const { success, bonus } = data||{};
         const isFormwright = cls === 'formwright';
-        const bricks = success && isFormwright ? 2 : 1;
-        p.bricks.blue = (p.bricks.blue||0) + bricks;
+        p.bricks.blue = (p.bricks.blue||0) + 1;
         if (bonus === 'gold') p.gold = (p.gold||0) + 1;
         if (bonus === 'shield' && p.armor < Math.floor(p.hpMax * 0.5)) p.armor++;
         if (bonus === 'roll_bonus') { if (!G.rollBonuses) G.rollBonuses = {}; G.rollBonuses[cls] = (G.rollBonuses[cls]||0) + 1; }
+        // v4: FW bonus = "next rumble: 2x brick refresh for 10s" (was +1 extra blue brick)
+        if (success && isFormwright) {
+          p.nextRumbleBuff = p.nextRumbleBuff || {};
+          p.nextRumbleBuff.refreshBoost = { multiplier: 2.0, durationMs: 10000 };
+        }
         const pNameB = p.playerName||p.name;
-        const label = bricks > 1 ? '+2 Blue Bricks!' : '+1 Blue Brick!';
-        log(pNameB+' completed blue event — '+label+(bonus?' +'+bonus:'')+(isFormwright&&success?' (Formwright bonus!)':''),'reward');
+        const label = '+1 Blue Brick!';
+        const fwLabel = (success && isFormwright) ? ' · next rumble: ⚡ 2× refresh 10s' : '';
+        log(pNameB+' completed blue event — '+label+(bonus?' +'+bonus:'')+(success&&isFormwright?' (Formwright charge!)':''),'reward');
         // Clear persisted blue space
         if (!G.blueSpaces) G.blueSpaces = {};
         if (p.space !== undefined) delete G.blueSpaces[p.space];
-        G.activeEvent = { ...G.activeEvent, blueResult:{ success:true, msg: label+(bonus==='gold'?' +1 Gold':bonus==='shield'?' +Shield pip':bonus?' +'+bonus.replace('_',' '):'')+(isFormwright?' (Formwright!)':'') }, resolved:false }; // DM must click resolve
+        G.activeEvent = { ...G.activeEvent, blueResult:{ success:true, msg: label+(bonus==='gold'?' +1 Gold':bonus==='shield'?' +Shield pip':bonus?' +'+bonus.replace('_',' '):'')+fwLabel, fwRefreshBuff: (success && isFormwright) }, resolved:false }; // DM must click resolve
         broadcastState(); return;
       }
       if (eventType === 'blueEventFail') {
@@ -1360,61 +1564,6 @@ wss.on('connection', (ws, req) => {
         if (p.space !== undefined) { G.blueSpaces[p.space] = 1; log('Space '+p.space+' retains blue energy','event'); }
         G.activeEvent = { ...G.activeEvent, blueResult:{ success:false, msg: penalty==='damage' ? '+1 Gold consolation · −1 HP (it saw you)' : penalty==='shield' ? '+1 Shield pip consolation' : '+1 Gold consolation' }, resolved:false }; // DM must click resolve
         broadcastState(); return;
-      }
-      if (eventType === 'grayTake1') {
-        const amt = cls==='blocksmith' ? 2 : 1;
-        p.bricks.gray = (p.bricks.gray||0)+amt;
-        G.activeEvent = { ...G.activeEvent, grayResult:{ took:amt, searched:false } };
-        log((p.playerName||p.name)+' took '+amt+' gray brick'+(amt>1?'s':'')+' from rubble','reward');
-        broadcastState(); return;
-      }
-      if (eventType === 'blocksmithScavenge') {
-        const base = 2;
-        const r = roll(6);
-        const bonus = r>=6 ? 2 : r>=4 ? 1 : 0;
-        const total = base + bonus;
-        p.bricks.gray = (p.bricks.gray||0) + total;
-        G.activeEvent = { ...G.activeEvent, grayResult:{ took:base, scavengeRoll:r, scavengeBonus:bonus, searched:false } };
-        log((p.playerName||p.name)+' Scavenge: '+base+' base + '+bonus+' bonus (roll '+r+') = '+total+' gray bricks','reward');
-        broadcastState(); return;
-      }
-      if (eventType === 'graySearch') {
-        const r = roll(6);
-        const found = r>=5?2:r>=3?1:0;
-        const builderBonus = cls==='blocksmith' ? 1 : 0;
-        const total = found + builderBonus;
-        p.bricks.gray = (p.bricks.gray||0)+total;
-        G.activeEvent = { ...G.activeEvent, grayResult:{ found:total, roll:r, searched:true, builderBonus:builderBonus>0 } };
-        log((p.playerName||p.name)+' searched rubble — found '+total+' gray brick'+(total!==1?'s':'')+' (roll '+r+')'+(builderBonus?' +Blocksmith bonus':''),'reward');
-        broadcastState(); return;
-      }
-      if (eventType === 'whitePickup') {
-        // Standard white brick pickup + class bonus
-        p.bricks.white = (p.bricks.white||0)+1;
-        if (cls==='fixer') {
-          // Fixer heals 2 HP to chosen target — sent as data.healTarget
-          const tgt = data.healTarget||cls;
-          const tp = G.players[tgt];
-          if(tp) { tp.hp = Math.min(tp.hpMax+3, tp.hp+2); log(`Fixer white bonus: +2 HP to ${tp.name}`,'heal'); }
-        } else {
-          // Self-heal 1 HP, overheal allowed
-          p.hp = Math.min(p.hpMax+3, p.hp+1);
-          log(`${p.name} white pickup +1 HP`,'heal');
-        }
-      }
-      if (eventType === 'creeperSuccess') {
-        const amt = cls==='wild_one'?2:1;
-        p.bricks.green = (p.bricks.green||0)+amt;
-        log(`${p.name} cut the vine! +${amt} green brick${amt>1?'s':''}`,'reward');
-      }
-      if (eventType === 'creeperFail') {
-        if (cls!=='wild_one') {
-          G.movementDebuffs[cls] = 2;
-          log(`${p.name} missed the vine — movement −2 next turn`,'damage');
-        } else {
-          p.bricks.green = (p.bricks.green||0)+1;
-          log(`Wild One missed but still gains 1 green brick`,'reward');
-        }
       }
 
       // ── v4 PURPLE FATED CHOICE ──
@@ -1761,33 +1910,149 @@ wss.on('connection', (ws, req) => {
         broadcastState(); return;
       }
 
-      // ── v4 RED TRIAL OF HAND (DM adjudicates) ──
-      if (eventType === 'redTrialResolve') {
-        // data.tier: 'perfect' | 'good' | 'failed' — DM taps the button
-        const tier = (data && data.tier) || 'failed';
-        const pName = p.playerName||p.name;
-        if (tier === 'perfect') {
-          p.bricks.red = (p.bricks.red||0) + 1;
-          p.gold = (p.gold||0) + 2;
-          p.cheese = (p.cheese||0) + 1;
-          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
-          G.activeEvent = { ...G.activeEvent, redResult:{ outcome:'perfect', msg:'+1 red, +2 gold, +1 cheese' }, resolved:false };
-          log(pName+' nailed the Trial of the Hand — PERFECT','reward');
-        } else if (tier === 'good') {
-          p.bricks.red = (p.bricks.red||0) + 1;
-          p.gold = (p.gold||0) + 1;
-          if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
-          G.activeEvent = { ...G.activeEvent, redResult:{ outcome:'good', msg:'+1 red, +1 gold' }, resolved:false };
-          log(pName+' passed the Trial — +1 red, +1 gold','reward');
+      // ── v4 RED TRIAL OF THE HAND — phase-based party race ──
+      // Phases: joining → active → picking → done
+      // Handlers: redTrialJoin, redTrialBegin, redTrialPickWinner, redTrialCancel, redTrialDigitalSubmit
+
+      if (eventType === 'redTrialJoin') {
+        if (!G.activeEvent || G.activeEvent.redVariant !== 'trial_of_hand') { broadcastState(); return; }
+        if (G.activeEvent.redPhase !== 'joining') {
+          ws.send(JSON.stringify({type:'error',msg:'Join window closed'})); return;
+        }
+        const joinCls = P.cls || cls;
+        const joiner = G.players[joinCls];
+        if (!joiner || !joiner.alive) {
+          ws.send(JSON.stringify({type:'error',msg:'Only living players can join'})); return;
+        }
+        if (!G.activeEvent.redJoined) G.activeEvent.redJoined = [];
+        if (!G.activeEvent.redJoined.includes(joinCls)) {
+          G.activeEvent.redJoined.push(joinCls);
+          log((joiner.playerName||joiner.name)+' joined the Trial','event');
         } else {
-          p.cheese = (p.cheese||0) + 1;
-          if (!G.lingeringEvents) G.lingeringEvents = {};
-          G.lingeringEvents[p.space] = { evType:'red', variant:'trial_of_hand', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
-          G.activeEvent = { ...G.activeEvent, redResult:{ outcome:'failed', msg:'+1 cheese — the stones await a new challenger' }, resolved:false };
-          log(pName+' — Trial failed. Event lingers for next challenger.','event');
         }
         broadcastState(); return;
       }
+
+      if (eventType === 'redTrialBegin') {
+        // DM triggers — moves to active phase, starts 30s challenge timer
+        if (!G.activeEvent || G.activeEvent.redVariant !== 'trial_of_hand') { broadcastState(); return; }
+        if (G.activeEvent.redPhase !== 'joining') {
+          ws.send(JSON.stringify({type:'error',msg:'Trial not in joining phase'})); return;
+        }
+        const joined = G.activeEvent.redJoined || [];
+        if (joined.length === 0) {
+          ws.send(JSON.stringify({type:'error',msg:'No players joined'})); return;
+        }
+        G.activeEvent.redPhase = 'active';
+        G.activeEvent.redStartedAt = Date.now();
+        G.activeEvent.redEndsAt = Date.now() + 30000;
+        log('Trial begins! '+joined.length+' challenger'+(joined.length!==1?'s':''),'event');
+        // Auto-advance to picking phase when time expires
+        const startedEventId = G.activeEvent.redStartedAt;
+        setTimeout(function() {
+          if (!G.activeEvent || G.activeEvent.redStartedAt !== startedEventId) return;
+          if (G.activeEvent.redPhase !== 'active') return;
+          G.activeEvent.redPhase = 'picking';
+          log('Trial timer expired — DM, pick the winner','event');
+          broadcastState();
+        }, 30000);
+        broadcastState(); return;
+      }
+
+      if (eventType === 'redTrialDigitalSubmit') {
+        // For digital challenges: players submit their score/finish time
+        if (!G.activeEvent || G.activeEvent.redVariant !== 'trial_of_hand') { broadcastState(); return; }
+        if (G.activeEvent.redPhase !== 'active') {
+          ws.send(JSON.stringify({type:'error',msg:'Trial not active'})); return;
+        }
+        const submitCls = P.cls || cls;
+        if (!G.activeEvent.redJoined.includes(submitCls)) {
+          ws.send(JSON.stringify({type:'error',msg:'Only joined players can submit'})); return;
+        }
+        if (!G.activeEvent.redDigitalScores) G.activeEvent.redDigitalScores = {};
+        const existing = G.activeEvent.redDigitalScores[submitCls];
+        if (existing && existing.finishedAt) return; // already submitted
+        G.activeEvent.redDigitalScores[submitCls] = {
+          taps: (data && data.taps) || 0,
+          reactionMs: (data && data.reactionMs) || null,
+          finishedAt: Date.now() - G.activeEvent.redStartedAt,
+        };
+        const submitP = G.players[submitCls];
+        log((submitP?submitP.playerName||submitP.name:submitCls)+' submitted Trial score','event');
+        broadcastState(); return;
+      }
+
+      if (eventType === 'redTrialPickWinner') {
+        // DM picks winner (from joined players). winnerCls null = no winner, event lingers.
+        if (!G.activeEvent || G.activeEvent.redVariant !== 'trial_of_hand') { broadcastState(); return; }
+        if (G.activeEvent.redPhase !== 'active' && G.activeEvent.redPhase !== 'picking') {
+          ws.send(JSON.stringify({type:'error',msg:'Trial not in pickable phase'})); return;
+        }
+        const winnerCls = (data && data.winnerCls) || null;
+        const joined = G.activeEvent.redJoined || [];
+        const landSpace = p ? p.space : -1;
+
+        // Distribute rewards
+        const results = {};
+        if (winnerCls && joined.includes(winnerCls)) {
+          const winner = G.players[winnerCls];
+          if (winner) {
+            winner.bricks.red = (winner.bricks.red||0) + 1;
+            winner.cheese = (winner.cheese||0) + 1;
+            const breakerBonus = (winnerCls === 'breaker') ? 1 : 0;
+            if (breakerBonus) winner.cheese = (winner.cheese||0) + breakerBonus;
+            results[winnerCls] = { won:true, red:1, cheese:1+breakerBonus, breakerBonus:!!breakerBonus };
+            log((winner.playerName||winner.name)+' won the Trial! +1 red, +'+(1+breakerBonus)+' cheese'+(breakerBonus?' (Breaker bonus)':''),'reward');
+          }
+          // Clear any lingering on this space — event was won
+          if (G.lingeringEvents && G.lingeringEvents[landSpace]) delete G.lingeringEvents[landSpace];
+          G.activeEvent.redPhase = 'done';
+        } else {
+          // No winner — event lingers, red brick stays
+          if (!G.lingeringEvents) G.lingeringEvents = {};
+          G.lingeringEvents[landSpace] = { evType:'red', variant:'trial_of_hand', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+          log('No winner named — red brick remains. Event lingers.','event');
+          G.activeEvent.redPhase = 'done';
+        }
+
+        // Participation rolls for joined losers (not winner)
+        joined.forEach(function(jcls) {
+          if (jcls === winnerCls) return;
+          const jp = G.players[jcls];
+          if (!jp) return;
+          const roll30 = Math.random();
+          if (roll30 < 0.3) {
+            // 30% → 1 cheese
+            jp.cheese = (jp.cheese||0) + 1;
+            results[jcls] = { won:false, cheese:1 };
+            log((jp.playerName||jp.name)+' received 1 cheese (participation)','reward');
+          } else {
+            // 70% → 1-2 gold
+            const gold = 1 + Math.floor(Math.random()*2);
+            jp.gold = (jp.gold||0) + gold;
+            results[jcls] = { won:false, gold };
+            log((jp.playerName||jp.name)+' received '+gold+' gold (participation)','reward');
+          }
+        });
+
+        G.activeEvent.redResult = { winnerCls, participants: joined, lingered: !winnerCls, results };
+        G.activeEvent.resolved = false;  // DM still presses Mark Resolved to advance turn
+        broadcastState(); return;
+      }
+
+      if (eventType === 'redTrialCancel') {
+        // DM cancel during joining phase — event lingers
+        if (!G.activeEvent || G.activeEvent.redVariant !== 'trial_of_hand') { broadcastState(); return; }
+        const landSpace = p ? p.space : -1;
+        if (!G.lingeringEvents) G.lingeringEvents = {};
+        G.lingeringEvents[landSpace] = { evType:'red', variant:'trial_of_hand', originCls:cls, attemptsSoFar:1, createdAt:Date.now() };
+        G.activeEvent.redPhase = 'done';
+        G.activeEvent.redResult = { winnerCls:null, participants:G.activeEvent.redJoined||[], lingered:true, cancelled:true, results:{} };
+        G.activeEvent.resolved = false;
+        log('DM cancelled the Trial — event lingers','event');
+        broadcastState(); return;
+      }
+
 
       // ── v4 GRAY RUBBLE STACKING ──
       if (eventType === 'grayRubbleResolve') {
@@ -1831,10 +2096,6 @@ wss.on('connection', (ws, req) => {
         broadcastState(); return;
       }
 
-      if (eventType === 'triviaSuccess') {
-        p.bricks.purple = (p.bricks.purple||0)+1;
-        log(`${p.name} answered correctly — claimed purple brick!`,'reward');
-      }
       if (eventType === 'riddle') {
         const solverCls = data.solverCls;
         if (solverCls && G.players[solverCls]) {
@@ -1870,6 +2131,124 @@ wss.on('connection', (ws, req) => {
     }
 
     // ── DM MARK RESOLVED — advances turn ──
+    // ── DM RESET EVENT — re-initialize current event's mini-game state ──
+    // Works for v4 events + gold + blue + riddle. NOT for monster/boss (rumble has its own reset).
+    // Clears any in-progress results/phases and rolls fresh content for the SAME event type.
+    if (type === 'dm_resetEvent') {
+      if (!G.activeEvent) { broadcastState(); return; }
+      const ev = G.activeEvent;
+      if (ev.evType === 'monster' || ev.evType === 'boss') {
+        log('Reset ignored — rumble has its own reset','event');
+        broadcastState(); return;
+      }
+      const evCls = ev.cls;
+      // Clear every result/phase/in-progress field so variant-specific init gives us a clean start
+      ['redResult','purpleResult','whiteResult','blackResult','greenResult','grayRubbleResult',
+       'blueResult','trapResult','goldResult','riddleWinner','riddleExpired','riddleActive',
+       'redJoined','redJoinEndsAt','redStartedAt','redEndsAt','redPhase','redDigitalScores','redChallenge',
+       'blueVariant','purpleChoice','whiteChoice','blackOffer','greenCut','grayBlocks','grayOutline','grayScore','grayPlaced']
+        .forEach(function(k) { delete ev[k]; });
+      ev.resolved = false;
+
+      // Re-init per variant
+      if (ev.redVariant === 'trial_of_hand') {
+        ev.redChallenge = RED_CHALLENGES[Math.floor(Math.random()*RED_CHALLENGES.length)];
+        ev.redPhase = 'joining';
+        ev.redJoined = [evCls];
+        ev.redJoinEndsAt = Date.now() + 30000;
+        ev.redStartedAt = null;
+        ev.redDigitalScores = {};
+      }
+      if (ev.grayVariant === 'rubble_stacking') {
+        initGrayRubble(ev);
+      }
+      if (ev.blackVariant === 'shadow_bargain') {
+        const rT = Math.random();
+        ev.blackOffer = rT<0.55?'blood_price' : rT<0.80?'brick_exchange' : rT<0.95?'poisoned_favor' : 'binding_pact';
+      }
+      // purple, white, green carry no generated content — clearing results above is enough
+      log('DM reset the event — fresh attempt','event');
+      broadcastState(); return;
+    }
+
+    // ── DM RE-ROLL EVENT — land on a DIFFERENT event on this space ──
+    // Rolls a new event from the zone's landing table, replacing the current event.
+    if (type === 'dm_rerollEvent') {
+      if (!G.activeEvent) { broadcastState(); return; }
+      const ev = G.activeEvent;
+      if (ev.evType === 'monster' || ev.evType === 'boss') {
+        log('Re-roll ignored — rumble has its own reset','event');
+        broadcastState(); return;
+      }
+      const evCls = ev.cls;
+      const p = G.players[evCls];
+      if (!p) { broadcastState(); return; }
+      const zone = (ev.zone !== undefined) ? ev.zone : (SPACES[p.space]?.zone || 0);
+      const pName = p.playerName||p.name||evCls;
+
+      // Roll a new event on a new server-side roll
+      const newRoll = roll(7);
+      const landingTable = LANDING_EVENTS[zone+1];
+      if (!landingTable) { broadcastState(); return; }
+      const newEvData = landingTable[newRoll-1];
+      if (!newEvData) { broadcastState(); return; }
+
+      // Build a fresh eventMeta (same shape as natural landingRoll init)
+      let newMeta = { cls:evCls, roll:newRoll, zone, resolved:false, evType:newEvData.type };
+      if (newEvData.type === 'gold') { newMeta.goldAmount = newEvData.amount||1; }
+      if (newEvData.type === 'blue') { newMeta.brickColor = 'blue'; }
+      if (newEvData.type === 'trap' || newEvData.type === 'doubletrap') {
+        const existingTraps = (G.orangeSpaces && G.orangeSpaces[p.space]) || 0;
+        const newTraps = newEvData.type === 'doubletrap' ? 2 : 1;
+        newMeta.trapCount = existingTraps + newTraps;
+      }
+      // Variant init for v4 events
+      if (newEvData.type === 'purple') { newMeta.purpleVariant = 'fated_choice'; newMeta.isFixer = (evCls === 'fixer'); }
+      if (newEvData.type === 'white')  { newMeta.whiteVariant = 'pilgrims_rest'; newMeta.isFixer = (evCls === 'fixer'); }
+      if (newEvData.type === 'black')  {
+        newMeta.blackVariant = 'shadow_bargain';
+        newMeta.isFormwright = (evCls === 'formwright');
+        newMeta.isFixer = (evCls === 'fixer');
+        const rT = Math.random();
+        newMeta.blackOffer = rT<0.55?'blood_price' : rT<0.80?'brick_exchange' : rT<0.95?'poisoned_favor' : 'binding_pact';
+      }
+      if (newEvData.type === 'green')  { newMeta.greenVariant = 'vine_path'; newMeta.isWildOne = (evCls === 'wild_one'); newMeta.evType = 'green'; }
+      if (newEvData.type === 'red') {
+        newMeta.redVariant = 'trial_of_hand';
+        newMeta.isBreaker = (evCls === 'breaker');
+        newMeta.redChallenge = RED_CHALLENGES[Math.floor(Math.random()*RED_CHALLENGES.length)];
+        newMeta.redPhase = 'joining';
+        newMeta.redJoined = [evCls];
+        newMeta.redJoinEndsAt = Date.now() + 30000;
+        newMeta.redStartedAt = null;
+        newMeta.redDigitalScores = {};
+        newMeta.evType = 'red';
+      }
+      if (newEvData.type === 'gray') {
+        newMeta.grayVariant = 'rubble_stacking';
+        newMeta.isBlocksmith = (evCls === 'blocksmith');
+        initGrayRubble(newMeta);
+        newMeta.evType = 'gray';
+      }
+      if (newEvData.type === 'monster') {
+        // Monster re-roll: set up pending rumble
+        const evMids = newEvData.mids || ['goblin'];
+        const entityType = ENTITY_META[evMids[0]] ? evMids[0] : 'goblin';
+        const entityTpl = ENTITY_META[entityType];
+        const flavorPool = RUMBLE_FLAVOR[entityType] || [entityTpl.name + ' appears!'];
+        const flavor = flavorPool[Math.floor(Math.random()*flavorPool.length)];
+        G.pendingRumbleBattle = {
+          cls: evCls,
+          entityType,
+          enemy: { name: entityTpl.name, hp: entityTpl.hp, hpMax: entityTpl.hp, damageType: entityTpl.dmgType || 'phys' },
+          flavor,
+        };
+      }
+      G.activeEvent = newMeta;
+      log('DM re-rolled '+pName+' — zone '+(zone+1)+' roll '+newRoll+' → '+newEvData.type,'event');
+      broadcastState(); return;
+    }
+
     if (type === 'dm_resolved') {
       if (!G.activeEvent) { broadcastState(); return; }
       G.activeEvent = null;

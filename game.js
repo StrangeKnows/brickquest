@@ -224,23 +224,6 @@ const STORE_PRICES = {
   purple:3, black:3
 };
 
-// ── LEGO TRIVIA ───────────────────────────────────────────
-const LEGO_TRIVIA = [
-  { q:"What year was LEGO founded?",                              a:"1932",        diff:"easy"   },
-  { q:"What does LEGO mean in Danish?",                          a:"play well",   diff:"easy"   },
-  { q:"What color was the first LEGO brick?",                    a:"red",         diff:"easy"   },
-  { q:"How many studs does a standard 2×4 LEGO brick have?",    a:"8",           diff:"easy"   },
-  { q:"What country is LEGO headquartered in?",                  a:"denmark",     diff:"easy"   },
-  { q:"What year did LEGO Mindstorms launch?",                   a:"1998",        diff:"medium" },
-  { q:"What was the first licensed LEGO theme?",                 a:"star wars",   diff:"medium" },
-  { q:"In what decade did LEGO minifigures first appear?",       a:"1970s",       diff:"medium" },
-  { q:"What material are LEGO bricks made from?",                a:"abs plastic", diff:"medium" },
-  { q:"How many LEGO sets are sold per second worldwide (approx)?", a:"7",        diff:"medium" },
-  { q:"How many possible combinations exist with 6 standard 2×4 LEGO bricks?", a:"915 million", diff:"hard" },
-  { q:"What is the clutch power of a LEGO stud in Newtons?",    a:"4.4",         diff:"hard"   },
-  { q:"Approximately how many LEGO pieces are produced each year?", a:"36 billion", diff:"hard" },
-];
-
 // ── RIDDLES ───────────────────────────────────────────────
 // ── ZONE-SPECIFIC CLUES ─────────────────────────────────
 // Each clue teaches zone-relevant tactics. clueZone matches ZONES index (0-4).

@@ -1326,3 +1326,219 @@ All syntax-verified. Ready for commit.
 - **Class skills rework with fusion gating + achievement unlocks**
   (queued as next major session)
 - **Board actions audit + consistency pass** (queued)
+
+---
+
+## Session 011 — Polish, Resolution Consistency, Revive Minigame (April 22-23, 2026)
+
+Post-v4 polish session. Big theme: shared component helpers for resolution
+cards, mid-combat death recovery, diagnostic fixes for mobile, and
+progression-system instrumentation.
+
+### Resolution card consistency pass — all 9 v4 events unified
+
+Introduced two shared helpers in players.html + test_players.html:
+
+- `buildResolutionCard({themeColor, borderColor, bgColor, title, rewardIcons, flavor, linger, extra, shower, showerTint})`
+  — builds the bordered themed result card with confetti canvas (20%
+  opacity), icon row, italic flavor, linger note, extras slot, and
+  "WAITING FOR DM" footer.
+- `renderRewardIcons({bricks:{color:n}, coins, cheese, shield, hp, maxHp, poison, custom})`
+  — builds the icon row. Supports colored brick squares, coins (🪙),
+  cheese (🧀), shield (🛡), HP chips (±N), Max HP chips, poison (☠)
+  stacks, plus arbitrary custom HTML.
+
+Every v4 resolution card migrated:
+1. Purple — 4 outcomes (Blessed/Cursed/Pass/Cleansed)
+2. White — 5 outcomes (Heal Ally / Self Heal / Max HP / Self Rest / Revive)
+3. Black — 5 outcomes (Refused / Blood Price / Brick Exchange / Poisoned Favor / Binding Pact)
+4. Green — 4 tiers (All Cut / 2 Cut / 1 Cut / Overwhelmed)
+5. Red — Winner/Loser/DNJ/Cancelled/No Winner
+6. Gray Rubble — 4 tiers (Perfect/Good/Miss/Fumble, match % in extras)
+7. Trap — Disarmed / Dodged / Sprung (per-damage flavor pool)
+8. Gold — Torch gathered / Crack found / Rat bite / Burnout
+9. Blue — migrated to helper (was the original template)
+
+Numeric rewards are auto-extracted from `R.msg` via regex (e.g. `+2 red`,
+`+3 gold`, `-2 HP`, `☠ 1 poison`). If no numeric content present, icon
+row omitted — card still renders cleanly with just title + flavor.
+
+### Green vine puzzle — redesigned
+
+Replaced the SVG trace minigame with a **multi-vine puzzle**. 6 vines
+in a 3×3 grid, each with a type:
+- **Thorn** 🌵 → TAP (quick press)
+- **Grab** 🌿 → HOLD 1.5s
+- **Weep** 💧 → SWIPE 40px
+
+Need 3 correct cuts out of 6 to pass (matches existing scoring tiers).
+Wrong gesture locks vine red. 25s timer. WO Wild One: HOLD on any vine
+counts as correct regardless of type. Legend row at top teaches the
+pairings.
+
+### Revive minigame — new death recovery mechanic
+
+Player HP=0 in rumble no longer silently auto-respawns. Instead:
+- Full-screen defeat overlay fades in
+- Tap-to-fill bar: 20 taps in 6s
+- Rumble is fully paused via new `_revivePaused` flag gating the main
+  `update()` loop + all damage sources
+- **Success with cheese** → full HP, cheese consumed, floater "🧀 REVIVED"
+- **Success without cheese** → 50% HP, floater "REVIVED"
+- **Failure** → retry at 80% speed (7.5s window). Second failure →
+  `_internalEnd('defeat')` fires, battle ends
+- 2.5s iframes + statuses cleared on revive
+- Battle continues mid-state (enemy HP, bricks, timer all preserved)
+
+Also audited all HP=0 paths to ensure revive triggers correctly:
+- Enemy melee/projectile hit: existing calls preserved
+- Poison DoT tick: fixed (was silently killing player until next enemy hit)
+- Poison puddle → poison status → tick: covered by poison tick fix
+- External `Rumble.setPlayerHP(n)`: defensive fix (triggers revive if set to 0)
+
+### Overheal cap 3× → 2× hpMax + purple HP bars on board
+
+Lifesteal overheal ceiling reduced from `hpMax * 3` to `hpMax * 2`.
+New caps per class (examples): BK 28 (was 42), FW 12 (was 18).
+
+Verified overheal already persists to board via
+`p.hp = Math.max(0, finalHp)` in battleEnd handler — no clamp.
+
+Added visual overheal state to every HP bar on player + DM screens:
+- When `hp > hpMax`, bar fill becomes purple gradient
+  `linear-gradient(90deg,#7B2FBE,#b06fef)` + `box-shadow: 0 0 6px #b06fef88`
+- HP text color → `#b06fef`
+- Bar width clamped to 100%
+- DM card also shows `(+N)` suffix on HP text for overheal amount
+- Applied to: main player stats strip, status tab HP card, party tab
+  HP bars, DM player roster cards
+
+### Mobile header auto-hide on scroll
+
+`.topbar` + `.phase-banner` now collapse smoothly on scroll-down in
+`#tab-content`, restore on scroll-up. Max action-pane real estate on
+landscape mobile screens. Uses `requestAnimationFrame` throttling +
+20px top-threshold (always visible near top). Transitions on
+max-height, padding, opacity, border-bottom-width.
+
+### Blue event FW Formwright Charge
+
+FW gets +1 blue brick (same as other classes) PLUS a persistent
+`nextRumbleBuff.refreshBoost = { multiplier: 2.0, durationMs: 10000 }`
+on blue-event success. Consumed at rumble start.
+
+Rumble side: `player.refreshBoost = { multiplier, endsAt }`. Check in
+`playerRefreshMult()` multiplies refresh rate while active. Floater
+"⚡ FORMWRIGHT CHARGE" at battle start. Compounds multiplicatively
+with daze (2× × 0.5 = 1.0).
+
+**UI additions:**
+- Blue resolution card → dedicated FW banner with 4-line flavor pool
+  when `fwRefreshBuff: true`
+- Player persistent banner shown between rounds while the buff is queued
+- DM blue result card shows same banner
+- DM roster shows `⚡ FW charge` pill until rumble consumes it
+- Also added `☠ N` poison pill for queued poison stacks (was invisible)
+
+### Shadow Bargain UX rework
+
+Old flow used browser `prompt()` dialog for brick_exchange — terrible
+on mobile, zero context. Rewrote:
+
+- **All classes** see the offer details now (FW retains Scholar's Eye
+  flavor framing; others see plain "The shadow offers:" lead-in)
+- Clear GAIN / COST rows per offer type:
+  - Blood Price → +2 black / −2-5 max HP (rolled, permanent)
+  - Brick Exchange → +1 black, +3 gold / −1 brick (your pick, below)
+  - Poisoned Favor → +1 black / ☠ 1 poison stack × 3 rumbles
+  - Binding Pact → +2 black / every ally loses 1 random brick
+- **Inline brick picker** for exchange — clickable tiles showing colored
+  brick square + class + count. Selection highlights gold. Replaces
+  dropdown/prompt entirely.
+- Accept button disabled if player has no eligible bricks; label
+  reflects state ("✓ ACCEPT (trade selected)" for exchange)
+
+### Skeleton bone-rise victory guard + universal corpse icons
+
+Two fixes in the victory flow:
+
+1. `triggerVictory()` now checks for pending `_boneRiseQueued` flags.
+   Skeleton small-hit deaths (finalDmg ≤ 10) queue a bone-rise that's
+   processed on the next frame. Without the guard, victory declared +
+   loot dropped before the skeleton could revive.
+
+2. `drawDeadEntity()` was hardcoded to draw 👺 (goblin). Now uses
+   `g.visIcon` (populated from entity registry) so every monster
+   shows its own icon in the corpse visual. Icons + X eyes scale with
+   entity radius — bosses now have larger corpse visuals. All monsters
+   laid on side, 70% opacity, grey body overlay, fade in last 0.5s.
+
+### Victory screen single-hit highlights + zero-hiding
+
+Added 6 new `_battleStats` fields:
+- `biggestDamageDealt` — largest single hit to any enemy
+- `biggestDamageTaken` — largest single hit to player (melee, projectile, poison)
+- `biggestHealPlayer` + `totalHealed` — biggest + total self-heal
+- `biggestHealEntity` + `totalEntityHeal` — biggest + total enemy self-heal
+  (cursed_knight +5, stone_colossus +3, others +2)
+
+Instrumented 6 damage sites + 5 heal sites. All stats passed through
+`battleEnd` snapshot for DM visibility.
+
+Victory screen rebuilt to show only non-zero stats in logical order:
+1. Time / HP (always)
+2. DMG DEALT / DMG TAKEN
+3. HIGHEST HIT / BIGGEST HIT TAKEN
+4. HP HEALED / BIGGEST HEAL
+5. ENEMY HEALED / BIGGEST ENEMY HEAL
+6. DPS / CRITS
+7. OVERLOADS / ARMOR ABSORBED
+
+Zero-valued stats hidden so "took no damage" runs don't show
+"DMG TAKEN 0", etc.
+
+### Debug log strip
+
+Removed 37 of 38 `[BQ-DBG]`, `[BQ-DBG-DM]`, `[BQ-DBG-SRV]`, `[BQ-RUMBLE]`
+console calls across all 5 files. Kept 1 legit `console.warn` in
+rumble.js that fires when `_showVictoryScreen` is called without state.
+
+### Small fixes
+
+- **Torch black-screen bug** — `test_players.html` missing
+  `var cheeseFound = 0;` declaration. Caused ReferenceError at
+  `endGame` → `finishGoldGame` never called → canvas stuck black.
+  Added declaration + canvas fade-to-opacity so gap between burnout
+  and result card is smooth.
+- **Crumb emoji cleanup** — `test_players.html` still had
+  `DECOY_POOL = ['crumb', 'cheese']` + 🟡 crumb draw branch. Removed
+  both. Torch now spawns only 🪙 coins + 🧀 cheese. `players.html`
+  was already clean.
+- **Mobile victory screen diagnostics** — user reported victory screen
+  not appearing on mobile. Added 4 `console.log` diagnostics in
+  rumble.js through the victory trigger flow. Left in place for
+  remote debugging.
+
+### File state
+
+Shipped in `/mnt/user-data/outputs`:
+- server.js 130978 bytes
+- rumble.js 364830 bytes
+- players.html 341547 bytes
+- test_players.html 342121 bytes
+- dm_screen.html 94880 bytes
+- game.js 32573 bytes (unchanged this session)
+
+All syntax-verified via `node --check` (server, rumble) and brace/paren
+count (HTML script tags).
+
+### Still deferred
+
+- Purple chest pictures — needs design direction (emoji / SVG / asset)
+- Pilgrim's Rest full rework — needs design direction (options, minigame vs decision)
+- Lingering event marker on board graphic
+- Cheese display on DM screen per-player roster
+- Cheese store mechanics
+- Class skills rework with fusion gating (MAJOR multi-session)
+- Board actions audit + consistency pass
+- Zone-scaled revive minigame difficulty
