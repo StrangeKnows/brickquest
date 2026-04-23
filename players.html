@@ -880,6 +880,11 @@ function switchTab(id, btn) {
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById('pane-'+id)?.classList.add('active');
+  // Returning to Dashboard should feel fresh — rotate flavor next render.
+  if (id === 'dashboard') {
+    _flavorStaleTab = true;
+    try { render(); } catch(e) {}
+  }
 }
 
 // ── MAIN RENDER ──
@@ -1184,9 +1189,48 @@ function _dashBrickGrid(me) {
   return `<div class="card"><div class="card-title">Brick Charges</div>${body}</div>`;
 }
 
-// ── PHASE CONTEXT ── cards that appear inline based on G.phase + active event.
-// Absorbs what the old Actions tab did — prepare panel, move/roll, landing
-// events, rumble card, gates.
+// ── TOP SLOT ── above the character card. Holds one of:
+//   (A) The landing-event card (via #landing-result container; populated by
+//       restoreActiveEvent), OR
+//   (B) The rumble-pending/active card, OR
+//   (C) A flavor line (when neither is active) — rendered by _dashFlavorLine.
+//
+// Returns { html, active } so renderDashboard knows whether to skip flavor.
+function _dashTopSlot(me) {
+  const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
+  let html = '';
+  let active = false;
+
+  // Rumble card (pending or active) — always shown when applicable
+  const rumbleHtml = renderRumbleCard(me);
+  if (rumbleHtml) { html += rumbleHtml; active = true; }
+
+  // Event card — the #landing-result container, populated by restoreActiveEvent.
+  // Multiple conditions surface this container (on-turn events, off-turn riddle
+  // watchers, red-trial race). Consolidate into one flag.
+  const hasMyActiveEvent = isMyTurn && G.phase === 'land' && !_pendingResult
+    && G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
+  const hasSharedRiddle = !isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle'
+    && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired);
+  const hasSharedTrial = !isMyTurn && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand';
+  if (hasMyActiveEvent || hasSharedRiddle || hasSharedTrial) {
+    html += '<div id="landing-result"></div>';
+    active = true;
+  }
+  return { html, active };
+}
+
+function _dashFlavorLine(me) {
+  const line = dashboardFlavor(false);
+  if (!line) return '';
+  return `<div class="card" style="padding:12px 16px;text-align:center;border-color:#2a2a2a;">
+    <div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;color:var(--text-dim);line-height:1.5;">${line}</div>
+  </div>`;
+}
+
+// ── PHASE CONTEXT ── middle-of-dashboard cards (non-top-slot).
+// Absorbs what the old Actions tab did, minus the event + rumble cards which
+// now live in the top slot via _dashTopSlot.
 function _dashPhaseContext(me) {
   const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
   let html = '';
@@ -1196,23 +1240,13 @@ function _dashPhaseContext(me) {
   if (G.phase === 'prepare') {
     html += renderPreparePanel(me);
   }
-  // Rumble pending / active card
-  html += renderRumbleCard(me);
-  // Landing-event entry
+  // Landing-event entry (Roll Die button) — only when no active event and no pending result
   if (isMyTurn && G.phase === 'land' && !_pendingResult) {
     var hasActiveEvent = G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
     if (!hasActiveEvent) {
       html += renderLandPanel(me);
-    } else {
-      html += '<div id="landing-result"></div>';
     }
-  }
-  // Off-turn viewers for shared events
-  if (!isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle' && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired)) {
-    html += '<div id="landing-result"></div>';
-  }
-  if (!isMyTurn && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand') {
-    html += '<div id="landing-result"></div>';
+    // When active event: landing-result container is in the TOP SLOT now, not here.
   }
   // Gates always visible when applicable
   html += renderGateActions(me);
@@ -1398,7 +1432,17 @@ function renderDashboard(me) {
   // Market expanded inline? Keep the existing market-panel render for now.
   const marketPanel = (typeof _marketOpen !== 'undefined' && _marketOpen)
     ? renderMarketPanel(me) : '';
+  // Top slot: event or rumble-pending card if active, otherwise a flavor line.
+  // The dashboardFlavor() call is made AFTER computing topSlot.active so the
+  // "just cleared" detection fires correctly on the render after event resolves.
+  const topSlot = _dashTopSlot(me);
+  const topSlotHtml = topSlot.active
+    ? topSlot.html
+    : _dashFlavorLine(me);
+  // Track active state for next render's transition detection
+  _dashTopSlotWasActive = topSlot.active;
   el.innerHTML = `
+    ${topSlotHtml}
     ${_dashHeader(me)}
     ${_dashBrickGrid(me)}
     ${_dashPhaseContext(me)}
@@ -1546,9 +1590,16 @@ window._debugPreparePanel = function() {
   });
 };
 
-// Dungeony dad-joke flavor pool for the prepare phase header.
-// Rotates on each tab-render so you get a new line every visit.
-var PREPARE_FLAVOR = [
+// Thematic flavor pool — dungeon atmosphere, dungeony dad jokes, LEGO meta.
+// Used by two surfaces:
+//   (A) Dashboard top slot (when no event/rumble-pending card is active)
+//   (B) Prepare panel header (cached per-phase via currentFlavor())
+// Keep one pool, two rotation policies. No duplication.
+//
+// Tone: wry, brief, same cadence across voices. Self-aware but not snarky.
+// Immersive when possible; the LEGO winks are occasional, not constant.
+var FLAVOR_POOL = [
+  // ── Dungeon atmosphere (original 20, kept verbatim — they land) ──
   'The torches crackle. Someone should really check the pilot light.',
   'A rat scurries past. It looks like it has somewhere to be.',
   'You smell damp stone and bad decisions.',
@@ -1569,22 +1620,136 @@ var PREPARE_FLAVOR = [
   'The air tastes like old parchment and regret.',
   'A skeleton waves. You wave back. It\'s only polite.',
   'Brave, aren\'t you? Or short on other options.',
+
+  // ── Dungeon dad jokes (new, 20) ──
+  'Why don\'t dragons tell jokes? They always sound too fiery.',
+  'A skeleton walked into a tavern. Couldn\'t order. No guts.',
+  'Dungeon economics: all rock, no paper.',
+  'The wizard\'s inbox is full. Mostly spam from liches.',
+  'Heard the bard\'s new album. It\'s a lute.',
+  'The necromancer threw a party. It was dead.',
+  'A ghost haunted the library. Nobody checked him out.',
+  'Why did the troll cross the bridge? Toll booth was broken.',
+  'The mage cast Identify on a sandwich. Results were bread-curdling.',
+  'Two goblins walked into a bar. The third one ducked.',
+  'The minotaur failed geometry. All those corners.',
+  'A vampire ordered stake. Kitchen refused.',
+  'Why are orcs bad at poker? Too many tells.',
+  'The lich took up pottery. Work was skeletal.',
+  'A paladin lost his virtue. Found it in the laundry.',
+  'Wizards hate stairs. Something about levels.',
+  'The cleric\'s sermon ran long. Nobody was healed.',
+  'Why did the slime dissolve? Existential acid reflux.',
+  'A gelatinous cube attended jazz night. Killed the mood.',
+  'The dungeon\'s Yelp review: two stars, would flee again.',
+
+  // ── LEGO meta (new, 20) ──
+  'A loose 1x1 rolls past. Somewhere, a foot waits.',
+  'Your inventory rattles when you walk. It\'s fine.',
+  'Somebody stepped on a red brick. The scream echoed for years.',
+  'You try to click two bricks together. They\'re from different sets.',
+  'The minifig next to you has the same face. Everyone does.',
+  'A stud clicks somewhere overhead. Reassuring and concerning.',
+  'You find a single brown 2x2. Sacred, but you don\'t know why.',
+  'The studs on this floor are decorative. Or the architect lied.',
+  'A baseplate extends into the distance. The grid is the grid.',
+  'Your cape is printed, not cloth. Nobody has to know.',
+  'You can\'t turn your wrist. You\'ve made peace with this.',
+  'The instructions are several rooms back. Wing it.',
+  'A brick-built dog watches silently. It judges your stacking.',
+  'Your hands grip but do not grasp. It has always been this way.',
+  'Somewhere, a vacuum runs. You do not move.',
+  'A wizard here has two faces. Literally. The print is double-sided.',
+  'You step on a Technic pin. It rolls. You roll with it.',
+  'The sky is a very large blue plate. You don\'t question it.',
+  'Your belt is part of your torso print. It was always there.',
+  'A 2x4 brick does many jobs. Respect the 2x4.',
 ];
-var _flavorIdx = 0;
-function nextFlavor() {
-  _flavorIdx = (_flavorIdx + Math.floor(Math.random()*5) + 1) % PREPARE_FLAVOR.length;
-  return PREPARE_FLAVOR[_flavorIdx];
+// Back-compat alias — any older code paths referring to PREPARE_FLAVOR still work.
+var PREPARE_FLAVOR = FLAVOR_POOL;
+// ── Flavor rotation infrastructure ──
+// One pool (FLAVOR_POOL), one LRU (_flavorRecent), two rotation policies.
+//
+// _flavorRecent holds the last LRU_SIZE indices shown on THIS client, across
+// both surfaces. Prevents the dashboard and prepare header from both landing
+// on the same line within a short window. Per-client (browser) state; server
+// not involved.
+//
+// Class-seeded picks: the starting offset for any new selection factors in
+// MY_CLASS, so two players on different classes rotating at the same moment
+// drift apart in the pool. They can still land on the same line eventually,
+// but not via mirror-rotation.
+var FLAVOR_LRU_SIZE = 15;
+var _flavorRecent = [];
+
+// Simple string hash for seeding. Returns non-negative int.
+function _flavorHash(s) {
+  var h = 0;
+  s = String(s || '');
+  for (var i = 0; i < s.length; i++) {
+    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
 }
-// Hold current flavor until the phase changes so it doesn't flicker on every render
+
+// Pick the next flavor index given a seed string. Walks the pool from the
+// seed position, skipping anything currently in _flavorRecent. Guaranteed to
+// return a fresh index as long as pool.length > LRU_SIZE (60 > 15, so yes).
+function _pickFlavor(seedKey) {
+  var pool = FLAVOR_POOL;
+  var n = pool.length;
+  var start = _flavorHash(seedKey + '|' + Date.now()) % n;
+  for (var step = 0; step < n; step++) {
+    var idx = (start + step) % n;
+    if (_flavorRecent.indexOf(idx) === -1) {
+      _flavorRecent.push(idx);
+      if (_flavorRecent.length > FLAVOR_LRU_SIZE) _flavorRecent.shift();
+      return idx;
+    }
+  }
+  // Pool exhausted (shouldn't happen) — reset and pick start.
+  _flavorRecent = [start];
+  return start;
+}
+
+// ── Prepare-panel header flavor ──
+// Holds during a single phase so the line doesn't flicker on every state tick.
 var _lastFlavorPhase = null;
 var _lastFlavor = '';
 function currentFlavor() {
   var key = (G && G.phase) + '|' + (G && G.round) + '|' + (G && G.activePlayerIdx);
   if (_lastFlavorPhase !== key) {
     _lastFlavorPhase = key;
-    _lastFlavor = nextFlavor();
+    var seed = (MY_CLASS || 'x') + '|' + key;
+    _lastFlavor = FLAVOR_POOL[_pickFlavor(seed)];
   }
   return _lastFlavor;
+}
+
+// ── Dashboard top-slot flavor ──
+// Rotates when any of these change:
+//   - phase / round / activePlayerIdx (phase transitions)
+//   - event card was active last render but no longer is (event cleared)
+//   - tab switched TO dashboard (via _flavorStaleTab flag, set by switchTab)
+//
+// Between rotation triggers, the line stays put — readable, not strobing.
+var _dashFlavorKey = null;
+var _dashFlavor = '';
+var _dashTopSlotWasActive = false;  // was an event/rumble card showing last render?
+var _flavorStaleTab = false;         // set by switchTab when entering dashboard
+function dashboardFlavor(topSlotActiveNow) {
+  var phaseKey = (G && G.phase) + '|' + (G && G.round) + '|' + (G && G.activePlayerIdx);
+  var clearedTrigger = _dashTopSlotWasActive && !topSlotActiveNow;
+  var tabTrigger = _flavorStaleTab;
+  var currentKey = phaseKey + '|' + (clearedTrigger ? 'c' + Date.now() : '') + (tabTrigger ? 't' + Date.now() : '');
+  if (_dashFlavorKey !== currentKey) {
+    _dashFlavorKey = currentKey;
+    var seed = (MY_CLASS || 'x') + '|dash|' + phaseKey + '|' + (_flavorRecent.length);
+    _dashFlavor = FLAVOR_POOL[_pickFlavor(seed)];
+    _flavorStaleTab = false;
+  }
+  _dashTopSlotWasActive = topSlotActiveNow;
+  return _dashFlavor;
 }
 
 function renderPreparePanel(me) {
