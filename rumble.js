@@ -8016,6 +8016,46 @@ function _showReviveOverlay() {
   // Tap counter removed — the visual (inner catching outer) IS the progress indicator.
   // Centered layout reads equally well in portrait and landscape.
 
+  // Color helpers: convert hex shorthand (#d44) to rgba() for alpha safety.
+  // The earlier implementation did `titleColor + '44'` which produces an
+  // invalid 5-char color (e.g. '#d4444') for 3-digit hex inputs — browsers
+  // silently fall back to transparent, so the outer heart was invisible.
+  var tcRgba = function(alpha) {
+    // Parse #d44 or #dd4444 into rgba
+    var h = titleColor.replace('#','');
+    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+    var r = parseInt(h.substr(0,2),16);
+    var g = parseInt(h.substr(2,2),16);
+    var b = parseInt(h.substr(4,2),16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+  };
+
+  // Two-heart stack — landscape-friendly sizing (uses min of vw and vh).
+  // Outer = time boundary (shrinks inward); inner = tap progress (grows).
+  // Outer renders as a HOLLOW outline so it stays visually distinct when
+  // inner grows near it: outer reads as "the boundary", inner as "the life".
+  var heartStackHtml =
+        '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);'
+      +   'display:flex;align-items:center;justify-content:center;">'
+      // Outer heart — hollow outline via -webkit-text-stroke
+      +   '<div id="revive-heart-outer" style="position:absolute;top:50%;left:50%;'
+      +     'transform:translate(-50%,-50%) scale(1);transform-origin:center;'
+      +     'font-size:min(240px,55vmin);line-height:1;'
+      +     'color:transparent;'
+      +     '-webkit-text-stroke:2px ' + tcRgba(0.55) + ';'
+      +     'text-stroke:2px ' + tcRgba(0.55) + ';'
+      +     'filter:drop-shadow(0 0 18px ' + tcRgba(0.35) + ');'
+      +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
+      // Inner heart — solid red, grows with taps
+      +   '<div id="revive-heart-inner" style="position:absolute;top:50%;left:50%;'
+      +     'transform:translate(-50%,-50%) scale(0.2);transform-origin:center;'
+      +     'font-size:min(240px,55vmin);line-height:1;'
+      +     'color:' + titleColor + ';'
+      +     'filter:drop-shadow(0 0 20px ' + titleColor + ');'
+      +     'animation:reviveInnerPulse 1s ease-in-out infinite;'
+      +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
+      + '</div>';
+
   var html =
     '<div id="revive-overlay" style="position:absolute;top:0;left:0;right:0;bottom:0;'
       + 'background:rgba(10,0,0,0.88);display:flex;flex-direction:column;align-items:center;justify-content:center;'
@@ -8027,25 +8067,7 @@ function _showReviveOverlay() {
       +   title + '</div>'
       + '<div style="font-size:clamp(12px,3vw,15px);color:#ddd;margin-bottom:16px;font-family:\'Crimson Pro\',serif;font-style:italic;text-align:center;">'
       +   subtitle + '</div>'
-      // Two-heart stack — landscape-friendly sizing (uses min of vw and vh)
-      + '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);'
-      +   'display:flex;align-items:center;justify-content:center;">'
-      // Outer heart (time boundary — shrinks as time runs out)
-      +   '<div id="revive-heart-outer" style="position:absolute;top:50%;left:50%;'
-      +     'transform:translate(-50%,-50%) scale(1);transform-origin:center;'
-      +     'font-size:min(240px,55vmin);line-height:1;'
-      +     'color:' + titleColor + '44;'
-      +     'text-shadow:0 0 30px ' + titleColor + '33;'
-      +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
-      // Inner heart (tap progress — grows)
-      +   '<div id="revive-heart-inner" style="position:absolute;top:50%;left:50%;'
-      +     'transform:translate(-50%,-50%) scale(0.2);transform-origin:center;'
-      +     'font-size:min(240px,55vmin);line-height:1;'
-      +     'color:' + titleColor + ';'
-      +     'filter:drop-shadow(0 0 20px ' + titleColor + ');'
-      +     'animation:reviveInnerPulse 1s ease-in-out infinite;'
-      +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
-      + '</div>'
+      + heartStackHtml
       // Style: inner pulse + tap impulse (layered)
       + '<style>'
       +   '@keyframes reviveInnerPulse { 0%,100% { filter:drop-shadow(0 0 14px ' + titleColor + '); }'
