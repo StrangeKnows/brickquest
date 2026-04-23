@@ -3206,7 +3206,7 @@ draw = function() {
     ctx.textAlign = _align;
     ctx.textBaseline = 'middle';
     ctx.shadowColor = ft.color;
-    ctx.shadowBlur = (fs / 14) * 8 * ft.alpha * glow;
+    ctx.shadowBlur = (fs / 14) * 5 * ft.alpha * glow;
     // Outline (WEAK tier) for extra saturation pop
     if (ft.outline || ft.tier === 'WEAK') {
       ctx.lineWidth = 2.5;
@@ -7961,7 +7961,7 @@ function triggerVictory() {
     // (either naturally or via vacuum sweep), wait this long before showing
     // the victory screen. Gives the player a beat to register what they
     // picked up before the card appears.
-    var VICTORY_GRACE_MS = 3000;
+    var VICTORY_GRACE_MS = 2000;
     var waitLoot = function() {
       if (!running) { entityRespawnPending = false; return; }
       var now = performance.now();
@@ -8521,7 +8521,7 @@ var _CHEESE_EVENT_FLAVORS = [
   'Gouda day.',
   'Mmm...',
   'Smell that?',
-  'Aged well.',
+  'Well aged.',
   'Creamy!',
   'Rind of joy.',
   'Hole-y moly.',
@@ -8716,7 +8716,7 @@ function _showVictoryScreen() {
     + 'z-index:200;box-sizing:border-box;'
     + 'font-family:\'Cinzel\',serif;'
     + 'pointer-events:none;'
-    + 'opacity:0;animation:bqVictoryFadeIn 2s ease-out forwards;'
+    + 'opacity:0;animation:bqVictoryFadeIn 1s ease-out forwards;'
     + '" id="rumble-victory-screen-outer">'
 
       // Scrollable content area — becomes the grid container in landscape
