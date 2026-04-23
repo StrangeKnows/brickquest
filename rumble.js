@@ -8725,9 +8725,16 @@ function _showVictoryScreen() {
   //   HERO    — VICTORY banner, tier label, flavor, favorite move (a hero stat)
   //   STATS   — 2-col grid of combat numbers
   //   REWARDS — charges refilling + loot chips + felled list, one grouped zone
-  // Portrait: vertically centered via flex justify-content (content fits →
-  //   centered; content overflows → scroll container takes over).
-  // Landscape: 3-column grid reflow (existing behavior preserved).
+  //   CONTINUE — button sits as last child of the content block
+  //
+  // Structure: vic-root is a flex container with ONE child (vic-scroll). The
+  // single-child pattern is what makes vertical centering work on mobile.
+  // An earlier design had Continue as a sibling with flex:0 0 auto; when the
+  // content exceeded viewport, flex centering degraded and pinned everything
+  // to top. With Continue inside vic-scroll as its last child, the whole
+  // block centers when it fits and scrolls as one unit when it doesn't.
+  //
+  // Landscape (short viewport): 3-column grid reflow preserved via media query.
   var html =
     '<div id="rumble-victory-screen" class="vic-root" style="'
     + 'position:absolute;top:0;left:0;right:0;bottom:0;'
@@ -8739,12 +8746,12 @@ function _showVictoryScreen() {
     + 'opacity:0;animation:bqVictoryFadeIn 1s ease-out forwards;'
     + '" id="rumble-victory-screen-outer">'
 
-      // Content area — flex:0 1 auto + max-height so it centers when it fits
-      // and scrolls when it doesn't. In landscape it becomes the 3-col grid.
+      // Single scrolling child. max-height:100% + overflow-y:auto means
+      // content centers when it fits, scrolls when it doesn't.
       + '<div class="vic-scroll" style="flex:0 1 auto;max-height:100%;width:100%;overflow-y:auto;display:flex;flex-direction:column;align-items:center;'
-      + 'padding:clamp(14px,4vw,28px) clamp(14px,4vw,24px) 8px;'
+      + 'padding:clamp(14px,4vw,28px) clamp(14px,4vw,24px) clamp(16px,4vw,28px);'
       + 'gap:clamp(14px,4vw,22px);'
-      + 'min-height:0;">'
+      + 'min-height:0;pointer-events:auto;">'
 
         // ── HERO ── VICTORY banner + tier + flavor + favorite move
         + '<div class="vic-col-hero" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
@@ -8815,28 +8822,23 @@ function _showVictoryScreen() {
           + '</div>'
         + '</div>'
 
-      + '</div>'  /* end scroll/grid */
+        // ── CONTINUE ── sits inside the scroll block so vertical centering works
+        + '<div class="vic-col-continue" style="display:flex;justify-content:center;width:100%;margin-top:clamp(4px,1.5vw,10px);">'
+          + '<button id="rumble-victory-continue" style="'
+          + 'padding:clamp(11px,3vw,13px) clamp(28px,7.5vw,36px);'
+          + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
+          + 'border:2px solid ' + tier.color + ';color:#000;font-weight:700;'
+          + 'font-size:clamp(13px,3.5vw,15px);'
+          + 'font-family:\'Cinzel\',serif;letter-spacing:.12em;border-radius:8px;cursor:pointer;'
+          + 'box-shadow:0 4px 20px ' + tier.color + '66;'
+          + 'min-width:170px;'
+          + '">CONTINUE →</button>'
+        + '</div>'
 
-      // Sticky Continue button — sits outside the scroll flex-item so it
-      // doesn't get pushed by centering.
-      + '<div style="flex:0 0 auto;width:100%;padding:12px clamp(10px,3vw,20px) clamp(14px,3.5vw,22px);'
-      + 'background:linear-gradient(180deg,rgba(8,8,14,0) 0%,rgba(8,8,14,0.95) 35%);'
-      + 'display:flex;justify-content:center;pointer-events:none;">'
-        + '<button id="rumble-victory-continue" style="'
-        + 'pointer-events:auto;'
-        + 'padding:clamp(11px,3vw,13px) clamp(28px,7.5vw,36px);'
-        + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
-        + 'border:2px solid ' + tier.color + ';color:#000;font-weight:700;'
-        + 'font-size:clamp(13px,3.5vw,15px);'
-        + 'font-family:\'Cinzel\',serif;letter-spacing:.12em;border-radius:8px;cursor:pointer;'
-        + 'box-shadow:0 4px 20px ' + tier.color + '66;'
-        + 'min-width:170px;'
-        + '">CONTINUE →</button>'
-      + '</div>'
+      + '</div>'  /* end vic-scroll */
 
       // Responsive reflow CSS + fade-in animation.
-      // Landscape short-viewport: 3-column grid. Portrait / taller viewports:
-      // fall through to the flex-column default defined inline.
+      // Landscape short-viewport: 3-column grid with Continue spanning all cols.
       + '<style>'
       +   '@keyframes bqVictoryFadeIn { from { opacity: 0; } to { opacity: 1; } }'
       +   '@media (orientation: landscape) and (max-height: 500px) {'
@@ -8844,15 +8846,16 @@ function _showVictoryScreen() {
       +     '.vic-root .vic-scroll {'
       +       ' display: grid !important;'
       +       ' grid-template-columns: 1fr 1.3fr 1fr;'
-      +       ' grid-template-areas: "stats hero loot";'
+      +       ' grid-template-areas: "stats hero loot" "continue continue continue";'
       +       ' align-items: start;'
       +       ' gap: 14px;'
-      +       ' padding: 12px 16px 8px;'
+      +       ' padding: 12px 16px 14px;'
       +       ' max-height: 100% !important;'
       +     '}'
-      +     '.vic-root .vic-col-hero  { grid-area: hero;  }'
-      +     '.vic-root .vic-col-stats { grid-area: stats; }'
-      +     '.vic-root .vic-col-loot  { grid-area: loot;  }'
+      +     '.vic-root .vic-col-hero     { grid-area: hero;     }'
+      +     '.vic-root .vic-col-stats    { grid-area: stats;    }'
+      +     '.vic-root .vic-col-loot     { grid-area: loot;     }'
+      +     '.vic-root .vic-col-continue { grid-area: continue; margin-top: 0; }'
       +     '.vic-root .vic-stat-grid { width: 100% !important; }'
       +     '.vic-root .vic-col-loot > div { width: 100% !important; }'
       +   '}'
