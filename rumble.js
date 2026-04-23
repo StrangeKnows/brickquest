@@ -3778,14 +3778,15 @@ function updateDroppedBricks(dt) {
           if (_battleStats) _battleStats.goldGained += amt;
           showFloatingText(player.x, player.y - 40, '+' + amt + ' 🪙', '#F5D000', player);
         } else {
-          // Brick — adds to inventory pool by color. In spec mode, brickMax
-          // IS the inventory (inventory-is-pool per Combat Economy v1), so a
-          // looted brick permanently grows the player's owned count. Current
-          // charges (bricks) also bump by 1 so the brick is immediately usable.
+          // Brick — looted mid-rumble grows both inventory ceiling AND active
+          // charges. S013.6: previously only spec mode grew the ceiling, which
+          // meant non-spec loot vanished after the battle (ceiling unchanged →
+          // server never saw the pickup). Now looted bricks persist AND are
+          // immediately usable.
+          //   bricks[c]   += 1  — charges (immediately usable)
+          //   brickMax[c] += 1  — inventory ceiling (persists post-rumble)
           player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
-          if (cfg && cfg.mode === 'spec') {
-            player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
-          }
+          player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
           if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
           showFloatingText(player.x, player.y - 40, '+1 ' + p.color.charAt(0).toUpperCase(),
             BRICK_COLORS[p.color] || '#fff', player);
@@ -7920,12 +7921,20 @@ function triggerVictory() {
     // for loot collection. Heals/regen remain active.
     if (typeof clearStatuses === 'function') clearStatuses();
     var victoryDeadline = performance.now() + 15000;
+    // S013.6: Grace period — after the LAST piece of loot is collected
+    // (either naturally or via vacuum sweep), wait this long before showing
+    // the victory screen. Gives the player a beat to register what they
+    // picked up before the card appears.
+    var VICTORY_GRACE_MS = 3000;
     var waitLoot = function() {
       if (!running) { entityRespawnPending = false; return; }
       var now = performance.now();
       if (droppedBricks.length === 0) {
-        _showVictoryScreen();
-        entityRespawnPending = false;
+        setTimeout(function() {
+          if (!running) return;
+          _showVictoryScreen();
+          entityRespawnPending = false;
+        }, VICTORY_GRACE_MS);
         return;
       }
       if (now >= victoryDeadline) {
@@ -7934,7 +7943,7 @@ function triggerVictory() {
           if (!running) return;
           _showVictoryScreen();
           entityRespawnPending = false;
-        }, 600);
+        }, VICTORY_GRACE_MS);
         return;
       }
       setTimeout(waitLoot, 200);
@@ -8516,18 +8525,22 @@ function _autoVacuumLoot() {
   droppedBricks.forEach(function(p) {
     if (p.done) return;
     if (p.kind === 'cheese') {
-      player.hpMax = (player.hpMax || 10) + 1;
-      player.hp = Math.min(player.hpMax, (player.hp || 0) + 1);
+      // S013.6: vacuum cheese mirrors normal pickup — adds to inventory,
+      // not direct hpMax buff. Cheese is a tradeable consumable in v4.
+      player.cheese = (player.cheese || 0) + 1;
       if (_battleStats) _battleStats.cheeseEaten++;
+      if (_battleStats) {
+        if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+        _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+      }
     } else if (p.kind === 'gold') {
       var amt = p.amount || 1;
       player.gold = (player.gold || 0) + amt;
       if (_battleStats) _battleStats.goldGained += amt;
     } else {
+      // S013.6: vacuum bricks grow ceiling + charges (matches normal pickup).
       player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
-      if (cfg && cfg.mode === 'spec') {
-        player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
-      }
+      player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
       if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
     }
     p.done = true;
@@ -8651,6 +8664,8 @@ function _showVictoryScreen() {
   //   .vic-col-loot   — right column (charges refilling, loot, felled)
   // Portrait: columns stack vertically (existing layout preserved).
   // Landscape: grid-template-columns splits them.
+  // S013.6: Victory overlay fades in over 2s for a "settling in" feel
+  // (complements the 3s loot-collection grace period before this fires).
   var html =
     '<div id="rumble-victory-screen" class="vic-root" style="'
     + 'position:absolute;top:0;left:0;right:0;bottom:0;'
@@ -8659,6 +8674,7 @@ function _showVictoryScreen() {
     + 'z-index:200;box-sizing:border-box;'
     + 'font-family:\'Cinzel\',serif;'
     + 'pointer-events:none;'
+    + 'opacity:0;animation:bqVictoryFadeIn 2s ease-out forwards;'
     + '" id="rumble-victory-screen-outer">'
 
       // Scrollable content area — becomes the grid container in landscape
@@ -8755,8 +8771,9 @@ function _showVictoryScreen() {
         + '">CONTINUE →</button>'
       + '</div>'
 
-      // ── Responsive reflow CSS ──
+      // ── Responsive reflow CSS + fade-in animation ──
       + '<style>'
+      +   '@keyframes bqVictoryFadeIn { from { opacity: 0; } to { opacity: 1; } }'
       +   '@media (orientation: landscape) and (max-height: 500px) {'
       +     '.vic-root .vic-scroll {'
       +       ' display: grid !important;'
