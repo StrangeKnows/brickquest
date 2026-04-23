@@ -1592,9 +1592,10 @@ function draw() {
   // ── Armor bursts ──
   drawArmorBursts();
 
-  // ── PHASE B: status effects ── outline tint on player + icons above
+  // ── PHASE B: status effects ── outline tint on player (ring colors only;
+  // the status icon stack above the player HP bar is drawn at line ~1555 via
+  // _drawEffectStack(_playerEffects()), same system as entities).
   drawPlayerStatusOutline();
-  drawStatusHUD();
 
   // ── Debug ── (only renders if #rumble-debug element exists on page)
   if (player) {
@@ -2111,83 +2112,13 @@ function fireOverloadBlack(count, ox, oy) {
 }
 
 // ═══════════════════════════════════════════════════
-// PHASE B — STATUS HUD + PLAYER STATUS OUTLINE
+// PHASE B — PLAYER STATUS OUTLINE (concentric rings)
 // ═══════════════════════════════════════════════════
-// drawStatusHUD: row of icons above the player showing active debuffs.
-// Each icon is a small rounded square with a glyph; its remaining duration
-// is shown as a clockwise pie-fill underneath. Stacks (poison) shown as
-// a small badge in the corner. Only renders when at least one status
-// is active. Anchored above the player at world coordinates so it tracks.
-//
-// Visual budget: small, never blocks the action. Hides itself when nothing
-// is active (no empty pill clutter).
-
-function drawStatusHUD() {
-  if (!player || !player.status) return;
-  var s = player.status;
-  // Build active list with display data. Order matters — poison first
-  // since it's the most actionable (visible damage incoming).
-  var active = [];
-  if (s.poison.timer  > 0 && s.poison.stacks > 0)
-    active.push({ glyph:'☠', color:'#1D9E75', timer:s.poison.timer, dur:6, stacks:s.poison.stacks });
-  if (s.slow.timer    > 0 && s.slow.factor  > 0)
-    active.push({ glyph:'❄', color:'#7FE0FF', timer:s.slow.timer,   dur:Math.max(s.slow.timer, 2) });
-  if (s.daze.timer    > 0)
-    active.push({ glyph:'✦', color:'#F5D000', timer:s.daze.timer,   dur:Math.max(s.daze.timer, 2) });
-  if (s.confuse.timer > 0)
-    active.push({ glyph:'?', color:'#E08CF0', timer:s.confuse.timer, dur:Math.max(s.confuse.timer, 1.5) });
-  if (s.weaken.timer  > 0)
-    active.push({ glyph:'▼', color:'#553366', timer:s.weaken.timer, dur:Math.max(s.weaken.timer, 3) });
-  if (active.length === 0) return;
-
-  var iconR  = 12;
-  var gap    = 6;
-  var totalW = active.length * (iconR*2) + (active.length - 1) * gap;
-  var startX = player.x - totalW / 2 + iconR;
-  var y      = player.y - player.r - 28;
-
-  for (var i = 0; i < active.length; i++) {
-    var a  = active[i];
-    var cx = startX + i * (iconR*2 + gap);
-    // Pie-fill background (drains as timer counts down)
-    var pct = Math.max(0, Math.min(1, a.timer / a.dur));
-    ctx.save();
-    // Outer ring (background pie that shows what's been "used up")
-    ctx.fillStyle = '#000000aa';
-    ctx.beginPath();
-    ctx.arc(cx, y, iconR + 2, 0, Math.PI*2);
-    ctx.fill();
-    // Color pie wedge — clockwise from top, shows remaining time
-    ctx.fillStyle = a.color + 'cc';
-    ctx.beginPath();
-    ctx.moveTo(cx, y);
-    ctx.arc(cx, y, iconR + 1, -Math.PI/2, -Math.PI/2 + Math.PI*2 * pct);
-    ctx.closePath();
-    ctx.fill();
-    // Inner solid (icon background)
-    ctx.fillStyle = '#1a1a1aee';
-    ctx.beginPath();
-    ctx.arc(cx, y, iconR - 1, 0, Math.PI*2);
-    ctx.fill();
-    // Glyph
-    ctx.fillStyle = a.color;
-    ctx.font = 'bold 14px serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(a.glyph, cx, y + 1);
-    // Stack badge (poison only)
-    if (a.stacks && a.stacks > 1) {
-      ctx.fillStyle = '#000000cc';
-      ctx.beginPath();
-      ctx.arc(cx + iconR - 3, y - iconR + 3, 6, 0, Math.PI*2);
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 9px ui-sans-serif,system-ui';
-      ctx.fillText(String(a.stacks), cx + iconR - 3, y - iconR + 4);
-    }
-    ctx.restore();
-  }
-}
+// S013.7: The old drawStatusHUD (radial pie-wedge icons above player) was
+// REMOVED. All status effects now flow through _playerEffects() →
+// _drawEffectStack() above the player's HP bar, matching how entities
+// already work. The outline rings below stay — they're a different visual
+// channel (passive body tint at a glance), not duplicated by the stack.
 
 // Subtle outline pulse on the player sprite that telegraphs current status.
 // Rendered as a soft ring just outside player.r in the status's signature
@@ -2778,8 +2709,39 @@ function _entityEffects(g) {
 function _playerEffects() {
   var fx = [];
   if (!player) return fx;
+  // S013.7: ALL player status effects flow through the unified effect
+  // stack above the HP bar. Previously maladies (poison/slow/daze/confuse/
+  // weaken) used a separate "pie wedge radial timer" above the player sprite
+  // which was occluded by enemies and didn't match the entity side's
+  // rendering. Now everything uses _drawEffectStack via this return array.
+  //
+  // Shape: { icon, color, timer (null = timerless), stack?, label? }
+  if (player.status) {
+    var s = player.status;
+    // Maladies — poison leads (most actionable), stacks badge shown.
+    if (s.poison.timer > 0 && s.poison.stacks > 0) {
+      fx.push({ icon:'☠', color:'#1D9E75', timer: s.poison.timer, stack: s.poison.stacks });
+    }
+    if (s.slow.timer > 0 && s.slow.factor > 0) {
+      // Format move multiplier like the entity side (".25" etc)
+      var pMult = Math.max(0, 1 - s.slow.factor);
+      var mTxt = pMult.toFixed(2);
+      if (mTxt.charAt(0) === '0') mTxt = mTxt.slice(1);
+      fx.push({ icon:'⧖', color:'#7FE0FF', timer: s.slow.timer, label: mTxt });
+    }
+    if (s.daze.timer > 0) {
+      fx.push({ icon:'✦', color:'#F5D000', timer: s.daze.timer });
+    }
+    if (s.confuse.timer > 0) {
+      fx.push({ icon:'?', color:'#E08CF0', timer: s.confuse.timer });
+    }
+    if (s.weaken.timer > 0) {
+      fx.push({ icon:'▼', color:'#553366', timer: s.weaken.timer });
+    }
+  }
+  // Buffs / resource timers
   if (playerRegen && playerRegen.timer > 0)
-    fx.push({ icon:'✚', color:'#EFEFEF', timer: playerRegen.timer });
+    fx.push({ icon:'✚', color:'#9B6FD4', timer: playerRegen.timer });
   if (player.iframes > 0)
     fx.push({ icon:'🛡', color:'#88aaff', timer: player.iframes });
   if (dashCooldown > 0)
