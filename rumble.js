@@ -2803,23 +2803,25 @@ function _playerEffects() {
 
 function showFloatingText(x, y, text, color, parent) {
   var now = performance.now();
-  // Spawn-position rule tied to what this text is:
+  // Spawn-position rule — unified via semantic classification:
   //   • Heal/shield numeric (contains ✚, ✨, ♥, or 🛡) → LEFT of parent
-  //     hitbox at vertical center. Left-of-entity is the reserved "good
-  //     stuff happening" lane.
-  //   • Damage OR pickup numeric ("+1", "12", "3 🧀", etc) → RIGHT of parent
-  //     hitbox at vertical center. Mirrors showDamageNumber.
-  //   • Status banners (EVADE!, FELLED!, FATIGUE 50%, etc) → keep the
-  //     passed-in (x, y), which is typically player.y - 50 (above head).
-  // Detection: starts with digit OR with +/- followed by a digit. Prior
-  // version only matched leading digit, so "+1 🧀 CHEESE" fell through
-  // to the raw (x,y) spawn and clipped against HP bars.
-  var isNumeric = /^[+\-−]?\d/.test(text);
+  //     at parent.r + 22 offset, vertical center.
+  //   • Damage/pickup numeric (digit anywhere in text) → RIGHT of parent
+  //     at parent.r + 22, vertical center. Mirrors showDamageNumber.
+  //   • Non-numeric (EVADE!, DAZED, flavor text) → keep passed-in (x, y),
+  //     typically parent.y - 50 (above the head), center-aligned.
+  // Detection: for numeric classification, we check if the text contains
+  // a digit at all. Previously only leading digit or leading +/-digit.
+  // Catches "☠ 1" (poison damage), "🛡 +3" (shield gain), etc.
+  var hasDigit = /\d/.test(text);
+  var leadsWithSymbol = /^[+\-−]/.test(text);
   var isHeal = /[✚✨♥🛡]/.test(text);
+  // Numeric IF text has digits AND isn't a banner-like thing
+  // (banner detection: starts with letter AND has no digit prefix or -)
+  var startsWithLetter = /^[A-Za-z]/.test(text);
+  var isNumeric = hasDigit && !(startsWithLetter && !leadsWithSymbol);
   if (parent && parent.r !== undefined && isNumeric) {
-    // Larger spawn offset so pickup/damage/heal text sits clear of the
-    // sprite AND the HP bar (which is drawn above the entity). 22 matches
-    // the RESIST bounce-out offset for visual consistency.
+    // Unified offset: sprite radius + 22 = clear of sprite edge + HP bar.
     var offset = parent.r + 22;
     if (isHeal) {
       x = parent.x - offset;

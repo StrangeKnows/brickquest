@@ -809,6 +809,11 @@ wss.on('connection', (ws, req) => {
       const pending = G.pendingRumbleBattle;
       const p = G.players[pending.cls];
       if (!p) { G.pendingRumbleBattle = null; return false; }
+      // S013.6: reviveCount is scoped to the CURRENT rumble only. Clear any
+      // carryover from the prior rumble when this one starts. Loot penalty
+      // (−10% per) should never compound across battles. DM roster badge
+      // clears at the same moment.
+      p.reviveCount = 0;
       // Seed the live battle state — snapshot of player's current HP, armor,
       // and bricks; the client reports back incrementally via battleTick.
       // S013 spec change (supersedes V2 §1.1 line 98): rumble no longer
