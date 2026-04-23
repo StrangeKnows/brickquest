@@ -16,7 +16,7 @@ const BQ_VERSION = (() => {
 })();
 
 // Shared game constants
-const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
+const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR } = require('./game.js');
 
 const PORT = 8080;
 const MIME = {
@@ -767,8 +767,8 @@ wss.on('connection', (ws, req) => {
         G.pendingDashRequest = null;
         broadcastState(); return;
       }
-      // Consume brick + per-turn flag + battle fatigue
-      p.bricks.red -= 1;
+      // Consume brick + per-turn flag + next-battle dash penalty
+      removeBrick(p, 'red', 1);
       p.dashUsedThisTurn = true;
       p.battleDashPenalty = 1; // next battle this turn decrements red by 1 extra
       resolveDash(cls, spaces, false);
@@ -810,8 +810,9 @@ wss.on('connection', (ws, req) => {
       if (!p) { G.pendingRumbleBattle = null; return false; }
       // Seed the live battle state — snapshot of player's current HP, armor,
       // and bricks; the client reports back incrementally via battleTick.
-      // S012 §1.1: refresh charges at rumble entry; rumble starts with all bricks charged.
-      refreshCharges(p);
+      // S013 spec change (supersedes V2 §1.1 line 98): rumble no longer
+      // refreshes charges at entry. Partial board state carries through.
+      // Zone gate crossings remain the only full refresh trigger.
       G.rumbleBattle = {
         cls: pending.cls,
         entityType: pending.entityType,
@@ -964,7 +965,11 @@ wss.on('connection', (ws, req) => {
           finalHpMax: p ? p.hpMax : null,
           finalArmor: p ? (p.armor || 0) : null,
           finalGold: p ? p.gold : null,
-          finalBricks: p ? { ...p.bricks } : null,
+          // S013: both fields saved separately (mirrors wire protocol)
+          //   finalBrickMax = inventory ceiling post-rumble (BRICK CHANGES delta)
+          //   finalBricks   = remaining charges post-rumble
+          finalBrickMax: p ? { ...p.bricks } : null,
+          finalBricks:   p ? { ...(p.bricksCharged || p.bricks) } : null,
           playerDied: p ? !p.alive : false,
           battleStats: battleStats || null,
         };
@@ -1018,7 +1023,8 @@ wss.on('connection', (ws, req) => {
           finalHpMax: fqP ? fqP.hpMax : null,
           finalArmor: fqP ? (fqP.armor || 0) : null,
           finalGold: fqP ? fqP.gold : null,
-          finalBricks: fqP ? { ...fqP.bricks } : null,
+          finalBrickMax: fqP ? { ...fqP.bricks } : null,
+          finalBricks:   fqP ? { ...(fqP.bricksCharged || fqP.bricks) } : null,
           playerDied: false,
         };
       }

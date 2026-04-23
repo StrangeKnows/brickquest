@@ -2457,3 +2457,196 @@ physical-device check.
 No commit this session per standing prefs (push only at session-end
 trigger phrases). Hold for Ross's "session done" signal.
 
+
+---
+
+## Session 013 continuation — Post-ship patches (April 23, 2026)
+
+After v0.13.0 shipped, playtest on Mac + Windows surfaced three
+things worth addressing before starting 0.14.0:
+
+### Part A — DM compact card footer bug
+
+The DM screen has two brick-render sites: an expanded roster panel
+(which got the S013 pip retrofit) and an inline compact card footer
+(which I missed in my S013 audit). Players spending charges saw
+correct state on player screens, but the DM's glance-view card
+showed solid pips only. Fixed by reading bricksCharged per color
+and rendering lit/hollow accordingly. Uses the same visual vocab
+as the expanded panel: solid+glow for lit, dark fill + color border
+for empty.
+
+This was a partial-audit gap on my part. The V2 §8.2 test target
+"DM sees dim pips on partial players" only fully passes with both
+render sites updated.
+
+### Part A.2 — DM BRICK CHANGES delta showed wrong numbers
+
+Playtest surfaced: after a rumble where Breaker looted 1 red + 1
+gray, the victory card's BRICK CHANGES only showed "+1 red",
+missing the gray. Root cause: the DM delta computation was reading
+`rr.finalBricks` as if it were the inventory count, but under the
+S013 wire protocol `finalBricks` = remaining charges and
+`finalBrickMax` = inventory ceiling.
+
+Separately, server.js's rumbleResult object only saved
+`finalBricks: {...p.bricks}` — which is the inventory (because
+p.bricks is inventory post-S012). So `rr.finalBricks` on the DM
+side was actually showing inventory but computed delta against
+pre.bricks (also inventory) as `finalBricks - pre.bricks` — meaning
+if 1 gray was looted and 0 charges spent by session end on the
+still-charged gray, the delta would display 0 for gray and miss
+the loot entirely.
+
+Actually more subtle: the rr.finalBricks from server was
+`{...p.bricks}` (inventory, post-loot). The DM read that as
+`after` inventory. The delta should work. But because I then
+split the server rumbleResult to have a separate `finalBrickMax`
+field and the DM code still read `finalBricks`, the values shifted
+semantically — finalBricks was now charges, not inventory, and
+delta math went wrong.
+
+Fix applied in two places:
+  - server.js: rumbleResult now saves both finalBrickMax (inventory)
+    and finalBricks (charges) as separate fields, matching the
+    wire protocol used in the battleEnd message
+  - dm_screen.html: BRICK CHANGES delta reads finalBrickMax (with
+    finalBricks fallback for older save data)
+
+Comment updated to clarify what each field means to prevent
+future confusion.
+
+### Part B — Rumble spec change: no refresh at rumble start
+
+V2 §1.1 line 98 specified "Rumble start: bricksCharged = {...bricks}
+(full reset)". In practice this meant the board charge model had no
+teeth: players could spend freely before rumble, knowing entry would
+refill everything. The partial-charge tactical weight collapsed at
+every monster encounter.
+
+Ross decided rumble should START at the player's current board
+charge state. Rumble no longer refreshes. Zone gate crossings remain
+the only full-refresh beat.
+
+Implementation:
+
+  server.js battleStart: removed refreshCharges(p) call at rumble
+    entry. Board charge state carries through unchanged.
+
+  server.js snapshot: playerRumble already included both bricks and
+    bricksCharged; no shape change needed.
+
+  players.html + test_players.html Rumble.start config: client now
+    passes bricks (= bricksCharged as starting charges) AND brickMax
+    (= bricks as ceiling) as separate fields. Backward-compat
+    fallback if either absent.
+
+  rumble.js spec-mode init: reads cfg.brickMax (ceiling) separately
+    from cfg.bricks (starting charges). Invariant enforced: charges
+    <= ceiling. Previous code forced both to the same value.
+
+Class-color regen behavior during rumble is UNCHANGED. The existing
+BRICK_ECONOMY.refreshRates system already tiers regen by class
+signature (3s), secondary (5s), baseline (10s). A Fixer entering
+rumble with 1/4 white can recover white charges during combat at
+3s per pip because white is signature. A Fixer with 1/4 red
+recovers slowly (10s per pip, baseline). This ties rumble sustain
+to class identity via existing color depth — no new code needed
+for that part.
+
+Net effect: board charge spends matter. A player who burned 3
+whites before rumble enters combat with only their remaining white
+pips charged, pays a tactical price, and has to earn them back
+through zone gates or rumble time-in-combat.
+
+### Part C — Dead-code sweep
+
+Ross caught poolCaps in BRICK_ECONOMY — a declared config block
+with zero readers, left over from a pre-"inventory-is-pool" design.
+Pulled the thread and surfaced more family-member orphans.
+
+Stripped from game.js:
+  - SHIELD_MAX per-class percentages table (obsoleted by S013
+    flat hpMax cap)
+  - SHIELD_COST per-class gray-cost table (obsoleted by S013 flat
+    1-gray cost)
+  - BRICK_ECONOMY.poolCaps block (inventory IS the pool)
+  - BRICK_ECONOMY.fatigueCurve (consumeFatigue is a no-op stub)
+  - BRICK_ECONOMY.offClassFatigueTicks (same)
+  - brickTierFor function + its export (rumble.js uses local
+    brickTier; this was an unused duplicate)
+
+Stripped from rumble.js:
+  - BRICK_ECONOMY duplicate fields (fatigueCurve, offClassFatigueTicks)
+  - consumeFatigue function (deprecated stub returning 1.0) and
+    its "kept for backward compat" comment block
+  - _currentFatigueMult module var (written thrice, never read)
+  - Fatigue HUD render block (⚡ icon + stack count showing a
+    number that no longer affects play)
+  - player.fatigue state field init in makePlayer
+  - player.fatigue reset at battle start
+  - fatigue: field in getState() snapshot
+
+Stripped from rumble_test.html:
+  - Fatigue readout in the spec-mode debug panel (showing sig:N
+    off:N counts that did nothing)
+
+Stripped from server.js:
+  - SHIELD_MAX and SHIELD_COST imports (neither had any call site
+    after S013 flat-shield rewrite)
+
+Fixed in server.js:
+  - Dash brick consumption now routes through removeBrick(p, 'red',
+    1) helper instead of direct p.bricks.red -= 1 (was inconsistent
+    with S013 charge-model invariant enforcement)
+  - Stale "battle fatigue" comment on the dash handler rewritten
+    to describe what the code actually does (next-battle penalty)
+
+Net strip: ~55 lines of confirmed dead code across 4 files.
+Zero behavior change; everything removed was a no-op, a config
+read by nothing, or a display indicator for a dead mechanic.
+
+Honest meta-note: this is the second audit pass where Ross caught
+dead config I missed on first sweep. Pattern: grep for exact names
+finds orphan functions, but structural dead code (declared but
+unread config keys, HUD indicators for ripped mechanics) slips
+through unless I broaden the search. Recording this to improve
+next audit.
+
+### Verification
+
+  node --check passes on all modified JS-bearing files:
+    server.js, game.js, rumble.js, players.html, test_players.html,
+    dm_screen.html, rumble_test.html
+
+  Dead-code sweep final grep counts:
+    poolCap, SHIELD_MAX, SHIELD_COST, fatigueCurve,
+    offClassFatigueTicks, consumeFatigue, _currentFatigueMult,
+    player.fatigue, brickTierFor — all zero refs across codebase.
+
+### Files shipped
+
+  - server.js          (2741 lines)
+    No refresh at rumble start, removeBrick for dash, cleaned imports
+  - game.js            ( 572 lines, -35)
+    BRICK_ECONOMY trimmed to just refreshRates, stripped SHIELD_MAX,
+    SHIELD_COST, brickTierFor
+  - rumble.js          (8517 lines, -30)
+    Fatigue system excised, brickMax/bricks split from cfg at start
+  - players.html       (6119 lines, -1 from adjustments)
+    Rumble.start now passes brickMax separately
+  - test_players.html  (6812 lines, +2 from mirror)
+    Same brickMax addition
+  - dm_screen.html     (1733 lines, +5)
+    Compact card footer shows charged/total pips
+  - rumble_test.html   ( 416 lines, -4)
+    Fatigue readout stripped
+  - NOTES.md           (this append)
+
+### Version
+
+  This session bundles: DM render fix (bug), rumble spec change
+  (behavior), dead-code sweep (cleanup). Per standing conventions:
+  v0.13.1 patch — all three are post-ship polish on the v0.13.0
+  foundation, not new feature scope.
+

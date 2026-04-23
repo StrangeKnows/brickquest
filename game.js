@@ -62,26 +62,11 @@ const DASH_FLAVOR = {
   },
 };
 
-// Shield (armor) rules — simple per-class max-shield pct of HP.
-// Pre-battle "spend gray to gain armor" action will be redesigned as part of
-// the new economy out-of-battle brick uses.
-const SHIELD_MAX = {
-  breaker:     0.75,  // most armored
-  blocksmith:  0.50,
-  formwright:  0.50,
-  snapstep:    0.50,
-  fixer:       0.50,
-  wild_one:    0.50,
-};
-const SHIELD_COST = {
-  breaker: 1, blocksmith: 1,    // 1 gray per shield
-  formwright: 2, snapstep: 2, fixer: 2, wild_one: 2  // 2 gray per shield
-};
-
-// ── BRICK ECONOMY (Combat & Economy v1) ──────────────────
-// Governs in-rumble brick refresh, pool caps, and overload fatigue.
-// Each class has a signature color (fast refresh, large pool) and secondary
-// color (medium refresh). All other colors are baseline (slow refresh, small pool).
+// ── BRICK ECONOMY ─────────────────────────────────────────
+// Governs in-rumble brick refresh rate. Each class has signature colors
+// (fast refresh) and secondary colors (medium refresh). All other colors
+// are baseline (slow refresh). Inventory IS the pool (spec mode): no
+// artificial cap; owned bricks = rumble capacity for that color.
 // See NOTES.md for the full design doc.
 const BRICK_ECONOMY = {
   // Seconds per one brick regenerated during active rumble combat.
@@ -90,29 +75,7 @@ const BRICK_ECONOMY = {
     secondary: 5.0,
     baseline: 10.0,
   },
-  // Max bricks of a given color a player can hold during rumble combat.
-  poolCaps: {
-    signature: 4,
-    secondary: 3,
-    baseline: 2,
-  },
-  // Overload fatigue: each index is the damage multiplier when the counter
-  // reaches that value. Counter resets to 0 at battle end.
-  fatigueCurve: [1.0, 0.8, 0.6, 0.5, 0.4],
-  // Baseline-color overloads increment their counter by this much per use
-  // (signature/secondary overloads increment by 1).
-  offClassFatigueTicks: 2,
 };
-
-// Helper: get the refresh tier for a (class, color) pair.
-// Returns 'signature' | 'secondary' | 'baseline'.
-function brickTierFor(cls, color) {
-  const meta = PLAYER_META[cls];
-  if (!meta) return 'baseline';
-  if (color === meta.signature) return 'signature';
-  if (color === meta.secondary) return 'secondary';
-  return 'baseline';
-}
 
 // ── ZONES & SPACES ───────────────────────────────────────
 // Zone 1: 8 spaces, store at idx 3 (space 4)
@@ -605,5 +568,5 @@ const RUMBLE_FLAVOR = {
 
 // Node.js export (ignored in browser)
 if (typeof module !== 'undefined') {
-  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR, SHIELD_MAX, SHIELD_COST, BRICK_ECONOMY, brickTierFor, RIDDLES };
+  module.exports = { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR, BRICK_ECONOMY, RIDDLES };
 }

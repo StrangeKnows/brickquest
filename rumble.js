@@ -75,8 +75,6 @@ const CLASS_META = {
 // Combat & Economy v1 spec. See NOTES.md for full design doc.
 const BRICK_ECONOMY = {
   refreshRates: { signature: 3.0, secondary: 5.0, baseline: 10.0 },
-  fatigueCurve: [1.0, 0.8, 0.6, 0.5, 0.4],
-  offClassFatigueTicks: 2,
 };
 
 function brickTier(cls, color) {
@@ -234,17 +232,6 @@ function getDisplayScale() {
 // thresholds, effect radii, burst sizes. Called per-frame but cheap.
 function scaleDist(px) {
   return px * getDisplayScale();
-}
-
-// Fatigue: DEPRECATED (kept as stub returning 1.0).
-// Previously 2+ brick overloads accumulated counters that damped future
-// casts to 40-80% of base damage. Removed per design — brick-refresh pacing
-// + inventory-as-capacity already constrain overload frequency without a
-// separate fatigue tax. Call sites that multiply by this result are
-// unaffected (1.0 = no change). The player.fatigue state field is kept
-// for backward compatibility with the server state shape.
-function consumeFatigue(color, count) {
-  return 1.0;
 }
 
 const BRICK_COLORS = {
@@ -502,7 +489,6 @@ function makePlayer(cls) {
     bricks: bricks,                // current charges
     brickMax: brickMax,            // max charges
     brickRecharge: brickRecharge,  // seconds until next recharge
-    fatigue: { signature: 0, offClass: 0 }, // overload fatigue counters (spec mode)
     overloadCount: 0,              // total overloads this battle (any color)
     armor: 0,                      // shield pips
     gold: 0,                       // coins picked up in rumble; surfaces to server
@@ -1709,7 +1695,6 @@ function cancelOverload() {
   overloadState = null;
 }
 
-var _currentFatigueMult = 1.0; // multiplier from last fatigue consume; color-fire fns may read
 var _currentCrit = false;      // crit flag from last cast; color handlers apply threshold effects
 
 function fireOverload(dragX, dragY, bricksUsed) {
@@ -1727,13 +1712,6 @@ function fireOverload(dragX, dragY, bricksUsed) {
   renderBrickBar();
   overloadState.fired = true;
   overloadState = null;
-
-  // Apply fatigue (spec mode only; sandbox returns 1.0).
-  // 1-brick uses are exempt — only 2+ brick overloads cost fatigue.
-  // NOTE: v1 visualizes fatigue via the floating text below but does NOT
-  // yet scale per-color damage/effects. Wiring fatigue into each overload's
-  // damage math is a follow-up tuning pass once we play-test the curve.
-  _currentFatigueMult = consumeFatigue(color, count);
 
   // Crit roll — one per cast. Stored globally so per-color handlers can
   // read it without threading a parameter through every fire function.
@@ -2791,17 +2769,6 @@ function _playerEffects() {
     var wDist = Math.hypot(player.x - (whiteField.ox||0), player.y - (whiteField.oy||0));
     if (wDist < (whiteField.radius || whiteField.r || 0)) {
       fx.push({ icon:'✦', color:'#EFEFEF', timer: null });
-    }
-  }
-  // Fatigue — shows while the player has accumulated any fatigue stacks.
-  // Cumulative counters on player.fatigue don't decay within a session, so
-  // the icon surfaces once the first 2+ brick overload fires and stays until
-  // reset. Not a transient state; the transient _currentFatigueMult latch
-  // is unreliable for display (resets between casts).
-  if (player.fatigue) {
-    var fatigueStacks = (player.fatigue.signature||0) + (player.fatigue.offClass||0);
-    if (fatigueStacks > 0) {
-      fx.push({ icon:'⚡', color:'#ff9944', timer: null, stack: fatigueStacks });
     }
   }
   // Overheal — player.hp is above hpMax (only source currently: purple
@@ -7657,8 +7624,11 @@ function _internalStart(config) {
   if (typeof cfg.gold === 'number')    player.gold = cfg.gold;
 
   // Seed bricks based on mode.
-  // Spec mode: brickMax = starting kit count (inventory IS the pool).
-  //   Refresh tops up to inventory max, no artificial ceiling.
+  // Spec mode: brickMax = inventory ceiling; bricks = starting charges.
+  //   S013 spec change: bricks and brickMax can differ at rumble start.
+  //   Rumble receives partial board charge state; regen ticks bricks
+  //   toward brickMax as before. If cfg.brickMax absent, fall back to
+  //   cfg.bricks (old behavior, treat starting charges as ceiling).
   //   As players earn bricks via fragments/fusion, inventory grows and so
   //   does available rumble capacity.
   // Sandbox mode: keeps makePlayer's random 1-10 per color.
@@ -7666,10 +7636,13 @@ function _internalStart(config) {
     var rates = BRICK_ECONOMY.refreshRates;
     Object.keys(player.bricks).forEach(function(c) {
       var tier = brickTier(cls, c);
-      var startQty = (cfg.bricks && cfg.bricks[c]) || 0;
-      // brickMax = inventory. No cap clamp.
-      player.brickMax[c] = startQty;
-      player.bricks[c] = startQty;
+      var ceiling = (cfg.brickMax && cfg.brickMax[c] != null) ? cfg.brickMax[c]
+                    : ((cfg.bricks && cfg.bricks[c]) || 0);
+      var startCharges = (cfg.bricks && cfg.bricks[c] != null) ? cfg.bricks[c] : ceiling;
+      // Invariant: charges <= ceiling
+      if (startCharges > ceiling) startCharges = ceiling;
+      player.brickMax[c] = ceiling;
+      player.bricks[c] = startCharges;
       // Stagger initial refresh clocks per color so bricks don't all
       // refresh synchronously mid-battle.
       player.brickRecharge[c] = Math.random() * rates[tier];
@@ -7681,14 +7654,11 @@ function _internalStart(config) {
     });
   }
 
-  // Reset fatigue counters (signature + off-class) at battle start.
-  player.fatigue = { signature: 0, offClass: 0 };
   // PHASE B — clear any lingering status effects from a previous battle
   // (poison/slow/daze/confuse/weaken). Defensive: makePlayer seeds them
   // fresh, but clearStatuses is the canonical reset.
   clearStatuses();
   player.overloadCount = 0;
-  _currentFatigueMult = 1.0;
   _currentCrit = false;
   critFlash = null;
   critBanners = [];
@@ -8376,7 +8346,6 @@ function _computeState() {
     elapsed:     _startedAt ? (performance.now() - _startedAt) / 1000 : 0,
     status:      running ? (player.hp > 0 ? 'active' : 'downed') : 'idle',
     mode:        (cfg && cfg.mode) || 'sandbox',
-    fatigue:     player.fatigue ? Object.assign({}, player.fatigue) : { signature: 0, offClass: 0 },
     overloadCount: player.overloadCount || 0,
     battleStats: _battleStats ? {
       damageDealt:    _battleStats.damageDealt || 0,

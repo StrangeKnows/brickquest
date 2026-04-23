@@ -1081,6 +1081,7 @@ function syncRumbleFromState(state) {
     _rumbleActive = true;
     _rumbleBattleId = ab.startTime;
     showRumble();
+    // S013 spec change: rumble starts at current board charge state.
     var startConfig = {
       cls: ab.cls,
       mode: 'spec',
@@ -1088,7 +1089,8 @@ function syncRumbleFromState(state) {
       hpMax: (ab.playerRumble && ab.playerRumble.hpMax) || 10,
       armor: (ab.playerRumble && ab.playerRumble.armor) || 0,
       gold: (ab.playerRumble && ab.playerRumble.gold) || 0,
-      bricks: (ab.playerRumble && ab.playerRumble.bricks) || {},
+      bricks: (ab.playerRumble && ab.playerRumble.bricksCharged) || (ab.playerRumble && ab.playerRumble.bricks) || {},
+      brickMax: (ab.playerRumble && ab.playerRumble.bricks) || {},
       queuedPoisonStacks: (ab.playerRumble && ab.playerRumble.queuedPoisonStacks) || 0, // v4
       refreshBoost: (ab.playerRumble && ab.playerRumble.refreshBoost) || null, // v4: FW blue-success buff
       entityCount: 1,

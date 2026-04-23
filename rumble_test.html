@@ -363,7 +363,7 @@ function startTestRumble(cls) {
   };
   Rumble.start(startConfig);
 
-  // Show live readout in spec mode (refresh rates, fatigue counters are visible here)
+  // Show live readout in spec mode (refresh rates visible here)
   var readout = document.getElementById('readout');
   readout.classList.toggle('hidden', currentMode !== 'spec');
 }
@@ -379,9 +379,6 @@ function updateReadout(state) {
     .slice(0, 5) // first 5 so it fits on small screens
     .join(' ');
   r.innerHTML =
-    '<span class="label">fatigue</span> ' +
-    '<span class="sig">sig:' + state.fatigue.signature + '</span> ' +
-    '<span class="off">off:' + state.fatigue.offClass + '</span> ' +
     '<span class="label">overloads</span> <span class="val">' + state.overloadCount + '</span> ' +
     '<span class="label">elapsed</span> <span class="val">' + state.elapsed.toFixed(1) + 's</span><br>' +
     brickSummary;

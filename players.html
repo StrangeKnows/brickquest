@@ -791,6 +791,9 @@ function syncRumbleFromState(state) {
     _rumbleBattleId = ab.startTime;
     showRumble();
     // Build config from server-provided player + enemy state.
+    // S013 spec change: rumble starts at the player's current board charge
+    // state, not full. Send bricksCharged as starting charges, bricks as
+    // the ceiling (what rumble regen refills toward).
     var startConfig = {
       cls: ab.cls,
       mode: 'spec',  // real battles use the spec inventory-is-pool model
@@ -798,7 +801,8 @@ function syncRumbleFromState(state) {
       hpMax: (ab.playerRumble && ab.playerRumble.hpMax) || 10,
       armor: (ab.playerRumble && ab.playerRumble.armor) || 0,
       gold: (ab.playerRumble && ab.playerRumble.gold) || 0,
-      bricks: (ab.playerRumble && ab.playerRumble.bricks) || {},
+      bricks: (ab.playerRumble && ab.playerRumble.bricksCharged) || (ab.playerRumble && ab.playerRumble.bricks) || {},
+      brickMax: (ab.playerRumble && ab.playerRumble.bricks) || {},
       queuedPoisonStacks: (ab.playerRumble && ab.playerRumble.queuedPoisonStacks) || 0, // v4
       refreshBoost: (ab.playerRumble && ab.playerRumble.refreshBoost) || null, // v4: FW blue-success buff
       entityCount: 1,

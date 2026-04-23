@@ -623,13 +623,18 @@ function renderPlayers() {
       : '#1D9E75';
     var hpBg = isOh ? 'linear-gradient(90deg,#7B2FBE,#b06fef)' : hc;
     var bkHtml = '';
-    Object.entries(p.bricks).forEach(function(entry) {
-      var color = entry[0]; var qty = entry[1];
+    BRICK_NAMES.forEach(function(color) {
+      var qty = p.bricks[color] || 0;
       if (qty <= 0) return;
+      var charged = Math.min(qty, (p.bricksCharged && p.bricksCharged[color]) || 0);
       var bg = BRICK_COLORS[color] || '#888';
-      var border = color === 'white' ? 'border:1px solid #ccc;' : '';
       for (var i = 0; i < qty; i++) {
-        bkHtml += '<span class="mini-brick" style="background:' + bg + ';' + border + '"></span>';
+        var lit = i < charged;
+        bkHtml += '<span class="mini-brick" style="'
+          + (lit
+            ? 'background:' + bg + ';box-shadow:0 0 3px ' + bg + ';'
+            : 'background:#1a1a1a;border:1px solid ' + bg + 'aa;box-sizing:border-box;')
+          + '"></span>';
       }
     });
     var statuses = (p.statusEffects || []).map(function(s) {
@@ -1325,13 +1330,17 @@ function renderActiveEvent() {
       var goldLine = fmtDelta(rr.finalGold, pre.gold, '🪙');
       var armorLine = (rr.finalArmor != null && rr.finalArmor > 0) ? ' · <span>🛡 ' + rr.finalArmor + '</span>' : '';
 
-      // Brick deltas — only show colors that changed
+      // Brick deltas — only show colors whose INVENTORY (ceiling) changed.
+      // S013: finalBrickMax is the inventory count post-rumble; finalBricks
+      // is remaining charges. BRICK CHANGES tracks gains/losses to ownership,
+      // not charge state. Fall back to finalBricks for older save files.
       var brickDeltas = '';
-      if (rr.finalBricks && pre.bricks) {
+      var finalInventory = rr.finalBrickMax || rr.finalBricks;
+      if (finalInventory && pre.bricks) {
         var brickBg = { red:'#D01012', blue:'#006DB7', gray:'#AAAAAA', green:'#237841', white:'#EFEFEF', yellow:'#F5D000', orange:'#F57C00', purple:'#7B2FBE', black:'#1a1a1a' };
         ['red','blue','gray','green','white','yellow','orange','purple','black'].forEach(function(col) {
           var before = pre.bricks[col] || 0;
-          var after = rr.finalBricks[col] || 0;
+          var after = finalInventory[col] || 0;
           if (after !== before) {
             var diff = after - before;
             var sign = diff > 0 ? '+' : '';
