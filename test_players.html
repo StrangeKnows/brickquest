@@ -795,20 +795,13 @@ var SELF_HEAL_AMT = {
 };
 var client   = null;
 var G        = null; // full game state
-// Skills system was removed during cleanup — empty stub so dead code paths
-// that still reference SKILLS don't throw.
-var SKILLS = {};
 var pendingTradeOffer = null;
 var _pendingTradeSent = null;
 var _marketOpen = false;
-var battleFeed = [];
 var _pendingResult = null;
 var _landingRollSent = false;
 var _burstFiredFor = null; // tracks which activeEvent got the burst — cls+roll key // prevents double-send of auto landing roll
 var _statusOpen = {}; // tracks open/closed state of collapsible status cards // inline result card shown in action pane until dismissed
-var _lastActionDesc = '';
-var _victoryPending = false;
-var _victoryTimer = null;
 var lastRoll = null;
 
 // ── CLASS COLORS / STYLES ──
@@ -921,89 +914,7 @@ function connectWS() {
       toast(declinerName + ' declined the trade', 'warn');
     }
     if (event === 'snapstepDisarmChain') { handleDisarmChain(data); }
-    if (event === 'attackResult') {
-      showRollResult(data);
-      pushBattleFeed('⚔️', data.note + ' → ' + data.net + ' damage on ' + (data.monsterName||'monster'), 'attack');
-    }
-    if (event === 'brickResult') {
-      showBrickResult(data);
-      var bfLabel = (data.color||'').charAt(0).toUpperCase()+(data.color||'').slice(1)+' brick: '+(data.effect||'');
-      pushBattleFeed('🧱', bfLabel, 'brick');
-    }
-    if (event === 'monsterAttackResult') {
-      var isMe = data.targetCls === MY_CLASS;
-      var targetName = data.targetName || (G&&G.players[data.targetCls]?(G.players[data.targetCls].playerName||G.players[data.targetCls].name):'ally');
-      var absorbed = data.armorAbsorbed > 0 ? ' ('+data.armorAbsorbed+' blocked by armor)' : '';
-      var hitMsg = data.net > 0
-        ? data.monsterName + ' → ' + (isMe ? 'YOU' : targetName) + ': −' + data.net + ' HP' + absorbed
-        : data.monsterName + ' → ' + (isMe ? 'YOU' : targetName) + ': blocked!' + absorbed;
-      pushBattleFeed('👺', hitMsg, isMe ? 'hit' : 'monster');
-      if (isMe) {
-        if (data.net > 0) showDamageFlash(data.net, data.monsterName);
-        // Show continue card so player sees the hit before acting
-        var borderColor = data.net > 0 ? 'var(--red)' : 'var(--green)';
-        var title = data.net > 0 ? data.monsterName + ' attacks!' : 'Attack blocked!';
-        var detail = data.net > 0
-          ? 'You take ' + data.net + ' damage' + absorbed
-          : 'Your armor absorbed all ' + data.armorAbsorbed + ' damage!';
-        _pendingResult = { border: borderColor, title: title, icon: '👺', mainNum: data.net > 0 ? -data.net : 0, detail: detail, kind: 'monster' };
-        render();
-      }
-    }
-    if (event === '_battleLoot_legacy') {
-      var loot2 = data.loot || {gold:0, bricks:[]};
-      var iconRow2 = '';
-      for (var gi2=0; gi2<(loot2.gold||0); gi2++) {
-        iconRow2 += '<span style="font-size:26px;line-height:1;margin:3px;display:inline-block;vertical-align:middle;">🪙</span>';
-      }
-      (loot2.bricks||[]).forEach(function(b) {
-        var bg2 = BRICK_COLORS[b]||'#888';
-        var bdr2 = b==='white'?'border:1px solid #ccc;':'';
-        iconRow2 += '<span style="width:24px;height:24px;border-radius:3px;background:'+bg2+';'+bdr2+'display:inline-block;vertical-align:middle;margin:3px;box-shadow:0 1px 4px rgba(0,0,0,.4);"></span>';
-      });
-      _pendingResult = {
-        border: 'var(--green)',
-        title: 'Victory!',
-        icon: '⚔️',
-        mainNum: null,
-        detail: '',
-        kind: 'victory',
-        brickDots: iconRow2
-      };
-      battleFeed = [];
-      render();
-    }
-    if (event === 'battleLoot') {
-      var loot = data.loot || {gold:0, bricks:[]};
-      // Build icon row: gold circles + brick squares — no text labels
-      var iconRow = '';
-      for (var gi=0; gi<(loot.gold||0); gi++) {
-        iconRow += '<span style="font-size:26px;line-height:1;margin:3px;display:inline-block;vertical-align:middle;">🪙</span>';
-      }
-      (loot.bricks||[]).forEach(function(b) {
-        var bg = BRICK_COLORS[b]||'#888';
-        var bdr = b==='white'?'border:1px solid #ccc;':'';
-        iconRow += '<span style="width:22px;height:22px;border-radius:3px;background:'+bg+';'+bdr+'display:inline-block;vertical-align:middle;margin:3px;box-shadow:0 1px 4px rgba(0,0,0,.4);"></span>';
-      });
-      _pendingResult = {
-        border: 'var(--green)',
-        title: 'Victory!',
-        icon: '⚔️',
-        mainNum: null,
-        detail: '',
-        kind: 'victory',
-        brickDots: iconRow
-      };
-      battleFeed = [];
-      render();
-    }
     if (event === 'error') { toast(data.msg, 'warn'); }
-    if (event === 'enhancedResult') {
-      if (data.cls === MY_CLASS) {
-        toast('Enhanced Movement: ' + data.duration + ' turn(s) active!', 'success');
-      }
-      // Show on DM screen too via state broadcast (handled separately)
-    }
     if (event === 'forceGateResult') {
       var gateMsg = data.success
         ? 'Gate forced open! (rolled ' + data.roll + ') — took 2 damage'
@@ -1020,24 +931,10 @@ function connectWS() {
         showDashResult(data);
       }
     }
-    if (event === 'lootReady') {
-      showLootScreen(data.loot);
-    }
     if (event === 'rewardPopup') {
       var isRiddleYellow = data.kind === 'brick' && data.color === 'yellow' && G && G.activeEvent && G.activeEvent.evType === 'riddle';
       if (!isRiddleYellow) showRewardPopup(data);
     }
-    if (event === 'skillUnlocked') {
-      var skillName = (data.skillId||'').replace(/_/g,' ');
-      skillName = skillName.charAt(0).toUpperCase() + skillName.slice(1);
-      toast('Skill Unlocked: ' + skillName + '!', 'success');
-      var allTabs = document.querySelectorAll('.tab');
-      var skillsTabEl = null;
-      allTabs.forEach(function(t) { if (t.textContent.trim() === 'Skills') skillsTabEl = t; });
-      if (skillsTabEl) switchTab('skills', skillsTabEl);
-      render();
-    }
-    if (event === 'scavengeResult') { toast('Scavenge: recovered ' + data.recovered + ' gray (rolled ' + data.roll + ')', data.recovered>0?'success':'normal'); }
     if (event === 'clueDiscovered') {
       // New clue revealed — render status tab to show it
       render();
@@ -1108,7 +1005,11 @@ function handleRumbleEvent(type, data) {
       finalArmor: snap.playerArmor,
       finalGold: snap.playerGold,
       finalCheese: snap.playerCheese || 0,
-      finalBricks: snap.playerBrickMax || snap.playerBricks,
+      // S012 §1.1 charge model:
+      //   finalBrickMax = inventory ceiling (may have grown from rumble loot)
+      //   finalBricks   = remaining charges (<= ceiling; persists to board as bricksCharged)
+      finalBrickMax: snap.playerBrickMax || snap.playerBricks,
+      finalBricks:   snap.playerBricks   || snap.playerBrickMax,
       battleStats: snap.battleStats || null,
     });
     if (reason === 'victory') {
@@ -1249,8 +1150,6 @@ function switchTab(id, btn) {
 }
 
 // ── MAIN RENDER ──
-var _wasBattle = false;
-var _wasAllDead = false;
 var _riddleTimerInterval = null;
 
 function _tickRiddleTimer() {
@@ -1279,40 +1178,11 @@ function render() {
     if (_topbar) _topbar.classList.toggle('hidden-on-scroll', !!_hideHdr);
     if (_phaseBanner) _phaseBanner.classList.toggle('hidden-on-scroll', !!_hideHdr);
   } catch (e) {}
-  // Clear battle feed when a new battle starts
-  if (G.battle && !_wasBattle) { battleFeed = []; _lastActionDesc = ''; _victoryPending = false; clearTimeout(_victoryTimer); _wasAllDead = false; _pendingResult = null; }
-  _wasBattle = !!G.battle;
   if (G.phase !== 'land') _landingRollSent = false;
   if (!G.activeEvent) _burstFiredFor = null;
-  // Pick up lastAction from state (catches other players' moves)
-  if (G.battle && G.battle.lastAction) {
-    var la = G.battle.lastAction;
-    var laKey = la.description || '';
-    if (laKey !== _lastActionDesc) {
-      _lastActionDesc = laKey;
-      pushBattleFeed(la.icon||'★', la.description||'', 'attack');
-    }
-  }
-  // Detect killing blow — set _victoryPending so result shows first
-  if (G.battle) {
-    var nowAllDead = G.battle.monsters && G.battle.monsters.every(function(m){ return m.hpCurrent <= 0; });
-    if (nowAllDead && !_wasAllDead) {
-      // Monsters just died this render — delay victory panel by 2s
-      _wasAllDead = true;
-      if (!_victoryPending) {
-        _victoryPending = true;
-        clearTimeout(_victoryTimer);
-        _victoryTimer = setTimeout(function() { _victoryPending = false; render(); }, 2000);
-      }
-    }
-    if (!nowAllDead) { _wasAllDead = false; }
-  }
   renderPhaseBanner(me);
   renderStatus(me);
   renderActions(me);
-  // Re-populate battle feed after innerHTML is set by renderActions
-  if (G.battle) renderBattleFeed();
-  renderSkills(me);
   renderParty();
   restoreActiveEvent();
   // Start riddle timer tick if active, stop if not
@@ -1394,19 +1264,9 @@ function restoreActiveEvent() {
 function renderPhaseBanner(me) {
   const el = document.getElementById('phase-banner');
   const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
-  const inBattle = !!G.battle;
   const activeName = PLAYER_META[G.turnOrder[G.activePlayerIdx]]?.name||'?';
-
-  if (inBattle) {
-    const b = G.battle;
-    const cur = b.initiative?.[b.initIdx];
-    const isMyBattleTurn = !b.monsterTurn && cur?.cls === MY_CLASS;
-    el.className = 'phase-banner '+(isMyBattleTurn?'battle-mine':'battle-wait');
-    el.textContent = isMyBattleTurn ? '⚔️ YOUR ATTACK TURN' : b.monsterTurn ? '👺 Monster Turn' : `Waiting — ${activeName}`;
-  } else {
-    el.className = 'phase-banner '+(isMyTurn?'mine':'waiting');
-    el.textContent = isMyTurn ? `▶ YOUR TURN — ${G.phase.toUpperCase()}` : `Waiting — ${activeName}'s turn`;
-  }
+  el.className = 'phase-banner '+(isMyTurn?'mine':'waiting');
+  el.textContent = isMyTurn ? `▶ YOUR TURN — ${G.phase.toUpperCase()}` : `Waiting — ${activeName}'s turn`;
 }
 
 // ═══════════════════════════════════════════
@@ -1522,7 +1382,6 @@ function renderStatus(me) {
     ${renderKOPanel(me)}
     ${renderMiniInventory(me)}
     ${renderBaseAbilities()}
-    ${renderUnlockedSkills(me)}
     ${renderStatusClues()}
     `;
 }
@@ -1612,30 +1471,6 @@ function renderStatusClues() {
   return html;
 }
 
-function renderUnlockedSkills(me) {
-  var mySkills = (typeof SKILLS !== 'undefined' && SKILLS[MY_CLASS]) ? SKILLS[MY_CLASS] : [];
-  if (!mySkills.length) return '';
-  var skills = me.skills || {};
-  var owned = mySkills.filter(function(sk) { return skills[sk.id]; });
-  if (!owned.length) {
-    var emptyTitle = '<div class="card-title" style="margin:0;padding:0;">Skills</div>';
-    return collapsibleCard('status-skills', emptyTitle, '<div style="font-size:12px;color:var(--text-faint);padding:4px 0;">No skills unlocked yet — collect bricks and unlock from the Skills tab.</div>', false);
-  }
-  var body = '';
-  owned.forEach(function(sk) {
-    body += '<div style="padding:7px 0;border-bottom:1px solid #1a1a1a;">'
-      + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;flex-wrap:wrap;">'
-      + '<span style="font-family:Cinzel,serif;font-size:12px;font-weight:700;color:var(--cls-color);">✓ ' + sk.name + '</span>'
-      + '<span style="font-size:10px;color:var(--green);background:#051a0f;padding:1px 6px;border-radius:6px;">Tier ' + sk.tier + '</span>'
-      + '</div>'
-      + '<div style="font-size:11px;color:var(--text-dim);margin-bottom:3px;line-height:1.4;">' + sk.desc + '</div>'
-      + '<div style="font-size:10px;color:var(--green);">' + sk.use + '</div>'
-      + '</div>';
-  });
-  var titleHtml = '<div class="card-title" style="margin:0;padding:0;">Skills (' + owned.length + ')</div>';
-  return collapsibleCard('status-skills', titleHtml, body, false);
-}
-
 function renderMiniInventory(me) {
   var allDots = '';
   BRICK_NAMES.forEach(function(k) {
@@ -1666,214 +1501,45 @@ function renderActions(me) {
   const el = document.getElementById('pane-actions');
   if(!el) return;
   const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
-  const inBattle = !!G.battle;
-  const b = G.battle;
-  const isMyBattleTurn = inBattle && !b.monsterTurn && b.initiative?.[b.initIdx]?.cls === MY_CLASS;
   const isKO = !me.alive || me.hp <= 0;
 
   if (isKO) { el.innerHTML = `<div class="card"><div style="color:var(--text-dim);text-align:center;font-size:13px;padding:20px;">You are KO — wait for revival.</div></div>`; return; }
 
   let html = '';
 
-  // ── VICTORY SCREEN (outside battle — shows after G.battle clears) ──
-  if (!inBattle && G.battleResult && G.battleResult.combatants.includes(MY_CLASS)) {
-    var br = G.battleResult;
-    var loot = br.loot || {gold:0, bricks:[]};
-    var alreadyResolved = br.resolvedBy.includes(MY_CLASS);
-    var lootBrickDots = (loot.bricks||[]).map(function(bk) {
-      var bg = BRICK_COLORS[bk]||'#888'; var bdr2 = bk==='white'?'border:1px solid #ccc;':'';
-      return '<span style="width:22px;height:22px;border-radius:4px;background:'+bg+';'+bdr2+'display:inline-block;margin:3px;box-shadow:0 1px 4px rgba(0,0,0,.5);"></span>';
-    }).join('');
-    html += '<div style="background:#051a0f;border:2px solid var(--green);border-radius:14px;padding:20px;text-align:center;margin-bottom:8px;">'
-      + '<div style="font-family:Cinzel,serif;font-size:22px;color:var(--green);margin-bottom:12px;">⚔️ Victory!</div>'
-      + '<div style="padding:14px;background:var(--surface3);border-radius:10px;margin-bottom:14px;">'
-      + '<div style="font-size:28px;font-weight:700;color:var(--gold);font-family:Cinzel,serif;margin-bottom:8px;">+'+(loot.gold||0)+' 🪙</div>'
-      + (lootBrickDots ? '<div style="display:flex;flex-wrap:wrap;justify-content:center;margin-bottom:6px;">'+lootBrickDots+'</div>' : '')
-      + (loot.bricks&&loot.bricks.length ? '<div style="font-size:12px;color:var(--text-faint);">'+loot.bricks.join(' · ')+'</div>' : '<div style="font-size:11px;color:var(--text-faint);">No brick drops</div>')
-      + '</div>'
-      + (!alreadyResolved
-        ? '<button class="btn success" data-cls="'+MY_CLASS+'" onclick="client.send(&quot;resolveBattleResult&quot;,{cls:this.dataset.cls})" style="width:100%;font-size:16px;padding:16px;font-family:Cinzel,serif;letter-spacing:.06em;">Continue →</button>'
-        : '<div style="font-size:13px;color:var(--text-dim);padding:10px;">✓ Waiting for others…</div>')
-      + '</div>';
-    el.innerHTML = html;
-    return;
+  // Pending result card (from reward, gate, etc.) — shown until dismissed
+  html += renderResultCard();
+
+  // Prepare phase — unified panel
+  if (G.phase === 'prepare') {
+    html += renderPreparePanel(me);
   }
-
-  // ── IN BATTLE ──
-  if (inBattle) {
-    const phase1Done = b.phase1Complete;
-    const livingMons = b.monsters?.filter(m=>m.hpCurrent>0)||[];
-    const allDead = livingMons.length === 0;
-    const cur = b.initiative?.[b.initIdx];
-    const isMonsterTurn = b.monsterTurn;
-
-    // ── 1. PLAYER STATS STRIP (always top) ──
-    var isOverhealB = me.hp > me.hpMax;
-    var hpPctB = Math.min(100, Math.max(0, Math.round(me.hp/me.hpMax*100)));
-    var hcB = isOverhealB ? '#b06fef'
-      : me.hp<=Math.floor(me.hpMax*.25) ? '#E24B4A'
-      : me.hp<=Math.floor(me.hpMax*.5) ? '#EF9F27'
-      : 'var(--cls-color)';
-    var hpBgB = isOverhealB ? 'linear-gradient(90deg,#7B2FBE,#b06fef)' : hcB;
-    var sMultB = (MY_CLASS==='breaker' && me.skills && me.skills.iron_hide) ? 1.5 : (MY_CLASS==='breaker' ? 0.75 : 0.5);
-    var sMaxB = Math.floor(me.hpMax * sMultB);
-    var bkDotsB = '';
-    BRICK_NAMES.forEach(function(k){ var qty=me.bricks[k]||0;if(!qty)return;var bg=BRICK_COLORS[k];var bdr=k==='white'?'border:1px solid #ccc;':'';for(var bi=0;bi<qty;bi++) bkDotsB+='<span style="width:14px;height:14px;border-radius:3px;background:'+bg+';'+bdr+'display:inline-block;margin:1px;box-shadow:0 1px 3px rgba(0,0,0,.4);flex-shrink:0;"></span>'; });
-    var playerActive = isMyBattleTurn;
-    html += '<div style="background:var(--surface2);border:2px solid '+(playerActive?'var(--cls-color)':'#2a2a2a')+';border-radius:10px;padding:10px 12px;margin-bottom:8px;transition:border-color .3s;">'
-      + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">'
-      + '<span style="font-family:Cinzel,serif;font-size:11px;color:var(--cls-color);">'+me.icon+' '+me.name+'</span>'
-      + (playerActive ? '<span style="font-size:9px;font-family:Cinzel,serif;color:var(--cls-color);letter-spacing:.04em;">YOUR TURN</span>' : '')
-      + '<span style="margin-left:auto;font-size:13px;font-weight:700;color:'+hcB+';">'+me.hp+'/'+me.hpMax+' HP</span>'
-      + '<span style="font-size:11px;color:#888;margin-left:6px;">🛡'+me.armor+'/'+sMaxB+'</span>'
-      + '</div>'
-      + '<div style="height:5px;border-radius:3px;background:#222;overflow:hidden;margin-bottom:6px;">'
-      + '<div style="width:'+hpPctB+'%;height:100%;background:'+hpBgB+';border-radius:3px;transition:width .4s;'+(isOverhealB?'box-shadow:0 0 6px #b06fef88;':'')+'"></div></div>'
-      + (bkDotsB?'<div style="display:flex;flex-wrap:wrap;gap:1px;">'+bkDotsB+'</div>':'<span style="font-size:10px;color:var(--text-faint);">No bricks</span>')
-      + '</div>';
-
-    // ── 2. ENEMY HEALTH BARS (highlighted on monster turn) ──
-    var allMons = b.monsters || [];
-    allMons.forEach(function(mon) {
-      var isDead = mon.hpCurrent <= 0;
-      var mhpPct = Math.max(0, Math.round(mon.hpCurrent/mon.hp*100));
-      var mhc = isDead?'#333':mon.hpCurrent<=Math.floor(mon.hp*.25)?'#E24B4A':mon.hpCurrent<=Math.floor(mon.hp*.5)?'#EF9F27':'#cc3333';
-      var tags = '';
-      if (mon.confused) tags += '<span style="font-size:10px;padding:1px 7px;border-radius:8px;background:#2a2500;color:var(--yellow);margin-right:4px;">Confused</span>';
-      if (mon.cursed>0) tags += '<span style="font-size:10px;padding:1px 7px;border-radius:8px;background:#1a0a1a;color:#9B59B6;margin-right:4px;">Cursed −'+mon.cursed+'</span>';
-      html += '<div style="background:#1a0505;border:2px solid '+(isMonsterTurn&&!isDead?'#cc3333':'#2a1515')+';border-radius:10px;padding:10px 12px;margin-bottom:8px;transition:border-color .3s;">'
-        + '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">'
-        + '<span style="font-family:Cinzel,serif;font-size:13px;font-weight:700;color:'+(isDead?'#444':'#cc3333')+';">👺 '+mon.name+'</span>'
-        + (isMonsterTurn&&!isDead ? '<span style="font-size:9px;font-family:Cinzel,serif;color:#cc3333;letter-spacing:.04em;">ATTACKING</span>' : '')
-        + '<span style="font-size:12px;color:'+mhc+';font-weight:700;">'+mon.hpCurrent+' / '+mon.hp+' HP</span>'
-        + '</div>'
-        + '<div style="height:6px;border-radius:3px;background:#2a1010;overflow:hidden;margin-bottom:5px;">'
-        + '<div style="width:'+mhpPct+'%;height:100%;background:'+mhc+';border-radius:3px;transition:width .4s;"></div></div>'
-        + (tags ? '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">'+tags+'</div>' : '')
-        + (isDead ? '<div style="font-size:10px;color:#444;margin-top:2px;font-family:Cinzel,serif;">☠ Defeated</div>' : '')
-        + '</div>';
-    });
-
-    // ── 3. INITIATIVE (compact, below bars) ──
-    if (b.initiative && b.initiative.length && !allDead) {
-      var initHtml = b.initiative.map(function(it, i) {
-        var isCur = !b.monsterTurn && b.initIdx === i;
-        var pm = PLAYER_META[it.cls];
-        var isMe = it.cls === MY_CLASS;
-        return '<span style="padding:2px 8px;border-radius:6px;font-size:11px;margin:2px;'
-          + (isCur?'background:var(--cls-color)33;border:1px solid var(--cls-color)66;color:var(--cls-color);font-weight:700;':'background:#1a1a1a;border:1px solid #222;color:'+(isMe?'var(--text)':'var(--text-faint)'))+';">'
-          + (isCur?'▶ ':'')+(pm?.icon||'')+(isMe?' You':' '+(pm?.name||it.cls))
-          + '</span>';
-      }).join('');
-      var monCur = b.monsterTurn;
-      initHtml += '<span style="padding:2px 8px;border-radius:6px;font-size:11px;margin:2px;'
-        + (monCur?'background:#cc333333;border:1px solid #cc333366;color:#cc3333;font-weight:700;':'background:#1a1a1a;border:1px solid #222;color:var(--text-faint)')+';">'
-        + (monCur?'▶ ':'')+'👺 Monsters</span>';
-      html += '<div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:8px;padding:4px 0;">'
-        + '<span style="font-family:Cinzel,serif;font-size:9px;color:var(--text-faint);margin-right:6px;">R'+b.battleRound+'</span>'
-        + initHtml + '</div>';
-    }
-
-    // ── 4. RESULT CARD ──
-    if (_pendingResult) {
-      html += renderResultCard();
-    } else if (allDead && _victoryPending) {
-      html += '<div style="background:#051a0f;border:2px solid var(--green);border-radius:12px;padding:16px;text-align:center;margin-bottom:8px;">'
-        + '<div style="font-family:Cinzel,serif;font-size:16px;color:var(--green);margin-bottom:8px;">⚔️ Monster Defeated!</div>'
-        + (battleFeed[0]?'<div style="font-size:12px;color:var(--text-dim);padding:6px;background:var(--surface3);border-radius:8px;">'+battleFeed[0].icon+' '+battleFeed[0].msg+'</div>':'')
-        + '<div style="font-size:11px;color:var(--text-faint);margin-top:8px;">Tallying loot…</div></div>';
-    } else if (allDead) {
-      html += '<div style="background:#051a0f;border:2px solid var(--green);border-radius:12px;padding:16px;text-align:center;margin-bottom:8px;">'
-        + '<div style="font-family:Cinzel,serif;font-size:18px;color:var(--green);margin-bottom:6px;">⚔️ Victory!</div>'
-        + '<div style="font-size:12px;color:var(--text-dim);">Loot incoming…</div></div>';
-
-    } else if (isMyBattleTurn) {
-      var monOpts2 = livingMons.map(function(m) {
-        return '<option value="'+b.monsters.indexOf(m)+'">'+m.name+' ('+m.hpCurrent+'/'+m.hp+'HP · Armor '+m.armor+')</option>';
-      }).join('');
-      html += '<div style="background:var(--surface2);border:1px solid var(--cls-color)44;border-radius:10px;padding:10px;margin-bottom:8px;">'
-        + '<div style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.08em;color:var(--cls-color);margin-bottom:6px;">TARGET</div>'
-        + '<select id="mon-sel" style="width:100%;padding:9px;border-radius:8px;border:1px solid var(--cls-color)44;background:var(--surface3);color:var(--text);font-size:13px;">'
-        + monOpts2 + '</select></div>';
-      html += '<div style="background:var(--surface2);border:1px solid var(--cls-color)33;border-radius:10px;padding:12px;margin-bottom:8px;">'
-        + '<div style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.08em;color:var(--cls-color);margin-bottom:8px;">SLOT 1 — ATTACK</div>'
-        + '<button class="btn primary" onclick="doAttack()" style="width:100%;font-size:15px;padding:12px;font-family:Cinzel,serif;letter-spacing:.04em;margin-bottom:6px;">'
-        + '⚔️ Roll '+me.die+' Attack'+(phase1Done&&b.monsters?.find(m=>m.blueOnly&&m.hpCurrent>0)?' — Phase 2 (Magic Only)':'')+' →'
-        + '</button>'
-        + '<button class="btn" onclick="doSearch()" style="width:100%;font-size:12px;color:var(--text-faint);">🔍 Search instead (find bricks)</button>'
-        + '</div>';
-      html += '<div style="background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;padding:12px;margin-bottom:8px;">'
-        + '<div style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.08em;color:var(--text-faint);margin-bottom:8px;">SLOT 2 — BRICK SKILL</div>'
-        + renderBrickButtons(me, b, phase1Done)
-        + renderClassAbilities(me, b)
-        + '</div>';
-      html += '<button class="btn" onclick="client.send(&quot;advanceBattleTurn&quot;)" style="width:100%;color:var(--text-faint);font-size:12px;margin-bottom:8px;">Skip / Pass Turn →</button>';
-
-    } else if (b.monsterTurn) {
-      html += '<div style="background:#1a0505;border:1px solid #2a1515;border-radius:10px;padding:14px;text-align:center;margin-bottom:8px;">'
-        + '<div style="font-size:11px;color:var(--red);font-family:Cinzel,serif;letter-spacing:.06em;">Watch your HP — you may be targeted.</div>'
-        + '</div>';
+  // Rumble battle card — pending (event card) or active (placeholder rumble screen)
+  html += renderRumbleCard(me);
+  // Landing phase / event
+  if (isMyTurn && G.phase === 'land' && !_pendingResult) {
+    var hasActiveEvent = G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
+    if (!hasActiveEvent) {
+      html += renderLandPanel(me);
     } else {
-      var waitCls = cur?.cls;
-      var waitPm = waitCls ? PLAYER_META[waitCls] : null;
-      var waitPlayer = waitCls ? G.players[waitCls] : null;
-      html += '<div style="background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;padding:14px;text-align:center;margin-bottom:8px;">'
-        + '<div style="font-size:11px;font-family:Cinzel,serif;color:var(--text-dim);">Waiting for '+(waitPm?'<span style="color:'+waitPm.color+';">'+waitPm.name+'</span>':'?')+'</div>'
-        + (waitPlayer?.hp !== undefined ? '<div style="font-size:10px;color:var(--text-faint);margin-top:4px;">'+waitPlayer.hp+'/'+waitPlayer.hpMax+' HP · 🛡'+(waitPlayer.armor||0)+'</div>' : '')
-        + '</div>';
-    }
-
-    // ── 5. BATTLE LOG ──
-    html += '<div style="background:var(--surface2);border:1px solid #2a2a3a;border-radius:10px;padding:10px;margin-bottom:8px;">'
-      + '<div style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.08em;color:var(--text-faint);margin-bottom:6px;">BATTLE LOG</div>'
-      + '<div id="battle-feed-list">'
-      + (battleFeed.length ? '' : '<div style="font-size:12px;color:var(--text-faint);text-align:center;padding:8px;">Battle begins…</div>')
-      + '</div></div>';
-
-    // ── 6. COMPLICATION ──
-    if (b.complication && b.complication!=='none') {
-      const compLabels={poison:'☠ Poison — −1 HP at end of each round',trapped:'⚠ Trapped Battlefield — orange traps active',armored:'🛡 Armored Surge — main monster +2 armor',swarm:'🐝 Swarm — goblin spawns round 2'};
-      html += '<div style="padding:8px 12px;border-radius:8px;background:#1a0800;border:1px solid var(--orange);font-size:12px;color:var(--orange);">'
-        + (compLabels[b.complication]||b.complication)+'</div>';
-    }
-  }
-
-  // ── OUT OF BATTLE ──
-  else {
-    // Pending result card (from reward, gate, etc.) — shown until dismissed
-    html += renderResultCard();
-
-    // Prepare phase — unified panel
-    if (G.phase === 'prepare') {
-      html += renderPreparePanel(me);
-    }
-    // Rumble battle card — pending (event card) or active (placeholder rumble screen)
-    html += renderRumbleCard(me);
-    // Landing phase / event
-    if (isMyTurn && G.phase === 'land' && !_pendingResult) {
-      var hasActiveEvent = G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
-      if (!hasActiveEvent) {
-        html += renderLandPanel(me);
-      } else {
-        // Active event — skip Roll Die button but keep #landing-result container for restoreActiveEvent
-        html += '<div id="landing-result"></div>';
-      }
-    }
-    // Riddle active — all non-initiating players also need the landing-result container
-    if (!isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle' && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired)) {
+      // Active event — skip Roll Die button but keep #landing-result container for restoreActiveEvent
       html += '<div id="landing-result"></div>';
     }
-    // v4: RED Trial of Hand — visible to ALL players (party race)
-    if (!isMyTurn && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand') {
-      html += '<div id="landing-result"></div>';
-    }
-    // Out of battle free actions — only during land phase or off-turn; prepare phase has its own panel
-    if (G.phase !== 'prepare') {
-      html += renderOutOfBattleActions(me);
-    }
-    // Gates
-    html += renderGateActions(me);
   }
+  // Riddle active — all non-initiating players also need the landing-result container
+  if (!isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle' && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired)) {
+    html += '<div id="landing-result"></div>';
+  }
+  // v4: RED Trial of Hand — visible to ALL players (party race)
+  if (!isMyTurn && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand') {
+    html += '<div id="landing-result"></div>';
+  }
+  // Out of battle free actions — only during land phase or off-turn; prepare phase has its own panel
+  if (G.phase !== 'prepare') {
+    html += renderOutOfBattleActions(me);
+  }
+  // Gates
+  html += renderGateActions(me);
 
   el.innerHTML = html;
 }
@@ -1966,7 +1632,6 @@ function buildPrepareActions(me) {
   var hasWhite = (me.bricks.white||0) > 0;
   var hasGray = (me.bricks.gray||0) > 0;
   var die = (PLAYER_META[MY_CLASS] || {}).die || 'd6';
-  var inBattle = G.battle && Array.isArray(G.battle.combatants) && G.battle.combatants.indexOf(MY_CLASS) >= 0;
 
   if (isMyTurn) {
   list.push({
@@ -2098,11 +1763,9 @@ function buildPrepareActions(me) {
 
   var zone = (SPACES[me.space] && SPACES[me.space].zone) || 0;
   var zoneRestricted = zone === 4;
-  var marketBlocked = inBattle || zoneRestricted || G.storeDisabled;
+  var marketBlocked = zoneRestricted || G.storeDisabled;
   var marketDetail;
-  if (inBattle) {
-    marketDetail = 'Market closed during battle.';
-  } else if (zoneRestricted) {
+  if (zoneRestricted) {
     marketDetail = 'Market unavailable in this zone.';
   } else if (G.storeDisabled) {
     marketDetail = 'Market closed by DM.';
@@ -2193,155 +1856,6 @@ function runAction(id) {
   if (fn) fn();
 }
 
-// ── ATTACK ──
-function doAttack() {
-  const monIdx = parseInt(document.getElementById('mon-sel')?.value||0);
-  client.rollAttack(MY_CLASS, monIdx);
-}
-function showRollResult(data) {
-  _pendingResult = {
-    border: 'var(--cls-color)',
-    title: 'Attack Roll',
-    icon: '⚔️',
-    mainNum: data.net,
-    detail: data.note + ' → ' + data.net + ' damage dealt',
-    kind: 'attack'
-  };
-  render();
-}
-
-function showBrickResult(data) {
-  var bg = BRICK_COLORS[data.color] || '#888';
-  var mainNum = data.dmg || data.heal || 0;
-  var rangeInfo = data.range ? ' (range: ' + data.range + ')' : '';
-  _pendingResult = {
-    border: bg,
-    title: (data.color||'').charAt(0).toUpperCase()+(data.color||'').slice(1)+' Brick',
-    icon: '<span style="width:18px;height:18px;border-radius:3px;background:'+bg+';display:inline-block;vertical-align:middle;margin-right:6px;border:1px solid rgba(0,0,0,.2);"></span>',
-    mainNum: mainNum,
-    detail: (data.effect||'') + rangeInfo,
-    kind: 'brick'
-  };
-  render();
-}
-
-function pushBattleFeed(icon, msg, kind) {
-  battleFeed.unshift({ icon:icon, msg:msg, kind:kind, t:new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) });
-  if (battleFeed.length > 12) battleFeed.length = 12;
-  renderBattleFeed();
-}
-
-function renderBattleFeed() {
-  var el = document.getElementById('battle-feed-list');
-  if (!el) return;
-  var colors = { attack:'var(--cls-color)', brick:'#8888cc', monster:'var(--red)', hit:'var(--red)', heal:'var(--green)', info:'var(--text-dim)' };
-  el.innerHTML = battleFeed.map(function(e) {
-    var isHit = e.kind === 'hit';
-    return '<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #1a1a1a;' + (isHit?'background:#1a0505;margin:0 -10px;padding:5px 10px;':'') + '">'
-      + '<span style="font-size:14px;flex-shrink:0;">' + e.icon + '</span>'
-      + '<span style="flex:1;font-size:12px;color:' + (colors[e.kind]||'var(--text-dim)') + ';line-height:1.4;">' + e.msg + '</span>'
-      + '<span style="font-size:9px;color:var(--text-faint);flex-shrink:0;margin-top:2px;">' + e.t + '</span>'
-      + '</div>';
-  }).join('');
-}
-
-function showDamageFlash(amount, source) {
-  var el = document.getElementById('damage-flash');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'damage-flash';
-    el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);'
-      + 'font-family:Cinzel,serif;font-size:52px;font-weight:700;color:#E24B4A;'
-      + 'text-shadow:0 0 20px #E24B4A;z-index:500;pointer-events:none;text-align:center;';
-    document.body.appendChild(el);
-  }
-  el.innerHTML = '-' + amount + '<div style="font-size:14px;margin-top:4px;opacity:.7;">' + (source||'') + '</div>';
-  el.style.opacity = '1';
-  el.style.display = 'block';
-  clearTimeout(el._t);
-  el._t = setTimeout(function() {
-    el.style.transition = 'opacity .5s';
-    el.style.opacity = '0';
-    setTimeout(function() { el.style.display='none'; el.style.transition=''; }, 500);
-  }, 1200);
-}
-
-// ── SEARCH ──
-function doSearch() {
-  const isScout = MY_CLASS === 'snapstep';
-  const r = roll(6);
-  const threshold = isScout ? 3 : 5;
-  let found = '';
-  const colors = ['red','blue','green','gray','white','yellow','orange'];
-  if (r >= 6) {
-    const b1=colors[Math.floor(Math.random()*colors.length)];
-    const b2=colors[Math.floor(Math.random()*colors.length)];
-    client.adjustBrick(MY_CLASS,b1,1); client.adjustBrick(MY_CLASS,b2,1);
-    found = `Found ${b1} + ${b2}!`;
-  } else if (r >= threshold) {
-    const b1=colors[Math.floor(Math.random()*colors.length)];
-    client.adjustBrick(MY_CLASS,b1,1);
-    found = `Found 1 ${b1}`;
-  } else if (r >= 3 && isScout) {
-    client.adjustBrick(MY_CLASS,'gray',1);
-    found = 'Found 1 gray';
-  } else {
-    found = 'Nothing found';
-  }
-  const el = document.getElementById('search-result');
-  if(el) el.innerHTML = `<div style="font-size:12px;color:var(--text-dim);margin-top:5px;">Roll ${r}: ${found}</div>`;
-  client.addLog(`${PLAYER_META[MY_CLASS].name} searched: ${found}`,'reward');
-  client.send('advanceBattleTurn');
-}
-
-// ── BRICK BUTTONS IN BATTLE ──
-function renderBrickButtons(me, b, phase1Done) {
-  const phase2Active = phase1Done && b.monsters?.some(m=>m.blueOnly&&m.hpCurrent>0);
-  const brickDefs = {
-    red:    { label:'1–3 dmg (ignoring armor)', warriorLabel:'3–5 dmg (ignoring armor)' },
-    blue:   { label:'3 magic dmg (ignores armor)', wizardLabel:'4–8 magic dmg (ignores armor)' },
-    white:  { label:'Heal self or ally', special:true },
-    gray:   { label:'+1 armor brick on minifig' },
-    purple: { label:'3–5 dmg + 2–3 HP self', wizardLabel:'4–8 dmg + 3–4 HP self' },
-    yellow: { label:'Confuse monster (1+ rounds)', scoutLabel:'Confuse + 1–3 damage/round' },
-    orange: { label:'Battle trap — fires this round', scoutLabel:'Snapstep trap 2–4 dmg' },
-    black:  { label:'Curse: monster −2 per attack', wizardLabel:'−3 to −4, persists' },
-    green:  { label:'Tame attempt (see class)' },
-  };
-  let html = '';
-  BRICK_NAMES.forEach(color=>{
-    const qty = me.bricks[color]||0;
-    if (!qty) return;
-    const def = brickDefs[color];
-    if (!def) return;
-    // Phase 2 restriction
-    if (phase2Active && !['blue','yellow'].includes(color)) return;
-    const label = (MY_CLASS==='breaker'&&def.warriorLabel)||
-                  (MY_CLASS==='formwright'&&def.wizardLabel)||
-                  (MY_CLASS==='snapstep'&&def.scoutLabel)||
-                  def.label;
-    const bg = BRICK_COLORS[color]||'#888';
-    const bdr = color==='white'?'border:1px solid #aaa;':'';
-    html += `<button class="btn" style="border-color:${bg}55;" onclick="useBrick('${color}')">
-      <span style="display:inline-flex;align-items:center;gap:7px;">
-        <span style="width:13px;height:13px;border-radius:3px;background:${bg};${bdr}display:inline-block;flex-shrink:0;"></span>
-        <span><strong style="color:${bg};">${color}</strong> (${qty}) — ${label}</span>
-      </span>
-    </button>`;
-  });
-  return html || '<div style="font-size:12px;color:var(--text-faint);">No bricks available</div>';
-}
-
-function useBrick(color) {
-  const monIdx = parseInt(document.getElementById('mon-sel')?.value||0);
-  if (color === 'white') {
-    // Show target selector
-    showHealSelector(monIdx);
-    return;
-  }
-  client.useBrick(MY_CLASS, color, monIdx);
-}
-
 function showHealSelector(monIdx) {
   const opts = Object.values(G.players).filter(p=>p.alive).map(p=>
     `<button class="btn" onclick="client.useBrick('${MY_CLASS}','white',${monIdx},'${p.cls}');document.getElementById('heal-sel-modal').remove();">${p.icon} ${p.name} (${p.hp}/${p.hpMax} HP)</button>`
@@ -2357,109 +1871,6 @@ function showHealSelector(monIdx) {
   document.body.appendChild(modal);
 }
 
-// ── CLASS ABILITIES ──
-function renderClassAbilities(me, b) {
-  const skills = me.skills||{};
-  let html = '<hr class="dv"><div class="card-title">Class Abilities</div>';
-  const mySkills = SKILLS[MY_CLASS]||[];
-  const owned = mySkills.filter(s=>skills[s.id]);
-  if (!owned.length) return html+'<div style="font-size:12px;color:var(--text-faint);">Unlock skills in the Skills tab</div>';
-
-  const monIdx = () => parseInt(document.getElementById('mon-sel')?.value||0);
-
-  owned.forEach(sk=>{
-    let action = '';
-    // Map skill id to action
-    if (sk.id==='rage_break_plus') action=`doRageBreak()`;
-    else if (sk.id==='whirlwind') action=`doWhirlwind()`;
-    else if (sk.id==='fortress_stance') action=`doFortressStance()`;
-    else if (sk.id==='legendary_bastion') action=`doLegendaryBastion()`;
-    else if (sk.id==='warlords_fury') action=`doWarlordsFury()`;
-    else if (sk.id==='catapult') action=`client.catapult(${monIdx()})`;
-    else if (sk.id==='pack_call_plus') action=`client.useBrick('${MY_CLASS}','orange',${monIdx()})`;
-    else if (sk.id==='alpha_predator') action=`doAlphaPredator()`;
-    else if (sk.id==='natures_wrath') action=`doNaturesWrath()`;
-    else if (sk.id==='time_freeze') action=`doTimeFreeze()`;
-    else if (sk.id==='cataclysm') action=`doCataclysm()`;
-    else if (sk.id==='blitz') action=`doBlitz()`;
-    else if (sk.id==='death_mark') action=`client.useBrick('${MY_CLASS}','orange',${monIdx()})`;
-    else if (sk.id==='phoenix_surge') action=`doPhoenixSurge()`;
-    else if (sk.id==='divine_shield') action=`doDivineShield()`;
-    else if (sk.id==='mass_surge') action=`client.massRepair()`;
-
-    if (action) {
-      html += `<button class="btn warn" onclick="${action}">★ ${sk.name} — ${sk.use}</button>`;
-    }
-  });
-
-  // Tame / command
-  if (MY_CLASS==='wild_one') {
-    if (!me.tamed) {
-      const canTame = (me.bricks.green||0)>=2 && b.monsters?.some(m=>m.tameable&&m.hpCurrent>0);
-      html += `<button class="btn" ${!canTame?'disabled':''} onclick="doTame()">🐾 Tame Monster (2 green bricks — uses both slots)</button>`;
-    } else {
-      html += `<button class="btn success" onclick="client.commandTamed('${MY_CLASS}',${monIdx()})">🐾 Command ${me.tamed.name} (1 green)</button>`;
-    }
-  }
-
-  // Fixer heal / revive in battle
-  if (MY_CLASS==='fixer') {
-    html += `<button class="btn success" onclick="showHealSelector(-1)">💊 Heal ally (1 white brick)</button>`;
-    html += `<button class="btn primary" onclick="showReviveSelector()">✨ Revive (1 purple + 1 white)</button>`;
-  }
-
-  return html;
-}
-
-// ── BREAKER ABILITIES ──
-function doRageBreak() {
-  const b = G.battle;
-  if (!b) return;
-  const me = G.players[MY_CLASS];
-  if((me.bricks.red||0)<2){toast('Need 2 red bricks','warn');return;}
-  client.useBrick(MY_CLASS,'red',parseInt(document.getElementById('mon-sel')?.value||0));
-  client.useBrick(MY_CLASS,'red',parseInt(document.getElementById('mon-sel')?.value||0));
-  toast('Rage Break+! ×2 multiplier applied','success');
-}
-function doWhirlwind() { client.useBrick(MY_CLASS,'red',0); toast('Whirlwind — hits all monsters!','success'); }
-function doFortressStance() { client.adjustArmor(MY_CLASS,3); toast('+3 armor bricks (Fortress Stance)','success'); }
-function doLegendaryBastion() { client.addLog('LEGENDARY BASTION active — Breaker immune 2 rounds!','action'); toast('Legendary Bastion!','success'); }
-function doWarlordsFury() {
-  const mi=parseInt(document.getElementById('mon-sel')?.value||0);
-  // Roll 3× d8
-  let total=0; for(let i=0;i<3;i++) { const r=roll(8); total+=r; }
-  client.send('adjustHP',{cls:null}); // placeholder — DM applies
-  client.addLog(`Warlord's Fury: ${total} total damage ignoring armor!`,'damage');
-  toast(`Warlord's Fury: ${total} damage!`,'success');
-}
-
-// ── FORMWRIGHT ──
-function doTimeFreeze() { client.addLog('TIME FREEZE — all monsters skip 2 turns!','action'); toast('Time Freeze!','success'); }
-function doCataclysm() {
-  const me=G.players[MY_CLASS];
-  if((me.bricks.blue||0)<3){toast('Need 3 blue bricks','warn');return;}
-  client.useBrick(MY_CLASS,'blue',0);client.useBrick(MY_CLASS,'blue',0);client.useBrick(MY_CLASS,'blue',0);
-  const dmg=rollRange(13,17);
-  G.battle?.monsters?.forEach((_,i)=>client.send('adjustHP',{}));
-  client.addLog(`CATACLYSM: ${dmg} magic damage to ALL monsters!`,'damage');
-  toast(`Cataclysm: ${dmg} damage!`,'success');
-}
-
-// ── SNAPSTEP ──
-function doBlitz() { client.addLog('BLITZ — Snapstep takes 2 full turns in a row!','action'); toast('Blitz!','success'); }
-
-// ── WILD ONE ──
-function doTame() {
-  const monIdx = parseInt(document.getElementById('mon-sel')?.value||0);
-  client.tameAttempt(MY_CLASS, monIdx);
-}
-function showTameResult(data) {
-  toast(data.success?`Tame succeeded! (rolled ${data.roll})`:`Tame failed (rolled ${data.roll}, need ${data.threshold})`
-    , data.success?'success':'warn');
-}
-function doAlphaPredator() { client.addLog('Alpha Predator — tamed hits ALL monsters!','action'); toast('Alpha Predator!','success'); }
-function doNaturesWrath() { client.addLog("Nature's Wrath — 3-5 damage + poison to all monsters!","action"); toast("Nature's Wrath!",'success'); }
-
 // ── FIXER ──
 function showReviveSelector() {
   const down = Object.values(G.players).filter(p=>!p.alive||p.hp<=0);
@@ -2470,8 +1881,6 @@ function showReviveSelector() {
   modal.innerHTML=`<div style="background:#1a1a1a;border:1px solid var(--cls-color);border-radius:14px;padding:16px;width:100%;max-width:300px;"><div style="font-family:Cinzel,serif;font-size:14px;color:var(--cls-color);margin-bottom:10px;">Revive who?</div>${opts}<button class="btn" onclick="document.getElementById('rev-modal').remove()">Cancel</button></div>`;
   document.body.appendChild(modal);
 }
-function doPhoenixSurge(){client.massRepair();client.addLog('PHOENIX SURGE — all fallen players revived at full HP!','heal');toast('Phoenix Surge!','success');}
-function doDivineShield(){client.addLog('DIVINE SHIELD — no damage this round!','action');toast('Divine Shield active!','success');}
 
 // ── MOVE PANEL ──
 function renderMovePanel(me) {
@@ -5058,22 +4467,6 @@ function renderGateActions(me) {
   return html;
 }
 
-// ═══════════════════════════════════════════
-//  BRICKS TAB
-// ═══════════════════════════════════════════
-function renderBricks(me) {
-  const el = document.getElementById('pane-bricks');
-  if(!el) return;
-
-  let html = '';
-
-
-
-
-
-  el.innerHTML = html;
-}
-
 // Step 1: Player tapped a brick on another player — they want that brick
 // Show modal to choose what to offer in return
 // Step 1: Player taps a brick on another player — select what to want, then what to offer
@@ -5258,89 +4651,11 @@ function openTradeComposer(targetCls) { startTradeRequest(targetCls, null); }
 function sendTradeOffer(targetCls, color) { confirmTradeOffer(targetCls, null, color); }
 
 // ═══════════════════════════════════════════
-//  SKILLS TAB
-// ═══════════════════════════════════════════
-var _skillCostMap = {};
-
-function doUnlockSkill(skillId) {
-  var cost = _skillCostMap[skillId];
-  if (!cost) { toast('Skill cost not found', 'warn'); return; }
-  client.unlockSkill(MY_CLASS, skillId, cost);
-}
-
-function renderSkills(me) {
-  const el = document.getElementById('pane-skills');
-  if(!el)return;
-  const mySkills = SKILLS[MY_CLASS]||[];
-  const skills = me.skills||{};
-  const bricks = me.bricks;
-  _skillCostMap = {};
-  mySkills.forEach(function(sk) { _skillCostMap[sk.id] = sk.unlock||{}; });
-
-  function hasTier(t) { return mySkills.some(s=>s.tier===t-1&&skills[s.id]); }
-
-  // Brick inventory strip at top
-  var bkDots = '';
-  BRICK_NAMES.forEach(function(k) {
-    var qty = bricks[k]||0;
-    if (!qty) return;
-    var bg = BRICK_COLORS[k];
-    var bdr = k==='white'?'border:1px solid #ccc;':'';
-    for (var i=0;i<qty;i++) {
-      bkDots += '<span style="width:18px;height:18px;border-radius:3px;background:'+bg+';'+bdr+'display:inline-block;margin:2px;box-shadow:0 1px 3px rgba(0,0,0,.4);flex-shrink:0;"></span>';
-    }
-  });
-  let html = '<div class="card" style="padding:8px 10px;">'
-    + '<div style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.08em;color:var(--text-dim);margin-bottom:6px;">BRICKS</div>'
-    + '<div style="display:flex;flex-wrap:wrap;">'
-    + (bkDots || '<span style="font-size:11px;color:var(--text-faint);">No bricks</span>')
-    + '</div></div>';
-  let anyUnlockable = false;
-  [1,2,3].forEach(tier=>{
-    const tierSkills = mySkills.filter(s=>s.tier===tier&&!skills[s.id]); // exclude owned
-    if (!tierSkills.length) return; // skip tier if all owned or none
-    anyUnlockable = true;
-    html+=`<div style="font-family:'Cinzel',serif;font-size:10px;letter-spacing:.08em;color:var(--text-faint);text-transform:uppercase;margin:14px 0 7px;">— Tier ${tier} —</div>`;
-    tierSkills.forEach(sk=>{
-      const cost=sk.unlock||{};
-      const tot=Object.values(cost).reduce((a,b)=>a+b,0);
-      const have=Object.entries(cost).reduce((a,[k,v])=>a+Math.min(bricks[k]||0,v),0);
-      const pct=tot>0?have/tot:1;
-      const isReady=pct>=1;
-      const isPartial=!isReady&&pct>=0.5;
-      const tierOk=tier===1||(tier===2&&hasTier(2))||(tier===3&&hasTier(3));
-      const show=isReady;
-
-      html+=`<div class="skill-card ${isReady?'owned':isPartial?'partial':'locked'}">
-        <div class="skill-prog"><div class="skill-prog-fill" style="width:${Math.round(pct*100)}%;background:${isReady?'var(--green)':isPartial?'var(--cls-color)':'#333'};"></div></div>
-        ${isPartial?`<div style="font-size:10px;color:var(--cls-color);margin-bottom:4px;">✦ ${have}/${tot} bricks — keep collecting</div>`:''}
-        ${!show&&!isPartial?`<div style="font-size:10px;color:var(--text-faint);margin-bottom:3px;">🔒 ${have}/${tot} bricks</div>`:''}
-        <div class="skill-name">${show?sk.name:'???'}</div>
-        <div class="skill-desc">${show?sk.desc:'???'}</div>
-        <div class="cost-tags">${Object.entries(cost).map(([k,v])=>{
-          const bg=BRICK_COLORS[k];const bdr=k==='white'?'border:1px solid #aaa;':'';
-          return `<span class="cost-tag" style="background:${bg}22;color:${k==='white'||k==='yellow'?'#777':bg};border:1px solid ${bg}44;">
-            <span style="width:9px;height:9px;border-radius:2px;background:${bg};${bdr}display:inline-block;"></span>${v} ${k}
-          </span>`;
-        }).join('')}</div>
-        ${isReady&&tierOk?`<button class="btn primary btn-sm" onclick="doUnlockSkill('${sk.id}')">Unlock</button>`:''}
-        ${!tierOk?`<div style="font-size:10px;color:var(--red);margin-top:3px;">Unlock a Tier ${tier-1} skill first</div>`:''}
-      </div>`;
-    });
-  });
-  if (!anyUnlockable) {
-    html = '<div style="text-align:center;padding:20px;color:var(--text-faint);font-size:13px;">All skills unlocked!<br><span style="font-size:11px;">See Status tab for your abilities.</span></div>';
-  }
-  el.innerHTML = html;
-}
-
-// ═══════════════════════════════════════════
 //  PARTY TAB
 // ═══════════════════════════════════════════
 function renderParty() {
   const el = document.getElementById('pane-party');
   if(!el)return;
-  const inBattle=!!G.battle;
   const me = G.players[MY_CLASS];
   let html='';
 
@@ -5418,13 +4733,6 @@ function renderParty() {
       +'</div>'
       +(myBricks?'<div style="display:flex;flex-wrap:wrap;">'+myBricks+'</div>':'')
       +'</div>';
-  }
-
-  if(inBattle&&G.battle.initiative){
-    const b=G.battle;
-    html+='<div class="card" style="margin-top:4px;"><div class="card-title">Initiative Order</div>'
-      +b.initiative.map(function(it,i){const isActive=!b.monsterTurn&&b.initIdx===i;const pm=PLAYER_META[it.cls];return '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #1a1a1a;'+(isActive?'color:var(--yellow);':'')+'">'+(isActive?'&#9658; ':'')+pm?.icon+' <span style="flex:1;">'+pm?.name+'</span><span style="font-size:11px;color:var(--text-dim);">'+it.roll+'</span></div>';}).join('')
-      +'<div style="display:flex;align-items:center;gap:8px;padding:5px 0;'+(b.monsterTurn?'color:var(--red)':'color:var(--text-faint)')+';">'+(b.monsterTurn?'&#9658; ':'')+'&#128122; <span style="flex:1;">Monsters</span></div></div>';
   }
 
   el.innerHTML=html;
@@ -5636,42 +4944,6 @@ function showDashResult(data) {
     kind: 'dash'
   };
   render();
-}
-
-function showLootScreen(loot) {
-  var existing = document.getElementById('loot-modal');
-  if (existing) existing.remove();
-  var brickList = loot.bricks && loot.bricks.length
-    ? loot.bricks.map(function(b) {
-        var bg = BRICK_COLORS[b] || '#888';
-        return '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:8px;background:' + bg + '22;border:1px solid ' + bg + '44;margin:2px;"><span style="width:10px;height:10px;border-radius:2px;background:' + bg + ';display:inline-block;"></span> 1 ' + b + '</span>';
-      }).join('')
-    : 'No bricks';
-  var modal = document.createElement('div');
-  modal.id = 'loot-modal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:200;display:flex;align-items:center;justify-content:center;padding:20px;';
-  modal.innerHTML = '<div style="background:#1a1a1a;border:2px solid var(--gold);border-radius:14px;padding:20px;max-width:320px;width:100%;text-align:center;">'
-    + '<div style="font-family:Cinzel,serif;font-size:18px;color:var(--gold);margin-bottom:8px;">⚔️ Victory!</div>'
-    + '<div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;">Battle loot is available to collect</div>'
-    + '<div style="padding:12px;background:var(--surface3);border-radius:10px;margin-bottom:14px;">'
-    + '<div style="font-size:20px;color:var(--gold);font-weight:700;margin-bottom:6px;">+' + (loot.gold||0) + ' Gold</div>'
-    + '<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:4px;">' + brickList + '</div>'
-    + '</div>'
-    + '<button class="btn success" onclick="collectLoot()" style="font-size:15px;padding:12px;">Collect Loot</button>'
-    + '</div>';
-  document.body.appendChild(modal);
-}
-
-function collectLoot() {
-  client.send('collectLoot', { cls: MY_CLASS });
-  var modal = document.getElementById('loot-modal');
-  if (modal) {
-    modal.innerHTML = '<div style="background:#1a1a1a;border:2px solid var(--green);border-radius:14px;padding:30px;text-align:center;">'
-      + '<div style="font-size:20px;color:var(--green);margin-bottom:8px;">✓ Loot Collected!</div>'
-      + '<div style="font-size:13px;color:var(--text-dim);">Waiting for DM to resolve battle and advance turn.</div>'
-      + '</div>';
-    setTimeout(function() { modal.remove(); }, 3000);
-  }
 }
 
 function handleDisarmChain(data) {
@@ -7180,7 +6452,6 @@ var MY_CLASS = 'breaker';
 var G = null;
 var client = null;
 var pendingTradeOffer = null;
-var _skillCostMap = {};
 var lastRoll = null;
 
 var CLS_STYLES = {
@@ -7264,34 +6535,11 @@ function connectWS() {
         return;
       }
       if (event === 'tradeOffer')      showTradeModal(data.offer);
-      if (event === 'attackResult') { showRollResult(data); pushBattleFeed('⚔️', data.note+' → '+data.net+' damage on '+(data.monsterName||'monster'), 'attack'); }
-      if (event === 'brickResult')  { showBrickResult(data); var bfl=(data.color||'').charAt(0).toUpperCase()+(data.color||'').slice(1)+' brick: '+(data.effect||''); pushBattleFeed('🧱',bfl,'brick'); }
-      if (event === 'monsterAttackResult') {
-        var isMe2 = data.targetCls === MY_CLASS;
-        var tName2 = data.targetName || (G&&G.players[data.targetCls]?(G.players[data.targetCls].playerName||G.players[data.targetCls].name):'ally');
-        var abs2 = data.armorAbsorbed>0?' ('+data.armorAbsorbed+' blocked)':'';
-        var hmsg = data.net>0 ? data.monsterName+' → '+(isMe2?'YOU':tName2)+': −'+data.net+' HP'+abs2 : data.monsterName+' → '+(isMe2?'YOU':tName2)+': blocked!'+abs2;
-        pushBattleFeed('👺', hmsg, isMe2?'hit':'monster');
-        if (isMe2) {
-          if (data.net>0) showDamageFlash(data.net, data.monsterName);
-          var bc2 = data.net>0?'var(--red)':'var(--green)';
-          _pendingResult = { border:bc2, title:data.net>0?data.monsterName+' attacks!':'Attack blocked!', icon:'👺', mainNum:data.net>0?-data.net:0, detail:data.net>0?'You take '+data.net+' damage'+abs2:'Armor absorbed all '+data.armorAbsorbed+' damage!', kind:'monster' };
-          render();
-        }
-      }
-      if (event === 'tameResult')      showTameResult(data);
       if (event === 'error')           toast(data.msg, 'warn');
       if (event === 'rewardPopup') { var isRiddleYellow = data.kind==='brick' && data.color==='yellow' && G && G.activeEvent && G.activeEvent.evType==='riddle'; if (!isRiddleYellow) showRewardPopup(data); }
       if (event === 'forceGateResult') showGateResult(data.success?'Gate forced! (roll '+data.roll+')':'Gate held (roll '+data.roll+') — 2 dmg', data.success);
       if (event === 'dashDenied' && data.cls===MY_CLASS) toast('Dash not possible — '+(data.reason||'denied'),'warn');
       if (event === 'dashResult' && data.cls===MY_CLASS) showDashResult(data);
-      if (event === 'enhancedResult' && data.cls===MY_CLASS) toast('Enhanced Movement: '+data.duration+' turn(s)!','success');
-      if (event === 'skillUnlocked') {
-        var sn=(data.skillId||'').replace(/_/g,' ');
-        toast('Skill Unlocked: '+sn.charAt(0).toUpperCase()+sn.slice(1)+'!','success');
-        render();
-      }
-      if (event === 'scavengeResult') toast('Scavenge: '+data.recovered+' gray (roll '+data.roll+')',data.recovered>0?'success':'normal');
     });
   });
 }

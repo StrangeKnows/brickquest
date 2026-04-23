@@ -79,12 +79,14 @@ function freshState() {
 
 function mkPlayer(cls, icon, color, hp, die, bricks) {
   const allBricks = {red:0,blue:0,green:0,white:0,gray:0,purple:0,yellow:0,orange:0,black:0};
+  const startBricks = {...allBricks,...bricks};
   return {
     cls, icon, color,
     name: {breaker:'Breaker',formwright:'Formwright',snapstep:'Snapstep',blocksmith:'Blocksmith',fixer:'Fixer',wild_one:'Wild One'}[cls]||cls,
     hp, hpMax:hp, armor:0, gold:3,
     die, space:0, alive:true,
-    bricks: {...allBricks,...bricks},
+    bricks: startBricks,            // owned inventory (ceiling)
+    bricksCharged: {...startBricks},// active charges (<= bricks[c]). Spent on action; refreshed at rumble entry + zone gate crossing. See DESIGN_S012_PROPOSAL_V2 §1.1.
     cheese: 0,             // v4: tradable food item (eat for +1 max HP, gift to ally)
     queuedPoisonStacks: 0, // v4: cross-system poison from failed green/black events
     queuedPoisonBattles: 0,// v4: how many rumble battles poison applies to
@@ -95,6 +97,44 @@ function mkPlayer(cls, icon, color, hp, die, bricks) {
     dashUsedThisTurn: false, // reset on each turn advance — one red dash per own turn
     battleDashPenalty: 0,    // if >0, decrement red by this much at battle start (consumed once)
   };
+}
+
+// ── CHARGE MODEL HELPERS (DESIGN_S012_PROPOSAL_V2 §1.1) ────────
+// p.bricks[c]         = owned inventory (ceiling)
+// p.bricksCharged[c]  = active charges; invariant: 0 <= bricksCharged[c] <= bricks[c]
+// Charges are spent on action, refreshed only at rumble entry and zone gate crossing.
+const BRICK_COLORS_ALL = ['red','blue','green','white','gray','purple','yellow','orange','black'];
+
+function refreshCharges(p) {
+  if (!p || !p.bricks) return;
+  if (!p.bricksCharged) p.bricksCharged = {};
+  BRICK_COLORS_ALL.forEach(function(c) { p.bricksCharged[c] = p.bricks[c] || 0; });
+}
+
+function addBrick(p, color, n) {
+  if (!p || !p.bricks) return;
+  n = (n == null) ? 1 : n;
+  if (!p.bricksCharged) p.bricksCharged = {};
+  p.bricks[color] = (p.bricks[color] || 0) + n;
+  p.bricksCharged[color] = (p.bricksCharged[color] || 0) + n; // new bricks arrive charged
+}
+
+function removeBrick(p, color, n) {
+  // Hard removal from inventory (penalties, trade-out). Maintains invariant.
+  if (!p || !p.bricks) return;
+  n = (n == null) ? 1 : n;
+  if (!p.bricksCharged) p.bricksCharged = {};
+  p.bricks[color] = Math.max(0, (p.bricks[color] || 0) - n);
+  if ((p.bricksCharged[color] || 0) > p.bricks[color]) {
+    p.bricksCharged[color] = p.bricks[color];
+  }
+}
+
+function spendBrickCharge(p, color, n) {
+  // Consume a charge without removing from inventory (board action, overload).
+  if (!p || !p.bricksCharged) return;
+  n = (n == null) ? 1 : n;
+  p.bricksCharged[color] = Math.max(0, (p.bricksCharged[color] || 0) - n);
 }
 
 let G = freshState();
@@ -362,6 +402,10 @@ function loadState() {
           var p = G.players[c];
           if (p.dashUsedThisTurn === undefined) p.dashUsedThisTurn = false;
           if (p.battleDashPenalty === undefined) p.battleDashPenalty = 0;
+          // S012: bricksCharged mirrors bricks on first migration (full-charge default)
+          if (p.bricksCharged === undefined && p.bricks) {
+            p.bricksCharged = { ...p.bricks };
+          }
         });
       }
       if (G.pendingDashRequest === undefined) G.pendingDashRequest = null;
@@ -549,6 +593,10 @@ function resolveDash(cls, spaces, forcedByDM) {
   }
 
   p.space = finalDest;
+  // S012 §1.1: charges refresh when the player crosses a zone boundary during dash.
+  const prevZoneD = SPACES[startSpace] ? SPACES[startSpace].zone : 0;
+  const newZoneD  = SPACES[finalDest]  ? SPACES[finalDest].zone  : 0;
+  if (newZoneD !== prevZoneD) refreshCharges(p);
   // DM force-dash stays in prepare so player returns to their prior status.
   // Player-initiated dash advances to land so the landing event triggers.
   if (!forcedByDM) {
@@ -643,7 +691,7 @@ wss.on('connection', (ws, req) => {
         broadcastState(); return;
       }
       p.gold -= price;
-      p.bricks[color] = (p.bricks[color]||0) + 1;
+      addBrick(p, color, 1);
       log((p.playerName||p.name)+' bought '+color+' brick ('+price+'g) → '+p.gold+'g remaining','reward');
       // Notify player of purchase
       ws.send(JSON.stringify({type:'rewardPopup',kind:'brick',color,label:'Bought '+color+' brick! ('+price+'g)',brickColor:BRICK_COLORS[color]||'#888'}));
@@ -667,6 +715,8 @@ wss.on('connection', (ws, req) => {
       const prevZone = SPACES[prev] ? SPACES[prev].zone : 0;
       const newZone = SPACES[destination] ? SPACES[destination].zone : 0;
       if (newZone !== prevZone) {
+        // S012 §1.1: charges refresh when the player crosses a zone boundary.
+        refreshCharges(p);
         if (p.weaknessReduction && p.weaknessReduction > 0) {
           p.hpMax = (p.hpMax||10) + p.weaknessReduction;
           log((p.playerName||p.name)+' crosses into Zone '+(newZone+1)+' — weakness lifts (+'+p.weaknessReduction+' Max HP restored)','reward');
@@ -752,6 +802,8 @@ wss.on('connection', (ws, req) => {
       if (!p) { G.pendingRumbleBattle = null; return false; }
       // Seed the live battle state — snapshot of player's current HP, armor,
       // and bricks; the client reports back incrementally via battleTick.
+      // S012 §1.1: refresh charges at rumble entry; rumble starts with all bricks charged.
+      refreshCharges(p);
       G.rumbleBattle = {
         cls: pending.cls,
         entityType: pending.entityType,
@@ -763,6 +815,7 @@ wss.on('connection', (ws, req) => {
           armor: p.armor || 0,
           gold: p.gold || 0,
           bricks: { ...p.bricks },
+          bricksCharged: { ...p.bricksCharged },
           queuedPoisonStacks: p.queuedPoisonStacks || 0, // v4: rumble applies these on start
           // v4: FW blue-success buff — 2× brick refresh for first 10s of this rumble
           refreshBoost: (p.nextRumbleBuff && p.nextRumbleBuff.refreshBoost) || null,
@@ -853,7 +906,7 @@ wss.on('connection', (ws, req) => {
     // Client reports battle end with final state + winner
     if (type === 'battleEnd') {
       if (!G.rumbleBattle) { broadcastState(); return; }
-      const { cls, victor, finalHp, finalHpMax, finalArmor, finalGold, finalCheese, finalBricks, reason, battleStats } = P;
+      const { cls, victor, finalHp, finalHpMax, finalArmor, finalGold, finalCheese, finalBricks, finalBrickMax, reason, battleStats } = P;
       if (cls !== G.rumbleBattle.cls) { broadcastState(); return; }
       const p = G.players[cls];
       if (p) {
@@ -870,8 +923,21 @@ wss.on('connection', (ws, req) => {
         if (typeof finalCheese === 'number' && finalCheese > 0) {
           p.cheese = (p.cheese||0) + Math.max(0, finalCheese);
         }
-        if (finalBricks && typeof finalBricks === 'object') {
+        // S012 §1.1: rumble reports two brick totals at end:
+        //   finalBrickMax = inventory ceiling (grew if player looted bricks in rumble)
+        //   finalBricks   = remaining charges (<= ceiling; persists to next board phase)
+        // Older clients send only finalBricks; treat as both.
+        if (finalBrickMax && typeof finalBrickMax === 'object') {
+          Object.keys(finalBrickMax).forEach(k => { p.bricks[k] = Math.max(0, finalBrickMax[k]); });
+        } else if (finalBricks && typeof finalBricks === 'object') {
           Object.keys(finalBricks).forEach(k => { p.bricks[k] = Math.max(0, finalBricks[k]); });
+        }
+        if (finalBricks && typeof finalBricks === 'object') {
+          if (!p.bricksCharged) p.bricksCharged = {};
+          Object.keys(finalBricks).forEach(k => {
+            // Clamp to ceiling to preserve invariant.
+            p.bricksCharged[k] = Math.max(0, Math.min(p.bricks[k] || 0, finalBricks[k]));
+          });
         }
         if (p.hp <= 0) p.alive = false;
       }
@@ -1481,7 +1547,7 @@ wss.on('connection', (ws, req) => {
       }
       if (eventType === 'brick')  {
         const d = data||{};
-        p.bricks[d.color] = (p.bricks[d.color]||0)+1;
+        addBrick(p, d.color, 1);
         log(`${p.name} found 1 ${d.color} brick`,'reward');
         if (d.color === 'red') {
           p.hpMax = (p.hpMax||10) + 1;
@@ -1624,7 +1690,7 @@ wss.on('connection', (ws, req) => {
             const nonPurpleOwned = Object.entries(p.bricks||{}).filter(([c,n]) => c !== 'purple' && n > 0);
             if (nonPurpleOwned.length > 0) {
               const pick = nonPurpleOwned[Math.floor(Math.random()*nonPurpleOwned.length)];
-              p.bricks[pick[0]] = Math.max(0, p.bricks[pick[0]] - 1);
+              removeBrick(p, pick[0], 1);
               curse = 'lost_brick';
               msg = 'Lost 1 '+pick[0]+' brick';
             } else {
@@ -1842,7 +1908,7 @@ wss.on('connection', (ws, req) => {
           const actual = (p.hpMax||10) - newMax;
           p.hpMax = newMax;
           p.hp = Math.min(p.hpMax, p.hp);
-          p.bricks.black = (p.bricks.black||0) + 2;
+          addBrick(p, 'black', 2);
           if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
           G.activeEvent = { ...G.activeEvent, blackResult:{ outcome:'blood_price', amt:actual, roll:r, msg:'−'+actual+' Max HP (permanent) · +2 black' }, resolved:false };
           log(pName+' paid BLOOD PRICE: −'+actual+' Max HP (permanent), +2 black','damage');
@@ -1850,21 +1916,21 @@ wss.on('connection', (ws, req) => {
           const color = (data && data.exchangeColor);
           if (!color || color === 'black') { ws.send(JSON.stringify({type:'error',msg:'Pick a non-black brick to trade'})); return; }
           if ((p.bricks[color]||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Not enough '+color+' bricks'})); return; }
-          p.bricks[color] -= 1;
-          p.bricks.black = (p.bricks.black||0) + 1;
+          removeBrick(p, color, 1);
+          addBrick(p, 'black', 1);
           p.gold = (p.gold||0) + 3;
           if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
           G.activeEvent = { ...G.activeEvent, blackResult:{ outcome:'brick_exchange', color, msg:'−1 '+color+' · +1 black, +3 gold' }, resolved:false };
           log(pName+' traded 1 '+color+' for 1 black + 3 gold','reward');
         } else if (offer === 'poisoned_favor') {
-          p.bricks.black = (p.bricks.black||0) + 1;
+          addBrick(p, 'black', 1);
           p.queuedPoisonStacks = (p.queuedPoisonStacks||0) + 1;
           p.queuedPoisonBattles = Math.max(p.queuedPoisonBattles||0, 3);
           if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
           G.activeEvent = { ...G.activeEvent, blackResult:{ outcome:'poisoned_favor', msg:'+1 black · poisoned next 3 battles' }, resolved:false };
           log(pName+' accepted POISONED FAVOR: +1 black, poisoned 3 battles','damage');
         } else if (offer === 'binding_pact') {
-          p.bricks.black = (p.bricks.black||0) + 2;
+          addBrick(p, 'black', 2);
           const losses = [];
           Object.keys(G.players||{}).forEach(allyCls => {
             if (allyCls === cls) return;
@@ -1873,7 +1939,7 @@ wss.on('connection', (ws, req) => {
             const nonBlack = Object.entries(ally.bricks||{}).filter(([c,n]) => c !== 'black' && n > 0);
             if (nonBlack.length === 0) return;
             const pick = nonBlack[Math.floor(Math.random()*nonBlack.length)];
-            ally.bricks[pick[0]] = Math.max(0, ally.bricks[pick[0]] - 1);
+            removeBrick(ally, pick[0], 1);
             losses.push((ally.playerName||ally.name)+' (−1 '+pick[0]+')');
           });
           if (G.lingeringEvents && G.lingeringEvents[p.space]) delete G.lingeringEvents[p.space];
@@ -2348,7 +2414,8 @@ wss.on('connection', (ws, req) => {
     }
     if (type === 'adjustBrick') {
       const p = G.players[P.cls];
-      p.bricks[P.color] = Math.max(0,(p.bricks[P.color]||0)+P.amount);
+      if (P.amount > 0) addBrick(p, P.color, P.amount);
+      else if (P.amount < 0) removeBrick(p, P.color, -P.amount);
     }
     if (type === 'adjustGold') {
       G.players[P.cls].gold = Math.max(0, G.players[P.cls].gold+P.amount);
@@ -2474,9 +2541,9 @@ wss.on('connection', (ws, req) => {
         const fromHasGold   = (from.gold||0) >= (t.offerGold||0);
         const toHasWant     = Object.entries(wantBricks).every(([k,v])  => (to.bricks[k]||0)   >= v);
         if (fromHasBricks && fromHasGold && toHasWant) {
-          Object.entries(offerBricks).forEach(([k,v]) => { from.bricks[k]=(from.bricks[k]||0)-v; to.bricks[k]=(to.bricks[k]||0)+v; });
+          Object.entries(offerBricks).forEach(([k,v]) => { removeBrick(from, k, v); addBrick(to, k, v); });
           if (t.offerGold>0) { from.gold=(from.gold||0)-t.offerGold; to.gold=(to.gold||0)+t.offerGold; }
-          Object.entries(wantBricks).forEach(([k,v])  => { to.bricks[k]=(to.bricks[k]||0)-v; from.bricks[k]=(from.bricks[k]||0)+v; });
+          Object.entries(wantBricks).forEach(([k,v])  => { removeBrick(to, k, v); addBrick(from, k, v); });
           const offerDesc=Object.entries(offerBricks).map(([k,v])=>`${v}x${k}`).join(', ')+(t.offerGold>0?` +${t.offerGold}g`:'');
           const wantDesc=Object.entries(wantBricks).map(([k,v])=>`${v}x${k}`).join(', ');
           log(`Trade accepted: ${from.name} gave [${offerDesc}] for [${wantDesc}] from ${to.name}`,'trade');
@@ -2514,8 +2581,8 @@ wss.on('connection', (ws, req) => {
           const have = from.bricks[k]||0;
           const actual = Math.min(qty, have);
           if (actual <= 0) return;
-          from.bricks[k] = have - actual;
-          to.bricks[k] = (to.bricks[k]||0) + actual;
+          removeBrick(from, k, actual);
+          addBrick(to, k, actual);
           log(`${fromName} gave ${actual}x ${k} to ${toName}`, 'trade');
         });
       }

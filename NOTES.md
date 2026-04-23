@@ -2066,3 +2066,234 @@ Shipped in /mnt/user-data/outputs:
 For S012 Claude: read DESIGN_S012_PROPOSAL_V2.txt FIRST. It
 supersedes the v1 proposal. Every decision from this doc is
 approved. Begin work on Build 0.12.0.
+
+---
+
+## Session 012 — Build 0.12.0 Foundations (April 23, 2026)
+
+First working session under the V2 proposal. Build 0.12.0 scope per
+§8.1: strip dead code, introduce `p.bricksCharged` data layer. No
+visible UI changes (§8.1 exit criterion: "existing gameplay unaffected";
+charge rendering is §8.2 / Build 0.13.0).
+
+### Part A — Dead code strip
+
+Removed all turn-based battle vestiges from the ripped combat system
+(commit 548e8be era). These were UI scaffolding over ghost state
+objects (G.battle, G.battleResult) whose server-side writers had been
+gone for months. The audit also surfaced orphaned skill-system
+renderers (SKILLS = {} stub, Skills tab pane, status-skills card,
+renderUnlockedSkills).
+
+players.html:
+  - Victory-screen block reading G.battleResult (ghost field, zero
+    writers server-side)
+  - renderActions if(inBattle)/else wrapper — flattened the always-
+    false branch, reindented the always-run else body
+  - renderPhaseBanner dead battle branch
+  - renderPreparePanel market-during-battle guard
+  - render() battle machinery: battleFeed reset, lastAction pickup,
+    killing-blow death-detection timer
+  - Nine dead WebSocket handlers with zero server emitters:
+    attackResult, brickResult, monsterAttackResult, battleLoot,
+    _battleLoot_legacy, enhancedResult, lootReady, skillUnlocked,
+    scavengeResult
+  - Orphaned functions: doAttack, showRollResult, showBrickResult,
+    pushBattleFeed, renderBattleFeed, showDamageFlash, doSearch,
+    renderBrickButtons, renderClassAbilities, showLootScreen,
+    collectLoot, renderUnlockedSkills
+  - All turn-based class ability fns: doRageBreak, doWhirlwind,
+    doFortressStance, doLegendaryBastion, doWarlordsFury, doTimeFreeze,
+    doCataclysm, doBlitz, doTame, showTameResult, doAlphaPredator,
+    doNaturesWrath, doPhoenixSurge, doDivineShield
+  - renderParty initiative-order card + dead inBattle local
+  - renderBricks stub (pane-bricks was never created — TAB_DEFS
+    has no 'bricks' entry)
+  - Skills tab block: _skillCostMap, doUnlockSkill, renderSkills
+    (pane-skills similarly never created)
+  - Six dead module-level vars: battleFeed, _wasBattle, _wasAllDead,
+    _victoryPending, _victoryTimer, _lastActionDesc
+  - SKILLS = {} declaration + its 2-line "kept as stub" comment
+  - renderSkills(me) call in render() hot path
+
+  Before: 6792 lines. After: 6062 lines. Δ = −730.
+
+test_players.html:
+  - Full mirror of every players.html strip
+  - Plus test-harness variant: second _skillCostMap in harness
+    globals block, second event-handler dispatch (one-liner format)
+    with condensed versions of the dead battle handlers, second
+    renderSkills/renderBricks variants
+
+  Before: 7525 lines. After: 6773 lines. Δ = −752.
+
+game.js:
+  - 12 of 25 legacy stubs removed (those with zero callers):
+    unlockSkill, tameAttempt, commandTamed, rollAttack, catapult,
+    startBattle, endBattle, monsterAttack, nextBattleRound,
+    setComplication, bossPhase2, salvage
+  - 10 stubs preserved: healPlayer, revivePlayer, massRepair,
+    useBrick, deconstructGate, rebuildBridge, blueprint, forge,
+    activateEnhanced, addShield. These still have live callers
+    from player UI (Fixer heal/revive/mass-repair, Blocksmith
+    deconstruct-gate/rebuild-bridge, Enhanced Movement, self-heal,
+    add-shield buttons).
+  - Comment rewritten to reflect current state and 0.14.0 plan
+  - Before: 620 lines. After: 607 lines. Δ = −13.
+
+Combined dead-code strip across session: −1495 lines.
+
+### Discovery: pre-existing broken UI
+
+The audit surfaced that 8 live player-UI buttons route to
+legacy-stub no-ops with zero server-side handlers. These have
+been broken since the turn-based system was ripped (commit 548e8be).
+Not caused by S012 strips. Per proposal §8.3/§8.14, these rebuild
+in Build 0.14.0 (Action Hub). Logged, deferred, 10 stubs preserved
+to prevent throw-on-click.
+
+Affected buttons (all currently no-op with console warn):
+  - Spend white brick — heal self
+  - Fixer: Heal ally / Revive player / Mass Repair
+  - Shield-up (status tab add-shield)
+  - Blocksmith: Deconstruct Gate / Rebuild Bridge
+  - Enhanced Movement (purple brick use)
+
+### Part B — bricksCharged data layer
+
+New data model per V2 §1.1, Charge Model B (Tactical):
+  p.bricks[c]         = owned inventory (ceiling)
+  p.bricksCharged[c]  = active charges; invariant bricksCharged[c] <= bricks[c]
+
+Charges spent on board action (future 0.14.0+). Refreshed only at
+rumble entry (full reset) and zone gate crossing. No mid-board
+refresh. Preserves the tactical rest-beat rhythm of traversal.
+
+Implementation, server.js:
+
+  - Four helpers at top of file, after mkPlayer:
+      refreshCharges(p)           — bricksCharged = {...bricks}
+      addBrick(p, color, n=1)     — new bricks arrive charged
+      removeBrick(p, color, n=1)  — hard remove from inventory;
+                                    clamps charges down to preserve
+                                    invariant
+      spendBrickCharge(p, color, n=1) — consume charge without
+                                    removing from inventory
+
+  - mkPlayer: new `bricksCharged` field mirrors starting `bricks`
+    (new players start fully charged).
+
+  - Save migration (loadState): if p.bricksCharged is missing on
+    load, defaults to {...p.bricks}. Existing saves come back as
+    fully-charged — matches Q9's "exact saved state" intent at
+    migration boundary since any pre-S012 save never had partial
+    charges to preserve.
+
+  - Rumble start hook: refreshCharges(p) called before the
+    playerRumble snapshot (line 800 area). Rumble always starts
+    with full charges regardless of prior board state. The snapshot
+    now carries both `bricks` (ceiling) and `bricksCharged`
+    (matching ceiling post-refresh).
+
+  - Rumble end hook (battleEnd handler): extended to accept
+    `finalBrickMax` (inventory ceiling after any mid-rumble loot)
+    and `finalBricks` (remaining charges). Backward-compatible:
+    if finalBrickMax is absent, finalBricks writes to both.
+    Charge write clamps to ceiling for invariant safety.
+
+  - Zone gate crossing: refreshCharges(p) in two paths:
+      1. dmMovePlayer: already had `if (newZone !== prevZone)`
+         zone-transition cleanup block; added refresh there.
+      2. requestRedDash: after final destination resolved, checks
+         zone of start vs finalDest; refresh on change. Catches
+         dashes that break through gates AND dashes that cross
+         zone boundaries without gates (rare, forward-safe).
+
+  - Gain/spend sites rewired through helpers:
+      L694 market purchase → addBrick
+      L1550 event brick reward → addBrick
+      L1693 cursed lost_brick penalty → removeBrick
+      L1918-1920 black bargain brick_exchange → removeBrick + addBrick
+      L1911 blood_price +2 black → addBrick
+      L1926 poisoned_favor +1 black → addBrick
+      L1933 binding_pact +2 black → addBrick
+      L1942 binding_pact ally loss → removeBrick
+      L2417 DM adjustBrick (grant/revoke) → addBrick/removeBrick
+      L2543-2546 trade acceptance → removeBrick + addBrick (both sides)
+      L2581-2585 direct give → removeBrick + addBrick
+
+Implementation, client:
+
+  - players.html + test_players.html battleEnd emit: now sends
+    `finalBrickMax` (= snap.playerBrickMax, the inventory ceiling)
+    and `finalBricks` (= snap.playerBricks, remaining charges) as
+    separate fields. Rumble.getState() already exposes both.
+    Matches new server semantics.
+
+  - No other client changes for 0.12.0. UI still renders from
+    p.bricks as the single brick count (unchanged). Charge-state
+    rendering is deferred to 0.13.0 per proposal §8.2.
+
+### Verification
+
+  node --check passes on all modified JS-bearing files:
+    server.js, game.js, players.html, test_players.html, rumble.js
+
+  Unit test exercised helpers end-to-end: mkPlayer → addBrick →
+  spendBrickCharge → refreshCharges → removeBrick with over-clamp.
+  Invariant bricksCharged[c] <= bricks[c] holds across all ops.
+
+  Ran `node -e "require('./server.js')"` — loads past all top-level
+  helper/mkPlayer/freshState/save-load execution, fails only at
+  'ws' module (expected in this container; not installed).
+
+### What 0.12.0 does NOT do (per §8.1 exit criteria)
+
+  - No visible UI changes. Empty-pip rendering is 0.13.0.
+  - No per-pip timestamp/pulse animations. That's 0.13.0 §1.2.
+  - No hold-to-charge board overload. That's 0.14.0 §1.3.
+  - No damage-scaling read of bricksCharged in rumble.js. Rumble
+    keeps its internal charge model (brickMax / bricks) as before.
+    The server's bricksCharged is a parallel board-side field that
+    feeds rumble's starting state but doesn't influence in-rumble
+    scaling this build.
+  - No HP bleed-out. 0.14.0 §1.4.
+  - No class-identity work. 0.15.0 / 0.16.0.
+
+### Deferred items noted for S013+
+
+  - Preserved game.js stubs (10) all get real implementations in
+    0.14.0 when the Action Hub rebuild wires proper server handlers.
+  - bricksCharged has no UI surface yet. Add visible pip-dimming +
+    pulse in 0.13.0 per §1.2.
+  - rumble.js damage scaling eventually reads server's bricksCharged
+    start-state instead of player.bricks at rumble-begin (§1.1
+    "Model B power scaling"). For now both paths are equivalent
+    since refreshCharges at rumble start makes them equal.
+
+### Files shipped
+
+Modified this session:
+  - server.js          (2681 lines)
+  - game.js            ( 607 lines)
+  - players.html       (6062 lines)
+  - test_players.html  (6773 lines)
+  - NOTES.md           (this append)
+
+No changes to: rumble.js, dm_screen.html, package.json, rumble.css,
+rumble_test.html, game.js constants, board graphic.
+
+Version: still v0.12.0 (bumped by S011 capstone). No bump this
+session — no feature ship yet, only foundation. Next bump at
+Build 0.13.0.
+
+### Session close notes
+
+No commit this session per standing prefs (push only at session-end
+trigger phrases). Hold for Ross's "session done" signal.
+
+Standing-prefs memory needs updates on session close:
+  - Remove arena_test.html (deleted in S011, still listed in memory's
+    full file set)
+  - Add rumble.js to full file set (central, 358 KB, central combat)
+  - Confirm NOTES.md is appended every session (handoff says so)

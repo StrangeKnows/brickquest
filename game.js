@@ -470,29 +470,17 @@ class GameClient {
   rescueVillager()                  { this.send('rescueVillager'); }
 
   // ── LEGACY STUBS ──
-  // Kept as no-ops so orphaned UI paths (dead code tied to removed turn-based
-  // battle + skills) don't throw if they fire. Remove after full UI cleanup.
+  // No-ops for UI paths tied to removed turn-based battle + skills systems.
+  // Will be replaced by real implementations in Build 0.14.0 (Action Hub).
   _legacy(name) { console.warn('[legacy no-op]', name); }
-  unlockSkill()       { this._legacy('unlockSkill'); }
   healPlayer()        { this._legacy('healPlayer'); }
   revivePlayer()      { this._legacy('revivePlayer'); }
   massRepair()        { this._legacy('massRepair'); }
-  tameAttempt()       { this._legacy('tameAttempt'); }
-  commandTamed()      { this._legacy('commandTamed'); }
-  rollAttack()        { this._legacy('rollAttack'); }
   useBrick()          { this._legacy('useBrick'); }
-  catapult()          { this._legacy('catapult'); }
-  startBattle()       { this._legacy('startBattle'); }
-  endBattle()         { this._legacy('endBattle'); }
-  monsterAttack()     { this._legacy('monsterAttack'); }
-  nextBattleRound()   { this._legacy('nextBattleRound'); }
-  setComplication()   { this._legacy('setComplication'); }
-  bossPhase2()        { this._legacy('bossPhase2'); }
   deconstructGate()   { this._legacy('deconstructGate'); }
   rebuildBridge()     { this._legacy('rebuildBridge'); }
   blueprint()         { this._legacy('blueprint'); }
   forge()             { this._legacy('forge'); }
-  salvage()           { this._legacy('salvage'); }
   activateEnhanced()  { this._legacy('activateEnhanced'); }
   addShield()         { this._legacy('addShield'); }
 }
