@@ -2813,8 +2813,9 @@ function showFloatingText(x, y, text, color, parent) {
   var isHeal = /[✚✨♥🛡]/.test(text);
   if (parent && parent.r !== undefined && isNumeric) {
     // Larger spawn offset so pickup/damage/heal text sits clear of the
-    // sprite AND the HP bar (which is drawn above the entity).
-    var offset = parent.r + 18;
+    // sprite AND the HP bar (which is drawn above the entity). 22 matches
+    // the RESIST bounce-out offset for visual consistency.
+    var offset = parent.r + 22;
     if (isHeal) {
       x = parent.x - offset;
       y = parent.y;
@@ -2877,30 +2878,45 @@ function showFloatingText(x, y, text, color, parent) {
     parent: par, offX: offX0, offY: offY0, side: _side });
 }
 
-// Fizzle sparks — sparse grey-white embers projecting outward from a hit
-// point in all directions. Used for RESIST/IMMUNE tiers to read as "the
-// attack scattered harmlessly". Riffs on the green-overload-field particle
-// style (small sparks, slight drift) but muted color + sparser count.
-//   ex, ey: hit center
+// Fizzle sparks — sparse grey-white embers drifting outward from an entity's
+// edge. Used for RESIST/IMMUNE tiers to read as "the attack scattered
+// harmlessly / gave up". Movement is slow, fluttery (horizontal wobble as
+// they rise), and droopy (mild gravity sags them down over their lifespan).
+// Contrast with DEFLECTION sparks (the directional vector burst used with
+// RESIST) which are fast and punchy.
+//   ex, ey: entity center
 //   count:  particle count (IMMUNE uses more than RESIST)
 //   color:  grey-white shade; pass '#d8d8d8' or similar
-function _spawnFizzleSparks(ex, ey, count, color) {
+//   entR:   optional entity radius so sparks spawn OUTSIDE the sprite
+//           (prevents clipping). Defaults to 16 if not provided.
+function _spawnFizzleSparks(ex, ey, count, color, entR) {
   count = count || 8;
   color = color || '#d8d8d8';
+  entR = entR || 16;
+  var spawnRadius = entR + 8;  // spawn ring sits clear of the sprite edge
   for (var i = 0; i < count; i++) {
     var a = Math.random() * Math.PI * 2;
-    var s = 35 + Math.random() * 55;       // slower than deflection sparks
-    var life = 0.6 + Math.random() * 0.5;  // persist longer (handled by alpha)
+    // Spawn around the entity's edge, not from its center
+    var sx = ex + Math.cos(a) * spawnRadius + (Math.random() - 0.5) * 4;
+    var sy = ey + Math.sin(a) * spawnRadius + (Math.random() - 0.5) * 4;
+    // Slow outward drift — was 35-90, now 12-28. Reads as "drift" not "splash"
+    var s = 12 + Math.random() * 16;
+    var life = 0.8 + Math.random() * 0.6;
     purpleParticles.push({
-      x: ex + (Math.random() - 0.5) * 6,   // slight spawn jitter
-      y: ey + (Math.random() - 0.5) * 6,
+      x: sx, y: sy,
       vx: Math.cos(a) * s,
-      vy: Math.sin(a) * s - 20,            // slight upward bias — "fizzling up"
-      r: 1.0 + Math.random() * 1.3,
+      vy: Math.sin(a) * s - 6,           // gentle upward bias (was -20)
+      r: 1.0 + Math.random() * 1.2,
       alpha: 0.75 + Math.random() * 0.2,
       color: color,
-      shadowColor: color,                   // glow matches fill (not purple)
-      fadeRate: 0.02 / life,               // longer-life particles fade slower
+      shadowColor: color,                // glow matches fill
+      fadeRate: 0.012 / life,            // longer-life particles fade slower
+      // Fizzle-specific behavior flags (read by updatePurpleParticles):
+      isFizzle: true,
+      flutterPhase: Math.random() * Math.PI * 2, // each particle flutters independently
+      flutterAmp: 8 + Math.random() * 10,         // horizontal wobble strength
+      droop: 18 + Math.random() * 14,             // downward pull (subtle gravity)
+      age: 0,
     });
   }
 }
@@ -2956,40 +2972,44 @@ function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, 
   if (tier === 'IMMUNE') {
     // Fizzle-out "0" — grows a touch then shrinks to nothing. Larger than
     // before (11 → 15) so it reads against the canvas. Parent-anchored
-    // RIGHT of the target to match the damage-right convention.
-    var immX = par ? par.x + par.r + 18 : ex;
+    // RIGHT of the target. Offset 24 puts it clear of sprite edge + HP bar
+    // area on larger enemies.
+    var immX = par ? par.x + par.r + 24 : ex;
     var immY = par ? par.y : ey - 10;
-    var immOffX = par ? par.r + 18 : offExX0;
+    var immOffX = par ? par.r + 24 : offExX0;
     var immOffY = par ? 0 : offExY0 - 10;
     floatingTexts.push({
       x: immX, y: immY, text: '0' + (icon ? ' ' + icon : ''), color: '#bfbfbf',
-      alpha: 0.95, vy: 0, fadeRate: 0.04, fontSize: 15,
+      alpha: 0.95, vy: -10, fadeRate: 0.035, fontSize: 15,  // slow rise, slightly longer fade
       mergeable: false, accum: 0, spawnTime: now,
       tier: 'IMMUNE', shrink: true, wobbleAmp: 2,
       parent: par, offX: immOffX, offY: immOffY, side: 'right',
     });
-    // FIZZLE sparks: grey-white embers projecting outward from the hit
-    // zone in a sparse burst. Matches the "attack scattered harmlessly"
-    // read. Particles fade fast.
-    _spawnFizzleSparks(ex, ey, 10, '#d8d8d8');
+    // FIZZLE sparks: grey-white embers drifting outward from the entity's
+    // edge, with flutter + droop. Reads as "the attack gave up / scattered
+    // harmlessly". Sparse + slow, not a splash.
+    _spawnFizzleSparks(ex, ey, 10, '#d8d8d8', par ? par.r : 16);
     return;
   }
   var text = '' + applied + (icon ? ' ' + icon : '');
   if (tier === 'RESIST') {
-    // Bounce OUTWARD off the entity — spawn at offset from entity center,
-    // initial velocity carries it away, then gravity pulls it back down.
-    // Font bumped 10 → 14 so the resisted number reads clearly.
+    // Bounce OUTWARD off the entity — spawn at entity EDGE plus a gap,
+    // initial velocity carries it a bit further out, then gravity arcs
+    // it down. Font 14 for legibility. Prior 22-unit fixed offset was
+    // too tight on larger entities and could clip their sprite.
     var dx = x - ex, dy = y - ey;
     var dist = Math.sqrt(dx*dx + dy*dy) || 1;
     var nx = dx / dist, ny = dy / dist;
+    var entR = (par && par.r) ? par.r : 16;
+    var spawnDist = entR + 22;        // sprite radius + clear gap
     floatingTexts.push({
-      x: ex + nx * 22, y: ey + ny * 22, text: text, color: _muteColor(baseColor),
-      alpha: 0.95, vy: ny * 80 - 20, vx: nx * 80,
-      fadeRate: 0.03, fontSize: 14,
+      x: ex + nx * spawnDist, y: ey + ny * spawnDist, text: text, color: _muteColor(baseColor),
+      alpha: 0.95, vy: ny * 40 - 16, vx: nx * 40,   // halved bounce speed
+      fadeRate: 0.025, fontSize: 14,
       mergeable: false, accum: applied, spawnTime: now,
       tier: 'RESIST', glowMult: 0.3,
-      // Bounce physics: gravity pulls it down, arc ends fast
-      gravity: 220,
+      // Bounce physics: gravity pulls it down gently
+      gravity: 140,
     });
     // Deflection sparks — directional burst along the bounce vector
     for (var si = 0; si < 3; si++) {
@@ -3001,10 +3021,10 @@ function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, 
         r: 1.5 + Math.random() * 1.5, alpha: 0.8, color: _muteColor(baseColor),
       });
     }
-    // FIZZLE sparks layer — sparse grey-white embers in all directions,
-    // reinforces "scattered harmlessly" read without overwhelming the
-    // deflection vector. Slightly smaller than IMMUNE count.
-    _spawnFizzleSparks(ex, ey, 7, '#d0d0d0');
+    // FIZZLE sparks layer — grey-white embers drifting outward from the
+    // entity's edge with flutter + droop. Sits alongside the deflection
+    // sparks: deflection is fast/directional, fizzle is slow/ambient.
+    _spawnFizzleSparks(ex, ey, 7, '#d0d0d0', par ? par.r : 16);
     return;
   }
   // NEUTRAL / VULN / WEAK use "rising number" style
@@ -7455,15 +7475,32 @@ function updatePurpleBursts(dt) {
 function updatePurpleParticles(dt) {
   purpleParticles = purpleParticles.filter(function(p) { return p.alpha > 0.05; });
   purpleParticles.forEach(function(p) {
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    if (p.isRed) {
+    if (p.isFizzle) {
+      // Fizzle path: slow drift + flutter (sine wobble horizontally) +
+      // droop (mild gravity). Very light friction so particles keep
+      // gently moving as they fade instead of dying in place.
+      p.age = (p.age || 0) + dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.985;                  // light friction, barely slowing
+      p.vy *= 0.985;
+      p.vy += (p.droop || 20) * dt;   // gravity droop — pulls embers down
+      // Flutter: small horizontal offset that oscillates over the particle's
+      // lifetime. Phase is per-particle so they don't wobble in unison.
+      var flutter = Math.sin(p.age * 4 + (p.flutterPhase || 0)) * (p.flutterAmp || 10);
+      p.x += flutter * dt;            // scaled by dt so rate is consistent
+      p.alpha -= p.fadeRate * 60 * dt;
+    } else if (p.isRed) {
+      p.x += p.vx * dt; p.y += p.vy * dt;
       p.vx *= 0.95; p.vy *= 0.95;
       p.alpha -= 1.2 * dt;
     } else if (p.fadeRate !== undefined) {
-      // Per-particle fade (e.g. fizzle sparks) — honor the supplied rate.
+      // Per-particle fade (non-fizzle) — honor supplied rate
+      p.x += p.vx * dt; p.y += p.vy * dt;
       p.vx *= 0.94; p.vy *= 0.94;
-      p.alpha -= p.fadeRate * 60 * dt; // fadeRate is per-frame @60fps
+      p.alpha -= p.fadeRate * 60 * dt;
     } else {
+      p.x += p.vx * dt; p.y += p.vy * dt;
       p.vx *= 0.92; p.vy *= 0.92;
       p.alpha -= 1.8 * dt;
     }
