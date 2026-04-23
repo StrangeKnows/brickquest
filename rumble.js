@@ -7921,6 +7921,105 @@ function respawnPlayer() {
 // ── REVIVE MINIGAME STATE ──
 var _reviveState = null;
 
+// S013.5: CPR blip pool. Single words or 1-3 word phrases that fade in/out
+// every 5 taps during the revive minigame. Mix: encouragement (you got this)
+// / unsteadiness (is this working?) / mild dad humor. Concise to keep the
+// player's eye on the heart, not the text.
+var _CPR_BLIPS = [
+  // encouragement
+  'Push!',
+  'Almost!',
+  "Don't stop",
+  'Breathe!',
+  'Stay with me',
+  'Come back',
+  'You got this',
+  // unsteadiness / brink
+  'Flickering...',
+  'Wait\u2014',
+  'Maybe?',
+  'Not yet',
+  'Hang on',
+  // dad-joke style
+  'Heart-y effort!',
+  'A-beating we go',
+  'Pump it, friend',
+];
+
+function _pickCPRBlip(lastBlip) {
+  // Avoid repeating the most recent blip in a row.
+  var pool = lastBlip
+    ? _CPR_BLIPS.filter(function(b) { return b !== lastBlip; })
+    : _CPR_BLIPS;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function _fireCPRBlip() {
+  if (!_reviveState) return;
+  var stack = document.getElementById('revive-heart-stack');
+  if (!stack) return;
+  var blip = _pickCPRBlip(_reviveState.lastBlip || null);
+  _reviveState.lastBlip = blip;
+
+  // Pick a random position around/over the heart. Avoid repeating the
+  // same quadrant as the previous blip to spread them out.
+  // Quadrants (relative to heart center): 0=top-left, 1=top-right,
+  // 2=bottom-right, 3=bottom-left. Also allow 4=overlapping center.
+  var quads = [0, 1, 2, 3, 4];
+  if (_reviveState.lastBlipQuad != null) {
+    quads = quads.filter(function(q) { return q !== _reviveState.lastBlipQuad; });
+  }
+  var quad = quads[Math.floor(Math.random() * quads.length)];
+  _reviveState.lastBlipQuad = quad;
+
+  // Offsets in percentage of stack dimensions. Rough clusters per quadrant
+  // with a bit of jitter so consecutive blips don't land at identical coords.
+  var jitter = function() { return (Math.random() - 0.5) * 14; };
+  var offsets = {
+    0: { x: -32 + jitter(), y: -28 + jitter() },
+    1: { x:  32 + jitter(), y: -28 + jitter() },
+    2: { x:  30 + jitter(), y:  22 + jitter() },
+    3: { x: -30 + jitter(), y:  22 + jitter() },
+    4: { x:  0  + jitter(), y:   0 + jitter() },
+  };
+  var pos = offsets[quad];
+
+  // Drift direction — slightly upward with some lateral bias based on quadrant
+  var driftX = (quad === 0 || quad === 3) ? -6 : (quad === 1 || quad === 2) ? 6 : 0;
+  var driftY = -18; // always drift up a bit
+
+  // Build the blip element and append to the heart stack
+  var el = document.createElement('div');
+  el.className = 'revive-cpr-blip';
+  el.textContent = blip;
+  el.style.cssText =
+      'position:absolute;'
+    + 'left:calc(50% + ' + pos.x.toFixed(1) + '%);'
+    + 'top:calc(50% + ' + pos.y.toFixed(1) + '%);'
+    + 'transform:translate(-50%,-50%);'
+    + 'font-family:\'Crimson Pro\',serif;font-style:italic;font-weight:600;'
+    + 'font-size:clamp(14px,3.8vw,19px);'
+    + 'color:#fff;letter-spacing:.04em;'
+    + 'text-shadow:0 0 10px #000, 0 0 18px rgba(220,80,80,0.8), 0 1px 3px rgba(0,0,0,0.9);'
+    + 'opacity:0;pointer-events:none;white-space:nowrap;'
+    + 'z-index:3;';
+  stack.appendChild(el);
+
+  // Animate: fade in fast, drift up, fade out, remove
+  requestAnimationFrame(function() {
+    el.style.transition = 'opacity 0.2s ease-out, transform 1.1s ease-out';
+    el.style.opacity = '1';
+    el.style.transform = 'translate(-50%,-50%) translate(' + driftX + 'px,' + driftY + 'px)';
+  });
+  setTimeout(function() {
+    el.style.transition = 'opacity 0.4s ease-in';
+    el.style.opacity = '0';
+  }, 650);
+  setTimeout(function() {
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }, 1200);
+}
+
 function _startReviveMinigame(attemptIdx) {
   // attemptIdx: 0 = first attempt, 1 = retry at reduced difficulty
   var isRetry = attemptIdx > 0;
@@ -7935,6 +8034,10 @@ function _startReviveMinigame(attemptIdx) {
     taps: 0,
     isRetry: isRetry,
     tickId: null,
+    lastBlipAtTap: 0,    // last tap count at which a blip fired
+    lastBlip: null,      // last blip text (prevents immediate repeat)
+    blipFadeTimer: null, // handle for the fade-out timeout
+    pathLength: 0,       // measured on overlay mount (SVG path.getTotalLength)
   };
   _showReviveOverlay();
   // Poll every 100ms to update UI + check time
@@ -7947,23 +8050,44 @@ function _reviveTick() {
   var pct = Math.min(1, (now - _reviveState.startedAt) / _reviveState.windowMs);
   var tapPct = Math.min(1, _reviveState.taps / _reviveState.tapsNeeded);
 
-  // S013.3: Inner heart scale grows 0.2 → 1.0 as taps accumulate. Outer
-  // boundary shrinks 1.0 → 0.2 as time runs out. If the player out-taps
-  // the timer, inner matches outer and revive triggers.
+  // Inner heart grows with taps; pulse accelerates as life returns.
   var innerEl = document.getElementById('revive-heart-inner');
-  var outerEl = document.getElementById('revive-heart-outer');
   if (innerEl) {
-    // Inner heart: scale 0.2 → 1.0 based on tap progress
     var innerScale = 0.2 + 0.8 * tapPct;
     innerEl.style.transform = 'translate(-50%,-50%) scale(' + innerScale.toFixed(3) + ')';
-    // Pulse speed accelerates with tap progress (life returning)
     var pulseSpeed = Math.max(0.3, 1.0 - 0.7 * tapPct); // seconds per cycle
     innerEl.style.animationDuration = pulseSpeed.toFixed(2) + 's';
   }
-  if (outerEl) {
-    // Outer boundary: scale 1.0 → 0.2 based on time elapsed (shrinks inward)
-    var outerScale = 1.0 - 0.8 * pct;
-    outerEl.style.transform = 'translate(-50%,-50%) scale(' + outerScale.toFixed(3) + ')';
+
+  // S013.5: Outer heart SVG outline drains from the bottom cusp. Animated
+  // via stroke-dashoffset growing from 0 to pathLength as time elapses.
+  // Heart shape stays full size — only the outline erases, like a fuse
+  // burning. Path starts at bottom cusp so drain visually originates there.
+  var pathEl = document.getElementById('revive-heart-outer-path');
+  if (pathEl) {
+    // Lazy-init: measure path length on first tick (SVG must be mounted).
+    if (!_reviveState.pathLength) {
+      try {
+        _reviveState.pathLength = pathEl.getTotalLength();
+        pathEl.style.strokeDasharray = _reviveState.pathLength;
+        pathEl.style.strokeDashoffset = 0;
+      } catch (e) {
+        // If getTotalLength fails (rare), fall back to approximate length.
+        _reviveState.pathLength = 80;
+        pathEl.style.strokeDasharray = 80;
+        pathEl.style.strokeDashoffset = 0;
+      }
+    }
+    // Drain: offset grows from 0 to full length as pct goes 0 → 1
+    pathEl.style.strokeDashoffset = (_reviveState.pathLength * pct).toFixed(2);
+  }
+
+  // CPR blip — fire one every 5 taps (5, 10, 15, 20)
+  var blipThreshold = Math.floor(_reviveState.taps / 5);
+  var lastBlipThreshold = Math.floor((_reviveState.lastBlipAtTap || 0) / 5);
+  if (_reviveState.taps > 0 && blipThreshold > lastBlipThreshold) {
+    _reviveState.lastBlipAtTap = _reviveState.taps;
+    _fireCPRBlip();
   }
 
   // Success?
@@ -8031,29 +8155,53 @@ function _showReviveOverlay() {
   };
 
   // Two-heart stack — landscape-friendly sizing (uses min of vw and vh).
-  // Outer = time boundary (shrinks inward); inner = tap progress (grows).
-  // Outer renders as a HOLLOW outline so it stays visually distinct when
-  // inner grows near it: outer reads as "the boundary", inner as "the life".
+  // Outer = SVG heart path with stroke-dasharray drain (timer). The outline
+  // erases from the bottom cusp around the perimeter as time runs out.
+  // Inner = Unicode ❤ that grows with taps and pulses like a beating heart.
+  // The SVG path starts at the bottom cusp (0, 8) and traces counterclockwise
+  // up the right lobe, across the top, down the left lobe, back to cusp.
+  // This gives us a natural "drain from the bottom" when we animate
+  // stroke-dashoffset from 0 upward — the outline retreats from its own
+  // starting point.
+  //
+  // Path coordinates use viewBox -10 -10 20 20 (heart centered at origin).
+  // Drawing method: cusp at (0, 8), up-right via quadratic to peak lobes.
+  var heartPath = 'M 0 8 '
+               + 'C 7 4, 9 -2, 6 -5 '      // right side: cusp up to right peak
+               + 'C 4 -8, 1 -7, 0 -4 '     // right lobe over top to center dip
+               + 'C -1 -7, -4 -8, -6 -5 '  // left lobe from dip over top to left peak
+               + 'C -9 -2, -7 4, 0 8 Z';   // left side down back to cusp
+
   var heartStackHtml =
-        '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);'
+        '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);overflow:visible;'
       +   'display:flex;align-items:center;justify-content:center;">'
-      // Outer heart — hollow outline via -webkit-text-stroke
-      +   '<div id="revive-heart-outer" style="position:absolute;top:50%;left:50%;'
-      +     'transform:translate(-50%,-50%) scale(1);transform-origin:center;'
-      +     'font-size:min(240px,55vmin);line-height:1;'
-      +     'color:transparent;'
-      +     '-webkit-text-stroke:2px ' + tcRgba(0.55) + ';'
-      +     'text-stroke:2px ' + tcRgba(0.55) + ';'
-      +     'filter:drop-shadow(0 0 18px ' + tcRgba(0.35) + ');'
-      +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
-      // Inner heart — solid red, grows with taps
+      // Outer heart — SVG with drainable stroke
+      +   '<svg id="revive-heart-outer-svg" viewBox="-10 -10 20 20" '
+      +     'style="position:absolute;top:50%;left:50%;'
+      +     'transform:translate(-50%,-50%);'
+      +     'width:min(260px,60vmin);height:min(260px,60vmin);'
+      +     'filter:drop-shadow(0 0 14px ' + tcRgba(0.5) + ');'
+      +     'pointer-events:none;'
+      +     'overflow:visible;">'
+      +     '<path id="revive-heart-outer-path" d="' + heartPath + '" '
+      +       'fill="none" '
+      +       'stroke="' + titleColor + '" '
+      +       'stroke-width="1.6" '
+      +       'stroke-linecap="round" '
+      +       'stroke-linejoin="round" '
+      +       'style="transition:stroke-dashoffset 0.1s linear;" />'
+      +   '</svg>'
+      // Inner heart — solid red Unicode glyph, grows with taps
       +   '<div id="revive-heart-inner" style="position:absolute;top:50%;left:50%;'
       +     'transform:translate(-50%,-50%) scale(0.2);transform-origin:center;'
       +     'font-size:min(240px,55vmin);line-height:1;'
       +     'color:' + titleColor + ';'
       +     'filter:drop-shadow(0 0 20px ' + titleColor + ');'
       +     'animation:reviveInnerPulse 1s ease-in-out infinite;'
-      +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
+      +     'transition:transform 0.1s linear;pointer-events:none;'
+      +     'z-index:2;">❤</div>'
+      // CPR blips are spawned dynamically at random positions by
+      // _fireCPRBlip (every 5 taps). They float, fade, and self-remove.
       + '</div>';
 
   var html =
