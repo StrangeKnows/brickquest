@@ -8,6 +8,13 @@ const path = require('path');
 const WebSocket = require('ws');
 const os = require('os');
 
+// Version — read from package.json so `npm version patch` bumps this everywhere.
+// Failure-safe: if the file is missing or malformed, fall back to 'dev'.
+const BQ_VERSION = (() => {
+  try { return require('./package.json').version || 'dev'; }
+  catch (e) { return 'dev'; }
+})();
+
 // Shared game constants
 const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR, SHIELD_MAX, SHIELD_COST } = require('./game.js');
 
@@ -1449,14 +1456,15 @@ wss.on('connection', (ws, req) => {
         const pNameGold = p.playerName||p.name||cls;
         const wrongTap = P.wrongTap || (data && data.wrongTap);
         const totalPlaced = parseInt(P.total || (data && data.total) || 0) || 0;
-        const cheeseFound = Math.max(0, parseInt((data && data.cheeseFound) || 0) || 0);
+        const cheeseFound = Math.max(0, parseInt(P.cheeseFound ?? (data && data.cheeseFound) ?? 0) || 0);
         const variant = G.activeEvent?.goldVariant;
 
-        // v4: Torch cheese pickups add to cheese inventory directly. Game no longer ends on cheese tap.
-        // The torch event ends only when all coins found OR torch burns out.
-        if (cheeseFound > 0 && variant === 'torch') {
+        // v4: Torch + Crack cheese pickups add to cheese inventory directly.
+        // Crack has rare (~15% spawn) cheese tiles; torch has them as common decoys.
+        if (cheeseFound > 0 && (variant === 'torch' || variant === 'crack')) {
           p.cheese = (p.cheese||0) + cheeseFound;
-          log(pNameGold+' found '+cheeseFound+' 🧀 cheese in the torchlight','reward');
+          var whereFound = variant === 'torch' ? 'in the torchlight' : 'tucked in the crack';
+          log(pNameGold+' found '+cheeseFound+' 🧀 cheese '+whereFound,'reward');
         }
 
         // Crack variant still has the rat bite on wrongTap (kept)
@@ -1492,10 +1500,19 @@ wss.on('connection', (ws, req) => {
         const finalDmg = Math.max(0, rawDmg - blocked);
         p.hp = Math.max(0, p.hp - finalDmg); if(p.hp<=0)p.alive=false;
         const pName = p.playerName||p.name;
+        // v4: Perfect dodge reward — clean escape (zero dmg) gives +1 orange brick.
+        // Rewards skill, parallels Snapstep disarm. Partial dodges / sprung traps get nothing.
+        let cleanEscapeBrick = false;
+        if (finalDmg === 0 && rawDmg > 0) {
+          p.bricks.orange = (p.bricks.orange||0) + 1;
+          cleanEscapeBrick = true;
+          log(`${pName} escaped the trap cleanly — +1 orange brick`,'reward');
+          clients.forEach((info,cws)=>{ if(info.role===cls&&cws.readyState===1) cws.send(JSON.stringify({type:'rewardPopup',kind:'brick',color:'orange',label:'Clean Escape! +1 Orange Brick',brickColor:'#E8610A'})); });
+        }
         log(`TRAP! ${pName} — ${trapCount} trap(s), ${rawDmg} raw, ${blocked} blocked, −${finalDmg} HP → ${p.hp}`,'damage');
         if (!G.orangeSpaces) G.orangeSpaces = {};
         G.orangeSpaces[p.space] = (G.orangeSpaces[p.space]||0) + trapCount;
-        G.activeEvent = { ...G.activeEvent, trapResult:{ dmg:finalDmg, rawDmg, dodged:blocked, trapCount, disarmed:false } };
+        G.activeEvent = { ...G.activeEvent, trapResult:{ dmg:finalDmg, rawDmg, dodged:blocked, trapCount, disarmed:false, cleanEscape:cleanEscapeBrick } };
         broadcastState(); return;
       }
       if (eventType === 'disarmTrap') {
@@ -2570,7 +2587,7 @@ httpServer.listen(PORT,'0.0.0.0',()=>{
   let ip='localhost';
   const nets=os.networkInterfaces();
   for(const n of Object.values(nets).flat()) { if(n.family==='IPv4'&&!n.internal){ip=n.address;break;} }
-  console.log(`\n🧱 BRICK QUEST v2 RUNNING\n`);
+  console.log(`\n🧱 BRICK QUEST v${BQ_VERSION} RUNNING\n`);
   console.log(`  DM Screen:    http://${ip}:${PORT}/dm_screen.html`);
   console.log(`  All Players:  http://${ip}:${PORT}/players.html`);
   console.log(`  Test Players: http://${ip}:${PORT}/test_players.html`);

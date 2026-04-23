@@ -881,7 +881,9 @@ function renderActiveEvent() {
   // Monster/boss events: hide the active-event panel while the pending rumble card or live rumble is in control.
   // Show it post-rumble (ev.rumbleResult set) so DM can review + Mark Resolved.
   if ((ev.evType === 'monster' || ev.evType === 'boss') && !ev.rumbleResult) { panel.style.display = 'none'; return; }
-  if (ev.resolved && !ev.blueResult && !ev.trapResult && !ev.grayResult && !ev.goldResult) { panel.style.display = 'none'; return; }
+  if (ev.resolved && !ev.blueResult && !ev.trapResult && !ev.grayResult && !ev.goldResult
+      && !ev.purpleResult && !ev.whiteResult && !ev.blackResult
+      && !ev.greenResult && !ev.grayRubbleResult && !ev.redResult) { panel.style.display = 'none'; return; }
   panel.style.display = 'block';
   var p = G.players[ev.cls];
 
@@ -948,6 +950,17 @@ function renderActiveEvent() {
       body += '<span style="font-size:14px;color:var(--text-dim);">→</span>';
       body += '<span style="width:20px;height:20px;border-radius:3px;background:#F57C00;display:inline-block;"></span>';
       body += '</div><div style="font-size:10px;color:var(--green);font-family:Cinzel,serif;letter-spacing:.04em;">DISARMED</div>';
+    } else if (tr.dmg === 0) {
+      // Clean escape — +1 orange brick if cleanEscape flag set
+      body += '<div style="font-size:22px;font-weight:700;color:var(--green);margin-bottom:4px;">\u2713 DODGED</div>';
+      if (tr.cleanEscape) {
+        body += '<div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:4px;">';
+        body += '<span style="font-size:11px;color:#888;">earned</span>';
+        body += '<span style="width:18px;height:18px;border-radius:3px;background:#F57C00;display:inline-block;"></span>';
+        body += '</div>';
+      }
+      if (tr.dodged > 0) body += '<div style="font-size:10px;color:#888;margin-bottom:4px;">'+tr.dodged+' blocked</div>';
+      body += '<div style="font-size:11px;color:#888;font-style:italic;">Clean escape. A piece pried loose.</div>';
     } else {
       var TRAP_FLAV_DM = {
         0:['Fast reflexes.','Not today.','The trap blinked. You didn\'t.','Clean dodge.'],
@@ -1017,6 +1030,108 @@ function renderActiveEvent() {
   if (evData.type === 'blue' && ev.blueVariant && !ev.blueResult) {
     var vLabs2 = {singing_stone:'Singing Stone',sentry_stone:'Sentry Stone',cipher_lock:'Cipher Lock'};
     body += '<div style="margin-top:6px;padding:6px 10px;border-radius:6px;background:#020a14;border:1px solid #006DB733;font-size:11px;color:#4db8ff66;font-style:italic;">'+(vLabs2[ev.blueVariant]||'Blue')+'\u2014challenge in progress\u2026</div>';
+  }
+
+  // v4 RESULT CARDS — compact DM-side breakdown for each v4 event type.
+  // Parses reward strings (+N brick, +N gold, +N cheese, -N HP, etc.) into
+  // an icon row so the DM sees at-a-glance what the player earned or lost.
+  function v4DmResultBlock(R, themeColor, bgColor, borderColor, title) {
+    if (!R) return '';
+    var msg = R.msg || '';
+    var items = [];
+    // Bricks
+    var brickRx = /\+(\d+)\s*(red|blue|gray|green|white|yellow|orange|purple|black)/gi;
+    var bm;
+    while ((bm = brickRx.exec(msg)) !== null) {
+      var colorMap = {red:'#D01012',blue:'#006DB7',gray:'#AAAAAA',green:'#237841',white:'#EFEFEF',yellow:'#F5D000',orange:'#F57C00',purple:'#7B2FBE',black:'#1a1a1a'};
+      var c = bm[2].toLowerCase();
+      var ct = parseInt(bm[1]);
+      for (var k=0; k<ct; k++) items.push({color: colorMap[c] || '#888', size: 18, border: c==='white'?'1px solid #ccc':''});
+    }
+    // Gold
+    var goldM = msg.match(/\+(\d+)\s*gold/i);
+    if (goldM) {
+      var gn = parseInt(goldM[1]);
+      for (var gk=0; gk<Math.min(gn,5); gk++) items.push({emoji:'🪙', size:18});
+      if (gn > 5) items.push({html:'<span style="font-size:12px;color:#F5D000;font-weight:700;vertical-align:middle;">×'+gn+'</span>'});
+    }
+    // Cheese — handles "+N cheese", "N cheese", or "🧀"
+    var cheeseM = msg.match(/\+(\d+)\s*(?:🧀|cheese)|(\d+)\s*cheese/i);
+    if (cheeseM) {
+      var cn = parseInt(cheeseM[1] || cheeseM[2]);
+      for (var ck=0; ck<Math.min(cn,5); ck++) items.push({emoji:'🧀', size:18});
+      if (cn > 5) items.push({html:'<span style="font-size:12px;color:#FFD96A;font-weight:700;vertical-align:middle;">×'+cn+'</span>'});
+    }
+    // HP loss
+    var hpM = msg.match(/[-−](\d+)\s*HP(?!\s*max)/i);
+    if (hpM) items.push({html:'<span style="font-size:13px;color:#E24B4A;font-weight:700;vertical-align:middle;">\u2212'+parseInt(hpM[1])+' \u2764\ufe0f</span>'});
+    // Max HP loss
+    var mxM = msg.match(/[-−](\d+)\s*max\s*HP|lose\s*(\d+)\s*max\s*HP/i);
+    if (mxM) {
+      var mxN = parseInt(mxM[1] || mxM[2]);
+      items.push({html:'<span style="font-size:12px;color:#E24B4A;font-weight:700;vertical-align:middle;">\u2212'+mxN+' HP<span style="font-size:9px;opacity:.7;">max</span></span>'});
+    }
+    // Poison stacks
+    var poiM = msg.match(/(\d+)\s*poison\s*stacks?|poisoned\s*\((\d+)\)/i);
+    if (poiM) items.push({html:'<span style="font-size:12px;color:#bada7a;font-weight:700;vertical-align:middle;">\u2620 '+parseInt(poiM[1] || poiM[2])+'</span>'});
+    // Shield
+    if (/shield pip|\+1 shield/i.test(msg)) items.push({emoji:'🛡', size:16});
+
+    var iconRow = items.length ? dmIconRow(items) : '<span style="font-size:11px;color:#888;font-style:italic;">—</span>';
+    return '<div style="margin-top:6px;padding:8px 10px;border-radius:8px;background:'+bgColor+';border:1px solid '+borderColor+';">'
+      + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:'+themeColor+';margin-bottom:4px;">'+title+'</div>'
+      + iconRow
+      + (msg ? '<div style="font-size:10px;color:#999;margin-top:4px;font-style:italic;">'+msg+'</div>' : '')
+      + '</div>';
+  }
+
+  if (ev.purpleResult) {
+    var prR = ev.purpleResult;
+    var prTitle = prR.outcome === 'blessed' ? 'BLESSED'
+      : prR.outcome === 'cursed' ? 'CURSED'
+      : prR.outcome === 'cleansed' ? 'CLEANSED'
+      : 'PASS';
+    var prTheme = prR.outcome === 'blessed' ? '#E8C868'
+      : prR.outcome === 'cursed' ? '#d44'
+      : prR.outcome === 'cleansed' ? '#4db8ff' : '#888';
+    body += v4DmResultBlock(prR, prTheme, '#1a0a1a', prTheme + '55', prTitle);
+  }
+  if (ev.whiteResult) {
+    var wrR = ev.whiteResult;
+    var wrTitle = wrR.outcome === 'heal_ally' ? 'HEALED ALLY'
+      : wrR.outcome === 'self_heal' ? 'SELF HEAL'
+      : wrR.outcome === 'self_maxhp' ? 'MAX HP UP'
+      : wrR.outcome === 'self_rest' ? 'SELF REST'
+      : wrR.outcome === 'revive' ? 'REVIVED ALLY' : 'RESTED';
+    body += v4DmResultBlock(wrR, '#E8F4F4', '#0a1a1a', '#9adada55', wrTitle);
+  }
+  if (ev.blackResult) {
+    var bkR = ev.blackResult;
+    var bkTitle = bkR.outcome === 'refused' ? 'REFUSED'
+      : bkR.outcome === 'blood_price' ? 'BLOOD PRICE'
+      : bkR.outcome === 'brick_exchange' ? 'BRICK TRADE'
+      : bkR.outcome === 'poisoned_favor' ? 'POISONED FAVOR'
+      : 'BINDING PACT';
+    body += v4DmResultBlock(bkR, '#c89ef0', '#140a1a', '#c89ef055', bkTitle);
+  }
+  if (ev.greenResult) {
+    var gnR = ev.greenResult;
+    var gnTitle = gnR.outcome === 'all_cut' ? 'ALL VINES CUT'
+      : gnR.outcome === 'partial_2' ? '2 CUT'
+      : gnR.outcome === 'partial_1' ? '1 CUT' : 'OVERWHELMED';
+    var gnTheme = (gnR.outcome === 'all_cut' || gnR.outcome === 'partial_2') ? '#b6e89a'
+      : gnR.outcome === 'partial_1' ? '#aaa' : '#d44';
+    body += v4DmResultBlock(gnR, gnTheme, '#0a1a0a', gnTheme + '55', gnTitle);
+  }
+  if (ev.grayRubbleResult) {
+    var grbR = ev.grayRubbleResult;
+    var grbTitle = grbR.tier === 'perfect' ? 'PERFECT STACK'
+      : grbR.tier === 'good' ? 'GOOD'
+      : grbR.tier === 'miss' ? 'MISS' : 'FUMBLE';
+    var grbTheme = grbR.tier === 'perfect' ? '#E8C868'
+      : grbR.tier === 'good' ? '#9adada'
+      : grbR.tier === 'miss' ? '#aaa' : '#d44';
+    body += v4DmResultBlock(grbR, grbTheme, '#121212', grbTheme + '55', grbTitle);
   }
 
   // GOLD

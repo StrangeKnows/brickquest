@@ -1542,3 +1542,527 @@ count (HTML script tags).
 - Class skills rework with fusion gating (MAJOR multi-session)
 - Board actions audit + consistency pass
 - Zone-scaled revive minigame difficulty
+
+---
+
+## Session 011 continuation — post-first-push iteration (April 23, 2026)
+
+After the first S011 push (commit `6e7b164`), Ross kept iterating.
+This section captures everything shipped AFTER that commit, before
+the session-capstone `-V` minor bump.
+
+### Revive button redesign (heart, 120px)
+
+The radial-gradient circle "egg" at 220px was too big and read wrong
+for the moment. Replaced with a thematic pulsing heart:
+
+- ❤ glyph at 90px font size, 120px button frame
+- Transparent background, drop-shadow glow in theme color
+- CSS keyframe `reviveHeartPulse` — 0.9s ease cycle, scale 1.0 ↔ 1.08
+- "TAP!" overlay text centered on the heart for clarity
+- Tap feedback scales just the heart span to 0.85 (not the button
+  itself — the pulse keyframe needs to keep running uninterrupted)
+
+Thematic tie: hearts already appear as damage floaters during combat.
+The revive heart reads as life force returning.
+
+### Post-victory poison death bug fix
+
+When the last enemy died in spec-mode rumble, the code entered a
+15-second "wait for loot collection" phase with `running = true`
+and no DoT-freeze. Poison kept ticking. If HP hit 0 during the wait,
+the revive minigame fired AFTER the fight was already won — jarring.
+
+Fix: one line in `triggerVictory()` spec-mode branch. The moment the
+loot-wait begins, call `clearStatuses()` to wipe lingering DoTs.
+Heals/regen untouched since they're not status effects. Player wins
+in peace.
+
+### Version system
+
+`package.json` version bumped to `0.11.0` (matching session number).
+`server.js` now reads `BQ_VERSION` from `package.json` at startup
+with a failure-safe fallback to 'dev':
+
+```js
+const BQ_VERSION = (() => {
+  try { return require('./package.json').version || 'dev'; }
+  catch (e) { return 'dev'; }
+})();
+```
+
+Banner shows `🧱 BRICK QUEST v0.11.0 RUNNING` dynamically.
+
+`save.sh` upgraded with version-bump flags using
+`npm version --no-git-tag-version` (edits package.json in place, no
+git tag — regular commit carries version info):
+
+```bash
+./save.sh "msg"            # commit + push only (unchanged)
+./save.sh -v "msg"         # patch bump (0.11.0 → 0.11.1)
+./save.sh -V "msg"         # minor bump (0.11.0 → 0.12.0)
+./save.sh --major "msg"    # major bump
+```
+
+Convention: `-v` for bug fixes and small additions, `-V` for
+session-capstone commits with multiple features.
+
+### Icons-only UI pass (gold / cheese words stripped)
+
+Ross wanted "Gold" and "Cheese" word labels gone from the player
+screen — icons are now universal enough to stand alone. Stripped:
+
+- Main player HUD stat chips: `🪙 ${gold}` / `🧀 ${cheese}` (was
+  number + label row below)
+- Trade/give UI rows: `🪙 x N` / `🧀 x N` (labels removed)
+- Rumble victory loot chips: `🪙 +3` / `🧀 +1` (word suffix dropped)
+
+Not stripped (intentionally):
+- Market description prose ("Buy bricks with gold" — reads naturally)
+- Crack-game stop button ("Stop — Keep N gold")
+- Free-action button labels (explain mechanics)
+- Server log messages
+
+Gold icon confirmed standard: 🪙 across ALL 47 uses. No competing
+icons. 🏆 only in victory contexts, never as currency.
+Cheese icon 🧀 consistent across all surfaces.
+
+### Stat chip centering + Attack Die removal
+
+`.stats-row` got `align-items:stretch` and `.stat-chip` became a flex
+column with `align-items:center; justify-content:center`. This makes
+icon-only chips (Gold, Cheese) match the height of label-bearing
+chips (Position) with content centered in the available space.
+
+Also removed the Attack Die chip entirely — `me.die` is still on the
+player object but only referenced in dead turn-based battle code.
+Clean removal of one stale UI element.
+
+### Cheese icon cross-surface audit + fixes
+
+Before this session, cheese display was inconsistent:
+
+Player side, 6 v4 render functions — only 2 extracted cheese:
+- Purple ✓ / White (no awards) / **Black ✗ BUG** / Green (no awards)
+- Red ✓ / **Gray Rubble ✗ BUG**
+
+Fixes:
+- Black bargain `renderBlackShadowBargain` — added cheese regex
+  handling both "+N cheese" AND plain "N cheese" (for "Shadow hands
+  you 1 cheese")
+- Gray rubble — added cheese regex to the spec extraction
+- Both regexes now: `/\+(\d+)\s*(?:🧀|cheese)|(\d+)\s*cheese/i`
+
+DM side was worse — no dedicated result panels for purple, white,
+black, green, gray rubble. Added `v4DmResultBlock()` helper that
+parses `R.msg` into an icon row (bricks, coins, cheese, HP, max HP,
+poison, shield). Hooked up to all 5 event types. Expanded the
+panel-hide gate to include v4 results.
+
+### Torch cheese server bug (critical fix)
+
+Ross reported clicking cheese tiles in torch event, no cheese on
+result screen. Dug in and found a silent server-side bug:
+
+Client sends `cheeseFound` at TOP LEVEL of the `resolveEvent` payload:
+```js
+client.send('resolveEvent', { cls, eventType: 'gold', amount,
+  total, wrongTap, cheeseFound });
+```
+
+Server was reading from NESTED `data`:
+```js
+const cheeseFound = Math.max(0,
+  parseInt((data && data.cheeseFound) || 0) || 0);
+```
+
+`data.cheeseFound` was always `undefined`. Cheese was being silently
+dropped on the server. Other fields (`amount`, `wrongTap`) had
+`P.amount ?? data.amount` fallback patterns — cheeseFound was
+missing that fallback.
+
+Fix: `P.cheeseFound ?? (data && data.cheeseFound) ?? 0`. Same
+pattern as other fields.
+
+### Crack game cheese (15% spawn)
+
+Per Ross's direction, crack game now optionally spawns 1 cheese tile:
+
+- 15% spawn chance per crack game (dice-roll at game start)
+- Replaces one 'empty' slot (doesn't reduce coin count)
+- Tapping cheese: collect +1 cheese, game continues (rat still ends)
+- Reveals as 🧀 with gold border, warm background
+- Server awards cheese for `variant === 'torch' || variant === 'crack'`
+
+Result card paths — all 6 outcomes handled:
+- Coins only | Coins + cheese | Cheese only | Rat bite alone
+- Rat bite + cheese (new title "🧀 CHEESE (WITH TEETH)" with
+  dedicated flavor pool)
+- Rat bite + coins (± cheese — now includes cheese if present)
+
+All 4 `finishGoldGame()` calls in crack path pass the cheeseFound
+parameter. Mirrored to test_players.html.
+
+### Orange brick reward for trap clean escape
+
+Ross: "orange event, brick rewards?" — identified gap where
+non-Snapstep players took damage from traps with no consolation.
+
+Decision: **Perfect dodge (zero damage taken) gives +1 orange brick.**
+Rewards skill, parallels Snapstep disarm path. Sprung traps still
+punish (no brick when damaged).
+
+Server: `trapDodge` handler checks `finalDmg === 0 && rawDmg > 0`,
+grants `p.bricks.orange++`, fires rewardPopup, sets
+`trapResult.cleanEscape = true`.
+
+Player card: dodged card shows orange brick icon via
+`renderRewardIcons({bricks:{orange:1}})`. New flavor line added to
+0-damage pool: *"You pried a piece loose on the way out."*
+
+DM card: new clean-escape branch (`tr.dmg === 0 && !tr.disarmed`)
+shows "✓ DODGED" in green + earned orange brick swatch + flavor.
+
+### Gray rubble timer scaling
+
+30s was too tight for dense outlines — Ross reported timeouts before
+completion. New formula:
+
+```
+timeLeft = 20 + 5 * blockCount
+```
+
+5 blocks → 45s, 6 blocks → 50s, 7 blocks → 55s, 8 blocks → 60s.
+Initial display label computes the budget inline so no "30" flicker
+before the first tick.
+
+### Mobile header compact + auto-hide
+
+Topbar + phase banner got two combined treatments:
+
+**Compact (always):**
+- Topbar 36px (was 60) / emoji 18px (was 24) / name 12px (was 15)
+- Phase banner 32px / 11px font
+- Tighter padding throughout
+
+**Auto-hide on active event (new):**
+- `render()` toggles `.hidden-on-scroll` on both elements based on
+  `G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved`
+- Wrapped in try/catch for safety during class selection phase
+- When event resolves → header pops back in for post-event actions
+
+Combined effect: during any active event minigame (rubble stacking,
+torch, crack, trap dodge, etc.) the full viewport is available for
+the action pane. Header returns after resolve.
+
+### Victory screen stats — single-hit highlights
+
+Added 6 new `_battleStats` fields:
+- `biggestDamageDealt` / `biggestDamageTaken` — single-hit highs
+- `biggestHealPlayer` + `totalHealed` — self-heal tracking
+- `biggestHealEntity` + `totalEntityHeal` — enemy self-heal tracking
+
+Instrumented 6 damage sites (2 player-hit paths, poison tick, entity
+damage) + 5 heal sites (white tap, white field tick, doWhiteHeal,
+regen tick, lifesteal, enemy heal).
+
+Victory screen rebuilt with dynamic cell array — zero-value stats
+hidden. Order: TIME / HP (always) → damage totals → single-hit highs
+→ heal totals → enemy heals → DPS/CRITS → overloads/armor. All 6 new
+fields pass through battleEnd snapshot for DM visibility.
+
+### File state at session end
+
+Shipped in `/mnt/user-data/outputs`:
+- server.js      (cheese fix + clean escape + version read)
+- rumble.js      (victory stats + post-victory poison fix + heart button)
+- players.html   (resolution cards + action polish + mobile header + crack cheese)
+- test_players.html   (mirror of players.html)
+- dm_screen.html (v4 result cards + clean escape)
+- package.json   (version 0.11.x)
+- save.sh        (version bump flags)
+
+### Design proposal (for S012)
+
+Shipped alongside code: `DESIGN_S012_PROPOSAL.txt` — 479 lines.
+Covers current understanding, proposed charge model for bricks
+(consumable → charge with empty pip visual), action screen redesign
+(SELF / ALLY / BOARD groupings), per-class identity audit, ordered
+implementation checklist, and 6 open design questions for Ross.
+
+Intended as the kickoff document for S012 in a fresh chat. Major
+refactor scope — bricksCharged data model touches server state,
+persistence, rumble reconciliation, all render surfaces. Should
+NOT be attempted in the current chat due to context budget.
+
+### Session close
+
+Session 011 ran April 22-23, 2026. Primary themes: polish,
+consistency, mobile ergonomics, bug surgery, versioning foundation,
+and a design-level reset for S012 via the proposal doc.
+
+Rough shipment count: ~20 substantive features/fixes across 5 files.
+Git pushes: 1 at the commit `6e7b164` midpoint, 1 session-capstone
+at v0.12.0 minor bump.
+
+---
+
+## Session 011 final — design closeout + v2 proposal (April 23, 2026)
+
+After shipping S011 code (commits up through 0.11.x patches), the
+closing half of the session was pure design work. Ross wanted a
+bulletproof handoff document for S012 before context ran out. This
+section captures every design decision from that conversation.
+
+### Structure of the design dialogue
+
+Ross marked up the v1 DESIGN_S012_PROPOSAL.txt with `***` comments.
+Those 10 comments triggered a back-and-forth that expanded the
+proposal scope by 3-4×. The v2 proposal now locks every decision.
+
+### Core systems approved
+
+CHARGE MODEL B (tactical)
+  - bricksCharged empty pips = zero rumble power contribution
+  - Empty pip still COUNTS as owned (inventory depth ceiling)
+  - Refresh only at rumble entry + zone gate crossing
+  - No mid-turn board refresh (preserves the rest-beat rhythm)
+
+HP BLEED-OUT
+  - Damage > 40% hpMax + would kill → slow drain instead of instant
+  - 1500ms duration
+  - Heal during bleed = rescue
+  - No instant KO
+  - Ripples favorably into Fixer identity as rescue class
+
+CLEANSE = WHITE OVERLOAD
+  - Universal (players + entities)
+  - Tier = number of status effects removed
+  - Works with regen zones (Fixer's white field tick)
+  - Applies to entity self-cleanse (Cursed Knight, etc.)
+
+OVERLOAD ON BOARD
+  - Same hold-to-charge mechanic as rumble
+  - Tier menu reveals action options as charge builds
+  - Per-class menus differ (FW purple sees different options
+    than BK purple)
+  - Hidden bonus sparkles occasionally (discovery mechanic)
+
+### Class expression framework
+
+Per-color specialization per class, felt in BOTH rumble AND board.
+
+Signature colors (2-3 per class):
+  BK: red, gray
+  FW: blue, purple, black
+  SS: orange, red
+  BS: gray, yellow
+  FX: white, black
+  WO: green, yellow
+
+Key specific mechanics ratified:
+  - FW purple: 90° cone AOE + teleport + dual blast (70% each end)
+  - FW purple board: 2× refresh rate
+  - SS orange rumble: 0.5s invuln on tap
+  - SS orange board: Cache infuse mechanic
+  - BS gray rumble: mid-fight armor regen (+1 pip every 8s)
+  - BS yellow rumble: true taunt (pulls enemy focus)
+  - WO green rumble PASSIVE: poison auto-spreads to adjacent enemies
+  - FX white: 1.5× output + field ticks double (existing, preserved)
+
+Pre-rumble buffs per class (passive, always on):
+  - BK: first hit +50% damage
+  - FW: starts with 1 FW Charge active (2× brick refresh 10s)
+  - SS: "First Step" — all enemy attacks miss SS for first 3 sec
+  - BS: +1 armor pip at start
+  - FX: start at hpMax + 1 (overheal pip)
+  - WO: first enemy starts poisoned (1 stack)
+
+Purple radii class-specific:
+  - FW: 90° cone
+  - FX: 60° cone
+  - Others: 30-60° tighter cones
+  - Class expression visible in every rumble
+
+### Class achievement unlocks
+
+All per-class board actions beyond baseline are achievement-gated.
+Progress visible in status tab. Unlock via toast + board overload
+menu appearance.
+
+SNAPSTEP:
+  - Cache Mastery (20 caches laid, 10 claimed) — doubles depth
+  - Ghost Step (100 attacks dodged) — undetectable movement
+  - Hunter's Mark (50 overload crits) — 2× damage to marked
+
+BREAKER (pick ONE for S012 flagship ship):
+  - Shatter (25 overload crits) — enemies lose 20% max HP pre-fight
+  - Ground Slam (150 damage absorbed) — space becomes damage zone
+  - Bulwark (survive below 10% HP 5 times) — transfer armor to ally
+  - DECISION POINT: Ross chooses at S012 start
+
+BLOCKSMITH:
+  - Mason Keystone (30 perfect stacks) — party ablative armor
+  - Architect Reroll (5 boss rumbles) — reroll an event once per
+    zone. PREVIOUSLY was "unlimited" — now LOCKED to once/zone.
+  - Forge, Blueprint — existing skills preserved
+
+FORMWRIGHT:
+  - Oracle Scry (10 black bargains survived) — party 3-event peek
+  - Wordsmith Confound (20 riddle firsts) — enemy's first action
+    randomized (non-boss, requires prior combat)
+
+FIXER:
+  - Heal Ally (baseline, no gate) — same-zone healing
+  - Field Medic (25 poison cures) — instant cure in zone
+  - Last Rites (10 rumble revives) — mid-zone resurrection
+
+WILD ONE:
+  - Spread Poison (baseline, no gate) — passive in rumble
+  - Mire (100 poison ticks) — zone-wide enemy pre-poison
+  - Whistle (50 killing blows on poisoned) — summon defeated
+    entity type. 30s. Tier by kill count (1/5/15/30 = 25/50/75/100%).
+  - Tracks killLog per-entity for tier calc
+
+REMOVED FROM V1:
+  - Rallying Cry — too OP, infinite red loop
+  - Enhanced Movement — vestigial purple-as-movement, deprecated
+  - Simple poison trap — would grief players, poisoned-entity
+    passive is cleaner
+  - Breaker Rally — replaced by destruction-focused alternatives
+
+### Cheese system
+
+Parallel economy alongside bricks. UNIFIED UX.
+
+MECHANICS:
+  - Cheese is consumed on eat OR throw (permanent loss)
+  - Eat at status tab → +N max HP (variant-specific scaling)
+  - Throw at pre-rumble modal → rumble effect (variant-specific)
+  - Same cheese = one use; cannot eat AND throw
+
+VARIANTS (initial ship = 6):
+  🧀 Standard (+1 HP, eat-only basic)
+  🧀 Sour green-spot (+2 HP / skip rumble)
+  🧀 Smoky mottled (+2 HP / distract 5s)
+  🧀 Rich deep gold (+2 HP / double loot)
+  🧀 Bleu blue-spot (+3 HP / force rarest drops)
+  🧀 Aged cracked (+3 HP / halve enemy count)
+
+HOLD-TO-CHARGE CHEESE (status tab):
+  - Tier 1: eat 1 cheese
+  - Tier 2: eat 2 simultaneously
+  - Tier 3: eat ALL (tests all variant effects)
+
+CHEESE DROP ROLLS:
+  - Rolled on rumble victory + event rewards
+  - Weighted toward common; rare variants from drops only
+  - Cheese shop sells basic 🧀 only
+
+DM PANEL:
+  - Per-player cheese inventory by variant
+  - DM can grant/revoke manually (story beats, testing)
+  - Display: 🧀 ×3  🧀ᴳ ×1  🧀ᴮ ×0
+
+### Entity overload system
+
+Parallel to player overload. Entities build charge, fire tiered
+attacks with AOE scaling.
+
+DATA MODEL:
+  entity.colors = { purple: 2, white: 1, green: 3, ... }
+  Rolled per entity at spawn within type-specific ranges.
+
+COLOR LEVEL RANGES:
+  Goblin:      all 0-1
+  Skeleton:    white 1-2, purple 0-1
+  Rot grub:    green 2-3, purple 1-2
+  Cursed Kt:   white 2-3, purple 2-3, red 1-2
+  Stone Col:   gray 3, red 2, purple 1-2
+  Bosses:      3-4 across multiple sigs
+
+OVERLOAD EFFECTS (aggression-focused, not defensive):
+  Red: berserk +50% dmg 5s
+  Blue: stagger zone on self
+  Orange: invuln burst
+  Yellow: pulls allied entities (aggro gather)
+  Green: poison pulse +stacks
+  Purple: self-heal OR teleport toward player
+  White: CLEANSE SELF (tier = statuses removed)
+  Black: shadow blink
+  Gray: +3 DR for 8s
+
+DROP RATES:
+  More of a color = higher drop chance for that brick color
+  Formula: baseDropChance + (level × 10%)
+  Rolled per entity — strategic enemy selection emerges
+
+INITIAL SCOPE:
+  Start with Cursed Knight, Rot Grub Matron, Stone Colossus
+  Expand after balancing
+
+### Multiplayer proximity rumble
+
+MECHANICS:
+  - N spaces = 2 (tunable) — initial value
+  - Auto-join, not opt-in
+  - Shared arena, shared enemy pool
+  - Individual loot zones
+  - Last damage = main drop (kill attribution)
+
+ARCHITECTURE:
+  - Server picks rumble host (first to trigger)
+  - Server-authoritative simulation
+  - 20 FPS state sync
+  - Client-side prediction for own player
+  - Local save on device, DM backup authoritative
+
+INCREMENTAL SHIP:
+  Phase 1: 2 players
+  Phase 2: 3-4
+  Phase 3: 6
+
+### Other locked decisions
+
+CACHE NAMING: "Cache" is locked as the SS placed-item name.
+
+MIRE NAMING: "Mire" is the approved name (was "Blight Bearer"
+placeholder).
+
+WHISTLE NAMING: "Whistle" is the approved name (was "Packmaster"
+placeholder).
+
+SCRY: party-wide visibility, not caster-only.
+
+ARCHITECT: once per zone, not once per game.
+
+ALLY ZONE: same-zone scoping (not same-space, not adjacency).
+
+### Timeline summary
+
+BUILD 0.12.0 — Foundations (charge model data layer)
+BUILD 0.13.0 — Charge Visible (UI renders)
+BUILD 0.14.0 — Action Hub + Bleed-Out (flagship UX)
+BUILD 0.15.0 — Class Identity: Rumble (per-color expression)
+BUILD 0.16.0 — Class Identity: Board (per-class overload menus)
+BUILD 0.17.0 — Cheese System (variants, throw, DM panel)
+BUILD 0.18.0 — Achievements + Unlocks (progression)
+BUILD 0.19.0 — Multiplayer Proximity (co-op rumble)
+BUILD 0.20.0 — Entity Overload (tactical depth)
+BUILD 0.21.0+ — Rares + polish
+
+Estimated 15-20 sessions to v1.0.0. 2-3 months at Ross's pacing.
+
+### Files shipped in this closing batch
+
+Shipped in /mnt/user-data/outputs:
+  - DESIGN_S012_PROPOSAL_V2.txt (1267 lines) — bulletproof handoff
+  - NOTES.md (updated with this section)
+  - No code changes in closing conversations (all code was shipped
+    in earlier S011 turns)
+
+### Handoff chain integrity
+
+For S012 Claude: read DESIGN_S012_PROPOSAL_V2.txt FIRST. It
+supersedes the v1 proposal. Every decision from this doc is
+approved. Begin work on Build 0.12.0.

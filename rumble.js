@@ -594,6 +594,7 @@ function updateStatusEffects(dt) {
       if (_battleStats) {
         _battleStats.damageTaken += dmg;
         if (player.hp < _battleStats.hpLow) _battleStats.hpLow = player.hp;
+        if (dmg > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmg;
       }
       showFloatingText(player.x, player.y - 40, '☠ ' + dmg, '#1D9E75', player);
       if (player.hp <= 0) {
@@ -1783,6 +1784,11 @@ function fireOverloadWhite(count, ox, oy) {
     var cap2 = Math.max(player.hpMax, player.hp);
     player.hp = Math.min(cap2, player.hp + healAmt);
     var healed = Math.round(player.hp - prev);
+    // v4: track total + biggest-single-heal for victory screen
+    if (_battleStats && healed > 0) {
+      _battleStats.totalHealed = (_battleStats.totalHealed || 0) + healed;
+      if (healed > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = healed;
+    }
     // Only surface the floater when actual HP was restored. Healing at
     // full HP produces a 0 that was rendering as "0 ✚ x3" on the player.
     if (healed > 0) {
@@ -1864,7 +1870,12 @@ function updateWhiteField(dt) {
       }
       player.hp = Math.min(player.hpMax, player.hp + tickHeal);
       if (player.hp > prev) {
-        showFloatingText(player.x, player.y - 40, (player.hp - prev) + ' ✚', '#EFEFEF', player);
+        var tickHealed = player.hp - prev;
+        if (_battleStats) {
+          _battleStats.totalHealed = (_battleStats.totalHealed || 0) + tickHealed;
+          if (tickHealed > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = tickHealed;
+        }
+        showFloatingText(player.x, player.y - 40, tickHealed + ' ✚', '#EFEFEF', player);
       }
     }
   }
@@ -3391,7 +3402,13 @@ function applyArsenalOnTouch(g, dx, dy, dist) {
     if (purpleOK) {
       var healAmt = (g.type === 'cursed_knight') ? 5
                   : (g.type === 'stone_colossus') ? 3 : 2;
+      var prevEntityHp = g.hp;
       g.hp = Math.min(g.hpMax, g.hp + healAmt);
+      var entityHealed = g.hp - prevEntityHp;
+      if (_battleStats && entityHealed > 0) {
+        _battleStats.totalEntityHeal = (_battleStats.totalEntityHeal || 0) + entityHealed;
+        if (entityHealed > (_battleStats.biggestHealEntity || 0)) _battleStats.biggestHealEntity = entityHealed;
+      }
       // Reactive tell: red heart floater from player toward entity
       spawnHeartFloat(player.x, player.y, g.x, g.y);
     }
@@ -3588,6 +3605,7 @@ function _applyEnemyMeleeDamage(g, dmg, dx, dy, dist) {
     if (_battleStats) {
       _battleStats.damageTaken += dmgLeft;
       if (player.hp < _battleStats.hpLow) _battleStats.hpLow = player.hp;
+      if (dmgLeft > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmgLeft;
     }
     showFloatingText(player.x, player.y - 40, dmgLeft + ' HP', '#E24B4A', player);
   }
@@ -4464,7 +4482,12 @@ function damageEntity(g, dmg, aggro, source) {
       && finalDmg > 0 && finalDmg <= 10) {
     g._boneRiseQueued = true;
   }
-  if (_battleStats) _battleStats.damageDealt += finalDmg;
+  if (_battleStats) {
+    _battleStats.damageDealt += finalDmg;
+    if (finalDmg > (_battleStats.biggestDamageDealt || 0)) {
+      _battleStats.biggestDamageDealt = finalDmg;
+    }
+  }
   if (aggro !== false) {
     g.aggroed = true;
     g.state = 'chase';
@@ -5135,6 +5158,7 @@ function updateEntity(g, dt, bounds) {
       if (_battleStats) {
         _battleStats.damageTaken += dmgLeft;
         if (player.hp < _battleStats.hpLow) _battleStats.hpLow = player.hp;
+        if (dmgLeft > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmgLeft;
       }
       showFloatingText(player.x, player.y - 40, dmgLeft + ' HP', '#E24B4A', player);
     }
@@ -5814,6 +5838,10 @@ function updateRegen(dt) {
     player.hp = Math.min(cap, player.hp + playerRegen.hpPerSec);
     var healed = Math.ceil(player.hp - prev);
     if (healed > 0) {
+      if (_battleStats) {
+        _battleStats.totalHealed = (_battleStats.totalHealed || 0) + healed;
+        if (healed > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = healed;
+      }
       showFloatingText(player.x, player.y-40, healed + ' ✨', '#EFEFEF', player);
       spawnHealSparkles(1);
     }
@@ -5861,6 +5889,10 @@ function doWhiteHeal(targetX, targetY) {
   var cap = Math.max(player.hpMax, player.hp);
   player.hp = Math.min(cap, player.hp + healAmt);
   var actual = player.hp - prev;
+  if (_battleStats && actual > 0) {
+    _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actual;
+    if (actual > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actual;
+  }
   var fx = targetX !== undefined ? targetX : player.x;
   var fy = targetY !== undefined ? targetY : player.y;
   showFloatingText(fx, fy - 50, actual + ' ✚', '#EFEFEF', player);
@@ -7361,6 +7393,11 @@ function updatePurpleBursts(dt) {
       if (healAmt > 0 && player.hp < overhealCap) {
         var preHp = player.hp;
         player.hp = Math.min(overhealCap, player.hp + healAmt);
+        var totalGained = player.hp - preHp;
+        if (_battleStats && totalGained > 0) {
+          _battleStats.totalHealed = (_battleStats.totalHealed || 0) + totalGained;
+          if (totalGained > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = totalGained;
+        }
         var overhealGained = Math.max(0, player.hp - Math.max(player.hpMax, preHp));
         if (overhealGained > 0) {
           showFloatingText(player.x, player.y-50, overhealGained + ' ♥', '#9B6FD4', player);
@@ -7672,6 +7709,13 @@ function _internalStart(config) {
     critsLanded: 0,
     overloadsFired: 0,
     hpLow: (typeof cfg.hp === 'number') ? cfg.hp : (player.hpMax || 10),
+    // v4: single-hit highlights for victory screen
+    biggestDamageDealt: 0,
+    biggestDamageTaken: 0,
+    biggestHealPlayer: 0,
+    biggestHealEntity: 0,
+    totalHealed: 0,
+    totalEntityHeal: 0,
   };
 
   timerLeft = RUMBLE_DURATION;
@@ -7820,6 +7864,10 @@ function triggerVictory() {
   if (cfg && cfg.mode === 'spec') {
     entityRespawnPending = true;
     _battleStats.endedAt = performance.now();
+    // v4: Fight is won — clear any lingering DoTs (poison, etc.) so the
+    // player doesn't get dragged into the revive minigame while waiting
+    // for loot collection. Heals/regen remain active.
+    if (typeof clearStatuses === 'function') clearStatuses();
     var victoryDeadline = performance.now() + 15000;
     var waitLoot = function() {
       if (!running) { entityRespawnPending = false; return; }
@@ -7933,11 +7981,15 @@ function _reviveTapHandler(e) {
   if (!_reviveState) return;
   if (e && e.preventDefault) e.preventDefault();
   _reviveState.taps++;
-  // Tiny visual feedback — pulse the button
+  // Tap feedback — scale the heart icon (not the button itself, which has
+  // its own pulse animation that we don't want to fight).
   var btn = document.getElementById('revive-tap-btn');
   if (btn) {
-    btn.style.transform = 'scale(0.95)';
-    setTimeout(function() { if (btn) btn.style.transform = 'scale(1)'; }, 80);
+    var heart = btn.querySelector('span:first-child');
+    if (heart) {
+      heart.style.transform = 'scale(0.85)';
+      setTimeout(function() { if (heart) heart.style.transform = 'scale(1)'; }, 80);
+    }
   }
 }
 
@@ -7969,19 +8021,22 @@ function _showReviveOverlay() {
       + '</div>'
       // Progress bar
       + '<div style="width:min(320px,90%);margin-bottom:8px;font-size:10px;color:#888;letter-spacing:.1em;">PROGRESS</div>'
-      + '<div style="width:min(320px,90%);height:14px;background:#1a0a0a;border:1px solid #444;border-radius:8px;overflow:hidden;margin-bottom:28px;">'
+      + '<div style="width:min(320px,90%);height:14px;background:#1a0a0a;border:1px solid #444;border-radius:8px;overflow:hidden;margin-bottom:24px;">'
       +   '<div id="revive-prog-bar" style="height:100%;background:linear-gradient(90deg,#4a9a35,#9adb9a);width:0%;transition:width 0.08s ease;box-shadow:0 0 10px #9adb9a;"></div>'
       + '</div>'
-      // Tap button (large target)
+      // Pulsing heart button — life force returning. ~120px tap target.
       + '<button id="revive-tap-btn" style="'
-      +   'width:min(220px,70vw);height:min(220px,70vw);border-radius:50%;'
-      +   'background:radial-gradient(circle,' + titleColor + 'dd 0%,' + titleColor + '88 55%,' + titleColor + '44 100%);'
-      +   'border:4px solid ' + titleColor + ';color:#fff;font-family:\'Cinzel\',serif;'
-      +   'font-size:clamp(18px,5vw,28px);font-weight:700;letter-spacing:.1em;'
-      +   'box-shadow:0 0 40px ' + titleColor + '88, inset 0 0 20px rgba(0,0,0,0.3);'
+      +   'width:min(120px,40vw);height:min(120px,40vw);border-radius:8px;'
+      +   'background:transparent;border:none;padding:0;'
+      +   'color:#fff;font-family:\'Cinzel\',serif;font-weight:700;letter-spacing:.1em;'
       +   'cursor:pointer;touch-action:manipulation;user-select:none;-webkit-user-select:none;'
-      +   'transition:transform 0.08s ease;'
-      +   '">REVIVE</button>'
+      +   'display:flex;align-items:center;justify-content:center;position:relative;'
+      +   'animation:reviveHeartPulse 0.9s ease-in-out infinite;'
+      +   '">'
+      +   '<span style="font-size:min(90px,30vw);line-height:1;filter:drop-shadow(0 0 14px ' + titleColor + '99);transition:transform 0.08s ease;">❤</span>'
+      +   '<span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:clamp(11px,3vw,14px);color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.9);pointer-events:none;">TAP!</span>'
+      + '</button>'
+      + '<style>@keyframes reviveHeartPulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.08); } }</style>'
     + '</div>';
 
   var wrapper = document.createElement('div');
@@ -8141,10 +8196,10 @@ function _showVictoryScreen() {
       + '</span>';
   }).join('');
   if (_battleStats.cheeseEaten > 0) {
-    gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5C80033;border:1px solid #F5C800;font-size:11px;">🧀 +' + _battleStats.cheeseEaten + ' cheese</span>';
+    gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5C80033;border:1px solid #F5C800;font-size:11px;">🧀 +' + _battleStats.cheeseEaten + '</span>';
   }
   if (_battleStats.goldGained > 0) {
-    gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5D00033;border:1px solid #F5D000;font-size:11px;">🪙 +' + _battleStats.goldGained + ' gold</span>';
+    gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5D00033;border:1px solid #F5D000;font-size:11px;">🪙 +' + _battleStats.goldGained + '</span>';
   }
   if (!gainedLines) gainedLines = '<span style="color:#888;font-size:11px;font-style:italic;">No loot gained</span>';
 
@@ -8178,20 +8233,39 @@ function _showVictoryScreen() {
         // Flavor text
         + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(11px,3vw,15px);color:#d8d8d8;text-align:center;max-width:min(420px,94%);margin-bottom:10px;line-height:1.4;">"' + flavor + '"</div>'
 
-        // Stat grid — 2 cols, fluid gap and padding
-        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(4px,1.4vw,10px) clamp(12px,4vw,22px);'
-        + 'background:#15151e;border:1px solid #2a2a3e;border-radius:10px;'
-        + 'padding:clamp(8px,2.5vw,14px) clamp(10px,3vw,18px);'
-        + 'width:min(340px,92%);margin-bottom:8px;font-family:ui-sans-serif,system-ui;">'
-          + '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">TIME</div><div style="font-size:clamp(13px,3.8vw,18px);color:#eee;font-family:ui-monospace,monospace;">' + timeStr + '</div></div>'
-          + '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">HP</div><div style="font-size:clamp(13px,3.8vw,18px);color:#eee;">' + player.hp + '/' + player.hpMax + '</div></div>'
-          + '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">DMG DEALT</div><div style="font-size:clamp(13px,3.8vw,18px);color:#E24B4A;">' + _battleStats.damageDealt + '</div></div>'
-          + '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">DMG TAKEN</div><div style="font-size:clamp(13px,3.8vw,18px);color:#D4537E;">' + _battleStats.damageTaken + '</div></div>'
-          + '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">DPS</div><div style="font-size:clamp(13px,3.8vw,18px);color:#F5D000;">' + dps + '</div></div>'
-          + '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">CRITS</div><div style="font-size:clamp(13px,3.8vw,18px);color:#F57C00;">' + _battleStats.critsLanded + '</div></div>'
-          + '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">OVERLOADS</div><div style="font-size:clamp(13px,3.8vw,18px);color:#7B2FBE;">' + _battleStats.overloadsFired + '</div></div>'
-          + '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">ARMOR</div><div style="font-size:clamp(13px,3.8vw,18px);color:#AAA;">' + _battleStats.armorAbsorbed + '</div></div>'
-        + '</div>'
+        // Stat grid — built dynamically to skip zero-value stats and order sensibly
+        + (function() {
+            // Collect all stat entries; only include those with real values.
+            // Time + HP always show (they're always present). Others are conditional.
+            var cells = [];
+            cells.push({ label: 'TIME', value: timeStr, color: '#eee', mono: true });
+            cells.push({ label: 'HP',   value: player.hp + '/' + player.hpMax, color: '#eee' });
+            if (_battleStats.damageDealt > 0) cells.push({ label: 'DMG DEALT', value: _battleStats.damageDealt, color: '#E24B4A' });
+            if (_battleStats.damageTaken > 0) cells.push({ label: 'DMG TAKEN', value: _battleStats.damageTaken, color: '#D4537E' });
+            if (_battleStats.biggestDamageDealt > 0) cells.push({ label: 'HIGHEST HIT', value: _battleStats.biggestDamageDealt, color: '#F57C00' });
+            if (_battleStats.biggestDamageTaken > 0) cells.push({ label: 'BIGGEST HIT TAKEN', value: _battleStats.biggestDamageTaken, color: '#D4537E' });
+            if (_battleStats.totalHealed > 0) cells.push({ label: 'HP HEALED', value: _battleStats.totalHealed, color: '#9adb9a' });
+            if (_battleStats.biggestHealPlayer > 0) cells.push({ label: 'BIGGEST HEAL', value: _battleStats.biggestHealPlayer, color: '#9adb9a' });
+            if (_battleStats.totalEntityHeal > 0) cells.push({ label: 'ENEMY HEALED', value: _battleStats.totalEntityHeal, color: '#B586D6' });
+            if (_battleStats.biggestHealEntity > 0) cells.push({ label: 'BIGGEST ENEMY HEAL', value: _battleStats.biggestHealEntity, color: '#B586D6' });
+            if (_battleStats.damageDealt > 0) cells.push({ label: 'DPS', value: dps, color: '#F5D000' });
+            if (_battleStats.critsLanded > 0) cells.push({ label: 'CRITS', value: _battleStats.critsLanded, color: '#F57C00' });
+            if (_battleStats.overloadsFired > 0) cells.push({ label: 'OVERLOADS', value: _battleStats.overloadsFired, color: '#7B2FBE' });
+            if (_battleStats.armorAbsorbed > 0) cells.push({ label: 'ARMOR ABSORBED', value: _battleStats.armorAbsorbed, color: '#AAA' });
+
+            var rows = cells.map(function(c) {
+              var monoStyle = c.mono ? 'font-family:ui-monospace,monospace;' : '';
+              return '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">' + c.label + '</div>'
+                   + '<div style="font-size:clamp(13px,3.8vw,18px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
+            }).join('');
+
+            return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(4px,1.4vw,10px) clamp(12px,4vw,22px);'
+              + 'background:#15151e;border:1px solid #2a2a3e;border-radius:10px;'
+              + 'padding:clamp(8px,2.5vw,14px) clamp(10px,3vw,18px);'
+              + 'width:min(340px,92%);margin-bottom:8px;font-family:ui-sans-serif,system-ui;">'
+              + rows
+              + '</div>';
+          })()
 
         // Favorite move
         + '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(10px,2.8vw,12px);color:#aaa;margin-bottom:6px;text-align:center;max-width:92%;">'
@@ -8316,6 +8390,13 @@ function _computeState() {
       overloadsFired: _battleStats.overloadsFired || 0,
       hpLow:          _battleStats.hpLow === 9999 ? (player.hpMax||0) : _battleStats.hpLow,
       enemiesKilled:  (_battleStats.enemiesKilled || []).slice(),
+      // v4 single-hit highlights
+      biggestDamageDealt: _battleStats.biggestDamageDealt || 0,
+      biggestDamageTaken: _battleStats.biggestDamageTaken || 0,
+      biggestHealPlayer:  _battleStats.biggestHealPlayer || 0,
+      biggestHealEntity:  _battleStats.biggestHealEntity || 0,
+      totalHealed:        _battleStats.totalHealed || 0,
+      totalEntityHeal:    _battleStats.totalEntityHeal || 0,
     } : null,
   };
 }

@@ -108,13 +108,13 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 
 /* TOPBAR */
 .topbar{
-  display:flex;align-items:center;gap:10px;
-  padding:8px 14px;
+  display:flex;align-items:center;gap:8px;
+  padding:4px 12px;
   background:linear-gradient(90deg,var(--cls-bg),#0a0a0a);
   border-bottom:1px solid var(--cls-border);
   flex-shrink:0;
   transition:max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease, border-bottom-width 0.2s ease;
-  max-height:60px;
+  max-height:36px;
   overflow:hidden;
 }
 .topbar.hidden-on-scroll{
@@ -124,10 +124,10 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   opacity:0;
   border-bottom-width:0;
 }
-.topbar-icon{font-size:24px;}
-.topbar-name{font-family:'Cinzel',serif;font-size:15px;font-weight:600;color:var(--cls-color);}
+.topbar-icon{font-size:18px;}
+.topbar-name{font-family:'Cinzel',serif;font-size:12px;font-weight:600;color:var(--cls-color);}
 .conn-pill{
-  font-size:10px;padding:2px 8px;border-radius:10px;
+  font-size:9px;padding:1px 6px;border-radius:8px;
   font-family:'Crimson Pro',serif;margin-left:auto;font-weight:600;
 }
 .conn-pill.on{background:#0a2a1a;color:var(--green);}
@@ -135,10 +135,10 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 
 /* PHASE BANNER */
 .phase-banner{
-  padding:7px 14px;text-align:center;font-size:13px;font-weight:600;
+  padding:4px 14px;text-align:center;font-size:11px;font-weight:600;
   font-family:'Cinzel',serif;letter-spacing:.05em;flex-shrink:0;
   transition:max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease, border-bottom-width 0.2s ease;
-  max-height:60px;
+  max-height:32px;
   overflow:hidden;
 }
 .phase-banner.hidden-on-scroll{
@@ -201,10 +201,11 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .hpbar-inner{height:100%;border-radius:5px;transition:width .4s,background .4s;}
 
 /* STATS ROW */
-.stats-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;}
+.stats-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:stretch;}
 .stat-chip{
   background:var(--surface3);border-radius:8px;padding:7px 12px;
   text-align:center;flex:1;min-width:55px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
 }
 .stat-num{font-family:'Cinzel',serif;font-size:18px;font-weight:700;}
 .stat-lbl{font-size:10px;color:var(--text-dim);margin-top:1px;}
@@ -988,6 +989,17 @@ function render() {
   if (!G || !MY_CLASS) return;
   const me = G.players[MY_CLASS];
   if (!me) return;
+  // v4: Auto-collapse header during active unresolved event on my turn — maximizes
+  // action-pane space for minigames. Restored when event resolved or not mine.
+  try {
+    var _topbar = document.querySelector('.topbar');
+    var _phaseBanner = document.querySelector('.phase-banner');
+    var _hideHdr = G.activeEvent
+      && G.activeEvent.cls === MY_CLASS
+      && !G.activeEvent.resolved;
+    if (_topbar) _topbar.classList.toggle('hidden-on-scroll', !!_hideHdr);
+    if (_phaseBanner) _phaseBanner.classList.toggle('hidden-on-scroll', !!_hideHdr);
+  } catch (e) {}
   // Clear battle feed when a new battle starts
   if (G.battle && !_wasBattle) { battleFeed = []; _lastActionDesc = ''; _victoryPending = false; clearTimeout(_victoryTimer); _wasAllDead = false; _pendingResult = null; }
   _wasBattle = !!G.battle;
@@ -1208,20 +1220,14 @@ function renderStatus(me) {
       </div>
       <div class="stats-row" style="margin-top:10px;">
         <div class="stat-chip">
-          <div class="stat-num" style="color:#F5D000;">${me.gold}</div>
-          <div class="stat-lbl">Gold</div>
+          <div class="stat-num" style="color:#F5D000;">🪙 ${me.gold}</div>
         </div>
         <div class="stat-chip" onclick="showCheeseActions()" style="cursor:${(me.cheese||0)>0?'pointer':'default'};">
           <div class="stat-num" style="color:#FFD96A;">🧀 ${me.cheese||0}</div>
-          <div class="stat-lbl">Cheese</div>
         </div>
         <div class="stat-chip">
           <div class="stat-num" style="color:var(--text-dim);font-size:13px;">${space?.label||'Start'}</div>
           <div class="stat-lbl">Position</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-num" style="font-size:14px;">${me.die}</div>
-          <div class="stat-lbl">Attack Die</div>
         </div>
       </div>
       ${(statuses||enhBadge||debuffBadge)?`<div class="status-wrap">${statuses}${enhBadge}${debuffBadge}</div>`:''}
@@ -2444,16 +2450,24 @@ function showLandingResult(ev, r, zone) {
       var grIsCrack = (G.activeEvent.goldVariant === 'crack');
       var grSpec = {}, grFlav = '', grTitle = '', grTheme = '#F5D000', grBg = '#1a1200';
 
-      if (grIsCrack && grWT && foundAmt2 === 0) {
-        // Crack: pure rat bite, nothing found
+      if (grIsCrack && grWT && foundAmt2 === 0 && grCheese === 0) {
+        // Crack: pure rat bite, nothing found at all
         grTitle = '🩸 RAT BITE'; grTheme = '#d44'; grBg = '#1a0505';
         grSpec.hp = -1;
         var rLines = ['Something bit back.','The rat was faster.','That was teeth, not coin.','The crack had other occupants.'];
         grFlav = rLines[Math.floor(Math.random()*rLines.length)];
+      } else if (grIsCrack && grWT && foundAmt2 === 0 && grCheese > 0) {
+        // Crack: rat bite but got cheese
+        grTitle = '🧀 CHEESE (WITH TEETH)'; grTheme = '#FFD96A'; grBg = '#1a1205';
+        grSpec.cheese = grCheese;
+        grSpec.hp = -1;
+        var rcLines = ['A cheese for your trouble. And your blood.','Cheese in hand, teeth in the other.','The rat and the cheese were close neighbors.','At least you got something.'];
+        grFlav = rcLines[Math.floor(Math.random()*rcLines.length)];
       } else if (grIsCrack && grWT && foundAmt2 > 0) {
-        // Crack: coins plus rat bite
+        // Crack: coins plus rat bite (optional cheese)
         grTitle = '🪙 FOUND (WITH TEETH)'; grTheme = '#E8C868'; grBg = '#1a1205';
         grSpec.coins = foundAmt2;
+        if (grCheese > 0) grSpec.cheese = grCheese;
         grSpec.hp = -1;
         var rbLines = ['Could have done without the teeth.','Found some. Then found the rat.','Coins in one hand, bite marks on the other.','Not bad. The rat disagrees.','Worth it. Probably.','The rat wanted its cut.'];
         grFlav = rbLines[Math.floor(Math.random()*rbLines.length)];
@@ -2690,7 +2704,8 @@ function showLandingResult(ev, r, zone) {
             'Not today.',
             'The trap blinked. You didn\'t.',
             'You were already moving.',
-            'Clean dodge. The fortress is unimpressed.'
+            'Clean dodge. The fortress is unimpressed.',
+            'You pried a piece loose on the way out.'
           ],
           1: [
             'A glancing blow. You\'ll feel it later.',
@@ -2736,12 +2751,16 @@ function showLandingResult(ev, r, zone) {
         var trapThemeColor = trapResult.dmg === 0 ? '#9adb9a' : '#d44';
         var trapBg = trapResult.dmg === 0 ? '#0a1200' : '#1a0500';
         var dodgedNote = dodged > 0 ? '<div style="font-size:11px;color:#888;margin-bottom:4px;">' + dodged + ' blocked</div>' : '';
+        // v4: Perfect dodge (zero dmg) earns +1 orange brick from server
+        var trapRewardSpec = trapResult.dmg === 0
+          ? (trapResult.cleanEscape ? { bricks: { orange: 1 } } : {})
+          : { hp: -trapResult.dmg };
         extra = buildResolutionCard({
           themeColor: trapThemeColor,
           borderColor: trapThemeColor + '88',
           bgColor: trapBg,
           title: trapResult.dmg === 0 ? '✓ DODGED' : '🗡 SPRUNG',
-          rewardIcons: renderRewardIcons({ hp: trapResult.dmg === 0 ? 0 : -trapResult.dmg }),
+          rewardIcons: renderRewardIcons(trapRewardSpec),
           flavor: trapFlav,
           extra: dodgedNote,
           showerTint: trapThemeColor,
@@ -4124,9 +4143,12 @@ function startCrackGame() {
   var min = _goldGameMin, max = _goldGameMax;
   var slots = max + 2; // extra empty/rat slots
   var coinsHidden = min + Math.floor(Math.random() * (max - min + 1));
-  // Build slot array: coins + empties + 1 rat stopper
+  // v4: 15% chance to also hide a cheese tile. Replaces one 'empty' slot.
+  var hasCheese = Math.random() < 0.15;
+  // Build slot array: coins + empties + 1 rat stopper + maybe 1 cheese
   var slotArr = [];
   for (var i = 0; i < coinsHidden; i++) slotArr.push('coin');
+  if (hasCheese) slotArr.push('cheese');
   while (slotArr.length < slots - 1) slotArr.push('empty');
   slotArr.push('rat'); // stopper
   // Shuffle
@@ -4135,14 +4157,28 @@ function startCrackGame() {
     var tmp = slotArr[si]; slotArr[si] = slotArr[rj]; slotArr[rj] = tmp;
   }
   var found = 0;
+  var cheeseFound = 0;
   var done = false;
 
   function render() {
     var btns = slotArr.map(function(type, idx) {
-      var revealed = type === '_coin' || type === '_empty' || type === '_rat';
-      var icon = revealed ? (type === '_coin' ? '&#129689;' : type === '_rat' ? '&#128001;' : '&#128065;') : '?';
-      var bg = revealed ? (type === '_coin' ? '#1a1200' : '#1a0a0a') : '#1a1a1a';
-      var border = revealed ? (type === '_coin' ? 'var(--gold)' : '#444') : '#333';
+      var revealed = type === '_coin' || type === '_empty' || type === '_rat' || type === '_cheese';
+      var icon = revealed
+        ? (type === '_coin' ? '&#129689;'
+          : type === '_rat' ? '&#128001;'
+          : type === '_cheese' ? '&#129472;'
+          : '&#128065;')
+        : '?';
+      var bg = revealed
+        ? (type === '_coin' ? '#1a1200'
+          : type === '_cheese' ? '#1a1400'
+          : '#1a0a0a')
+        : '#1a1a1a';
+      var border = revealed
+        ? (type === '_coin' ? 'var(--gold)'
+          : type === '_cheese' ? '#FFD96A'
+          : '#444')
+        : '#333';
       return '<button '+(revealed||done?'disabled':'')+' onclick="crackTap('+idx+')" '
         +'style="width:52px;height:52px;border-radius:10px;background:'+bg+';border:2px solid '+border+';font-size:22px;cursor:'+(revealed||done?'default':'pointer')+';transition:all .15s;">'
         +icon+'</button>';
@@ -4164,6 +4200,10 @@ function startCrackGame() {
     if (done) return;
     var type = slotArr[idx];
     if (type === 'coin') { slotArr[idx] = '_coin'; found++; }
+    else if (type === 'cheese') {
+      // v4: found cheese in the crack. Golden sparks + floater, NOT game-ending.
+      slotArr[idx] = '_cheese'; cheeseFound++;
+    }
     else if (type === 'empty') { slotArr[idx] = '_empty'; }
     else if (type === 'rat') {
       slotArr[idx] = '_rat'; done = true;
@@ -4206,7 +4246,7 @@ function startCrackGame() {
         } else {
           overlay.remove();
           render();
-          finishGoldGame(found, coinsHidden, true); // wrongTap=true → -1 HP
+          finishGoldGame(found, coinsHidden, true, cheeseFound); // wrongTap=true → -1 HP
         }
       }
       requestAnimationFrame(animRat);
@@ -4284,17 +4324,17 @@ function startCrackGame() {
         setTimeout(function() {
           cancelAnimationFrame(burstFrame);
           if (burstOverlay.parentNode) burstOverlay.remove();
-          finishGoldGame(found, coinsHidden, false);
+          finishGoldGame(found, coinsHidden, false, cheeseFound);
         }, 1500);
       } else {
-        finishGoldGame(found, coinsHidden, false);
+        finishGoldGame(found, coinsHidden, false, cheeseFound);
       }
     }
     render();
   };
   window.crackStop = function() {
     done = true;
-    finishGoldGame(found, coinsHidden);
+    finishGoldGame(found, coinsHidden, false, cheeseFound);
     render();
   };
 
@@ -4867,7 +4907,7 @@ function _showTradeComposer(targetCls) {
     var gQty = _tradeOfferAmounts.gold||0;
     offerRows += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
       +'<span style="font-size:18px;line-height:1;">&#129689;</span>'
-      +'<span style="font-family:Cinzel,serif;font-size:12px;color:var(--gold);flex:1;">gold</span>'
+      +'<span style="font-family:Cinzel,serif;font-size:12px;color:var(--gold);flex:1;"></span>'
       +'<span style="font-size:11px;color:var(--text-dim);">x'+myGold+'</span>'
       +'<div style="display:flex;align-items:center;gap:6px;">'
       +'<button onclick="event.stopPropagation();adjustTradeOffer(\'gold\','+-1+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">&#8722;</button>'
@@ -5173,7 +5213,7 @@ function openGivePanel(targetCls) {
   if(myGold>0){
     rows+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
       +'<span style="font-size:18px;line-height:1;">&#129689;</span>'
-      +'<span style="font-family:Cinzel,serif;font-size:12px;color:var(--gold);flex:1;">gold</span>'
+      +'<span style="font-family:Cinzel,serif;font-size:12px;color:var(--gold);flex:1;"></span>'
       +'<span style="font-size:11px;color:var(--text-dim);">x'+myGold+'</span>'
       +'<div style="display:flex;align-items:center;gap:6px;">'
       +'<button onclick="adjustGive(\'gold\','+-1+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">&#8722;</button>'
@@ -5788,6 +5828,9 @@ function renderBlackShadowBargain(ev, me, G) {
     // Poison stacks queued
     const poiM = msg.match(/(\d+)\s*poison\s*stacks?|poisoned\s*\((\d+)\)/i);
     if (poiM) spec.poison = parseInt(poiM[1] || poiM[2]);
+    // Cheese — handles both "+1 cheese" and "hands you N cheese" phrasings
+    const cheeseM = msg.match(/\+(\d+)\s*(?:🧀|cheese)|(\d+)\s*cheese/i);
+    if (cheeseM) spec.cheese = parseInt(cheeseM[1] || cheeseM[2]);
 
     return lingerHeader + buildResolutionCard({
       themeColor, borderColor, bgColor, title,
@@ -6385,6 +6428,8 @@ function renderGrayRubbleStacking(ev, me, G) {
     const spec = {};
     const brickM = msg.match(/\+(\d+)\s*gray/i);
     if (brickM) { spec.bricks = { gray: parseInt(brickM[1]) }; }
+    const cheeseM = msg.match(/\+(\d+)\s*(?:🧀|cheese)|(\d+)\s*cheese/i);
+    if (cheeseM) spec.cheese = parseInt(cheeseM[1] || cheeseM[2]);
 
     const matchLine = '<div style="font-size:11px;color:#888;margin-bottom:6px;">Match: '+R.matchPct+'%'+(R.overhang?' · overhang: '+R.overhang:'')+'</div>';
     return lingerHeader + buildResolutionCard({
@@ -6401,7 +6446,7 @@ function renderGrayRubbleStacking(ev, me, G) {
   return lingerHeader
     + '<div style="font-family:Cinzel,serif;font-size:18px;color:#ccc;text-align:center;margin-bottom:4px;">🧱 RUBBLE STACKING</div>'
     + '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:10px;font-style:italic;">Drag to move the falling block. It locks when it lands.</div>'
-    + '<div style="font-size:11px;color:#8ac;text-align:center;margin-bottom:8px;">⏱ <span id="gray-timer">30</span>s · block <span id="gray-block-idx">1</span>/<span id="gray-block-total">'+blocks.length+'</span></div>'
+    + '<div style="font-size:11px;color:#8ac;text-align:center;margin-bottom:8px;">⏱ <span id="gray-timer">'+(20 + 5*blocks.length)+'</span>s · block <span id="gray-block-idx">1</span>/<span id="gray-block-total">'+blocks.length+'</span></div>'
     + '<div style="text-align:center;"><canvas id="gray-canvas" style="background:#0a0a0a;border:1px solid #333;border-radius:6px;display:inline-block;touch-action:none;" width="300" height="360"></canvas></div>'
     + (isBlocksmith
       ? '<div style="font-size:10px;color:#F5D000;text-align:center;margin-top:6px;letter-spacing:.04em;">🔧 BLOCKSMITH: perfect bonus</div>'
@@ -6419,6 +6464,9 @@ function startGrayRubble() {
   if (_grayState && _grayState._interval) clearInterval(_grayState._interval);
   if (_grayState && _grayState._fall) clearInterval(_grayState._fall);
 
+  // v4: Timer scales with puzzle complexity — 20s base + 5s per block.
+  // 5 blocks = 45s, 8 blocks = 60s. Prevents timeout on dense outlines.
+  var _grayTimeBudget = 20 + 5 * (ev.grayBlocks ? ev.grayBlocks.length : 5);
   _grayState = {
     W: 5, H: 6,
     cellSize: 60,
@@ -6432,7 +6480,7 @@ function startGrayRubble() {
     dragging: false,
     dragStartCol: 2,
     dragStartX: 0,
-    timeLeft: 30,
+    timeLeft: _grayTimeBudget,
     finished: false,
   };
 
