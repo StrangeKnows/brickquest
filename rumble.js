@@ -2878,12 +2878,12 @@ function showFloatingText(x, y, text, color, parent) {
     parent: par, offX: offX0, offY: offY0, side: _side });
 }
 
-// Fizzle sparks — sparse grey-white embers drifting outward from an entity's
-// edge. Used for RESIST/IMMUNE tiers to read as "the attack scattered
-// harmlessly / gave up". Movement is slow, fluttery (horizontal wobble as
-// they rise), and droopy (mild gravity sags them down over their lifespan).
-// Contrast with DEFLECTION sparks (the directional vector burst used with
-// RESIST) which are fast and punchy.
+// Fizzle sparks — small erratic grey-white embers near an entity's edge.
+// Reads as a visual "dink" — a short, twitchy burst of tiny particles that
+// die fast. Contrast with DEFLECTION sparks (big directional punch) and
+// PULSE particles (smooth drift). Each fizzle particle jitters its velocity
+// on every frame (erratic, not smooth), so the effect reads as noise/static
+// rather than a controlled motion.
 //   ex, ey: entity center
 //   count:  particle count (IMMUNE uses more than RESIST)
 //   color:  grey-white shade; pass '#d8d8d8' or similar
@@ -2893,30 +2893,29 @@ function _spawnFizzleSparks(ex, ey, count, color, entR) {
   count = count || 8;
   color = color || '#d8d8d8';
   entR = entR || 16;
-  var spawnRadius = entR + 8;  // spawn ring sits clear of the sprite edge
+  var spawnRadius = entR + 6;  // spawn ring sits clear of the sprite edge
   for (var i = 0; i < count; i++) {
     var a = Math.random() * Math.PI * 2;
-    // Spawn around the entity's edge, not from its center
-    var sx = ex + Math.cos(a) * spawnRadius + (Math.random() - 0.5) * 4;
-    var sy = ey + Math.sin(a) * spawnRadius + (Math.random() - 0.5) * 4;
-    // Slow outward drift — was 35-90, now 12-28. Reads as "drift" not "splash"
-    var s = 12 + Math.random() * 16;
-    var life = 0.8 + Math.random() * 0.6;
+    // Spawn ring around entity edge, small jitter
+    var sx = ex + Math.cos(a) * spawnRadius + (Math.random() - 0.5) * 3;
+    var sy = ey + Math.sin(a) * spawnRadius + (Math.random() - 0.5) * 3;
+    // Faster emission (40-80 px/s), still outward
+    var s = 40 + Math.random() * 40;
+    // Short life so particles pop and die (2-3x prior decay rate)
+    var life = 0.25 + Math.random() * 0.2;
     purpleParticles.push({
       x: sx, y: sy,
       vx: Math.cos(a) * s,
-      vy: Math.sin(a) * s - 6,           // gentle upward bias (was -20)
-      r: 1.0 + Math.random() * 1.2,
-      alpha: 0.75 + Math.random() * 0.2,
+      vy: Math.sin(a) * s - 4,           // faint upward bias
+      r: 0.6 + Math.random() * 0.7,       // SMALLER particles (was 1.0-2.3)
+      alpha: 0.85 + Math.random() * 0.15,
       color: color,
-      shadowColor: color,                // glow matches fill
-      fadeRate: 0.012 / life,            // longer-life particles fade slower
+      shadowColor: color,                 // glow matches fill
+      fadeRate: 0.05 / life,              // ~0.15-0.20/frame = dies in ~5-8 frames
       // Fizzle-specific behavior flags (read by updatePurpleParticles):
       isFizzle: true,
-      flutterPhase: Math.random() * Math.PI * 2, // each particle flutters independently
-      flutterAmp: 8 + Math.random() * 10,         // horizontal wobble strength
-      droop: 18 + Math.random() * 14,             // downward pull (subtle gravity)
-      age: 0,
+      jitter: 80 + Math.random() * 60,    // erratic velocity perturbation per-frame
+      droop: 30 + Math.random() * 20,     // downward pull while fading
     });
   }
 }
@@ -7476,19 +7475,19 @@ function updatePurpleParticles(dt) {
   purpleParticles = purpleParticles.filter(function(p) { return p.alpha > 0.05; });
   purpleParticles.forEach(function(p) {
     if (p.isFizzle) {
-      // Fizzle path: slow drift + flutter (sine wobble horizontally) +
-      // droop (mild gravity). Very light friction so particles keep
-      // gently moving as they fade instead of dying in place.
-      p.age = (p.age || 0) + dt;
+      // Erratic "dink" fizzle: fast decay + random velocity perturbation
+      // per frame → reads as a twitchy metallic particle burst, not smooth
+      // drift. Gravity droop pulls embers down as they die.
       p.x += p.vx * dt;
       p.y += p.vy * dt;
-      p.vx *= 0.985;                  // light friction, barely slowing
-      p.vy *= 0.985;
-      p.vy += (p.droop || 20) * dt;   // gravity droop — pulls embers down
-      // Flutter: small horizontal offset that oscillates over the particle's
-      // lifetime. Phase is per-particle so they don't wobble in unison.
-      var flutter = Math.sin(p.age * 4 + (p.flutterPhase || 0)) * (p.flutterAmp || 10);
-      p.x += flutter * dt;            // scaled by dt so rate is consistent
+      // Random jitter on velocity each frame — this is what makes it erratic
+      var j = (p.jitter || 80) * dt;
+      p.vx += (Math.random() - 0.5) * j * 2;
+      p.vy += (Math.random() - 0.5) * j * 2;
+      // Minimal friction — we want particles to keep their erratic motion
+      p.vx *= 0.97;
+      p.vy *= 0.97;
+      p.vy += (p.droop || 30) * dt;       // droop downward while fizzling
       p.alpha -= p.fadeRate * 60 * dt;
     } else if (p.isRed) {
       p.x += p.vx * dt; p.y += p.vy * dt;
@@ -8520,7 +8519,7 @@ var _CHEESE_EVENT_FLAVORS = [
   'Big find.',
   'Dairy won.',
   'Gouda day.',
-  'Mmm.',
+  'Mmm...',
   'Smell that?',
   'Aged well.',
   'Creamy!',
@@ -8674,8 +8673,14 @@ function _showVictoryScreen() {
   var fav = _favoriteMove();
   var flavor = _pickFlavor(tier.label, { revived: _wasRevivedThisFight });
 
-  // Bricks-gained summary (just the counts by color)
-  var gainedLines = Object.keys(_battleStats.bricksGained).map(function(c) {
+  // Bricks-gained summary (just the counts by color). S013.6: filter to
+  // only actual brick-color keys — cheese is tracked in bricksGained for
+  // historical stat purposes but renders via its own dedicated chip below.
+  // Without this filter, cheese would double-render here AND in the
+  // cheeseEaten branch. Same bug class as the DM v4DmResultBlock dedup.
+  var gainedLines = Object.keys(_battleStats.bricksGained).filter(function(c) {
+    return BRICK_COLORS[c];  // only render genuine brick colors
+  }).map(function(c) {
     return '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:' + (BRICK_COLORS[c]||'#555') + '33;border:1px solid ' + (BRICK_COLORS[c]||'#555') + '88;font-size:11px;">'
       + '<span style="width:10px;height:10px;border-radius:2px;background:' + (BRICK_COLORS[c]||'#555') + ';margin-right:6px;"></span>'
       + '+' + _battleStats.bricksGained[c] + ' ' + c
