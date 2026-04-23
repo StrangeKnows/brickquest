@@ -87,6 +87,7 @@ function mkPlayer(cls, icon, color, hp, die, bricks) {
     die, space:0, alive:true,
     bricks: startBricks,            // owned inventory (ceiling)
     bricksCharged: {...startBricks},// active charges (<= bricks[c]). Spent on action; refreshed at rumble entry + zone gate crossing. See DESIGN_S012_PROPOSAL_V2 §1.1.
+    lastDropped: {},                // per-color last-spend timestamp (§1.2 pulse timing). Map color → ms since epoch.
     cheese: 0,             // v4: tradable food item (eat for +1 max HP, gift to ally)
     queuedPoisonStacks: 0, // v4: cross-system poison from failed green/black events
     queuedPoisonBattles: 0,// v4: how many rumble battles poison applies to
@@ -132,9 +133,13 @@ function removeBrick(p, color, n) {
 
 function spendBrickCharge(p, color, n) {
   // Consume a charge without removing from inventory (board action, overload).
+  // Stamps lastDropped[color] per §1.2 so clients can pulse the empty pip's
+  // recency tier (<5s fast, 5-30s medium, 30s+ slow).
   if (!p || !p.bricksCharged) return;
   n = (n == null) ? 1 : n;
   p.bricksCharged[color] = Math.max(0, (p.bricksCharged[color] || 0) - n);
+  if (!p.lastDropped) p.lastDropped = {};
+  p.lastDropped[color] = Date.now();
 }
 
 let G = freshState();
@@ -406,6 +411,9 @@ function loadState() {
           if (p.bricksCharged === undefined && p.bricks) {
             p.bricksCharged = { ...p.bricks };
           }
+          // S013: per-color pulse-timing map. Empty map means no charges have
+          // been spent yet this session (no pulse until first use).
+          if (p.lastDropped === undefined) p.lastDropped = {};
         });
       }
       if (G.pendingDashRequest === undefined) G.pendingDashRequest = null;
@@ -2419,6 +2427,57 @@ wss.on('connection', (ws, req) => {
     }
     if (type === 'adjustGold') {
       G.players[P.cls].gold = Math.max(0, G.players[P.cls].gold+P.amount);
+    }
+
+    // ── S013 §8.2 — BOARD ACTIONS CONSUMING bricksCharged ──
+    // Heal self: spend 1 white charge → +N HP (per-class, capped at hpMax).
+    // Per §1.1 charge model, spend dims the white pip; refresh at rumble
+    // entry or zone-gate crossing relights it.
+    const SELF_HEAL_AMT = { breaker: 2, formwright: 2, snapstep: 2, blocksmith: 2, fixer: 4, wild_one: 2 };
+    if (type === 'healPlayer') {
+      const p = G.players[P.cls];
+      if (!p || !p.alive) { broadcastState(); return; }
+      if (((p.bricksCharged && p.bricksCharged.white) || 0) <= 0) {
+        ws.send(JSON.stringify({type:'error',msg:'No white charge available'}));
+        broadcastState(); return;
+      }
+      if (p.hp >= p.hpMax) {
+        ws.send(JSON.stringify({type:'error',msg:'Already at full HP'}));
+        broadcastState(); return;
+      }
+      spendBrickCharge(p, 'white', 1);
+      const baseHeal = SELF_HEAL_AMT[p.cls] || 2;
+      const healAmt = Math.min(baseHeal, p.hpMax - p.hp);
+      p.hp += healAmt;
+      log(`${p.name} healed +${healAmt} HP (1 white charge) → ${p.hp}/${p.hpMax}`, 'heal');
+    }
+    // Shield self (§8.2 board action, consumes bricksCharged.gray).
+    // BASE for all classes: 1 gray charge → +1 armor, cap = hpMax.
+    // CRIT: on a lucky roll, same cost yields +2 armor instead of +1.
+    //   Blocksmith: 25% crit (class identity). All other classes: 10%.
+    // Class abilities / fusion upgrades will modify these values later.
+    if (type === 'addShield') {
+      const p = G.players[P.cls];
+      if (!p || !p.alive) { broadcastState(); return; }
+      const cost = 1;
+      const cap  = p.hpMax || 10;
+      const critChance = (p.cls === 'blocksmith') ? 0.25 : 0.10;
+      if (((p.bricksCharged && p.bricksCharged.gray) || 0) < cost) {
+        ws.send(JSON.stringify({type:'error',msg:'Need 1 gray charge (have '+((p.bricksCharged && p.bricksCharged.gray) || 0)+')'}));
+        broadcastState(); return;
+      }
+      if ((p.armor || 0) >= cap) {
+        ws.send(JSON.stringify({type:'error',msg:'Armor already at max ('+cap+')'}));
+        broadcastState(); return;
+      }
+      spendBrickCharge(p, 'gray', cost);
+      const crit = Math.random() < critChance;
+      const gain = crit ? 2 : 1;
+      p.armor = Math.min(cap, (p.armor || 0) + gain);
+      log(`${p.name} raised shield +${gain} armor${crit?' (CRIT!)':''} (1 gray charge) → 🛡${p.armor}/${cap}`, 'reward');
+      if (crit) {
+        ws.send(JSON.stringify({type:'rewardPopup',kind:'shield',label:'Shield crit! +2 armor',color:'gray',brickColor:BRICK_COLORS.gray}));
+      }
     }
 
     // ── v4 CHEESE SYSTEM ──

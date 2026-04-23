@@ -715,14 +715,26 @@ function renderPlayers() {
     html += '<div><div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:var(--dim);margin-bottom:5px;">BRICKS</div>';
     BRICK_NAMES.forEach(function(color) {
       var qty = p.bricks[color] || 0;
+      var charged = Math.min(qty, (p.bricksCharged && p.bricksCharged[color]) || 0);
       var bg = BRICK_COLORS[color] || '#888';
       var bdr = color === 'white' ? 'border:1px solid #555;' : '';
       var tc = (color==='white'||color==='yellow') ? '#666' : bg;
+      // Mini pip row: one pip per owned brick, lit = charged, hollow = empty
+      var pips = '';
+      for (var pi = 0; pi < qty; pi++) {
+        var lit = pi < charged;
+        pips += '<span style="display:inline-block;width:6px;height:6px;border-radius:1px;margin-right:1px;'
+          + (lit
+            ? 'background:'+bg+';box-shadow:0 0 2px '+bg+';'
+            : 'background:#1a1a1a;border:1px solid '+bg+'aa;box-sizing:border-box;')
+          + '"></span>';
+      }
       html += '<div style="display:flex;align-items:center;gap:5px;padding:3px 0;border-bottom:1px solid #1a1a1a;">'
         + '<span style="width:10px;height:10px;border-radius:2px;background:'+bg+';'+bdr+'display:inline-block;flex-shrink:0;"></span>'
         + '<span style="flex:1;font-size:11px;color:'+tc+';">'+color+'</span>'
+        + (qty > 0 ? '<span style="display:inline-flex;gap:0;margin-right:4px;">'+pips+'</span>' : '')
         + '<button class="adj" onclick="client.adjustBrick(\'' + p.cls + '\',\''+color+'\', -1)" '+(qty<1?'disabled':'')+'>−</button>'
-        + '<span style="font-size:12px;font-weight:700;min-width:20px;text-align:center;color:'+tc+';">'+qty+'</span>'
+        + '<span style="font-size:12px;font-weight:700;min-width:30px;text-align:center;color:'+tc+';">'+charged+'/'+qty+'</span>'
         + '<button class="adj" onclick="client.adjustBrick(\'' + p.cls + '\',\''+color+'\', 1)">+</button>'
         + '</div>';
     });

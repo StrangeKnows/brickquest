@@ -2297,3 +2297,163 @@ Standing-prefs memory needs updates on session close:
     full file set)
   - Add rumble.js to full file set (central, 358 KB, central combat)
   - Confirm NOTES.md is appended every session (handoff says so)
+
+---
+
+## Session 013 — Build 0.13.0 Charge Visible (April 23, 2026)
+
+Second session under the V2 proposal. Build 0.13.0 scope per §8.2:
+brick chip visual redesign with lit/dim pip states, pulse on empty
+pips per §1.2 timing, board heal/shield consume bricksCharged.
+
+### Part A — Pip rendering
+
+New shared helper renderBrickPips(bricks, bricksCharged, lastDropped, opts)
+in players.html and test_players.html. Same visual vocabulary as the
+rumble brick HUD (rumble.js _brickBtnHTML at line 2362 — 6×6px rounded
+square, solid color + glow when lit, dark fill + color-tinted border
+when empty). Board version sized 10-14px depending on surface. opts
+supports clickable={targetCls} for party tab tap-to-trade.
+
+CSS (S013 §1.2 timing):
+  @keyframes pip-pulse: 0.55 ↔ 0.95 opacity sine
+  .pip-empty default 1.8s cycle (slow / aging tier)
+  .pulse-fast 0.6s   (<5s since last spend)
+  .pulse-med  1.0s   (5-30s since last spend)
+  .pulse-slow 1.8s   (30s+ / never spent)
+
+Per-color recency from p.lastDropped[color] (server-stamped on every
+spendBrickCharge call). Per §1.2 line 131 "Start with per-color
+tracking; per-pip specificity can expand later."
+
+### Part B — Surfaces retrofit
+
+Four surfaces now show the pip chip:
+  1. Main HUD mini-inventory (status tab) — renderMiniInventory
+  2. Party tab other-player card — preserves click-to-trade per pip
+  3. Party tab self card (compact)
+  4. DM roster (dm_screen.html) — adds mini pip row + charged/total
+     count format ("2/3") next to each color's adjust controls
+
+The dm_screen retrofit answers §8.2's test target "DM sees dim pips
+on partial players." Adjust buttons unchanged — DM still grants/revokes
+inventory as before.
+
+### Part C — Board actions consume charges
+
+S012 left game.js with 10 _legacy() stubs servicing live UI. §8.2
+asks for board heal + shield to consume bricksCharged. Two stubs
+got real implementations:
+
+  game.js:
+    healPlayer(cls) → this.send('healPlayer', { cls })
+    addShield(cls)  → this.send('addShield', { cls })
+  Other 8 stubs unchanged (Action Hub work in 0.14.0).
+
+  server.js handlers:
+    healPlayer — gates on bricksCharged.white >= 1 and hp < hpMax.
+                 Spends 1 white charge, heals per-class amount
+                 (SELF_HEAL_AMT table: fixer 4, others 2). Errors
+                 routed to ws.send for client toast.
+
+    addShield — uniform base per Ross's S013 design call: 1 gray
+                charge → +1 armor for ALL classes, cap = hpMax.
+                Crit: 10% chance (Blocksmith 25%) yields +2 armor
+                at the same 1-gray cost. Crit fires a rewardPopup
+                so the player sees the lucky outcome.
+                Class-specific scaling (iron_hide bonus, per-class
+                multipliers) removed. Class abilities + fusion
+                upgrades will reintroduce variation in later builds.
+
+  Client-side gating switched from inventory to charge:
+    - selfHeal() — checks bricksCharged.white not bricks.white,
+      checks hp < hpMax before send, no premature success toast
+      (server emits error on failure).
+    - Add Shield button (prepare-panel + out-of-battle) — gates
+      on bricksCharged.gray, copy reads "1 gray charge" not
+      "1 gray brick" to reinforce the model.
+    - Status-tab shield-cap display (renderStatus) flattened
+      to me.hpMax (was per-class mult with iron_hide branch).
+
+### Part D — lastDropped data field
+
+p.lastDropped: {} added to mkPlayer. Save migration defaults to
+empty object on load (no pulse-worthy events on first session).
+spendBrickCharge stamps p.lastDropped[color] = Date.now() on every
+charge consumption. Field persists across rumble entry/exit and
+zone gate refresh — refresh restores charges but doesn't erase the
+"what did I last use" memory. Pulses naturally cease once a color is
+fully charged (pip-empty class only applies when i >= charged).
+
+### Verification
+
+  node --check passes on all modified files:
+    server.js, game.js, players.html, test_players.html, dm_screen.html
+
+  End-to-end charge-flow walkthrough:
+    Pre-heal (8/14 HP, 2 white charges) → spend 1 → 10/14 HP, 1 charge
+    Empty white pip immediately reads pulse-fast (just-dropped)
+    Spend 1 gray with crit → +2 armor at 1-charge cost
+    Zone gate refresh → all charges back to inventory ceiling
+    lastDropped persists across refresh (history intact)
+
+  §1.2 pulse tier function:
+    1s ago  → pulse-fast (0.6s)
+    10s ago → pulse-med  (1.0s)
+    60s ago → pulse-slow (1.8s, default)
+    Never   → pulse-slow
+
+  Crit probability sanity (1000 rolls each):
+    10% rolled 104, 25% rolled 263 (within expected range)
+
+### What 0.13.0 does NOT do
+
+  - No Character Dashboard layout (§7 — that's 0.14.0 Action Hub)
+  - No hold-to-charge overload (§1.3, 0.14.0)
+  - No HP bleed-out (§1.4, 0.14.0)
+  - No class-specific charge effectiveness (§8.5+ class identity)
+  - No fusion-system upgrades to brick effectiveness (much later)
+  - 8 of the 10 game.js _legacy stubs still in place (Fixer ally
+    heal/revive/mass-repair, Blocksmith deconstruct-gate/rebuild-
+    bridge, Enhanced Movement, Blueprint, Forge, useBrick — all
+    rebuilt in 0.14.0 Action Hub)
+
+### Files shipped
+
+  - server.js          (2740 lines, +59 from 0.12.1)
+    healPlayer + addShield handlers, lastDropped on mkPlayer + migration,
+    spendBrickCharge stamps lastDropped
+  - game.js            ( 609 lines, +2 from 0.12.1)
+    Real send() for healPlayer + addShield, narrowed legacy block 10→8
+  - players.html       (6115 lines, +52 from 0.12.1)
+    pip-pulse CSS, renderBrickPips helper, 4 surface retrofits, charge-
+    gated heal/shield buttons, flat shield cap
+  - test_players.html  (6810 lines, +37 from 0.12.1)
+    Full mirror of players.html
+  - dm_screen.html     (1728 lines, +12 from 0.12.1)
+    Roster pip row + charged/total format
+  - NOTES.md           (this append)
+
+### Test targets (§8.2)
+
+  ☐ Charge state readable at glance
+       — pip row with lit/empty + pulse should make this immediate.
+         Verify on phone in actual session.
+  ☐ Heal self → white pip empties, pulses
+       — server stamps lastDropped.white on spendBrickCharge,
+         empty pip gets pulse-fast class within 5s.
+  ☐ Rumble entry → charges refill
+       — refreshCharges(p) at battleStart is unchanged from S012.
+  ☐ Zone gate crossing → charges refill
+       — refreshCharges(p) at zone transition unchanged from S012.
+  ☐ DM sees dim pips on partial players
+       — DM roster shows 2/3 + lit/empty mini pip row per color.
+
+All five test targets are wired. Playtest-readiness pending on
+physical-device check.
+
+### Session close notes
+
+No commit this session per standing prefs (push only at session-end
+trigger phrases). Hold for Ross's "session done" signal.
+

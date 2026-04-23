@@ -334,6 +334,16 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   60%{transform:translateY(3px) scale(1.05);}
   100%{opacity:1;transform:translateY(0) scale(1);}
 }
+
+/* S013 §1.2 — empty pip pulse, 3 recency tiers */
+@keyframes pip-pulse {
+  0%,100% { opacity: 0.55; }
+  50%     { opacity: 0.95; }
+}
+.pip-empty            { animation: pip-pulse 1.8s ease-in-out infinite; } /* default: aging (30s+) */
+.pip-empty.pulse-fast { animation-duration: 0.6s; }                       /* <5s since use */
+.pip-empty.pulse-med  { animation-duration: 1.0s; }                       /* 5-30s since use */
+.pip-empty.pulse-slow { animation-duration: 1.8s; }                       /* 30s+ / default  */
 .modal-overlay{
   display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);
   z-index:100;align-items:center;justify-content:center;padding:20px;
@@ -1046,8 +1056,8 @@ function renderStatus(me) {
   const space = SPACES[me.space];
   const myKeys = Object.entries(G.magicKeys||{}).filter(([,cls])=>cls===MY_CLASS).map(([c])=>c);
 
-  const shieldMult = (MY_CLASS==='breaker' && me.skills && me.skills.iron_hide) ? 1.5 : (MY_CLASS==='breaker' ? 0.75 : 0.5);
-  const shieldMax  = Math.floor(me.hpMax * shieldMult);
+  // Shield cap (S013: uniform hpMax for all classes; class abilities can change later)
+  const shieldMax  = me.hpMax;
   const shieldPct  = shieldMax > 0 ? Math.min(100, Math.round((me.armor||0) / shieldMax * 100)) : 0;
   // Shield pip blocks — one per max shield point, filled = active
   let shieldPips = '';
@@ -1190,19 +1200,69 @@ function renderStatusClues() {
   return html;
 }
 
-function renderMiniInventory(me) {
-  var allDots = '';
-  BRICK_NAMES.forEach(function(k) {
-    var qty = me.bricks[k] || 0;
-    if (!qty) return;
-    var bg = BRICK_COLORS[k];
-    var bdr = k==='white'?'border:1px solid #ccc;':'';
-    for (var i=0;i<qty;i++) {
-      allDots += '<span style="width:20px;height:20px;border-radius:4px;background:'+bg+';'+bdr+'display:inline-block;margin:2px;box-shadow:0 1px 3px rgba(0,0,0,.5);flex-shrink:0;"></span>';
+// ── BRICK PIP RENDERING (S013 §7.2 / §1.2) ──────────────────
+// Pip row for a player's inventory: one pip per owned brick, lit for
+// charged, hollow+pulsing for empty. Pulse speed tier is set per-color
+// from lastDropped[color] recency per §1.2.
+//
+// Usage:
+//   renderBrickPips(me.bricks, me.bricksCharged, me.lastDropped, opts)
+// opts (all optional):
+//   size: pip size px (default 10, compact = 6)
+//   clickable: {targetCls: string} → pips become tap-to-trade, one per pip
+//
+// Pips follow the rumble HUD visual: filled pip = brick color + glow;
+// empty pip = dark fill + color-tinted border (readable for low-contrast
+// colors like black).
+
+function _pulseTier(lastDroppedAt) {
+  if (!lastDroppedAt) return 'pulse-slow';
+  var age = Date.now() - lastDroppedAt;
+  if (age < 5000)  return 'pulse-fast';
+  if (age < 30000) return 'pulse-med';
+  return 'pulse-slow';
+}
+
+function renderBrickPips(bricks, bricksCharged, lastDropped, opts) {
+  opts = opts || {};
+  var size = opts.size || 10;
+  var clickable = opts.clickable || null;
+  var bc = bricksCharged || {};
+  var ld = lastDropped || {};
+  var out = '';
+  BRICK_NAMES.forEach(function(color) {
+    var owned = bricks[color] || 0;
+    if (!owned) return;
+    var charged = Math.min(owned, bc[color] || 0);
+    var bg = BRICK_COLORS[color] || '#555';
+    var tier = _pulseTier(ld[color]);
+    for (var i = 0; i < owned; i++) {
+      var lit = i < charged;
+      var cls = lit ? 'pip-lit' : ('pip-empty ' + tier);
+      var style = 'display:inline-block;width:'+size+'px;height:'+size+'px;border-radius:2px;margin:1px;'
+        + (lit
+          ? 'background:' + bg + ';box-shadow:0 0 4px ' + bg + ';'
+          : 'background:#1a1a1a;border:1px solid ' + bg + 'aa;box-sizing:border-box;');
+      var attrs = 'class="'+cls+'" style="'+style+'"';
+      if (clickable && clickable.targetCls) {
+        // Each lit pip is a tap-to-trade target (empty pips are not tradable —
+        // they're charges, not inventory, but even empty owned slots represent
+        // physical bricks the owner could trade; keep entire set clickable
+        // per §1.1 "inventory is what you own" model).
+        attrs += ' data-t="'+clickable.targetCls+'" data-k="'+color+'" onclick="event.stopPropagation();startTradeRequest(this.dataset.t,this.dataset.k)" ';
+        attrs += 'title="Trade for 1 '+color+'"';
+      }
+      out += '<span ' + attrs + '></span>';
     }
   });
-  if (!allDots) return '';
-  return '<div class="card"><div class="card-title">Bricks</div><div style="display:flex;flex-wrap:wrap;padding:4px 0;">' + allDots + '</div></div>';
+  return out;
+}
+
+function renderMiniInventory(me) {
+  var pips = renderBrickPips(me.bricks, me.bricksCharged, me.lastDropped, { size: 12 });
+  if (!pips) return '';
+  return '<div class="card"><div class="card-title">Bricks</div>'
+    + '<div style="display:flex;flex-wrap:wrap;padding:4px 0;">' + pips + '</div></div>';
 }
 
 function renderKOPanel(me) {
@@ -1472,20 +1532,21 @@ function buildPrepareActions(me) {
 
   // ── ADD SHIELD — always shown ──
   {
-    var hasIronHide = MY_CLASS === 'breaker' && me.skills && me.skills.iron_hide;
-    var sCost = (MY_CLASS === 'breaker' || MY_CLASS === 'blocksmith') ? 1 : 2;
-    var sGain = hasIronHide ? 2 : 1;
-    var sMult = hasIronHide ? 1.5 : (MY_CLASS === 'breaker' ? 0.75 : 0.5);
-    var sMax = Math.floor(me.hpMax * sMult);
-    var shieldHaveEnough = (me.bricks.gray || 0) >= sCost;
+    // Shield (uniform base: 1 gray charge → +1 armor, cap = hpMax).
+    // Server may roll a crit for +2 on the same cost; not advertised up front.
+    var sCost = 1;
+    var sGain = 1;
+    var sMax  = me.hpMax;
+    var grayCharges = (me.bricksCharged && me.bricksCharged.gray) || 0;
+    var shieldHaveEnough = grayCharges >= sCost;
     var shieldAtMax = (me.armor || 0) >= sMax;
     var shieldDetail;
     if (shieldAtMax) {
       shieldDetail = 'Shield is at maximum (' + sMax + ').\nUse some or take a hit first.';
     } else if (!shieldHaveEnough) {
-      shieldDetail = 'Needs ' + sCost + ' gray brick' + (sCost>1?'s':'') + '.\nCurrent: ' + (me.bricks.gray || 0) + '.\nWould add +' + sGain + ' pip.';
+      shieldDetail = 'Needs 1 gray charge.\nCurrent: ' + grayCharges + '.\nAdds +1 armor.';
     } else {
-      shieldDetail = 'Costs ' + sCost + ' gray brick' + (sCost>1?'s':'') + '.\n+' + sGain + ' pip.\nCurrent shield: ' + (me.armor || 0) + ' / ' + sMax + '.';
+      shieldDetail = 'Costs 1 gray charge.\n+1 armor.\nCurrent shield: ' + (me.armor || 0) + ' / ' + sMax + '.';
     }
     list.push({
       id: 'add_shield',
@@ -4073,8 +4134,10 @@ function finishGoldGame(amount, total, wrongTap, cheeseFound) {
 
 function renderOutOfBattleActions(me) {
   let html = '<div class="card"><div class="card-title">Free Actions (Out of Battle)</div>';
-  // Self heal
-  if((me.bricks.white||0)>0) html+=`<button class="btn success" onclick="selfHeal()">💊 Spend white brick — heal self (${SELF_HEAL_AMT[MY_CLASS]||2} HP)</button>`;
+  var whiteCharges = (me.bricksCharged && me.bricksCharged.white) || 0;
+  var grayCharges  = (me.bricksCharged && me.bricksCharged.gray)  || 0;
+  // Self heal — gated on white CHARGE (§8.2) not inventory
+  if (whiteCharges > 0) html+=`<button class="btn success" onclick="selfHeal()">💊 Spend white charge — heal self (${SELF_HEAL_AMT[MY_CLASS]||2} HP)</button>`;
   // Fixer special
   if(MY_CLASS==='fixer') {
     html+=`<button class="btn success" onclick="showHealSelector(-1)">💊 Heal ally (1 white brick)</button>`;
@@ -4082,19 +4145,15 @@ function renderOutOfBattleActions(me) {
     const down=Object.values(G.players).filter(p=>!p.alive||p.hp<=0);
     if(down.length) html+=`<button class="btn primary" onclick="showReviveSelector()">✨ Revive player</button>`;
   }
-  // Armor
-  // Shield button — cost varies by class, shows current cap
+  // Shield (uniform base: 1 gray → +1 armor, cap = hpMax). Server rolls crit silently.
   (function() {
-    var hasIronHide2 = MY_CLASS==='breaker' && me.skills && me.skills.iron_hide;
-    var sCost = (MY_CLASS==='breaker'||MY_CLASS==='blocksmith') ? 1 : 2;
-    var sGain2 = hasIronHide2 ? 2 : 1;
-    var sMult = hasIronHide2 ? 1.5 : (MY_CLASS==='breaker' ? 0.75 : 0.5);
-    var sMax = Math.floor(me.hpMax * sMult);
-    var hasEnough = (me.bricks.gray||0) >= sCost;
+    var sCost = 1;
+    var sMax  = me.hpMax;
+    var hasEnough = grayCharges >= sCost;
     var atMax = (me.armor||0) >= sMax;
     html += '<button class="btn" '+((!hasEnough||atMax)?'disabled':'')
       + ' onclick="client.addShield(this.dataset.cls)" data-cls="'+MY_CLASS+'">'
-      + '🛡 Add Shield — costs ' + sCost + ' gray · +' + sGain2 + ' pip · ' + (me.armor||0) + '/' + sMax + ' max'
+      + '🛡 Add Shield — costs 1 gray charge · +1 armor · ' + (me.armor||0) + '/' + sMax
       + (atMax ? ' (FULL)' : '')
       + '</button>';
   })();
@@ -4140,9 +4199,9 @@ function renderOutOfBattleActions(me) {
 }
 function selfHeal(){
   const me=G.players[MY_CLASS];
-  if((me.bricks.white||0)<1){toast('No white bricks','warn');return;}
-  client.healPlayer(MY_CLASS,MY_CLASS);
-  toast(`Healed self +${SELF_HEAL_AMT[MY_CLASS]||2} HP`,'success');
+  if((me.bricksCharged && me.bricksCharged.white || 0)<1){toast('No white charge available','warn');return;}
+  if(me.hp>=me.hpMax){toast('Already at full HP','warn');return;}
+  client.healPlayer(MY_CLASS);
 }
 
 function showForge(){
@@ -4446,15 +4505,10 @@ function renderParty() {
     var hpBg=isOh?'linear-gradient(90deg,#7B2FBE,#b06fef)':hc;
     var pColor=PLAYER_META[cls].color;
     var statuses=(p.statusEffects||[]).map(function(s){return '<span class="status-badge '+s+'">'+s+'</span>';}).join('');
-    var brickDots='';
-    BRICK_NAMES.forEach(function(k){
-      var qty=p.bricks[k]||0; if(!qty)return;
-      var bg=BRICK_COLORS[k]; var bdr2=k==='white'?'border:1px solid #ccc;':'';
-      for(var bi=0;bi<qty;bi++){
-        brickDots+='<span title="Trade for 1 '+k+'" '+(p.connected?'onclick="event.stopPropagation();startTradeRequest(this.dataset.t,this.dataset.k)" data-t="'+cls+'" data-k="'+k+'" ':'')
-          +'style="width:20px;height:20px;border-radius:3px;background:'+bg+';'+bdr2+'display:inline-block;margin:2px;box-shadow:0 1px 3px rgba(0,0,0,.4);flex-shrink:0;'+(p.connected?'cursor:pointer;':'')+';"></span>';
-      }
-    });
+    var brickDots = renderBrickPips(
+      p.bricks, p.bricksCharged, p.lastDropped,
+      { size: 14, clickable: p.connected ? { targetCls: cls } : null }
+    );
     html+='<div '+(p.connected?'onclick="openGivePanel(\''+cls+'\')" ':'')+'style="padding:12px;border-radius:12px;background:var(--surface3);border:1px solid #2a2a2a;margin-bottom:8px;'+(p.connected?'cursor:pointer;':'')+'">'
       +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
       +'<span style="font-size:22px;">'+p.icon+'</span>'
@@ -4476,8 +4530,7 @@ function renderParty() {
   if(me){
     var myHpPct=Math.max(0,Math.round(me.hp/me.hpMax*100));
     var myHc=me.hp<=Math.floor(me.hpMax*.25)?'#E24B4A':me.hp<=Math.floor(me.hpMax*.5)?'#EF9F27':'#1D9E75';
-    var myBricks='';
-    BRICK_NAMES.forEach(function(k){var qty=me.bricks[k]||0;if(!qty)return;var bg=BRICK_COLORS[k];var bdr=k==='white'?'border:1px solid #ccc;':'';myBricks+='<span style="display:inline-flex;align-items:center;gap:2px;padding:2px 5px;border-radius:6px;background:'+bg+'22;border:1px solid '+bg+'33;margin:1px;font-size:10px;"><span style="width:7px;height:7px;border-radius:2px;background:'+bg+';'+bdr+'display:inline-block;"></span><span style="color:'+(k==='white'||k==='yellow'?'#555':bg)+';font-weight:700;">'+qty+'</span></span>';});
+    var myBricks = renderBrickPips(me.bricks, me.bricksCharged, me.lastDropped, { size: 10 });
     html+='<div style="padding:10px 12px;border-radius:12px;border:1px solid var(--cls-color);margin-bottom:8px;opacity:.7;">'
       +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'
       +'<span style="font-size:16px;">'+me.icon+'</span>'

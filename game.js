@@ -469,11 +469,14 @@ class GameClient {
   removeFortressBrick()             { this.send('removeFortressBrick'); }
   rescueVillager()                  { this.send('rescueVillager'); }
 
+  // ── BOARD ACTIONS (S013 §8.2 — consume bricksCharged) ──
+  healPlayer(cls)                   { this.send('healPlayer', { cls }); }
+  addShield(cls)                    { this.send('addShield',  { cls }); }
+
   // ── LEGACY STUBS ──
   // No-ops for UI paths tied to removed turn-based battle + skills systems.
   // Will be replaced by real implementations in Build 0.14.0 (Action Hub).
   _legacy(name) { console.warn('[legacy no-op]', name); }
-  healPlayer()        { this._legacy('healPlayer'); }
   revivePlayer()      { this._legacy('revivePlayer'); }
   massRepair()        { this._legacy('massRepair'); }
   useBrick()          { this._legacy('useBrick'); }
@@ -482,7 +485,6 @@ class GameClient {
   blueprint()         { this._legacy('blueprint'); }
   forge()             { this._legacy('forge'); }
   activateEnhanced()  { this._legacy('activateEnhanced'); }
-  addShield()         { this._legacy('addShield'); }
 }
 
 // ── UTILITY ───────────────────────────────────────────────
