@@ -1962,17 +1962,22 @@ function fireOverloadBlue(count) {
   var target = entities.length ? entities.reduce(function(a,b){
     return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null;
   if (!target) return;
-  // Single bolt. Damage scales with overload count, class affinity, and inventory.
-  // Overload bolts also create a minor impact burst radius that damages
-  // nearby entities for half damage. Burst radius scales with count.
+  // Single bolt. Damage scales with overload count, class affinity, inventory,
+  // and crit. Overload bolts also create a minor impact burst radius that
+  // damages nearby entities for half damage. Burst radius scales with count.
+  //
+  // BLUE CRUSHING STRIKE: crit doubles bolt damage (matches red/gray/purple
+  // convention). Previously blue crit only marked targets for +50% follow-up
+  // damage, which was wasted on solo kills and made blue crit feel weak.
   var tap = tapScaleMult('blue');
   var aff = affinityMult('blue');
   var stack = overloadStackMult(count);
+  var bcritMult = _currentCrit ? 2.0 : 1.0;
   blueBolts.push({
     x: player.x, y: player.y,
     target: target,
     speed: 400 + count * 40,
-    dmg: Math.ceil(4 * tap * count * aff * stack),
+    dmg: Math.ceil(4 * tap * count * aff * stack * bcritMult),
     r: 6 + count * 4,       // x1=10, x5=26
     dead: false,
     travelled: 0,
@@ -1980,7 +1985,7 @@ function fireOverloadBlue(count) {
     glow: count * 10,
     delayTimer: 0,
     burstRadius: scaleDist((30 + count * 15) * stack),  // impact burst AoE
-    burstDmg: Math.ceil(2 * tap * count * aff * stack),      // ~half primary dmg
+    burstDmg: Math.ceil(2 * tap * count * aff * stack * bcritMult),      // ~half primary dmg
     isCrit: _currentCrit,
   });
 }
@@ -3764,25 +3769,17 @@ function drawDroppedBricks() {
     ctx.globalAlpha = alpha;
 
     if (p.kind === 'cheese') {
-      // Cheese wedge: warm yellow triangle with small dark holes. Bigger
-      // than a brick because it's a bigger deal.
-      var cz = p.r * 1.6;
-      ctx.shadowColor = '#F5C800'; ctx.shadowBlur = 12;
-      ctx.fillStyle = '#F5D060';
-      ctx.beginPath();
-      ctx.moveTo(p.x - cz/2, p.y + cz/2 + bobY);
-      ctx.lineTo(p.x + cz/2, p.y + cz/2 + bobY);
-      ctx.lineTo(p.x, p.y - cz/2 + bobY);
-      ctx.closePath();
-      ctx.fill();
-      // Holes
+      // Render the 🧀 emoji so the on-ground cheese loot matches the cheese
+      // icon used everywhere else (DM chips, player HUD, victory card).
+      // Previously rendered as a yellow triangle with dark dots, which was
+      // stylized but didn't read as cheese at a glance.
+      var cz = p.r * 2.4; // slightly larger than a brick
+      ctx.shadowColor = '#F5C800'; ctx.shadowBlur = 10;
+      ctx.font = cz + 'px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🧀', p.x, p.y + bobY);
       ctx.shadowBlur = 0;
-      ctx.fillStyle = '#A8851F';
-      [[-2, 1], [2, 3], [0, -2]].forEach(function(o) {
-        ctx.beginPath();
-        ctx.arc(p.x + o[0], p.y + o[1] + bobY, 1.2, 0, Math.PI*2);
-        ctx.fill();
-      });
     } else if (p.kind === 'gold') {
       // Gold coin: round disc with rim + inner highlight.
       var rad = p.r;
@@ -6194,7 +6191,9 @@ var blueBolts = [];
 function startBlueBolt(lockedTarget) {
   var target = lockedTarget || (entities.length ? entities.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null);
   if (!target || !player) return;
-  blueBolts.push({ x: player.x, y: player.y, target: target, speed: 500, dmg: Math.ceil(4 * tapScaleMult('blue') * affinityMult('blue')), r: 7, dead: false, travelled: 0, tier: 1, glow: 0, delayTimer: 0, isCrit: _currentCrit });
+  // BLUE CRUSHING STRIKE: crit doubles damage (matches red/gray/purple).
+  var bcritTap = _currentCrit ? 2.0 : 1.0;
+  blueBolts.push({ x: player.x, y: player.y, target: target, speed: 500, dmg: Math.ceil(4 * tapScaleMult('blue') * affinityMult('blue') * bcritTap), r: 7, dead: false, travelled: 0, tier: 1, glow: 0, delayTimer: 0, isCrit: _currentCrit });
 }
 
 // Blue drag-drop variant: fires a bolt at a fixed world-space point.
@@ -6204,12 +6203,14 @@ function startBlueBolt(lockedTarget) {
 // area-denial casts instead of always homing on the nearest entity.
 function startBlueBoltAtPoint(tx, ty) {
   if (!player) return;
+  // BLUE CRUSHING STRIKE: crit doubles damage.
+  var bcritAP = _currentCrit ? 2.0 : 1.0;
   blueBolts.push({
     x: player.x, y: player.y,
     target: null, fixedPoint: true,
     targetX: tx, targetY: ty,
     speed: 500,
-    dmg: Math.ceil(4 * tapScaleMult('blue') * affinityMult('blue')),
+    dmg: Math.ceil(4 * tapScaleMult('blue') * affinityMult('blue') * bcritAP),
     // Impact radius for drag-drop fire: modest AoE so dropping near a goblin
     // still connects. Scales with display (scaleDist). Snapstep-tight enough
     // that you have to aim, wide enough to be useful.
@@ -8022,32 +8023,46 @@ function _fireCPRBlip() {
   var el = document.createElement('div');
   el.className = 'revive-cpr-blip';
   el.textContent = blip;
+  var isRetry = !!_reviveState.isRetry;
+  // Retry gets a more ragged, dying-breath typography: bolder weight,
+  // wider letter-spacing, slight tracking shake, and a bone-white color
+  // (matches the heart outline). Normal gets the warm CPR italic look.
+  var fontStyle = isRetry
+    ? 'font-family:Georgia,\'Times New Roman\',serif;font-style:italic;font-weight:900;font-size:clamp(16px,4.6vw,22px);letter-spacing:.14em;'
+    : 'font-family:\'Crimson Pro\',Georgia,serif;font-style:italic;font-weight:600;font-size:clamp(14px,3.8vw,19px);letter-spacing:.04em;';
+  var colorStyle = isRetry
+    ? 'color:#e8dcc0;text-shadow:0 0 14px rgba(0,0,0,0.95), 0 0 22px rgba(232,220,192,0.5), 0 2px 5px rgba(0,0,0,0.95);'
+    : 'color:#fff;text-shadow:0 0 10px #000, 0 0 18px rgba(220,80,80,0.8), 0 1px 3px rgba(0,0,0,0.9);';
   el.style.cssText =
       'position:absolute;'
     + 'left:calc(50% + ' + pos.x.toFixed(1) + '%);'
     + 'top:calc(50% + ' + pos.y.toFixed(1) + '%);'
     + 'transform:translate(-50%,-50%);'
-    + 'font-family:\'Crimson Pro\',serif;font-style:italic;font-weight:600;'
-    + 'font-size:clamp(14px,3.8vw,19px);'
-    + 'color:#fff;letter-spacing:.04em;'
-    + 'text-shadow:0 0 10px #000, 0 0 18px rgba(220,80,80,0.8), 0 1px 3px rgba(0,0,0,0.9);'
+    + fontStyle
+    + colorStyle
     + 'opacity:0;pointer-events:none;white-space:nowrap;'
     + 'z-index:3;';
   stack.appendChild(el);
 
-  // Animate: fade in fast, drift up, fade out, remove
+  // Animate: fade in, drift up, fade out, remove.
+  // Retry blips hang longer and fade more slowly — desperate pacing.
+  var holdMs   = isRetry ? 2200 : 650;    // time on screen at full opacity
+  var fadeMs   = isRetry ? 1500 : 400;    // fade-out duration
+  var driftMs  = isRetry ? 3200 : 1100;   // total transform duration
+  var removeMs = holdMs + fadeMs + 100;
+
   requestAnimationFrame(function() {
-    el.style.transition = 'opacity 0.2s ease-out, transform 1.1s ease-out';
+    el.style.transition = 'opacity 0.2s ease-out, transform ' + driftMs + 'ms ease-out';
     el.style.opacity = '1';
     el.style.transform = 'translate(-50%,-50%) translate(' + driftX + 'px,' + driftY + 'px)';
   });
   setTimeout(function() {
-    el.style.transition = 'opacity 0.4s ease-in';
+    el.style.transition = 'opacity ' + fadeMs + 'ms ease-in';
     el.style.opacity = '0';
-  }, 650);
+  }, holdMs);
   setTimeout(function() {
     if (el && el.parentNode) el.parentNode.removeChild(el);
-  }, 1200);
+  }, removeMs);
 }
 
 function _startReviveMinigame(attemptIdx) {
@@ -8115,9 +8130,12 @@ function _reviveTick() {
     pathEl.style.strokeDashoffset = (_reviveState.pathLength * pct).toFixed(2);
   }
 
-  // CPR blip — fire one every 5 taps (5, 10, 15, 20)
-  var blipThreshold = Math.floor(_reviveState.taps / 5);
-  var lastBlipThreshold = Math.floor((_reviveState.lastBlipAtTap || 0) / 5);
+  // CPR blip frequency. Normal first attempt: every 5 taps (5,10,15,20).
+  // LAST CHANCE retry: every 3 taps (more frequent, desperate pacing matches
+  // the dire flavor pool).
+  var blipInterval = _reviveState.isRetry ? 3 : 5;
+  var blipThreshold = Math.floor(_reviveState.taps / blipInterval);
+  var lastBlipThreshold = Math.floor((_reviveState.lastBlipAtTap || 0) / blipInterval);
   if (_reviveState.taps > 0 && blipThreshold > lastBlipThreshold) {
     _reviveState.lastBlipAtTap = _reviveState.taps;
     _fireCPRBlip();

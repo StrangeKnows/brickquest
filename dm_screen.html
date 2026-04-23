@@ -1102,10 +1102,30 @@ function renderActiveEvent() {
     if (/shield pip|\+1 shield/i.test(msg)) items.push({emoji:'🛡', size:16});
 
     var iconRow = items.length ? dmIconRow(items) : '<span style="font-size:11px;color:#888;font-style:italic;">—</span>';
+
+    // Strip parsed reward tokens from the msg so they don't double-render
+    // (icon row already showed them). Keeps narrative context after em-dash
+    // or parenthesis. Before: "+1 🧀 cheese — chests left for next traveler"
+    //          → icons show 🧀, text shows "chests left for next traveler"
+    var trimmedMsg = msg
+      .replace(/\+\d+\s*(?:red|blue|gray|green|white|yellow|orange|purple|black)(?:\s+brick)?s?/gi, '')
+      .replace(/\+\d+\s*(?:🧀|cheese)/gi, '')
+      .replace(/\+\d+\s*🧀/gi, '')
+      .replace(/\+\d+\s*gold/gi, '')
+      .replace(/\+\d+\s*🪙/gi, '')
+      .replace(/[-−]\d+\s*(?:max\s*)?HP(?!\s*max)/gi, '')
+      .replace(/[-−]\d+\s*max\s*HP/gi, '')
+      .replace(/\+1\s*shield\s*pip?/gi, '')
+      // Clean up leading comma/em-dash/whitespace left behind
+      .replace(/^[\s,·\-—]+/, '')
+      .replace(/[\s,·\-—]+$/, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
     return '<div style="margin-top:6px;padding:8px 10px;border-radius:8px;background:'+bgColor+';border:1px solid '+borderColor+';">'
       + '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:'+themeColor+';margin-bottom:4px;">'+title+'</div>'
       + iconRow
-      + (msg ? '<div style="font-size:10px;color:#999;margin-top:4px;font-style:italic;">'+msg+'</div>' : '')
+      + (trimmedMsg ? '<div style="font-size:10px;color:#999;margin-top:4px;font-style:italic;">'+trimmedMsg+'</div>' : '')
       + '</div>';
   }
 
