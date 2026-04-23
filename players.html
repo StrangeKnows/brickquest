@@ -4432,6 +4432,20 @@ function _showTradeComposer(targetCls) {
       +'<button onclick="event.stopPropagation();adjustTradeWant(\''+k+'\',1)" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">+</button>'
       +'</div></div>';
   });
+  // Want cheese row — can want cheese from them if they have any
+  var targetCheese = target.cheese||0;
+  if (targetCheese > 0) {
+    var wcQty = _tradeWantAmounts.cheese||0;
+    wantRows += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
+      +'<span style="font-size:18px;line-height:1;">&#129472;</span>'
+      +'<span style="font-family:Cinzel,serif;font-size:12px;color:#FFD96A;flex:1;"></span>'
+      +'<span style="font-size:11px;color:var(--text-dim);">x'+targetCheese+' avail</span>'
+      +'<div style="display:flex;align-items:center;gap:6px;">'
+      +'<button onclick="event.stopPropagation();adjustTradeWant(\'cheese\','+-1+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">&#8722;</button>'
+      +'<span id="twant-qty-cheese" style="min-width:24px;text-align:center;font-family:Cinzel,serif;font-size:14px;">'+wcQty+'</span>'
+      +'<button onclick="event.stopPropagation();adjustTradeWant(\'cheese\',1)" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">+</button>'
+      +'</div></div>';
+  }
 
   // Build offer rows (my bricks)
   var offerRows = '';
@@ -4464,6 +4478,20 @@ function _showTradeComposer(targetCls) {
       +'<button onclick="event.stopPropagation();adjustTradeOffer(\'gold\',1,'+myGold+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">+</button>'
       +'</div></div>';
   }
+  // Cheese offer row — offer cheese alongside bricks/gold
+  var myCheeseT = me.cheese||0;
+  if (myCheeseT > 0) {
+    var ocQty = _tradeOfferAmounts.cheese||0;
+    offerRows += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
+      +'<span style="font-size:18px;line-height:1;">&#129472;</span>'
+      +'<span style="font-family:Cinzel,serif;font-size:12px;color:#FFD96A;flex:1;"></span>'
+      +'<span style="font-size:11px;color:var(--text-dim);">x'+myCheeseT+'</span>'
+      +'<div style="display:flex;align-items:center;gap:6px;">'
+      +'<button onclick="event.stopPropagation();adjustTradeOffer(\'cheese\','+-1+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">&#8722;</button>'
+      +'<span id="toffer-qty-cheese" style="min-width:24px;text-align:center;font-family:Cinzel,serif;font-size:14px;">'+ocQty+'</span>'
+      +'<button onclick="event.stopPropagation();adjustTradeOffer(\'cheese\',1,'+myCheeseT+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">+</button>'
+      +'</div></div>';
+  }
 
   // Summary icons for headers
   function buildIcons(amounts, isOther) {
@@ -4474,6 +4502,7 @@ function _showTradeComposer(targetCls) {
       for(var i=0;i<qty;i++) icons+='<span style="width:16px;height:16px;border-radius:2px;background:'+bg+';'+bdr+'display:inline-block;margin:1px;box-shadow:0 1px 2px rgba(0,0,0,.4);"></span>';
     });
     if((amounts.gold||0)>0) icons+='<span style="font-size:14px;vertical-align:middle;margin:1px;">&#129689;</span><span style="font-size:11px;color:var(--gold);">'+amounts.gold+'</span>';
+    if((amounts.cheese||0)>0) icons+='<span style="font-size:14px;vertical-align:middle;margin:1px;">&#129472;</span><span style="font-size:11px;color:#FFD96A;">'+amounts.cheese+'</span>';
     return icons || '<span style="font-size:11px;color:var(--text-faint);">—</span>';
   }
 
@@ -4538,10 +4567,12 @@ function confirmTradeOffer(targetCls) {
   BRICK_NAMES.forEach(function(k){ if((_tradeWantAmounts[k]||0)>0) wantBricks[k]=_tradeWantAmounts[k]; });
   var offerBricks = {};
   BRICK_NAMES.forEach(function(k){ if((_tradeOfferAmounts[k]||0)>0) offerBricks[k]=_tradeOfferAmounts[k]; });
-  var offerGold = _tradeOfferAmounts.gold||0;
-  client.offerTrade(MY_CLASS, targetCls, wantBricks, offerBricks, offerGold);
+  var offerGold   = _tradeOfferAmounts.gold   || 0;
+  var offerCheese = _tradeOfferAmounts.cheese || 0;
+  var wantCheese  = _tradeWantAmounts.cheese  || 0;
+  client.offerTrade(MY_CLASS, targetCls, wantBricks, offerBricks, offerGold, wantCheese, offerCheese);
   document.getElementById('trade-composer')?.remove();
-  _pendingTradeSent = { fromCls: MY_CLASS, targetCls, wantBricks, offerBricks, offerGold };
+  _pendingTradeSent = { fromCls: MY_CLASS, targetCls, wantBricks, wantCheese, offerBricks, offerGold, offerCheese };
   var targetName = G.players[targetCls]?.playerName || G.players[targetCls]?.name || targetCls;
   var banner = document.getElementById('phase-banner');
   if (banner) {
@@ -4582,8 +4613,10 @@ function renderParty() {
     var offerIcons2 = '';
     Object.entries(offerBricks2).forEach(function(e){ var k=e[0];var qty=e[1];var bg=BRICK_COLORS[k]||'#888';var bdr=k==='white'?'border:1px solid #ccc;':'';for(var i=0;i<qty;i++)offerIcons2+='<span style="width:18px;height:18px;border-radius:3px;background:'+bg+';'+bdr+'display:inline-block;margin:1px;"></span>'; });
     if (pt.offerGold>0) offerIcons2+='<span style="font-size:14px;vertical-align:middle;">&#129689;</span><span style="font-size:11px;color:var(--gold);">'+pt.offerGold+'</span>';
+    if ((pt.offerCheese||0)>0) offerIcons2+='<span style="font-size:14px;vertical-align:middle;">&#129472;</span><span style="font-size:11px;color:#FFD96A;">'+pt.offerCheese+'</span>';
     var wantIcons2 = '';
     Object.entries(wantBricks2).forEach(function(e){ var k=e[0];var qty=e[1];var bg=BRICK_COLORS[k]||'#888';var bdr=k==='white'?'border:1px solid #ccc;':'';for(var i=0;i<qty;i++)wantIcons2+='<span style="width:18px;height:18px;border-radius:3px;background:'+bg+';'+bdr+'display:inline-block;margin:1px;"></span>'; });
+    if ((pt.wantCheese||0)>0) wantIcons2+='<span style="font-size:14px;vertical-align:middle;">&#129472;</span><span style="font-size:11px;color:#FFD96A;">'+pt.wantCheese+'</span>';
     html += '<div style="background:#1a1500;border:2px solid var(--gold);border-radius:12px;padding:12px 14px;margin-bottom:10px;text-align:center;">'
       + '<div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.06em;color:var(--gold);margin-bottom:6px;">AWAITING RESPONSE</div>'
       + '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">Trade sent to <span style="color:'+ptColor+';font-weight:700;">'+(ptTarget?.icon||'')+' '+ptName+'</span></div>'
@@ -4742,7 +4775,7 @@ function showTradeModal(offer) {
   const wantBg = BRICK_COLORS[offer.wantColor] || '#888';
   const wantBdr = offer.wantColor==='white' ? 'border:1px solid #ccc;' : '';
 
-  // Build want items display
+  // Build want items display (what they want from you)
   var wantBricks = offer.wantBricks || (offer.wantColor ? {[offer.wantColor]:1} : {});
   var wantItems = '';
   Object.entries(wantBricks).forEach(function(e) {
@@ -4750,8 +4783,11 @@ function showTradeModal(offer) {
     var bg=BRICK_COLORS[k]||'#888'; var bdr=k==='white'?'border:1px solid #ccc;':'';
     for (var i=0;i<qty;i++) wantItems+='<span style="width:26px;height:26px;border-radius:4px;background:'+bg+';'+bdr+'display:inline-block;margin:2px;box-shadow:0 1px 4px rgba(0,0,0,.5);"></span>';
   });
+  if ((offer.wantCheese||0) > 0) {
+    wantItems += '<span style="font-size:22px;vertical-align:middle;margin:2px;">&#129472;</span><span style="font-size:13px;color:#FFD96A;font-family:Cinzel,serif;vertical-align:middle;">'+offer.wantCheese+'</span>';
+  }
 
-  // Build offer items display (multi-brick + gold)
+  // Build offer items display (what they give you — bricks + gold + cheese)
   var offerItems = '';
   var offerBricks = offer.offerBricks || (offer.offerColor ? {[offer.offerColor]:1} : {});
   Object.entries(offerBricks).forEach(function(e) {
@@ -4763,6 +4799,9 @@ function showTradeModal(offer) {
   });
   if (offer.offerGold > 0) {
     offerItems += '<span style="font-size:18px;vertical-align:middle;margin:2px;">&#129689;</span><span style="font-size:13px;color:var(--gold);font-family:Cinzel,serif;vertical-align:middle;">'+offer.offerGold+'</span>';
+  }
+  if ((offer.offerCheese||0) > 0) {
+    offerItems += '<span style="font-size:22px;vertical-align:middle;margin:2px;">&#129472;</span><span style="font-size:13px;color:#FFD96A;font-family:Cinzel,serif;vertical-align:middle;">'+offer.offerCheese+'</span>';
   }
 
   document.getElementById('trade-modal-body').innerHTML =

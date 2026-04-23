@@ -414,7 +414,7 @@ class GameClient {
   purchaseBrick(cls,color)          { this.send('purchaseBrick',{cls,color}); }
   adjustGold(cls,amount)            { this.send('adjustGold',{cls,amount}); }
   adjustArmor(cls,amount)           { this.send('adjustArmor',{cls,amount}); }
-  offerTrade(fromCls,toCls,wantBricks,offerBricks,offerGold) { this.send('offerTrade',{fromCls,toCls,wantBricks,offerBricks,offerGold}); }
+  offerTrade(fromCls,toCls,wantBricks,offerBricks,offerGold,wantCheese,offerCheese) { this.send('offerTrade',{fromCls,toCls,wantBricks,offerBricks,offerGold,wantCheese,offerCheese}); }
   respondTrade(id,accept)           { this.send('respondTrade',{id,accept}); }
   setGate(gate,status)              { this.send('setGate',{gate,status}); }
   forceGate(cls,gate)               { this.send('forceGate',{cls,gate}); }

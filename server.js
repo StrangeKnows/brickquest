@@ -2632,12 +2632,14 @@ wss.on('connection', (ws, req) => {
       const id = Date.now().toString();
       const offerBricks = P.offerBricks || (P.offerColor ? {[P.offerColor]:1} : {});
       const offerGold   = P.offerGold || 0;
+      const offerCheese = P.offerCheese || 0;
       const wantBricks  = P.wantBricks || (P.wantColor ? {[P.wantColor]:1} : {});
-      G.pendingTrade = { id, fromCls:P.fromCls, toCls:P.toCls, wantBricks, offerBricks, offerGold };
+      const wantCheese  = P.wantCheese || 0;
+      G.pendingTrade = { id, fromCls:P.fromCls, toCls:P.toCls, wantBricks, wantCheese, offerBricks, offerGold, offerCheese };
       const fromName = G.players[P.fromCls]?.playerName || G.players[P.fromCls]?.name || P.fromCls;
       const toName   = G.players[P.toCls]?.playerName   || G.players[P.toCls]?.name   || P.toCls;
-      const offerDesc = Object.entries(offerBricks).map(([k,v])=>`${v}x${k}`).join(', ')+(offerGold>0?` +${offerGold}g`:'');
-      const wantDesc  = Object.entries(wantBricks).map(([k,v])=>`${v}x${k}`).join(', ');
+      const offerDesc = Object.entries(offerBricks).map(([k,v])=>`${v}x${k}`).join(', ')+(offerGold>0?` +${offerGold}g`:'')+(offerCheese>0?` +${offerCheese}🧀`:'');
+      const wantDesc  = Object.entries(wantBricks).map(([k,v])=>`${v}x${k}`).join(', ')+(wantCheese>0?` +${wantCheese}🧀`:'');
       log(`${fromName} offers [${offerDesc}] for [${wantDesc}] from ${toName}`,'trade');
       clients.forEach((info, cws) => {
         if (info.role === P.toCls && cws.readyState === 1)
@@ -2654,17 +2656,21 @@ wss.on('connection', (ws, req) => {
         const wantBricks  = t.wantBricks  || {};
         const fromHasBricks = Object.entries(offerBricks).every(([k,v]) => (from.bricks[k]||0) >= v);
         const fromHasGold   = (from.gold||0) >= (t.offerGold||0);
+        const fromHasCheese = (from.cheese||0) >= (t.offerCheese||0);
         const toHasWant     = Object.entries(wantBricks).every(([k,v])  => (to.bricks[k]||0)   >= v);
-        if (fromHasBricks && fromHasGold && toHasWant) {
+        const toHasCheese   = (to.cheese||0) >= (t.wantCheese||0);
+        if (fromHasBricks && fromHasGold && fromHasCheese && toHasWant && toHasCheese) {
           Object.entries(offerBricks).forEach(([k,v]) => { removeBrick(from, k, v); addBrick(to, k, v); });
-          if (t.offerGold>0) { from.gold=(from.gold||0)-t.offerGold; to.gold=(to.gold||0)+t.offerGold; }
+          if (t.offerGold>0)   { from.gold=(from.gold||0)-t.offerGold;   to.gold=(to.gold||0)+t.offerGold; }
+          if (t.offerCheese>0) { from.cheese=(from.cheese||0)-t.offerCheese; to.cheese=(to.cheese||0)+t.offerCheese; }
           Object.entries(wantBricks).forEach(([k,v])  => { removeBrick(to, k, v); addBrick(from, k, v); });
-          const offerDesc=Object.entries(offerBricks).map(([k,v])=>`${v}x${k}`).join(', ')+(t.offerGold>0?` +${t.offerGold}g`:'');
-          const wantDesc=Object.entries(wantBricks).map(([k,v])=>`${v}x${k}`).join(', ');
+          if (t.wantCheese>0)  { to.cheese=(to.cheese||0)-t.wantCheese; from.cheese=(from.cheese||0)+t.wantCheese; }
+          const offerDesc=Object.entries(offerBricks).map(([k,v])=>`${v}x${k}`).join(', ')+(t.offerGold>0?` +${t.offerGold}g`:'')+(t.offerCheese>0?` +${t.offerCheese}🧀`:'');
+          const wantDesc=Object.entries(wantBricks).map(([k,v])=>`${v}x${k}`).join(', ')+(t.wantCheese>0?` +${t.wantCheese}🧀`:'');
           log(`Trade accepted: ${from.name} gave [${offerDesc}] for [${wantDesc}] from ${to.name}`,'trade');
           clients.forEach((info, cws) => {
             if ((info.role===t.fromCls||info.role===t.toCls) && cws.readyState===1)
-              cws.send(JSON.stringify({type:'tradeAccepted',wantBricks,offerBricks,offerGold:t.offerGold,fromCls:t.fromCls,toCls:t.toCls}));
+              cws.send(JSON.stringify({type:'tradeAccepted',wantBricks,wantCheese:t.wantCheese||0,offerBricks,offerGold:t.offerGold,offerCheese:t.offerCheese||0,fromCls:t.fromCls,toCls:t.toCls}));
           });
         } else { log(`Trade failed — items no longer available`,'trade'); }
       } else {
