@@ -7946,11 +7946,15 @@ var _CPR_BLIPS = [
   'Pump it, friend',
 ];
 
-function _pickCPRBlip(lastBlip) {
-  // Avoid repeating the most recent blip in a row.
-  var pool = lastBlip
-    ? _CPR_BLIPS.filter(function(b) { return b !== lastBlip; })
-    : _CPR_BLIPS;
+function _pickCPRBlip(usedSet) {
+  // No-repeat within a revive session. When every blip has been used, clear
+  // the set so we can cycle through again (rare — 15 blips vs 4 per session).
+  var pool = _CPR_BLIPS.filter(function(b) { return !usedSet[b]; });
+  if (!pool.length) {
+    // Exhausted — clear and restart
+    Object.keys(usedSet).forEach(function(k) { delete usedSet[k]; });
+    pool = _CPR_BLIPS.slice();
+  }
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
@@ -7958,7 +7962,9 @@ function _fireCPRBlip() {
   if (!_reviveState) return;
   var stack = document.getElementById('revive-heart-stack');
   if (!stack) return;
-  var blip = _pickCPRBlip(_reviveState.lastBlip || null);
+  if (!_reviveState.usedBlips) _reviveState.usedBlips = {};
+  var blip = _pickCPRBlip(_reviveState.usedBlips);
+  _reviveState.usedBlips[blip] = true;
   _reviveState.lastBlip = blip;
 
   // Pick a random position around/over the heart. Avoid repeating the
@@ -8036,6 +8042,8 @@ function _startReviveMinigame(attemptIdx) {
     tickId: null,
     lastBlipAtTap: 0,    // last tap count at which a blip fired
     lastBlip: null,      // last blip text (prevents immediate repeat)
+    usedBlips: {},       // S013.6: session-level used-blip set (no repeats)
+    lastBlipQuad: null,  // last quadrant used for positioning
     blipFadeTimer: null, // handle for the fade-out timeout
     pathLength: 0,       // measured on overlay mount (SVG path.getTotalLength)
   };
@@ -8051,18 +8059,20 @@ function _reviveTick() {
   var tapPct = Math.min(1, _reviveState.taps / _reviveState.tapsNeeded);
 
   // Inner heart grows with taps; pulse accelerates as life returns.
-  var innerEl = document.getElementById('revive-heart-inner');
-  if (innerEl) {
+  // S013.6: inner is now an SVG <g> wrapper — scale applies via CSS transform
+  // on the group, not translate+scale on a div.
+  var innerG = document.getElementById('revive-heart-inner-g');
+  if (innerG) {
     var innerScale = 0.2 + 0.8 * tapPct;
-    innerEl.style.transform = 'translate(-50%,-50%) scale(' + innerScale.toFixed(3) + ')';
+    innerG.style.transform = 'scale(' + innerScale.toFixed(3) + ')';
     var pulseSpeed = Math.max(0.3, 1.0 - 0.7 * tapPct); // seconds per cycle
-    innerEl.style.animationDuration = pulseSpeed.toFixed(2) + 's';
+    innerG.style.animationDuration = pulseSpeed.toFixed(2) + 's';
   }
 
-  // S013.5: Outer heart SVG outline drains from the bottom cusp. Animated
-  // via stroke-dashoffset growing from 0 to pathLength as time elapses.
-  // Heart shape stays full size — only the outline erases, like a fuse
-  // burning. Path starts at bottom cusp so drain visually originates there.
+  // S013.5: Outer heart SVG outline drains from full perimeter to empty.
+  // At t=0, strokeDashoffset=0 → full outline drawn. At t=windowMs,
+  // strokeDashoffset=pathLength → outline fully erased. Shape stays the
+  // same size throughout; only the visible stroke segment changes.
   var pathEl = document.getElementById('revive-heart-outer-path');
   if (pathEl) {
     // Lazy-init: measure path length on first tick (SVG must be mounted).
@@ -8072,9 +8082,8 @@ function _reviveTick() {
         pathEl.style.strokeDasharray = _reviveState.pathLength;
         pathEl.style.strokeDashoffset = 0;
       } catch (e) {
-        // If getTotalLength fails (rare), fall back to approximate length.
-        _reviveState.pathLength = 80;
-        pathEl.style.strokeDasharray = 80;
+        _reviveState.pathLength = 50;
+        pathEl.style.strokeDasharray = 50;
         pathEl.style.strokeDashoffset = 0;
       }
     }
@@ -8098,10 +8107,8 @@ function _reviveTick() {
   // Time out?
   if (now >= _reviveState.endsAt) {
     if (!_reviveState.isRetry) {
-      // Offer retry
       _offerReviveRetry();
     } else {
-      // Final failure → defeat
       _resolveRevive(false);
     }
   }
@@ -8112,12 +8119,12 @@ function _reviveTapHandler(e) {
   if (e && e.preventDefault) e.preventDefault();
   _reviveState.taps++;
   // S013.3: CPR feel — inner heart gives a quick extra squeeze on tap.
-  // Overall scale is driven by _reviveTick; this is a brief impulse on top.
-  var innerEl = document.getElementById('revive-heart-inner');
-  if (innerEl) {
-    innerEl.classList.remove('revive-tap-impulse');
-    void innerEl.offsetWidth; // restart animation
-    innerEl.classList.add('revive-tap-impulse');
+  // Overall scale is driven by _reviveTick; this is a brief filter impulse on top.
+  var innerG = document.getElementById('revive-heart-inner-g');
+  if (innerG) {
+    innerG.classList.remove('revive-tap-impulse');
+    void innerG.offsetWidth; // restart animation
+    innerG.classList.add('revive-tap-impulse');
   }
 }
 
@@ -8175,31 +8182,43 @@ function _showReviveOverlay() {
   var heartStackHtml =
         '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);overflow:visible;'
       +   'display:flex;align-items:center;justify-content:center;">'
-      // Outer heart — SVG with drainable stroke
-      +   '<svg id="revive-heart-outer-svg" viewBox="-10 -10 20 20" '
+      // Outer heart — SVG outline, bone white with dark shadow. Acts as a
+      // timer: starts at full perimeter, drains to zero as time runs out.
+      // Stroke width reduced to ~1/3 of prior (0.53 in 20-unit viewBox).
+      +   '<svg id="revive-heart-outer-svg" viewBox="-11 -11 22 22" '
       +     'style="position:absolute;top:50%;left:50%;'
       +     'transform:translate(-50%,-50%);'
       +     'width:min(260px,60vmin);height:min(260px,60vmin);'
-      +     'filter:drop-shadow(0 0 14px ' + tcRgba(0.5) + ');'
       +     'pointer-events:none;'
       +     'overflow:visible;">'
       +     '<path id="revive-heart-outer-path" d="' + heartPath + '" '
       +       'fill="none" '
-      +       'stroke="' + titleColor + '" '
-      +       'stroke-width="1.6" '
+      +       'stroke="#e8dcc0" '
+      +       'stroke-width="0.55" '
       +       'stroke-linecap="round" '
       +       'stroke-linejoin="round" '
-      +       'style="transition:stroke-dashoffset 0.1s linear;" />'
+      +       'style="filter:drop-shadow(0 0 0.4px rgba(0,0,0,0.95)) drop-shadow(0 0 2px rgba(0,0,0,0.7));'
+      +       'transition:stroke-dashoffset 0.1s linear;" />'
       +   '</svg>'
-      // Inner heart — solid red Unicode glyph, grows with taps
-      +   '<div id="revive-heart-inner" style="position:absolute;top:50%;left:50%;'
-      +     'transform:translate(-50%,-50%) scale(0.2);transform-origin:center;'
-      +     'font-size:min(240px,55vmin);line-height:1;'
-      +     'color:' + titleColor + ';'
-      +     'filter:drop-shadow(0 0 20px ' + titleColor + ');'
-      +     'animation:reviveInnerPulse 1s ease-in-out infinite;'
-      +     'transition:transform 0.1s linear;pointer-events:none;'
-      +     'z-index:2;">❤</div>'
+      // Inner heart — SVG filled shape, same path as outer. Grows with taps
+      // via SVG transform on the <g> wrapper. Because it shares the outer
+      // path exactly, when scale reaches 1.0 the inner fill perfectly rings
+      // the outer outline.
+      +   '<svg id="revive-heart-inner-svg" viewBox="-11 -11 22 22" '
+      +     'style="position:absolute;top:50%;left:50%;'
+      +     'transform:translate(-50%,-50%);'
+      +     'width:min(260px,60vmin);height:min(260px,60vmin);'
+      +     'pointer-events:none;'
+      +     'overflow:visible;z-index:2;">'
+      +     '<g id="revive-heart-inner-g" style="transform-origin:center;'
+      +       'transform:scale(0.2);'
+      +       'transition:transform 0.1s linear;'
+      +       'animation:reviveInnerPulse 1s ease-in-out infinite;">'
+      +       '<path d="' + heartPath + '" '
+      +         'fill="' + titleColor + '" '
+      +         'style="filter:drop-shadow(0 0 3px ' + titleColor + ');" />'
+      +     '</g>'
+      +   '</svg>'
       // CPR blips are spawned dynamically at random positions by
       // _fireCPRBlip (every 5 taps). They float, fade, and self-remove.
       + '</div>';
@@ -8218,11 +8237,11 @@ function _showReviveOverlay() {
       + heartStackHtml
       // Style: inner pulse + tap impulse (layered)
       + '<style>'
-      +   '@keyframes reviveInnerPulse { 0%,100% { filter:drop-shadow(0 0 14px ' + titleColor + '); }'
-      +     ' 50% { filter:drop-shadow(0 0 26px ' + titleColor + ') brightness(1.2); } }'
-      +   '.revive-tap-impulse { animation: reviveInnerPulse 1s ease-in-out infinite, reviveTapBurst 0.18s ease-out; }'
-      +   '@keyframes reviveTapBurst { 0% { filter:drop-shadow(0 0 40px #fff) brightness(1.8); }'
-      +     ' 100% { filter:drop-shadow(0 0 20px ' + titleColor + ') brightness(1); } }'
+      +   '@keyframes reviveInnerPulse { 0%,100% { filter:drop-shadow(0 0 4px ' + titleColor + '); }'
+      +     ' 50% { filter:drop-shadow(0 0 8px ' + titleColor + ') brightness(1.15); } }'
+      +   '.revive-tap-impulse { animation: reviveTapBurst 0.18s ease-out; }'
+      +   '@keyframes reviveTapBurst { 0% { filter:drop-shadow(0 0 12px #fff) brightness(1.6); }'
+      +     ' 100% { filter:drop-shadow(0 0 4px ' + titleColor + ') brightness(1); } }'
       + '</style>'
     + '</div>';
 
@@ -8560,6 +8579,14 @@ function _showVictoryScreen() {
             if (_battleStats.critsLanded > 0) cells.push({ label: 'CRITS', value: _battleStats.critsLanded, color: '#F57C00' });
             if (_battleStats.overloadsFired > 0) cells.push({ label: 'OVERLOADS', value: _battleStats.overloadsFired, color: '#7B2FBE' });
             if (_battleStats.armorAbsorbed > 0) cells.push({ label: 'ARMOR ABSORBED', value: _battleStats.armorAbsorbed, color: '#AAA' });
+            // S013.6: Revive counter — surfaces near-deaths to player since
+            // each one reduces loot chance by 10% (floor 10%). Shows total
+            // revives this run, not just this fight, because the penalty
+            // stacks across rumbles.
+            if (player && (player.reviveCount || 0) > 0) {
+              var effPenalty = Math.min(90, 10 * player.reviveCount); // capped at −90% (10% floor)
+              cells.push({ label: 'REVIVES (−' + effPenalty + '% LOOT)', value: player.reviveCount, color: '#e8dcc0' });
+            }
 
             var rows = cells.map(function(c) {
               var monoStyle = c.mono ? 'font-family:ui-monospace,monospace;' : '';
