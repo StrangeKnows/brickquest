@@ -8683,10 +8683,12 @@ function _showVictoryScreen() {
   }
   // S013.1: kick off the post-victory brick refill boost. Existing regen
   // tick in the update loop runs at 20× speed until _internalEnd clears
-  // the flag (when player clicks Continue). Empty pips fill visibly on
-  // the rumble HUD behind the victory card.
+  // the flag (when player finishes the victory flow). Pips animate during
+  // both cards; they're only VISIBLE on card 2 but the fill continues
+  // through card 1 so the bar is further along when card 2 appears.
   _victoryRefillActive = true;
   _startVictoryRefillLoop();
+
   var durMs = Math.max(1, _battleStats.endedAt - _battleStats.startedAt);
   var durSec = Math.round(durMs / 1000);
   var mm = Math.floor(durSec / 60), ss = durSec % 60;
@@ -8696,13 +8698,11 @@ function _showVictoryScreen() {
   var fav = _favoriteMove();
   var flavor = _pickFlavor(tier.label, { revived: _wasRevivedThisFight });
 
-  // Bricks-gained summary (just the counts by color). S013.6: filter to
-  // only actual brick-color keys — cheese is tracked in bricksGained for
-  // historical stat purposes but renders via its own dedicated chip below.
-  // Without this filter, cheese would double-render here AND in the
-  // cheeseEaten branch. Same bug class as the DM v4DmResultBlock dedup.
+  // Bricks-gained summary (filter to only actual brick-color keys — cheese
+  // is tracked separately to avoid double-rendering; same dedup pattern as
+  // the DM v4 DmResultBlock).
   var gainedLines = Object.keys(_battleStats.bricksGained).filter(function(c) {
-    return BRICK_COLORS[c];  // only render genuine brick colors
+    return BRICK_COLORS[c];
   }).map(function(c) {
     return '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:' + (BRICK_COLORS[c]||'#555') + '33;border:1px solid ' + (BRICK_COLORS[c]||'#555') + '88;font-size:11px;">'
       + '<span style="width:10px;height:10px;border-radius:2px;background:' + (BRICK_COLORS[c]||'#555') + ';margin-right:6px;"></span>'
@@ -8721,174 +8721,186 @@ function _showVictoryScreen() {
     ? '<span style="color:' + (BRICK_COLORS[fav.color]||'#fff') + ';font-weight:700;">' + fav.color + '</span> brick × ' + fav.count
     : '<span style="color:#888;font-style:italic;">—</span>';
 
-  // Victory screen layout — v2 "breathe, grouped meaningfully":
-  //   HERO    — VICTORY banner, tier label, flavor, favorite move (a hero stat)
-  //   STATS   — 2-col grid of combat numbers
-  //   REWARDS — charges refilling + loot chips + felled list, one grouped zone
-  //   CONTINUE — button sits as last child of the content block
-  //
-  // Structure: vic-root is a flex container with ONE child (vic-scroll). The
-  // single-child pattern is what makes vertical centering work on mobile.
-  // An earlier design had Continue as a sibling with flex:0 0 auto; when the
-  // content exceeded viewport, flex centering degraded and pinned everything
-  // to top. With Continue inside vic-scroll as its last child, the whole
-  // block centers when it fits and scrolls as one unit when it doesn't.
-  //
-  // Landscape (short viewport): 3-column grid reflow preserved via media query.
-  var html =
-    '<div id="rumble-victory-screen" class="vic-root" style="'
-    + 'position:absolute;top:0;left:0;right:0;bottom:0;'
-    + 'background:rgba(8,8,14,.92);'
-    + 'display:flex;flex-direction:column;align-items:center;justify-content:center;'
-    + 'z-index:200;box-sizing:border-box;'
-    + 'font-family:\'Cinzel\',serif;'
-    + 'pointer-events:none;'
-    + 'opacity:0;animation:bqVictoryFadeIn 1s ease-out forwards;'
-    + '" id="rumble-victory-screen-outer">'
+  // ── Shared CSS block for both cards ──
+  // Backdrop bumped from .92 to .97 opacity so the rumble HUD (HP bar,
+  // zoom pill, magnifying glass) doesn't ghost through. Fade keyframes
+  // handle the enter/exit transitions on card swaps.
+  var sharedCss =
+    '<style>'
+    +   '@keyframes bqVictoryFadeIn  { from { opacity: 0; } to { opacity: 1; } }'
+    +   '@keyframes bqVictoryFadeOut { from { opacity: 1; } to { opacity: 0; } }'
+    +   '.bq-vic-backdrop {'
+    +     ' position:absolute;top:0;left:0;right:0;bottom:0;'
+    +     ' background:rgba(8,8,14,.97);'
+    +     ' display:flex;flex-direction:column;align-items:center;justify-content:center;'
+    +     ' z-index:200;box-sizing:border-box;'
+    +     ' font-family:\'Cinzel\',serif;'
+    +     ' opacity:0;animation:bqVictoryFadeIn .6s ease-out forwards;'
+    +   '}'
+    +   '.bq-vic-backdrop.fading-out { animation:bqVictoryFadeOut .3s ease-in forwards; }'
+    +   '.bq-vic-card {'
+    +     ' width:min(420px,92%);max-height:calc(100% - 24px);overflow-y:auto;'
+    +     ' display:flex;flex-direction:column;align-items:center;'
+    +     ' padding:clamp(18px,5vw,32px) clamp(18px,5vw,28px);'
+    +     ' gap:clamp(14px,4vw,22px);'
+    +     ' pointer-events:auto;'
+    +   '}'
+    +   '.bq-vic-btn {'
+    +     ' padding:clamp(12px,3.2vw,14px) clamp(32px,8vw,44px);'
+    +     ' font-size:clamp(13px,3.5vw,15px);'
+    +     ' font-family:\'Cinzel\',serif;letter-spacing:.14em;font-weight:700;'
+    +     ' border-radius:10px;cursor:pointer;border:2px solid;'
+    +     ' min-width:190px;'
+    +   '}'
+    +   /* Landscape short-viewport: card 2 uses 2-col grid */
+    +   '@media (orientation: landscape) and (max-height: 500px) {'
+    +     '.bq-vic-card.card-rewards {'
+    +       ' width:min(720px,96%);'
+    +       ' display:grid;'
+    +       ' grid-template-columns:1fr 1fr;'
+    +       ' grid-template-areas:"stats rewards" "claim claim";'
+    +       ' align-items:start;'
+    +       ' gap:16px;'
+    +     '}'
+    +     '.bq-vic-card.card-rewards .vic-stats-zone   { grid-area:stats; width:100%; }'
+    +     '.bq-vic-card.card-rewards .vic-rewards-zone { grid-area:rewards; width:100%; }'
+    +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim; }'
+    +     '.bq-vic-card.card-rewards .vic-stat-grid    { width:100% !important; }'
+    +     '.bq-vic-card.card-rewards .vic-rewards-body { width:100% !important; }'
+    +   '}'
+    + '</style>';
 
-      // Single scrolling child. max-height:100% + overflow-y:auto means
-      // content centers when it fits, scrolls when it doesn't.
-      + '<div class="vic-scroll" style="flex:0 1 auto;max-height:100%;width:100%;overflow-y:auto;display:flex;flex-direction:column;align-items:center;'
-      + 'padding:clamp(14px,4vw,28px) clamp(14px,4vw,24px) clamp(16px,4vw,28px);'
-      + 'gap:clamp(14px,4vw,22px);'
-      + 'min-height:0;pointer-events:auto;">'
+  // ── Card 1 HTML: THE MOMENT ──
+  function buildCardMoment() {
+    return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
+      + '<div class="bq-vic-card card-moment">'
+        + '<div style="font-size:clamp(10px,2.5vw,13px);letter-spacing:.25em;color:' + tier.color + ';">⚔ VICTORY ⚔</div>'
+        + '<div style="font-size:clamp(28px,8vw,44px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 22px ' + tier.color + ';text-align:center;line-height:1.1;">' + tier.label + '</div>'
+        + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(13px,3.4vw,17px);color:#d8d8d8;text-align:center;max-width:94%;line-height:1.5;">"' + flavor + '"</div>'
+        + '<div style="font-family:ui-sans-serif,system-ui;text-align:center;color:#aaa;display:flex;flex-direction:column;gap:4px;">'
+          + '<span style="font-size:clamp(9px,2.2vw,11px);color:#888;letter-spacing:.18em;">FAVORITE MOVE</span>'
+          + '<span style="font-size:clamp(13px,3.2vw,15px);">' + favLine + '</span>'
+        + '</div>'
+        + '<button id="bq-vic-btn-continue" class="bq-vic-btn" style="'
+        + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
+        + 'border-color:' + tier.color + ';color:#000;'
+        + 'box-shadow:0 4px 20px ' + tier.color + '66;'
+        + 'margin-top:clamp(6px,2vw,12px);'
+        + '">CONTINUE →</button>'
+      + '</div>'
+      + sharedCss
+      + '</div>';
+  }
 
-        // ── HERO ── VICTORY banner + tier + flavor + favorite move
-        + '<div class="vic-col-hero" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
-          + '<div style="font-size:clamp(10px,2.5vw,13px);letter-spacing:.25em;color:' + tier.color + ';margin-bottom:6px;">⚔ VICTORY ⚔</div>'
-          + '<div style="font-size:clamp(24px,7vw,40px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 18px ' + tier.color + ';margin-bottom:10px;text-align:center;line-height:1.1;">' + tier.label + '</div>'
-          + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(12px,3.2vw,16px);color:#d8d8d8;text-align:center;max-width:min(420px,94%);margin-bottom:14px;line-height:1.5;">"' + flavor + '"</div>'
-          // Favorite move — styled like a stat line so it reads as a hero-level datum
-          + '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(10px,2.6vw,12px);color:#aaa;text-align:center;max-width:92%;">'
-            + '<span style="color:#888;letter-spacing:.14em;">FAVORITE MOVE</span><br>'
-            + '<span style="font-size:clamp(12px,3vw,14px);">' + favLine + '</span>'
+  // ── Card 2 HTML: THE NUMBERS ──
+  function buildCardRewards() {
+    // Stats grid cells
+    var cells = [];
+    cells.push({ label: 'TIME', value: timeStr, color: '#eee', mono: true });
+    cells.push({ label: 'HP',   value: player.hp + '/' + player.hpMax, color: '#eee' });
+    if (_battleStats.damageDealt > 0) cells.push({ label: 'DMG DEALT', value: _battleStats.damageDealt, color: '#E24B4A' });
+    if (_battleStats.damageTaken > 0) cells.push({ label: 'DMG TAKEN', value: _battleStats.damageTaken, color: '#D4537E' });
+    if (_battleStats.biggestDamageDealt > 0) cells.push({ label: 'HIGHEST HIT', value: _battleStats.biggestDamageDealt, color: '#F57C00' });
+    if (_battleStats.biggestDamageTaken > 0) cells.push({ label: 'BIGGEST HIT TAKEN', value: _battleStats.biggestDamageTaken, color: '#D4537E' });
+    if (_battleStats.totalHealed > 0) cells.push({ label: 'HP HEALED', value: _battleStats.totalHealed, color: '#9adb9a' });
+    if (_battleStats.biggestHealPlayer > 0) cells.push({ label: 'BIGGEST HEAL', value: _battleStats.biggestHealPlayer, color: '#9adb9a' });
+    if (_battleStats.totalEntityHeal > 0) cells.push({ label: 'ENEMY HEALED', value: _battleStats.totalEntityHeal, color: '#B586D6' });
+    if (_battleStats.biggestHealEntity > 0) cells.push({ label: 'BIGGEST ENEMY HEAL', value: _battleStats.biggestHealEntity, color: '#B586D6' });
+    if (_battleStats.damageDealt > 0) cells.push({ label: 'DPS', value: dps, color: '#F5D000' });
+    if (_battleStats.critsLanded > 0) cells.push({ label: 'CRITS', value: _battleStats.critsLanded, color: '#F57C00' });
+    if (_battleStats.overloadsFired > 0) cells.push({ label: 'OVERLOADS', value: _battleStats.overloadsFired, color: '#7B2FBE' });
+    if (_battleStats.armorAbsorbed > 0) cells.push({ label: 'ARMOR ABSORBED', value: _battleStats.armorAbsorbed, color: '#AAA' });
+    if (player && (player.reviveCount || 0) > 0) {
+      var effPenalty = Math.min(90, 10 * player.reviveCount);
+      cells.push({ label: 'REVIVES (−' + effPenalty + '% LOOT)', value: player.reviveCount, color: '#e8dcc0' });
+    }
+    var rows = cells.map(function(c) {
+      var monoStyle = c.mono ? 'font-family:ui-monospace,monospace;' : '';
+      return '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;margin-bottom:2px;">' + c.label + '</div>'
+           + '<div style="font-size:clamp(14px,4vw,19px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
+    }).join('');
+
+    return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
+      + '<div class="bq-vic-card card-rewards">'
+        // Stats zone
+        + '<div class="vic-stats-zone" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:8px;">'
+          + '<div style="font-size:clamp(9px,2.2vw,10px);letter-spacing:.2em;color:#888;font-family:ui-sans-serif,system-ui;">COMBAT</div>'
+          + '<div class="vic-stat-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(8px,2vw,12px) clamp(14px,4vw,22px);'
+            + 'background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
+            + 'padding:clamp(12px,3vw,18px) clamp(14px,3.5vw,20px);'
+            + 'width:min(340px,100%);font-family:ui-sans-serif,system-ui;">'
+            + rows
           + '</div>'
         + '</div>'
-
-        // ── STATS ── 2-col combat numbers
-        + '<div class="vic-col-stats" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
-        + (function() {
-            var cells = [];
-            cells.push({ label: 'TIME', value: timeStr, color: '#eee', mono: true });
-            cells.push({ label: 'HP',   value: player.hp + '/' + player.hpMax, color: '#eee' });
-            if (_battleStats.damageDealt > 0) cells.push({ label: 'DMG DEALT', value: _battleStats.damageDealt, color: '#E24B4A' });
-            if (_battleStats.damageTaken > 0) cells.push({ label: 'DMG TAKEN', value: _battleStats.damageTaken, color: '#D4537E' });
-            if (_battleStats.biggestDamageDealt > 0) cells.push({ label: 'HIGHEST HIT', value: _battleStats.biggestDamageDealt, color: '#F57C00' });
-            if (_battleStats.biggestDamageTaken > 0) cells.push({ label: 'BIGGEST HIT TAKEN', value: _battleStats.biggestDamageTaken, color: '#D4537E' });
-            if (_battleStats.totalHealed > 0) cells.push({ label: 'HP HEALED', value: _battleStats.totalHealed, color: '#9adb9a' });
-            if (_battleStats.biggestHealPlayer > 0) cells.push({ label: 'BIGGEST HEAL', value: _battleStats.biggestHealPlayer, color: '#9adb9a' });
-            if (_battleStats.totalEntityHeal > 0) cells.push({ label: 'ENEMY HEALED', value: _battleStats.totalEntityHeal, color: '#B586D6' });
-            if (_battleStats.biggestHealEntity > 0) cells.push({ label: 'BIGGEST ENEMY HEAL', value: _battleStats.biggestHealEntity, color: '#B586D6' });
-            if (_battleStats.damageDealt > 0) cells.push({ label: 'DPS', value: dps, color: '#F5D000' });
-            if (_battleStats.critsLanded > 0) cells.push({ label: 'CRITS', value: _battleStats.critsLanded, color: '#F57C00' });
-            if (_battleStats.overloadsFired > 0) cells.push({ label: 'OVERLOADS', value: _battleStats.overloadsFired, color: '#7B2FBE' });
-            if (_battleStats.armorAbsorbed > 0) cells.push({ label: 'ARMOR ABSORBED', value: _battleStats.armorAbsorbed, color: '#AAA' });
-            // Revives across the run — each one penalizes loot rolls by 10%.
-            if (player && (player.reviveCount || 0) > 0) {
-              var effPenalty = Math.min(90, 10 * player.reviveCount);
-              cells.push({ label: 'REVIVES (−' + effPenalty + '% LOOT)', value: player.reviveCount, color: '#e8dcc0' });
-            }
-
-            var rows = cells.map(function(c) {
-              var monoStyle = c.mono ? 'font-family:ui-monospace,monospace;' : '';
-              return '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;margin-bottom:2px;">' + c.label + '</div>'
-                   + '<div style="font-size:clamp(14px,4vw,19px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
-            }).join('');
-
-            return '<div class="vic-stat-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(8px,2vw,12px) clamp(14px,4vw,22px);'
-              + 'background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
-              + 'padding:clamp(12px,3vw,18px) clamp(14px,3.5vw,20px);'
-              + 'width:min(340px,92%);font-family:ui-sans-serif,system-ui;">'
-              + rows
-              + '</div>';
-          })()
-        + '</div>'
-
-        // ── REWARDS ── charges refilling + loot chips + felled, one grouped band
-        + '<div class="vic-col-loot" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
-          + '<div style="width:min(340px,92%);display:flex;flex-direction:column;align-items:center;gap:10px;font-family:ui-sans-serif,system-ui;">'
-            // Single section header for the whole rewards band
-            + '<div style="font-size:clamp(9px,2.2vw,10px);letter-spacing:.2em;color:#888;">REWARDS</div>'
-            // Charges refilling (live pip animation)
+        // Rewards zone
+        + '<div class="vic-rewards-zone" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:8px;font-family:ui-sans-serif,system-ui;">'
+          + '<div style="font-size:clamp(9px,2.2vw,10px);letter-spacing:.2em;color:#888;">REWARDS</div>'
+          + '<div class="vic-rewards-body" style="width:min(340px,100%);display:flex;flex-direction:column;align-items:center;gap:10px;'
+            + 'background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
+            + 'padding:clamp(12px,3vw,18px) clamp(14px,3.5vw,20px);">'
             + '<div id="rumble-victory-bricks" style="width:100%;text-align:center;">'
               + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:3px;">' + _renderVictoryPips() + '</div>'
             + '</div>'
-            // Loot chips
             + '<div style="width:100%;text-align:center;line-height:1.7;">' + gainedLines + '</div>'
-            // Felled list — quiet caption tone
             + (_battleStats.enemiesKilled.length
               ? '<div style="font-size:clamp(9px,2.4vw,11px);color:#666;text-align:center;font-style:italic;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
               : '')
           + '</div>'
         + '</div>'
-
-        // ── CONTINUE ── sits inside the scroll block so vertical centering works
-        + '<div class="vic-col-continue" style="display:flex;justify-content:center;width:100%;margin-top:clamp(4px,1.5vw,10px);">'
-          + '<button id="rumble-victory-continue" style="'
-          + 'padding:clamp(11px,3vw,13px) clamp(28px,7.5vw,36px);'
+        // Claim button
+        + '<div class="vic-claim-zone" style="display:flex;justify-content:center;width:100%;margin-top:clamp(4px,1.5vw,8px);">'
+          + '<button id="bq-vic-btn-claim" class="bq-vic-btn" style="'
           + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
-          + 'border:2px solid ' + tier.color + ';color:#000;font-weight:700;'
-          + 'font-size:clamp(13px,3.5vw,15px);'
-          + 'font-family:\'Cinzel\',serif;letter-spacing:.12em;border-radius:8px;cursor:pointer;'
+          + 'border-color:' + tier.color + ';color:#000;'
           + 'box-shadow:0 4px 20px ' + tier.color + '66;'
-          + 'min-width:170px;'
-          + '">CONTINUE →</button>'
+          + '">CLAIM →</button>'
         + '</div>'
+      + '</div>'
+      + sharedCss
+      + '</div>';
+  }
 
-      + '</div>'  /* end vic-scroll */
-
-      // Responsive reflow CSS + fade-in animation.
-      // Landscape short-viewport: 3-column grid with Continue spanning all cols.
-      + '<style>'
-      +   '@keyframes bqVictoryFadeIn { from { opacity: 0; } to { opacity: 1; } }'
-      +   '@media (orientation: landscape) and (max-height: 500px) {'
-      +     '.vic-root { justify-content: flex-start !important; }'
-      +     '.vic-root .vic-scroll {'
-      +       ' display: grid !important;'
-      +       ' grid-template-columns: 1fr 1.3fr 1fr;'
-      +       ' grid-template-areas: "stats hero loot" "continue continue continue";'
-      +       ' align-items: start;'
-      +       ' gap: 14px;'
-      +       ' padding: 12px 16px 14px;'
-      +       ' max-height: 100% !important;'
-      +     '}'
-      +     '.vic-root .vic-col-hero     { grid-area: hero;     }'
-      +     '.vic-root .vic-col-stats    { grid-area: stats;    }'
-      +     '.vic-root .vic-col-loot     { grid-area: loot;     }'
-      +     '.vic-root .vic-col-continue { grid-area: continue; margin-top: 0; }'
-      +     '.vic-root .vic-stat-grid { width: 100% !important; }'
-      +     '.vic-root .vic-col-loot > div { width: 100% !important; }'
-      +   '}'
-      + '</style>'
-
-    + '</div>';
-
+  // ── Render + state machine ──
   var root = document.getElementById('rumble-root') || document.body;
   var existing = document.getElementById('rumble-victory-screen');
   if (existing) existing.remove();
   var wrapper = document.createElement('div');
-  wrapper.innerHTML = html;
-  var node = wrapper.firstChild;
-  root.appendChild(node);
+  wrapper.id = 'rumble-victory-screen';
+  root.appendChild(wrapper);
 
   var dismissed = false;
   var dismiss = function() {
     if (dismissed) return;
     dismissed = true;
-    if (node.parentNode) node.parentNode.removeChild(node);
+    if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
     _internalEnd('victory');
   };
 
-  // Hook Continue button — only clickable because the outer has
-  // pointer-events:none, and the button explicitly re-enables via
-  // pointer-events:auto in its style.
-  var btn = document.getElementById('rumble-victory-continue');
-  if (btn) {
-    btn.addEventListener('click', dismiss);
-    btn.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+  function showCard(step) {
+    wrapper.innerHTML = (step === 'moment') ? buildCardMoment() : buildCardRewards();
+    // Wire buttons for this card
+    if (step === 'moment') {
+      var btnC = document.getElementById('bq-vic-btn-continue');
+      if (btnC) {
+        btnC.addEventListener('click', function() {
+          // Cross-fade to card 2 — trigger fadeout, swap after animation
+          var bd = document.getElementById('bq-vic-backdrop');
+          if (bd) bd.classList.add('fading-out');
+          setTimeout(function() { showCard('rewards'); }, 280);
+        });
+        btnC.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+      }
+    } else {
+      var btnX = document.getElementById('bq-vic-btn-claim');
+      if (btnX) {
+        btnX.addEventListener('click', dismiss);
+        btnX.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+      }
+    }
   }
+  showCard('moment');
 
-  // 60s absolute safety fallback in case the button is never tapped.
+  // 60s absolute safety fallback in case buttons never get tapped.
   setTimeout(dismiss, 60000);
 }
 
