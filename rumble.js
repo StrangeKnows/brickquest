@@ -174,6 +174,11 @@ function critChance(color, count) {
 // Crit stats debug — tracks recent rolls for player visibility.
 // Toggle CRIT_DEBUG to true to log to console and overlay the panel.
 var CRIT_DEBUG = true;
+// Toggle FLOATER_DEBUG to true in browser console (or here) to log every
+// damage/floater spawn with: text, tier, parent type, side, spawn coords,
+// parent radius. Useful for diagnosing placement issues (collisions,
+// clipping, wrong side).
+var FLOATER_DEBUG = false;
 var _critStats = { total: 0, crits: 0, perColor: {} };
 
 // Per-battle stats — populated during combat, consumed by victory screen.
@@ -2876,6 +2881,17 @@ function showFloatingText(x, y, text, color, parent) {
     vy: -riseSpeed2, fadeRate: fadeRate2, fontSize: fontSize2,
     mergeable: !!isDmg, accum: num2, spawnTime: now,
     parent: par, offX: offX0, offY: offY0, side: _side });
+  if (FLOATER_DEBUG && typeof console !== 'undefined') {
+    console.log('[FLOAT-TXT]', JSON.stringify({
+      text: text, isDmg: isDmg, isHeal: isHeal, isNumeric: isNumeric,
+      parent: par ? (par === player ? 'player' : (par.type || '?')) : 'none',
+      parR: par ? par.r : null,
+      parPos: par ? ('(' + Math.round(par.x) + ',' + Math.round(par.y) + ')') : null,
+      spawn: '(' + Math.round(x) + ',' + Math.round(y) + ')',
+      offset: par ? ('(' + Math.round(offX0) + ',' + Math.round(offY0) + ')') : null,
+      side: _side, fontSize: fontSize2,
+    }));
+  }
 }
 
 // Fizzle sparks — small erratic grey-white embers near an entity's edge.
@@ -2941,10 +2957,11 @@ function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, 
   var par = parent || null;
   // Spawn position: when parented, numbers appear to the RIGHT of the target's
   // hitbox at roughly vertical center rather than stacked between the target
-  // and its HP bar. Gap past the radius keeps the number clear of the sprite.
+  // and its HP bar. Offset par.r + 22 (unified with showFloatingText) gives
+  // proper clearance past the sprite edge + HP bar region.
   // RESIST tier overrides this below (its bounce-off geometry is independent).
   if (par && par.r !== undefined && tier !== 'RESIST') {
-    var rightOffset = par.r + 14;
+    var rightOffset = par.r + 22;
     x = par.x + rightOffset;
     y = par.y;
     ex = par.x + rightOffset;
@@ -3076,6 +3093,17 @@ function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, 
     shake: !!cfg.shake, outline: !!cfg.outline || wb >= 3,
     parent: par, offX: offX0, offY: offY0, side: 'right',
   });
+  if (FLOATER_DEBUG && typeof console !== 'undefined') {
+    console.log('[FLOAT-DMG]', JSON.stringify({
+      text: text, tier: tier, applied: applied,
+      parent: par ? (par === player ? 'player' : (par.type || '?')) : 'none',
+      parR: par ? par.r : null,
+      parPos: par ? ('(' + Math.round(par.x) + ',' + Math.round(par.y) + ')') : null,
+      spawn: '(' + Math.round(x) + ',' + Math.round(y) + ')',
+      offset: par ? ('(' + Math.round(offX0) + ',' + Math.round(offY0) + ')') : null,
+      side: 'right', fontSize: finalFontSize,
+    }));
+  }
 }
 
 // Helpers to shift color for resist tier rendering.
