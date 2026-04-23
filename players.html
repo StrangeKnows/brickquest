@@ -387,6 +387,11 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 </head>
 <body>
 
+<!-- Zoom root — wraps class-select + game-screen so applyFontSize() can scale
+     the content via CSS transform. Without this wrapper the zoom slider
+     silently no-ops on the player screen. -->
+<div id="zoom-root" style="width:100%;height:100dvh;transform-origin:top left;">
+
 <!-- CLASS SELECTOR -->
 <div id="class-select-screen">
   <h1>⚔️ Brick Quest</h1>
@@ -445,6 +450,7 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   <div class="tabs" id="tabs-bar"></div>
   <div class="tab-content" id="tab-content"></div>
 </div>
+</div><!-- end #zoom-root -->
 
 <!-- ── RUMBLE (real-time combat runtime) ──
      Hidden by default; shown when server reports active rumbleBattle.
@@ -1591,10 +1597,8 @@ window._debugPreparePanel = function() {
 };
 
 // Thematic flavor pool — dungeon atmosphere, dungeony dad jokes, LEGO meta.
-// Used by two surfaces:
-//   (A) Dashboard top slot (when no event/rumble-pending card is active)
-//   (B) Prepare panel header (cached per-phase via currentFlavor())
-// Keep one pool, two rotation policies. No duplication.
+// Used by the Dashboard top slot when no event/rumble-pending card is active.
+// Rotates on phase change, event-clear, or tab-switch to Dashboard.
 //
 // Tone: wry, brief, same cadence across voices. Self-aware but not snarky.
 // Immersive when possible; the LEGO winks are occasional, not constant.
@@ -1622,35 +1626,35 @@ var FLAVOR_POOL = [
   'Brave, aren\'t you? Or short on other options.',
 
   // ── Dungeon dad jokes (new, 20) ──
-  'Why don\'t dragons tell jokes? They always sound too fiery.',
+  'A dragon tried stand-up. The crowd was lit.',
   'A skeleton walked into a tavern. Couldn\'t order. No guts.',
   'Dungeon economics: all rock, no paper.',
-  'The wizard\'s inbox is full. Mostly spam from liches.',
+  'The wizard filed his taxes. Audited by a specter.',
   'Heard the bard\'s new album. It\'s a lute.',
   'The necromancer threw a party. It was dead.',
   'A ghost haunted the library. Nobody checked him out.',
-  'Why did the troll cross the bridge? Toll booth was broken.',
+  'The troll charges tolls. Accepts teeth.',
   'The mage cast Identify on a sandwich. Results were bread-curdling.',
   'Two goblins walked into a bar. The third one ducked.',
-  'The minotaur failed geometry. All those corners.',
+  'The minotaur got lost at work. Occupational hazard.',
   'A vampire ordered stake. Kitchen refused.',
   'Why are orcs bad at poker? Too many tells.',
   'The lich took up pottery. Work was skeletal.',
-  'A paladin lost his virtue. Found it in the laundry.',
+  'The paladin misplaced his honor. Last seen near the tavern.',
   'Wizards hate stairs. Something about levels.',
   'The cleric\'s sermon ran long. Nobody was healed.',
-  'Why did the slime dissolve? Existential acid reflux.',
-  'A gelatinous cube attended jazz night. Killed the mood.',
+  'A slime joined improv. Kept splitting into two characters.',
+  'A mimic opened a gift shop. All items final.',
   'The dungeon\'s Yelp review: two stars, would flee again.',
 
   // ── LEGO meta (new, 20) ──
   'A loose 1x1 rolls past. Somewhere, a foot waits.',
   'Your inventory rattles when you walk. It\'s fine.',
   'Somebody stepped on a red brick. The scream echoed for years.',
-  'You try to click two bricks together. They\'re from different sets.',
+  'You try to click a brick sideways. The studs disagree.',
   'The minifig next to you has the same face. Everyone does.',
   'A stud clicks somewhere overhead. Reassuring and concerning.',
-  'You find a single brown 2x2. Sacred, but you don\'t know why.',
+  'You find a trans-clear 1x1 cheese slope. Cherished. Easily lost.',
   'The studs on this floor are decorative. Or the architect lied.',
   'A baseplate extends into the distance. The grid is the grid.',
   'Your cape is printed, not cloth. Nobody has to know.',
@@ -1712,20 +1716,6 @@ function _pickFlavor(seedKey) {
   return start;
 }
 
-// ── Prepare-panel header flavor ──
-// Holds during a single phase so the line doesn't flicker on every state tick.
-var _lastFlavorPhase = null;
-var _lastFlavor = '';
-function currentFlavor() {
-  var key = (G && G.phase) + '|' + (G && G.round) + '|' + (G && G.activePlayerIdx);
-  if (_lastFlavorPhase !== key) {
-    _lastFlavorPhase = key;
-    var seed = (MY_CLASS || 'x') + '|' + key;
-    _lastFlavor = FLAVOR_POOL[_pickFlavor(seed)];
-  }
-  return _lastFlavor;
-}
-
 // ── Dashboard top-slot flavor ──
 // Rotates when any of these change:
 //   - phase / round / activePlayerIdx (phase transitions)
@@ -1755,9 +1745,8 @@ function dashboardFlavor(topSlotActiveNow) {
 function renderPreparePanel(me) {
   var actions = buildPrepareActions(me);
   if (!actions.length) return '';
-  var html = '<div style="text-align:center;margin:6px 0 14px 0;padding:0 10px;">'
-    + '<div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;color:var(--text-dim);line-height:1.5;">' + currentFlavor() + '</div>'
-    + '</div>';
+  // Flavor line lives in the Dashboard top slot now — no second copy here.
+  var html = '';
   actions.forEach(function(a) {
     html += renderActionButton(a);
   });
