@@ -434,6 +434,10 @@ var rafId = null;
 // enemy AI, damage, timer, loot) are frozen. `running` stays true (so _internalEnd
 // isn't triggered prematurely) but _revivePaused gates every per-tick side-effect.
 var _revivePaused = false;
+// S013.1: post-victory brick-refill boost. Set true when victory screen is shown,
+// cleared at rumble end. While true, brick regen rate is multiplied so empty pips
+// fill visibly during the victory card display.
+var _victoryRefillActive = false;
 var lastTs = 0;
 var cfg = null; // last start(config) object
 
@@ -849,12 +853,17 @@ function update(dt) {
     if (!player.brickMax) player.brickMax = {};
     var SANDBOX_RATES = { red:1, gray:1, green:1, blue:2, white:2, yellow:2, orange:2, purple:3, black:3 };
     var useSpec = (cfg && cfg.mode === 'spec');
+    // S013.1: victory-screen refill boost. When the victory overlay is up,
+    // regen rate spikes so players see empty pips fill visibly (~1.5-2s
+    // full refill). This is the "earned-rest" beat between rumble and
+    // next board leg. Only on victory, not defeat or force-quit.
+    var victoryBoost = _victoryRefillActive ? 20 : 1;
     Object.keys(player.bricks).forEach(function(c) {
       if (!player.brickMax[c]) player.brickMax[c] = player.bricks[c];
       var isHeld = overloadState && overloadState.color === c;
       if (player.bricks[c] < (player.brickMax[c]||0)) {
         // Daze slows refresh rate (playerRefreshMult 0.5 under daze, 1 else).
-        if (!isHeld) player.brickRecharge[c] = (player.brickRecharge[c]||0) + dt * playerRefreshMult();
+        if (!isHeld) player.brickRecharge[c] = (player.brickRecharge[c]||0) + dt * playerRefreshMult() * victoryBoost;
         var rate;
         if (useSpec) {
           var tier = brickTier(player.cls, c);
@@ -8140,6 +8149,46 @@ function _favoriteMove() {
   return best ? { color: best, count: bestCount } : null;
 }
 
+// S013.1: Victory card brick refill helpers.
+// During the victory overlay, player.bricks ticks up rapidly (via the
+// _victoryRefillActive boost). These helpers render a live pip row in the
+// card and poll it every 80ms so players see charges filling in.
+var _victoryRefillInterval = null;
+
+function _renderVictoryPips() {
+  if (!player || !player.bricks || !player.brickMax) return '';
+  var ALL = ['red','blue','green','white','gray','purple','yellow','orange','black'];
+  var out = '';
+  ALL.forEach(function(c) {
+    var max = player.brickMax[c] || 0;
+    if (max <= 0) return; // only show colors the player brought into rumble (or looted)
+    var cur = Math.min(max, player.bricks[c] || 0);
+    var bg = BRICK_COLORS[c] || '#555';
+    for (var i = 0; i < max; i++) {
+      var lit = i < cur;
+      out += '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;'
+        + (lit
+          ? 'background:' + bg + ';box-shadow:0 0 4px ' + bg + ';'
+          : 'background:#1a1a1a;border:1px solid ' + bg + 'aa;box-sizing:border-box;')
+        + '"></span>';
+    }
+  });
+  return out;
+}
+
+function _startVictoryRefillLoop() {
+  if (_victoryRefillInterval) clearInterval(_victoryRefillInterval);
+  _victoryRefillInterval = setInterval(function() {
+    var el = document.getElementById('rumble-victory-pips');
+    if (!el) { clearInterval(_victoryRefillInterval); _victoryRefillInterval = null; return; }
+    el.innerHTML = _renderVictoryPips();
+  }, 80);
+}
+
+function _stopVictoryRefillLoop() {
+  if (_victoryRefillInterval) { clearInterval(_victoryRefillInterval); _victoryRefillInterval = null; }
+}
+
 // Build + inject the victory overlay. Called after all loot is collected
 // (or safety-timeout expires). Click "Continue" button to dismiss → triggers
 // _internalEnd('victory'). Has a 1-second pointer-events guard so the same
@@ -8149,6 +8198,12 @@ function _showVictoryScreen() {
     console.warn('[BQ-RUMBLE] _showVictoryScreen bailing — missing player or _battleStats');
     _internalEnd('victory'); return;
   }
+  // S013.1: kick off the post-victory brick refill boost. Existing regen
+  // tick in the update loop runs at 20× speed until _internalEnd clears
+  // the flag (when player clicks Continue). Empty pips fill visibly on
+  // the rumble HUD behind the victory card.
+  _victoryRefillActive = true;
+  _startVictoryRefillLoop();
   var durMs = Math.max(1, _battleStats.endedAt - _battleStats.startedAt);
   var durSec = Math.round(durMs / 1000);
   var mm = Math.floor(durSec / 60), ss = durSec % 60;
@@ -8242,6 +8297,15 @@ function _showVictoryScreen() {
           + '<span style="color:#888;letter-spacing:.1em;">FAVORITE MOVE · </span>' + favLine
         + '</div>'
 
+        // S013.1: Live brick refill display. Pips reflect player.bricks
+        // live state, which is ticking up rapidly thanks to the victory
+        // boost. A separate DOM loop (see _startVictoryRefillLoop below)
+        // re-renders this element ~every 80ms until the card is dismissed.
+        + '<div id="rumble-victory-bricks" style="font-family:ui-sans-serif,system-ui;width:min(340px,92%);text-align:center;margin-bottom:8px;">'
+          + '<div style="font-size:clamp(8px,2vw,9px);letter-spacing:.18em;color:#888;margin-bottom:4px;">CHARGES REFILLING</div>'
+          + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:2px;">' + _renderVictoryPips() + '</div>'
+        + '</div>'
+
         // Loot gained
         + '<div style="font-family:ui-sans-serif,system-ui;width:min(340px,92%);text-align:center;margin-bottom:6px;">'
           + '<div style="font-size:clamp(8px,2vw,9px);letter-spacing:.18em;color:#888;margin-bottom:4px;">LOOT GAINED</div>'
@@ -8308,6 +8372,8 @@ function _showVictoryScreen() {
 // event ('victory' | 'defeat' | 'timeout' | 'quit').
 function _internalEnd(reason) {
   running = false;
+  _victoryRefillActive = false;
+  _stopVictoryRefillLoop();
   // v4: tear down revive minigame if still active
   if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
   _reviveState = null;

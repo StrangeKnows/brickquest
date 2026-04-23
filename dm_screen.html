@@ -77,6 +77,7 @@ html,body{height:100%;font-family:'Crimson Pro',Georgia,serif;background:var(--b
 select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--border);background:var(--surface3);color:var(--text);font-size:12px;margin-bottom:6px;}
 .fortress-brick{width:18px;height:18px;border-radius:3px;background:#888;border:1px solid #aaa;display:inline-block;margin:2px;}
 .fortress-brick.gone{background:#1a1a1a;border-color:#222;}
+@keyframes dm-arm-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(220,80,80,0.6); } 50% { box-shadow:0 0 0 4px rgba(220,80,80,0.0); } }
 ::-webkit-scrollbar{width:3px;height:3px;}
 ::-webkit-scrollbar-thumb{background:#2a2a2a;border-radius:2px;}
 </style>
@@ -241,8 +242,8 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
           <span style="font-family:Cinzel,serif;font-size:11px;color:var(--gold);">&#9889; ACTIVE LANDING EVENT</span>
           <div style="display:flex;gap:4px;flex-wrap:wrap;">
-            <button class="btn btn-sm" style="font-size:10px;padding:4px 8px;background:#1a2020;border:1px solid #588;color:#8bb;" onclick="dmResetEvent()" title="Reset current event with fresh content">&#8634; Reset</button>
-            <button class="btn btn-sm" style="font-size:10px;padding:4px 8px;background:#1a1020;border:1px solid #858;color:#b8b;" onclick="dmRerollEvent()" title="Roll a new random event on this space">&#9860; Re-roll</button>
+            <button class="btn btn-sm" style="font-size:10px;padding:4px 8px;background:#1a2020;border:1px solid #588;color:#8bb;" onclick="dmResetEvent(event)" title="Reset current event with fresh content">&#8634; Reset</button>
+            <button class="btn btn-sm" style="font-size:10px;padding:4px 8px;background:#1a1020;border:1px solid #858;color:#b8b;" onclick="dmRerollEvent(event)" title="Roll a new random event on this space">&#9860; Re-roll</button>
             <button class="btn G btn-sm" onclick="dmResolveEvent()">&#10003; Mark Resolved</button>
           </div>
         </div>
@@ -1401,16 +1402,24 @@ function renderActiveEvent() {
         if (bs.bricksUsed) {
           Object.keys(bs.bricksUsed).forEach(function(c) {
             if (!bs.bricksUsed[c]) return;
+            if (!brickBg2[c]) return;
             var brdr = c === 'white' ? 'border:1px solid #ccc;' : '';
-            usedChips += '<span style="display:inline-flex;align-items:center;gap:3px;margin:1px 2px;padding:1px 4px;background:#0a0a0a;border-radius:4px;font-size:10px;"><span style="width:8px;height:8px;border-radius:2px;background:' + (brickBg2[c]||'#888') + ';' + brdr + 'display:inline-block;"></span><span style="color:#ccc;">' + bs.bricksUsed[c] + '</span></span>';
+            usedChips += '<span style="display:inline-flex;align-items:center;gap:3px;margin:1px 2px;padding:1px 4px;background:#0a0a0a;border-radius:4px;font-size:10px;"><span style="width:8px;height:8px;border-radius:2px;background:' + brickBg2[c] + ';' + brdr + 'display:inline-block;"></span><span style="color:#ccc;">' + bs.bricksUsed[c] + '</span></span>';
           });
         }
         if (bs.bricksGained) {
           Object.keys(bs.bricksGained).forEach(function(c) {
             if (!bs.bricksGained[c]) return;
+            // Skip non-brick keys (cheese is tracked here historically but isn't a brick color)
+            if (!brickBg2[c]) return;
             var brdr2 = c === 'white' ? 'border:1px solid #ccc;' : '';
-            gainedChips += '<span style="display:inline-flex;align-items:center;gap:3px;margin:1px 2px;padding:1px 4px;background:#0a0a0a;border-radius:4px;font-size:10px;"><span style="width:8px;height:8px;border-radius:2px;background:' + (brickBg2[c]||'#888') + ';' + brdr2 + 'display:inline-block;"></span><span style="color:#9adb9a;">+' + bs.bricksGained[c] + '</span></span>';
+            gainedChips += '<span style="display:inline-flex;align-items:center;gap:3px;margin:1px 2px;padding:1px 4px;background:#0a0a0a;border-radius:4px;font-size:10px;"><span style="width:8px;height:8px;border-radius:2px;background:' + brickBg2[c] + ';' + brdr2 + 'display:inline-block;"></span><span style="color:#9adb9a;">+' + bs.bricksGained[c] + '</span></span>';
           });
+          // Cheese as its own icon chip (tracked in bricksGained for legacy reasons)
+          var cheeseGained = bs.bricksGained.cheese || 0;
+          if (cheeseGained > 0) {
+            gainedChips += '<span style="display:inline-flex;align-items:center;gap:3px;margin:1px 2px;padding:1px 4px;background:#0a0a0a;border-radius:4px;font-size:10px;">🧀<span style="color:#9adb9a;">+' + cheeseGained + '</span></span>';
+          }
         }
         if (usedChips || gainedChips) {
           body += '<div style="display:flex;justify-content:center;gap:10px;margin-top:6px;flex-wrap:wrap;">'
@@ -1478,16 +1487,59 @@ function dmResolveEvent() {
   client.send('dm_resolved', {});
 }
 
-function dmResetEvent() {
-  if (!G || !G.activeEvent) return;
-  if (!confirm('Reset this event? Current mini-game state clears; fresh content rolled for same event type.')) return;
-  client.send('dm_resetEvent', {});
+// Two-tap inline confirm. btnEl is the button element, armedLabel is the
+// label to show while armed, action is the callback on confirm. Arms for 5s.
+// A second button (data-confirm-cancel) shows alongside for explicit cancel.
+function _armConfirm(btnEl, armedLabel, action) {
+  if (!btnEl) return;
+  if (btnEl.dataset.armed === '1') {
+    // Second tap — commit
+    _clearArm(btnEl);
+    action();
+    return;
+  }
+  // First tap — arm it
+  btnEl.dataset.armed = '1';
+  btnEl.dataset.origText = btnEl.innerHTML;
+  btnEl.dataset.origBg = btnEl.style.background;
+  btnEl.dataset.origBorder = btnEl.style.borderColor;
+  btnEl.innerHTML = armedLabel;
+  btnEl.style.background = '#3a1a1a';
+  btnEl.style.borderColor = '#d44';
+  btnEl.style.color = '#fbb';
+  btnEl.style.animation = 'dm-arm-pulse 0.8s ease-in-out infinite';
+  btnEl.dataset.armTimeout = setTimeout(function() { _clearArm(btnEl); }, 5000);
 }
 
-function dmRerollEvent() {
+function _clearArm(btnEl) {
+  if (!btnEl || btnEl.dataset.armed !== '1') return;
+  clearTimeout(parseInt(btnEl.dataset.armTimeout));
+  btnEl.innerHTML = btnEl.dataset.origText || btnEl.innerHTML;
+  btnEl.style.background = btnEl.dataset.origBg || '';
+  btnEl.style.borderColor = btnEl.dataset.origBorder || '';
+  btnEl.style.color = '';
+  btnEl.style.animation = '';
+  delete btnEl.dataset.armed;
+  delete btnEl.dataset.origText;
+  delete btnEl.dataset.origBg;
+  delete btnEl.dataset.origBorder;
+  delete btnEl.dataset.armTimeout;
+}
+
+function dmResetEvent(ev) {
   if (!G || !G.activeEvent) return;
-  if (!confirm('Re-roll this space? A new event is drawn from the zone table, replacing the current event.')) return;
-  client.send('dm_rerollEvent', {});
+  var btn = ev && ev.currentTarget;
+  _armConfirm(btn, '&#8634; Confirm Reset?', function() {
+    client.send('dm_resetEvent', {});
+  });
+}
+
+function dmRerollEvent(ev) {
+  if (!G || !G.activeEvent) return;
+  var btn = ev && ev.currentTarget;
+  _armConfirm(btn, '&#9860; Confirm Re-roll?', function() {
+    client.send('dm_rerollEvent', {});
+  });
 }
 
 function toggleEventTable() {

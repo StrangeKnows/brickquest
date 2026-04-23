@@ -2235,7 +2235,44 @@ wss.on('connection', (ws, req) => {
       if (!G.activeEvent) { broadcastState(); return; }
       const ev = G.activeEvent;
       if (ev.evType === 'monster' || ev.evType === 'boss') {
-        log('Reset ignored — rumble has its own reset','event');
+        // Reset behavior on monster/boss events depends on state:
+        //   - During an active rumble: blocked (use the rumble-internal force-reset)
+        //   - After rumble ended (rumbleResult set): re-pend a fresh rumble with
+        //     the same enemy; restore player to pre-rumble snapshot so it's a
+        //     clean retry.
+        if (G.rumbleBattle) {
+          log('Reset ignored — rumble is active; use the rumble-internal reset','event');
+          broadcastState(); return;
+        }
+        // Restore player from preRumbleSnap if available
+        const mcls = ev.cls;
+        const mp = G.players[mcls];
+        if (mp && ev.preRumbleSnap) {
+          mp.hp      = ev.preRumbleSnap.hp;
+          mp.hpMax   = ev.preRumbleSnap.hpMax;
+          mp.armor   = ev.preRumbleSnap.armor || 0;
+          mp.gold    = ev.preRumbleSnap.gold || 0;
+          mp.bricks  = { ...ev.preRumbleSnap.bricks };
+          refreshCharges(mp);
+          mp.alive   = true;
+        }
+        // Re-pend the rumble using the event's mids array (same source as
+        // both forced and natural monster event creation).
+        const mMids = ev.mids || ['goblin'];
+        const mEntity = ENTITY_META[mMids[0]] ? mMids[0] : 'goblin';
+        const mTpl = ENTITY_META[mEntity];
+        const mFlavorPool = RUMBLE_FLAVOR[mEntity] || [mTpl.name + ' appears!'];
+        const mFlavor = mFlavorPool[Math.floor(Math.random() * mFlavorPool.length)];
+        G.pendingRumbleBattle = {
+          cls: mcls,
+          entityType: mEntity,
+          enemy: { type: mEntity, name: mTpl.name, hp: mTpl.hpMax, hpMax: mTpl.hpMax },
+          flavor: mFlavor,
+          createdAt: Date.now(),
+        };
+        delete ev.rumbleResult;
+        ev.resolved = false;
+        log('DM reset the rumble — player restored, ' + mTpl.name + ' re-pending','event');
         broadcastState(); return;
       }
       const evCls = ev.cls;
