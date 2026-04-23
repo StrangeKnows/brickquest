@@ -633,10 +633,10 @@ function connectWS() {
       if (!isRiddleYellow) showRewardPopup(data);
     }
     if (event === 'clueDiscovered') {
-      // New clue revealed — render status tab to show it
+      // New clue revealed — render so the Dashboard clues section picks it up.
+      // If the player is on the Dashboard tab, scroll to the clues block.
       render();
-      // If on status tab, scroll to clues
-      var pane = document.getElementById('pane-status');
+      var pane = document.getElementById('pane-dashboard');
       if (pane && pane.classList.contains('active')) {
         setTimeout(function() {
           var clueEl = document.getElementById('status-clues');
@@ -852,9 +852,9 @@ function setConn(on) {
 // ── TABS ──
 // Skills tab removed during cleanup; skill system pending redesign.
 const TAB_DEFS = [
-  { id:'status',  label:'Status'  },
-  { id:'actions', label:'Actions' },
-  { id:'party',   label:'Party'   },
+  { id:'dashboard', label:'Dashboard' },
+  { id:'party',     label:'Party'     },
+  { id:'fusion',    label:'Fusion'    },
 ];
 
 function buildTabs() {
@@ -914,9 +914,9 @@ function render() {
   if (G.phase !== 'land') _landingRollSent = false;
   if (!G.activeEvent) _burstFiredFor = null;
   renderPhaseBanner(me);
-  renderStatus(me);
-  renderActions(me);
+  renderDashboard(me);
   renderParty();
+  renderFusion();
   restoreActiveEvent();
   // Start riddle timer tick if active, stop if not
   if (G.activeEvent && G.activeEvent.riddleActive && !_riddleTimerInterval) {
@@ -1027,94 +1027,398 @@ function collapsibleCard(id, titleHtml, bodyHtml, startOpen) {
     + '</div>';
 }
 
-function renderStatus(me) {
-  const el = document.getElementById('pane-status');
-  if(!el) return;
+// ═══════════════════════════════════════════
+//  DASHBOARD (doc §7, 0.14.0 item 3/7)
+// ═══════════════════════════════════════════
+// Main play surface. Replaces old Status + Actions tabs. Lives in pane-dashboard.
+//
+// Structure (top-down):
+//   _dashHeader        — class/HP/armor/resource chips + status badges
+//   _dashBrickGrid     — per-color pip rows with signature markers
+//   _dashPhaseContext  — prepare/move/land/rumble cards when phase applies
+//   _dashActions       — SELF / ALLY (brick-action target) / CLASS / BOARD
+//   renderStatusClues  — existing clue panel
+//   renderKOPanel      — replaces everything if hp=0
+//
+// Hold-to-charge brick-action tier menus are item 6/7. Current buttons are
+// tap-only (tier-1 action). The UI scaffolding here is designed so each action
+// button can be upgraded to tap+hold without restructuring.
+//
+// Class signatures from DESIGN_S012_PROPOSAL_V2.txt §2.2.
+const CLASS_SIGNATURE = {
+  breaker:    ['red', 'gray'],
+  formwright: ['blue', 'purple', 'black'],
+  snapstep:   ['orange', 'red'],
+  blocksmith: ['gray', 'yellow'],
+  fixer:      ['white', 'black'],
+  wild_one:   ['green', 'yellow'],
+};
+const CLASS_SECONDARY = {
+  breaker:    ['orange'],
+  formwright: ['white'],
+  snapstep:   ['yellow'],
+  blocksmith: ['orange'],
+  fixer:      ['purple'],
+  wild_one:   ['black'],
+};
+
+// ── HEADER ── class + HP + armor + gold/cheese chips + status
+function _dashHeader(me) {
   const isOH = me.hp > me.hpMax;
-  const pct = Math.min(100, Math.max(0,Math.round(me.hp/me.hpMax*100)));
+  const pct = Math.min(100, Math.max(0, Math.round(me.hp / me.hpMax * 100)));
   const hc  = isOH ? '#b06fef'
-    : me.hp<=Math.floor(me.hpMax*.25) ? '#E24B4A'
-    : me.hp<=Math.floor(me.hpMax*.5) ? '#EF9F27'
+    : me.hp <= Math.floor(me.hpMax * 0.25) ? '#E24B4A'
+    : me.hp <= Math.floor(me.hpMax * 0.5)  ? '#EF9F27'
     : getComputedStyle(document.documentElement).getPropertyValue('--cls-color').trim();
   const hpBg = isOH ? 'linear-gradient(90deg,#7B2FBE,#b06fef)' : hc;
   const hpShadow = isOH ? 'box-shadow:0 0 6px #b06fef88;' : '';
+  const space = SPACES[me.space];
+  const meta = PLAYER_META[MY_CLASS] || {};
+  const className = meta.name || MY_CLASS;
+  const classIcon = meta.icon || '◆';
 
-  // Status effects
-  const statuses = (me.statusEffects||[]).map(s=>`<span class="status-badge ${s}">${s}</span>`).join('');
-  // Movement debuff
+  const statuses = (me.statusEffects || []).map(s => `<span class="status-badge ${s}">${s}</span>`).join('');
   const debuff = G.movementDebuffs?.[MY_CLASS];
   const debuffBadge = debuff ? `<span class="status-badge poisoned">🐌 −${debuff} Move</span>` : '';
 
-  // Tamed monster
-  const tamed = me.tamed ? `<div class="card" style="border-color:var(--green)22;">
-    <div class="card-title">Tamed Monster</div>
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <span style="font-family:'Cinzel',serif;color:var(--green);">${me.tamed.name}</span>
-      <span style="font-size:12px;color:var(--text-dim);">${me.tamed.hp}/${me.tamed.hpMax} HP</span>
-    </div>
-  </div>` : '';
-
-  // Position & keys
-  const space = SPACES[me.space];
-  const myKeys = Object.entries(G.magicKeys||{}).filter(([,cls])=>cls===MY_CLASS).map(([c])=>c);
-
-  // Shield cap (S013: uniform hpMax for all classes; class abilities can change later)
-  const shieldMax  = me.hpMax;
-  const shieldPct  = shieldMax > 0 ? Math.min(100, Math.round((me.armor||0) / shieldMax * 100)) : 0;
-  // Shield pip blocks — one per max shield point, filled = active
+  const shieldMax = me.hpMax;
   let shieldPips = '';
   for (let i = 0; i < shieldMax; i++) {
-    const filled = i < (me.armor||0);
-    shieldPips += `<span style="display:inline-block;width:${Math.max(10, Math.min(22, Math.floor(260/shieldMax)))}px;height:14px;border-radius:3px;margin:1px;`
+    const filled = i < (me.armor || 0);
+    const pipW = Math.max(10, Math.min(22, Math.floor(260 / shieldMax)));
+    shieldPips += `<span style="display:inline-block;width:${pipW}px;height:14px;border-radius:3px;margin:1px;`
       + (filled ? 'background:#AAAAAA;box-shadow:0 1px 3px rgba(0,0,0,.5);' : 'background:#1a1a1a;border:1px solid #2a2a2a;')
       + '"></span>';
   }
 
-  el.innerHTML = `
-    <div class="card">
-      <div class="card-title">HP</div>
-      <div class="hp-row">
-        <span class="hp-big" style="color:${hc};">${me.hp}</span>
-        <span class="hp-max">/ ${me.hpMax} HP</span>
+  const myKeys = Object.entries(G.magicKeys || {}).filter(([, cls]) => cls === MY_CLASS).map(([c]) => c);
+
+  return `<div class="card">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+      <div style="font-size:28px;line-height:1;">${classIcon}</div>
+      <div style="flex:1;">
+        <div style="font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;">${className}</div>
+        <div style="font-size:11px;color:var(--text-dim);">${space?.label || 'Start'}</div>
       </div>
-      <div class="hpbar-outer">
-        <div class="hpbar-inner" style="width:${pct}%;background:${hpBg};${hpShadow}"></div>
-      </div>
-      <div style="margin-top:10px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
-          <span style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.06em;color:#888;">🛡 SHIELD</span>
-          <span style="font-family:Cinzel,serif;font-size:14px;font-weight:700;color:${(me.armor||0)>0?'#AAAAAA':'#333'};">${me.armor||0}<span style="font-size:10px;color:#555;"> / ${shieldMax}</span></span>
-        </div>
-        <div style="display:flex;flex-wrap:wrap;">${shieldPips}</div>
-      </div>
-      <div class="stats-row" style="margin-top:10px;">
-        <div class="stat-chip">
-          <div class="stat-num" style="color:#F5D000;">🪙 ${me.gold}</div>
-        </div>
-        <div class="stat-chip" onclick="showCheeseActions()" style="cursor:${(me.cheese||0)>0?'pointer':'default'};">
-          <div class="stat-num" style="color:#FFD96A;">🧀 ${me.cheese||0}</div>
-        </div>
-        <div class="stat-chip">
-          <div class="stat-num" style="color:var(--text-dim);font-size:13px;">${space?.label||'Start'}</div>
-          <div class="stat-lbl">Position</div>
-        </div>
-      </div>
-      ${(statuses||debuffBadge)?`<div class="status-wrap">${statuses}${debuffBadge}</div>`:''}
-      ${(me.queuedPoisonStacks||0)>0?`<div style="margin-top:6px;padding:6px 8px;background:#1a2a10;border:1px solid #4a7a2a;border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
-        <span style="font-size:11px;color:#bada7a;font-family:Cinzel,serif;letter-spacing:.04em;">☠ POISON QUEUED: ${me.queuedPoisonStacks} stack${me.queuedPoisonStacks!==1?'s':''} (${me.queuedPoisonBattles||1} battle${(me.queuedPoisonBattles||1)!==1?'s':''})</span>
-        ${(me.bricks.white||0)>=1?`<button class="btn" style="padding:4px 8px;font-size:10px;background:#3a3a5a;border:1px solid #8a8aaa;color:#dde;" onclick="cleansePoisonAction()">🩹 Cleanse (1 white)</button>`:''}
-      </div>`:''}
-      ${(me.nextRumbleBuff && me.nextRumbleBuff.refreshBoost)?`<div style="margin-top:6px;padding:6px 8px;background:#0a1a2a;border:1px solid #4d8abf;border-radius:6px;">
-        <span style="font-size:11px;color:#4db8ff;font-family:Cinzel,serif;letter-spacing:.04em;">⚡ FORMWRIGHT CHARGE: 2× brick refresh for first ${Math.round((me.nextRumbleBuff.refreshBoost.durationMs||10000)/1000)}s of next rumble</span>
-      </div>`:''}
-      ${myKeys.length?`<div style="font-size:12px;color:var(--yellow);margin-top:4px;">🗝 Keys: ${myKeys.join(', ')}</div>`:''}
     </div>
-    ${tamed}
-    ${renderKOPanel(me)}
-    ${renderMiniInventory(me)}
-    ${renderBaseAbilities()}
+    <div class="hp-row">
+      <span class="hp-big" style="color:${hc};">${me.hp}</span>
+      <span class="hp-max">/ ${me.hpMax} HP</span>
+    </div>
+    <div class="hpbar-outer">
+      <div class="hpbar-inner" style="width:${pct}%;background:${hpBg};${hpShadow}"></div>
+    </div>
+    <div style="margin-top:10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+        <span style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.06em;color:#888;">🛡 SHIELD</span>
+        <span style="font-family:Cinzel,serif;font-size:14px;font-weight:700;color:${(me.armor||0)>0?'#AAAAAA':'#333'};">${me.armor||0}<span style="font-size:10px;color:#555;"> / ${shieldMax}</span></span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;">${shieldPips}</div>
+    </div>
+    <div class="stats-row" style="margin-top:10px;">
+      <div class="stat-chip">
+        <div class="stat-num" style="color:#F5D000;">🪙 ${me.gold}</div>
+      </div>
+      <div class="stat-chip" onclick="showCheeseActions()" style="cursor:${(me.cheese||0)>0?'pointer':'default'};">
+        <div class="stat-num" style="color:#FFD96A;">🧀 ${me.cheese||0}</div>
+      </div>
+    </div>
+    ${(statuses || debuffBadge) ? `<div class="status-wrap">${statuses}${debuffBadge}</div>` : ''}
+    ${(me.queuedPoisonStacks || 0) > 0 ? `<div style="margin-top:6px;padding:6px 8px;background:#1a2a10;border:1px solid #4a7a2a;border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <span style="font-size:11px;color:#bada7a;font-family:Cinzel,serif;letter-spacing:.04em;">☠ POISON QUEUED: ${me.queuedPoisonStacks} stack${me.queuedPoisonStacks!==1?'s':''} (${me.queuedPoisonBattles||1} battle${(me.queuedPoisonBattles||1)!==1?'s':''})</span>
+      ${(me.bricks.white||0)>=1 ? `<button class="btn" style="padding:4px 8px;font-size:10px;background:#3a3a5a;border:1px solid #8a8aaa;color:#dde;" onclick="cleansePoisonAction()">🩹 Cleanse (1 white)</button>` : ''}
+    </div>` : ''}
+    ${(me.nextRumbleBuff && me.nextRumbleBuff.refreshBoost) ? `<div style="margin-top:6px;padding:6px 8px;background:#0a1a2a;border:1px solid #4d8abf;border-radius:6px;">
+      <span style="font-size:11px;color:#4db8ff;font-family:Cinzel,serif;letter-spacing:.04em;">⚡ FORMWRIGHT CHARGE: 2× brick refresh for first ${Math.round((me.nextRumbleBuff.refreshBoost.durationMs||10000)/1000)}s of next rumble</span>
+    </div>` : ''}
+    ${myKeys.length ? `<div style="font-size:12px;color:var(--yellow);margin-top:4px;">🗝 Keys: ${myKeys.join(', ')}</div>` : ''}
+  </div>`;
+}
+
+// ── BRICK GRID ── per-color row with pips, signature ★, row tinting (doc §7.2)
+function _dashBrickGrid(me) {
+  const sigs = CLASS_SIGNATURE[MY_CLASS] || [];
+  const secs = CLASS_SECONDARY[MY_CLASS] || [];
+  const bricks = me.bricks || {};
+  const charged = me.bricksCharged || {};
+  const ld = me.lastDropped || {};
+  const rows = BRICK_NAMES.filter(c => (bricks[c] || 0) > 0);
+  if (!rows.length) {
+    return `<div class="card"><div class="card-title">Brick Charges</div>
+      <div style="font-size:12px;color:var(--text-dim);padding:6px 0;">No bricks owned.</div></div>`;
+  }
+  let body = '';
+  rows.forEach(color => {
+    const owned = bricks[color] || 0;
+    const chg = Math.min(owned, charged[color] || 0);
+    const bg = BRICK_COLORS[color] || '#555';
+    const tier = _pulseTier(ld[color]);
+    const isSig = sigs.indexOf(color) >= 0;
+    const isSec = !isSig && secs.indexOf(color) >= 0;
+    const rowTint = isSig
+      ? `background:linear-gradient(90deg, ${bg}11, transparent);border-left:2px solid ${bg}aa;`
+      : isSec
+        ? `background:linear-gradient(90deg, ${bg}08, transparent);border-left:1px solid ${bg}66;`
+        : '';
+    const starHtml = isSig ? `<span style="color:${bg};font-size:11px;margin-left:4px;" title="Signature color">★</span>` : '';
+    let pipHtml = '';
+    const MAX_PIPS = 10;
+    const showCount = Math.min(owned, MAX_PIPS);
+    for (let i = 0; i < showCount; i++) {
+      const lit = i < chg;
+      const cls = lit ? 'pip-lit' : ('pip-empty ' + tier);
+      pipHtml += `<span class="${cls}" style="display:inline-block;width:14px;height:14px;border-radius:2px;margin:1px;`
+        + (lit
+            ? `background:${bg};box-shadow:0 0 4px ${bg};`
+            : `background:#1a1a1a;border:1px solid ${bg}aa;box-sizing:border-box;`)
+        + '"></span>';
+    }
+    const overflow = owned > MAX_PIPS ? `<span style="font-size:10px;color:#aaa;margin-left:4px;">×${owned}</span>` : '';
+    const colorLabel = color.charAt(0).toUpperCase() + color.slice(1);
+    body += `<div style="display:flex;align-items:center;padding:4px 8px;margin:2px 0;border-radius:4px;${rowTint}">
+      <div style="width:60px;font-family:Cinzel,serif;font-size:11px;color:${bg};letter-spacing:.04em;">${colorLabel}</div>
+      <div style="flex:1;display:flex;align-items:center;flex-wrap:wrap;">${pipHtml}${overflow}</div>
+      <div style="font-family:monospace;font-size:11px;color:#888;min-width:32px;text-align:right;">${chg}/${owned}${starHtml}</div>
+    </div>`;
+  });
+  return `<div class="card"><div class="card-title">Brick Charges</div>${body}</div>`;
+}
+
+// ── PHASE CONTEXT ── cards that appear inline based on G.phase + active event.
+// Absorbs what the old Actions tab did — prepare panel, move/roll, landing
+// events, rumble card, gates.
+function _dashPhaseContext(me) {
+  const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
+  let html = '';
+  // Pending result card (from reward, gate, etc.)
+  html += renderResultCard();
+  // Prepare phase — full prepare panel with rumble-prep actions
+  if (G.phase === 'prepare') {
+    html += renderPreparePanel(me);
+  }
+  // Rumble pending / active card
+  html += renderRumbleCard(me);
+  // Landing-event entry
+  if (isMyTurn && G.phase === 'land' && !_pendingResult) {
+    var hasActiveEvent = G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
+    if (!hasActiveEvent) {
+      html += renderLandPanel(me);
+    } else {
+      html += '<div id="landing-result"></div>';
+    }
+  }
+  // Off-turn viewers for shared events
+  if (!isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle' && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired)) {
+    html += '<div id="landing-result"></div>';
+  }
+  if (!isMyTurn && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand') {
+    html += '<div id="landing-result"></div>';
+  }
+  // Gates always visible when applicable
+  html += renderGateActions(me);
+  return html;
+}
+
+// ── ACTIONS ── SELF / ALLY / CLASS / BOARD (doc §7.3)
+function _dashActions(me) {
+  // During prepare phase, the prepare panel already provides context-specific
+  // action buttons with the same brick-action semantics. Skip these sections
+  // so we're not painting two of everything.
+  if (G.phase === 'prepare') return '';
+  return `<div class="card">
+    <div class="card-title">Actions</div>
+    ${_dashActionsSelf(me)}
+    ${_dashActionsAlly(me)}
+    ${_dashActionsClass(me)}
+    ${_dashActionsBoard(me)}
+  </div>`;
+}
+
+function _dashActionsSelf(me) {
+  const whiteC = (me.bricksCharged && me.bricksCharged.white) || 0;
+  const grayC  = (me.bricksCharged && me.bricksCharged.gray)  || 0;
+  const healAmt = (typeof SELF_HEAL_AMT !== 'undefined' && SELF_HEAL_AMT[MY_CLASS]) || 2;
+  const atHpMax = me.hp >= me.hpMax;
+  const atShieldMax = (me.armor || 0) >= me.hpMax;
+  let buttons = '';
+  buttons += `<button class="btn success" ${whiteC < 1 || atHpMax ? 'disabled' : ''} onclick="selfHeal()">
+    💊 Heal Self <span style="font-size:10px;color:#888;margin-left:4px;">+${healAmt} HP · 1 ⬜${whiteC < 1 ? ' — needs 1' : ''}${atHpMax ? ' — at max' : ''}</span>
+  </button>`;
+  buttons += `<button class="btn" ${grayC < 1 || atShieldMax ? 'disabled' : ''} onclick="client.addShield('${MY_CLASS}')">
+    🛡 Brace <span style="font-size:10px;color:#888;margin-left:4px;">+1 armor · 1 ▪ · ${me.armor||0}/${me.hpMax}${grayC < 1 ? ' — needs 1' : ''}${atShieldMax ? ' — full' : ''}</span>
+  </button>`;
+  return `<div style="margin-top:8px;">
+    <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.1em;color:var(--text-dim);margin-bottom:4px;">SELF</div>
+    <div style="display:flex;flex-direction:column;gap:4px;">${buttons}</div>
+  </div>`;
+}
+
+function _dashActionsAlly(me) {
+  // ALLY section: brick-actions I take that TARGET an ally. Resource transfer
+  // (give bricks/gold/cheese) lives on the Party tab — not duplicated here.
+  const zone = SPACES[me.space]?.zone || 0;
+  const whiteC = (me.bricksCharged && me.bricksCharged.white) || 0;
+  const allies = Object.values(G.players || {}).filter(p => {
+    if (p.cls === MY_CLASS) return false;
+    const pz = SPACES[p.space]?.zone || 0;
+    return pz === zone;
+  });
+  const hasAlly = allies.length > 0;
+  let buttons = '';
+  if (!hasAlly) {
+    buttons = `<div style="font-size:11px;color:var(--text-dim);font-style:italic;padding:4px 6px;">No ally in this zone.</div>`;
+  } else if (MY_CLASS === 'fixer') {
+    buttons += `<button class="btn success" ${whiteC < 1 ? 'disabled' : ''} onclick="showHealSelector(-1)">
+      💊 Heal Ally <span style="font-size:10px;color:#888;margin-left:4px;">1 ⬜${whiteC < 1 ? ' — needs 1' : ''}</span>
+    </button>`;
+    // Fixer has Mass Repair (2 white → all allies)
+    buttons += `<button class="btn success" ${whiteC < 2 ? 'disabled' : ''} onclick="client.massRepair()">
+      💊 Mass Repair <span style="font-size:10px;color:#888;margin-left:4px;">2 ⬜ · all allies${whiteC < 2 ? ' — needs 2' : ''}</span>
+    </button>`;
+  } else {
+    buttons += `<div style="font-size:11px;color:var(--text-dim);padding:4px 6px;">Heal Ally is Fixer's signature. Other classes gain zone-heal via multi-color costs (item 5).</div>`;
+  }
+  return `<div style="margin-top:10px;">
+    <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.1em;color:var(--text-dim);margin-bottom:4px;">ALLY <span style="color:#666;font-weight:400;">· same zone · for gifts/trades use Party tab</span></div>
+    <div style="display:flex;flex-direction:column;gap:4px;">${buttons}</div>
+  </div>`;
+}
+
+function _dashActionsClass(me) {
+  // CLASS brick-actions — abilities unique to the class. Blocksmith has Forge
+  // and Blueprint (skill-gated). Other classes get their class abilities via
+  // signature brick overload hold-menus (item 6/7). For now we surface existing
+  // class buttons.
+  let buttons = '';
+  if (MY_CLASS === 'blocksmith' && me.skills?.forge) {
+    buttons += `<button class="btn warn" onclick="showForge()">🔧 Forge <span style="font-size:10px;color:#888;margin-left:4px;">2 same → 1 any</span></button>`;
+  }
+  if (MY_CLASS === 'blocksmith' && me.skills?.blueprint) {
+    buttons += `<button class="btn warn" onclick="showBlueprint()">📋 Blueprint <span style="font-size:10px;color:#888;margin-left:4px;">1 gray → duplicate 1 brick</span></button>`;
+  }
+  // Fixer Revive (when allies are KO'd)
+  if (MY_CLASS === 'fixer') {
+    const whiteC = (me.bricksCharged && me.bricksCharged.white) || 0;
+    const down = Object.values(G.players || {}).filter(p => p.cls !== MY_CLASS && (!p.alive || p.hp <= 0));
+    if (down.length > 0) {
+      buttons += `<button class="btn primary" ${whiteC < 3 ? 'disabled' : ''} onclick="showReviveSelector()">
+        ✨ Revive <span style="font-size:10px;color:#888;margin-left:4px;">3 ⬜ · one downed ally${whiteC < 3 ? ' — needs 3' : ''}</span>
+      </button>`;
+    }
+  }
+  // Class-ability reference list (read-only descriptive text) — keeps the
+  // identity visible at a glance until hold-to-charge tier menus land.
+  const abilities = _dashGetClassAbilities(MY_CLASS);
+  let abText = '';
+  if (abilities.length) {
+    abilities.forEach(ab => {
+      abText += `<div style="padding:5px 0;border-bottom:1px solid #1a1a1a;">
+        <div style="font-family:Cinzel,serif;font-size:11px;font-weight:700;color:var(--cls-color);">${ab[0]}</div>
+        <div style="font-size:11px;color:var(--text-dim);line-height:1.4;">${ab[1]}</div>
+      </div>`;
+    });
+  }
+  if (!buttons && !abText) return '';
+  return `<div style="margin-top:10px;">
+    <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.1em;color:var(--text-dim);margin-bottom:4px;">CLASS <span style="color:#666;font-weight:400;">· hold brick for tier menu (item 6)</span></div>
+    ${buttons ? `<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;">${buttons}</div>` : ''}
+    ${abText ? `<div>${abText}</div>` : ''}
+  </div>`;
+}
+
+function _dashGetClassAbilities(cls) {
+  const abilities = {
+    breaker: [
+      ['Red Brick (base)', '3–5 armor-ignoring damage — server rolls in range.'],
+      ['Gray Armor (base)', 'Each armor pip absorbs 1 damage. 1 gray = +1 pip.'],
+      ['White Brick (base)', 'Heal self 3 HP (baseline other classes heal 2).'],
+    ],
+    formwright: [
+      ['Blue Brick (base)', '4–8 magic damage rolled server-side.'],
+      ['Purple Brick (base)', '4–8 damage + 3–4 HP self-heal.'],
+      ['Black Brick (base)', 'Curse monster −3 to −4 per attack.'],
+      ['Blue Landing (base)', 'Free Arcane Bolt on blue event space.'],
+    ],
+    snapstep: [
+      ['Movement (base)', '+1 to every movement roll (Fleet Foot +2 more).'],
+      ['Orange Brick (base)', 'Battle trap deals 2–4 damage.'],
+      ['Trap Sense (base)', 'Orange landing events convert to red trials in zone.'],
+    ],
+    blocksmith: [
+      ['Gray Armor (base)', '1 gray = +1 pip (others need 2).'],
+      ['Gray Landing (base)', 'Auto-collect 2 gray bricks from rubble event.'],
+      ['Trap Disarm (base)', 'Disarm traps as free action — 1 gray.'],
+    ],
+    fixer: [
+      ['White Self-Heal (base)', 'Heal self 4 HP per white brick.'],
+      ['White Ally-Heal (base)', 'Heal any ally 4 HP per white brick.'],
+      ['Cleanse (base)', 'Remove a status effect — free, once per round, same zone.'],
+      ['White Landing (base)', 'Landing on white event: give +2 HP to zone ally.'],
+    ],
+    wild_one: [
+      ['Creeping Vine (base)', 'Immune to movement penalty on fail.'],
+      ['Yellow Brick (base)', 'When confusion dispels, monster −1 to next attack.'],
+      ['Thorn Trap (base)', 'Orange battle trap deals 3–5 damage.'],
+    ],
+  };
+  return abilities[cls] || [];
+}
+
+function _dashActionsBoard(me) {
+  const sp = SPACES[me.space];
+  if (!sp) return '';
+  const isMarket = !G.storeDisabled && sp.zone !== 4;
+  let buttons = '';
+  if (isMarket) {
+    buttons += `<button class="btn" style="color:var(--gold);border-color:var(--gold)44;" onclick="_marketOpen=!_marketOpen;render();">
+      🏪 Market <span style="font-size:10px;color:#888;margin-left:4px;">· ${me.gold||0} gold</span>
+    </button>`;
+  }
+  // Note: gate + landing-event logic already rendered above via _dashPhaseContext.
+  // Board section stays minimal — just the space-bound options that aren't
+  // phase-gated.
+  if (!buttons) return '';
+  return `<div style="margin-top:10px;">
+    <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.1em;color:var(--text-dim);margin-bottom:4px;">BOARD <span style="color:#666;font-weight:400;">· ${sp.label || 'Start'}</span></div>
+    <div style="display:flex;flex-direction:column;gap:4px;">${buttons}</div>
+  </div>`;
+}
+
+function renderDashboard(me) {
+  const el = document.getElementById('pane-dashboard');
+  if (!el) return;
+  const isKO = !me.alive || me.hp <= 0;
+  if (isKO) {
+    el.innerHTML = `<div class="card" style="border-color:var(--red);">
+      <div style="text-align:center;color:var(--red);font-family:'Cinzel',serif;font-size:16px;margin-bottom:8px;">⬇ KNOCKED OUT</div>
+      <div style="font-size:12px;color:var(--text-dim);text-align:center;">Your phone is still active. You can accept or decline trade requests from the Party tab.</div>
+    </div>`;
+    return;
+  }
+  // Market expanded inline? Keep the existing market-panel render for now.
+  const marketPanel = (typeof _marketOpen !== 'undefined' && _marketOpen)
+    ? renderMarketPanel(me) : '';
+  el.innerHTML = `
+    ${_dashHeader(me)}
+    ${_dashBrickGrid(me)}
+    ${_dashPhaseContext(me)}
+    ${_dashActions(me)}
+    ${marketPanel}
     ${renderStatusClues()}
-    `;
+  `;
+}
+
+// ── FUSION (stub) ── 0.15.0+ will wire brick fusion for higher tiers
+function renderFusion() {
+  const el = document.getElementById('pane-fusion');
+  if (!el) return;
+  el.innerHTML = `<div class="card">
+    <div class="card-title">Fusion</div>
+    <div style="padding:12px 6px;text-align:center;">
+      <div style="font-family:'Cinzel',serif;font-size:16px;color:var(--cls-color);margin-bottom:10px;letter-spacing:.08em;">⚗ Coming Soon</div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.6;">Brick fusion will unlock higher-tier pieces and special moves by combining charges across colors. Thank you for your patience.</div>
+    </div>
+  </div>`;
 }
 
 function renderPendingClue() {
@@ -1132,57 +1436,6 @@ function renderPendingClue() {
     + '</div>';
 }
 
-
-function renderBaseAbilities() {
-  var abilities = {
-    breaker: [
-      ['Red Brick (base)', '3–5 armor-ignoring damage — server rolls in this range automatically'],
-      ['Gray Armor (base)', 'Each armor pip absorbs 1 damage. 1 gray = +1 pip. Unlock Iron Hide (Tier 1) to get +2 pips per gray instead. Max shield = 75% of max HP (150% with Iron Hide).'],
-      ['White Brick (base)', 'Heal self 3 HP (Formwright/Snapstep/Wild One heal 2)'],
-    ],
-    formwright: [
-      ['Blue Brick (base)', '4–8 magic damage — server rolls randomly in range when you tap the button'],
-      ['Purple Brick (base)', '4–8 damage + 3–4 HP self-heal — both values rolled server-side'],
-      ['Black Brick (base)', 'Curse monster −3 to −4 per attack (other classes do −2)'],
-      ['Blue Landing (base)', 'Free Arcane Bolt when landing on a blue brick board event'],
-    ],
-    snapstep: [
-      ['Movement (base)', '+1 to every movement roll always (Fleet Foot skill adds +2 more)'],
-      ['Battle Search (base)', 'Find bricks on 3+ in battle (other classes need 5+)'],
-      ['Orange Brick (base)', 'Battle trap deals 2–4 damage (other classes deal 1–2)'],
-      ['Trap Sense (base)', 'While in zone: orange landing events convert to red challenge events'],
-    ],
-    blocksmith: [
-      ['Gray Armor (base)', 'Each armor pip absorbs 1 damage. Only 1 gray brick needed per pip (others need 2). Max shield = 50% of max HP.'],
-      ['Gray Landing (base)', 'Auto-collect 2 gray bricks from rubble event (others take 1 or risk)'],
-      ['Trap Disarm (base)', 'Disarm traps as free action — costs 1 gray brick, no slot used'],
-      ['Blueprint (base)', 'Duplicate 1 brick once per zone (costs 1 gray brick)'],
-    ],
-    fixer: [
-      ['White Self-Heal (base)', 'Heal self 4 HP per white brick (Breaker/Blocksmith 3, others 2)'],
-      ['White Ally-Heal (base)', 'Heal any ally 4 HP per white brick (all others heal 2)'],
-      ['Cleanse (base)', 'Remove a status effect — free action, once per round, same zone'],
-      ['White Landing (base)', 'Landing on white board event: give +2 HP to any player in zone'],
-    ],
-    wild_one: [
-      ['Tame (base)', 'Tame succeeds on 3+ (others need 5+; Easy Tame skill lowers to 2+)'],
-      ['Creeping Vine (base)', 'Immune to movement penalty on fail; gains 1 green fail / 2 green success'],
-      ['Yellow Brick (base)', 'When confusion dispels, monster takes −1 to next attack roll'],
-      ['Thorn Trap (base)', 'Orange battle trap deals 3–5 damage (other classes deal 1–2)'],
-    ],
-  };
-  var list = abilities[MY_CLASS] || [];
-  if (!list.length) return '';
-  var body = '';
-  list.forEach(function(ab) {
-    body += '<div style="padding:6px 0;border-bottom:1px solid #1a1a1a;">'
-      + '<div style="font-family:Cinzel,serif;font-size:11px;font-weight:700;color:var(--cls-color);margin-bottom:2px;">' + ab[0] + '</div>'
-      + '<div style="font-size:11px;color:var(--text-dim);line-height:1.4;">' + ab[1] + '</div>'
-      + '</div>';
-  });
-  var titleHtml = '<div class="card-title" style="margin:0;padding:0;">Base Abilities</div>';
-  return collapsibleCard('status-abilities', titleHtml, body, false);
-}
 
 function renderStatusClues() {
   var clues = G.discoveredClues || [];
@@ -1260,71 +1513,6 @@ function renderBrickPips(bricks, bricksCharged, lastDropped, opts) {
   return out;
 }
 
-function renderMiniInventory(me) {
-  var pips = renderBrickPips(me.bricks, me.bricksCharged, me.lastDropped, { size: 12 });
-  if (!pips) return '';
-  return '<div class="card"><div class="card-title">Bricks</div>'
-    + '<div style="display:flex;flex-wrap:wrap;padding:4px 0;">' + pips + '</div></div>';
-}
-
-function renderKOPanel(me) {
-  if (me.alive && me.hp > 0) return '';
-  return `<div class="card" style="border-color:var(--red);">
-    <div style="text-align:center;color:var(--red);font-family:'Cinzel',serif;font-size:16px;margin-bottom:8px;">⬇ KNOCKED OUT</div>
-    <div style="font-size:12px;color:var(--text-dim);text-align:center;">Your phone is still active.<br>You can accept or decline trade requests.</div>
-  </div>`;
-}
-
-// ═══════════════════════════════════════════
-//  ACTIONS TAB
-// ═══════════════════════════════════════════
-function renderActions(me) {
-  const el = document.getElementById('pane-actions');
-  if(!el) return;
-  const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
-  const isKO = !me.alive || me.hp <= 0;
-
-  if (isKO) { el.innerHTML = `<div class="card"><div style="color:var(--text-dim);text-align:center;font-size:13px;padding:20px;">You are KO — wait for revival.</div></div>`; return; }
-
-  let html = '';
-
-  // Pending result card (from reward, gate, etc.) — shown until dismissed
-  html += renderResultCard();
-
-  // Prepare phase — unified trade/setup/move into one panel with an actions tab
-  if (G.phase === 'prepare') {
-    html += renderPreparePanel(me);
-  }
-  // Rumble card — pending (event card) or active (placeholder rumble screen)
-  html += renderRumbleCard(me);
-  // Landing phase / event
-  if (isMyTurn && G.phase === 'land' && !_pendingResult) {
-    var hasActiveEvent = G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
-    if (!hasActiveEvent) {
-      html += renderLandPanel(me);
-    } else {
-      // Active event — skip Roll Die button but keep #landing-result container for restoreActiveEvent
-      html += '<div id="landing-result"></div>';
-    }
-  }
-  // Riddle active — all non-initiating players also need the landing-result container
-  if (!isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle' && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired)) {
-    html += '<div id="landing-result"></div>';
-  }
-  // v4: RED Trial of Hand — visible to ALL players (party race)
-  if (!isMyTurn && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand') {
-    html += '<div id="landing-result"></div>';
-  }
-  // Out of battle free actions — only during land phase or off-turn; prepare phase has its own panel
-  if (G.phase !== 'prepare') {
-    html += renderOutOfBattleActions(me);
-  }
-  // Gates
-  html += renderGateActions(me);
-
-  el.innerHTML = html;
-}
-
 // ── PREPARE PANEL ──
 // Single panel shown during the prepare phase. Lists all available actions as
 // flat buttons. Tapping a button expands it to show details and a Use button.
@@ -1337,9 +1525,9 @@ function toggleActionExpand(id) {
 
 // Diagnostic: call from browser console to see what wraps the action cards
 window._debugPreparePanel = function() {
-  var pane = document.getElementById('pane-actions');
-  if (!pane) { console.log('pane-actions not found'); return; }
-  console.log('=== pane-actions ancestors ===');
+  var pane = document.getElementById('pane-dashboard');
+  if (!pane) { console.log('pane-dashboard not found'); return; }
+  console.log('=== pane-dashboard ancestors ===');
   var el = pane;
   var depth = 0;
   while (el && depth < 10) {
@@ -1350,7 +1538,7 @@ window._debugPreparePanel = function() {
     el = el.parentElement;
     depth++;
   }
-  console.log('=== pane-actions direct children ===');
+  console.log('=== pane-dashboard direct children ===');
   Array.from(pane.children).forEach(function(c, i) {
     var style = window.getComputedStyle(c);
     console.log(i, c.tagName, 'class=' + (c.className||''),
@@ -4108,69 +4296,6 @@ function finishGoldGame(amount, total, wrongTap, cheeseFound) {
     + '</div>';
 }
 
-function renderOutOfBattleActions(me) {
-  let html = '<div class="card"><div class="card-title">Free Actions (Out of Battle)</div>';
-  var whiteCharges = (me.bricksCharged && me.bricksCharged.white) || 0;
-  var grayCharges  = (me.bricksCharged && me.bricksCharged.gray)  || 0;
-  // Self heal — gated on white CHARGE (§8.2) not inventory
-  if (whiteCharges > 0) html+=`<button class="btn success" onclick="selfHeal()">💊 Spend white charge — heal self (${SELF_HEAL_AMT[MY_CLASS]||2} HP)</button>`;
-  // Fixer special
-  if(MY_CLASS==='fixer') {
-    html+=`<button class="btn success" onclick="showHealSelector(-1)">💊 Heal ally (1 white brick)</button>`;
-    html+=`<button class="btn success" onclick="client.massRepair()">💊 Mass Repair (2 white — all players)</button>`;
-    const down=Object.values(G.players).filter(p=>!p.alive||p.hp<=0);
-    if(down.length) html+=`<button class="btn primary" onclick="showReviveSelector()">✨ Revive player</button>`;
-  }
-  // Shield (uniform base: 1 gray → +1 armor, cap = hpMax). Server rolls crit silently.
-  (function() {
-    var sCost = 1;
-    var sMax  = me.hpMax;
-    var hasEnough = grayCharges >= sCost;
-    var atMax = (me.armor||0) >= sMax;
-    html += '<button class="btn" '+((!hasEnough||atMax)?'disabled':'')
-      + ' onclick="client.addShield(this.dataset.cls)" data-cls="'+MY_CLASS+'">'
-      + '🛡 Add Shield — costs 1 gray charge · +1 armor · ' + (me.armor||0) + '/' + sMax
-      + (atMax ? ' (FULL)' : '')
-      + '</button>';
-  })();
-  // Blocksmith forge
-  if(MY_CLASS==='blocksmith'&&me.skills?.forge) html+=`<button class="btn warn" onclick="showForge()">🔧 Forge (2 same → 1 any)</button>`;
-  // Blocksmith blueprint
-  if(MY_CLASS==='blocksmith'&&me.skills?.blueprint) html+=`<button class="btn warn" onclick="showBlueprint()">📋 Blueprint (1 gray → duplicate 1 brick)</button>`;
-
-  // Market button — collapsible
-  var isMarketSpace = (function(){
-    var sp = SPACES[me.space]; if(!sp) return false;
-    return !G.storeDisabled && sp.zone !== 4;
-  })();
-  if (isMarketSpace) {
-    html += '<button class="btn" style="color:var(--gold);border-color:var(--gold)44;" onclick="_marketOpen=!_marketOpen;render();">'
-      + '&#128722; Market — &#129689;' + (me.gold||0) + ' gold'
-      + (_marketOpen ? ' &#9650;' : ' &#9660;')
-      + '</button>';
-    if (_marketOpen) {
-      var prices2={red:1,gray:1,green:1,blue:2,white:2,yellow:2,orange:2,purple:3,black:3};
-      html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px;">';
-      Object.entries(prices2).forEach(function(e){
-        var col=e[0]; var price=e[1];
-        var bg=BRICK_COLORS[col]||'#888'; var bdr=col==='white'?'border:1px solid #ccc;':'';
-        var tc=(col==='white'||col==='yellow')?'#333':bg;
-        var canAfford=(me.gold||0)>=price;
-        html+='<button onclick="buyBrick(this.dataset.color)" data-color="'+col+'" '+(canAfford?'':'disabled')+' '
-          +'style="display:flex;flex-direction:column;align-items:center;gap:5px;padding:10px 6px;border-radius:10px;'
-          +'background:'+bg+'18;border:1px solid '+(canAfford?bg:'#333')+';cursor:'+(canAfford?'pointer':'not-allowed')+';'
-          +'opacity:'+(canAfford?'1':'.4')+';">'
-          +'<span style="width:22px;height:22px;border-radius:4px;background:'+bg+';'+bdr+'display:block;box-shadow:0 1px 3px rgba(0,0,0,.4);"></span>'
-          +'<span style="font-family:Cinzel,serif;font-size:9px;letter-spacing:.04em;color:'+tc+';">'+col+'</span>'
-          +'<span style="font-size:13px;color:var(--gold);">&#129689;'+price+'</span>'
-          +'</button>';
-      });
-      html += '</div>';
-    }
-  }
-  html += '</div>';
-  return html;
-}
 function selfHeal(){
   const me=G.players[MY_CLASS];
   if((me.bricksCharged && me.bricksCharged.white || 0)<1){toast('No white charge available','warn');return;}
@@ -4554,6 +4679,21 @@ function openGivePanel(targetCls) {
       +'<button onclick="adjustGive(\'gold\',1,'+myGold+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">+</button>'
       +'</div></div>';
   }
+  // 0.14.0: cheese is giftable through the same unified give panel
+  // (no more separate cheese-modal gift flow). Eat-cheese-on-self stays
+  // standalone via showCheeseActions().
+  var myCheese=me.cheese||0;
+  if(myCheese>0){
+    rows+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
+      +'<span style="font-size:18px;line-height:1;">&#129472;</span>'
+      +'<span style="font-family:Cinzel,serif;font-size:12px;color:#FFD96A;flex:1;"></span>'
+      +'<span style="font-size:11px;color:var(--text-dim);">x'+myCheese+'</span>'
+      +'<div style="display:flex;align-items:center;gap:6px;">'
+      +'<button onclick="adjustGive(\'cheese\','+-1+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">&#8722;</button>'
+      +'<span id="give-qty-cheese" style="min-width:24px;text-align:center;font-family:Cinzel,serif;font-size:14px;">0</span>'
+      +'<button onclick="adjustGive(\'cheese\',1,'+myCheese+')" style="width:28px;height:28px;border-radius:50%;background:#222;border:1px solid #444;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;">+</button>'
+      +'</div></div>';
+  }
   var modal=document.createElement('div');
   modal.id='give-composer';
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:200;display:flex;align-items:center;justify-content:center;padding:20px;';
@@ -4582,7 +4722,8 @@ function confirmGive(targetCls){
   var bricks={};
   BRICK_NAMES.forEach(function(k){if((_giveAmounts[k]||0)>0)bricks[k]=_giveAmounts[k];});
   var goldAmt=_giveAmounts.gold||0;
-  client.send('giveItems',{fromCls:MY_CLASS,targetCls:targetCls,bricks:bricks,gold:goldAmt});
+  var cheeseAmt=_giveAmounts.cheese||0;
+  client.send('giveItems',{fromCls:MY_CLASS,targetCls:targetCls,bricks:bricks,gold:goldAmt,cheese:cheeseAmt});
   document.getElementById('give-composer')?.remove();
   _giveAmounts={};
   var tName=G.players[targetCls]?.playerName||G.players[targetCls]?.name||targetCls;
@@ -4751,26 +4892,18 @@ function showCheeseActions() {
   const me = G.players[MY_CLASS]; if (!me) return;
   const cheese = me.cheese || 0;
   if (cheese < 1) { toast('No cheese yet — earn some from events', 'normal'); return; }
-  const myZone = (typeof SPACES !== 'undefined' && SPACES[me.space]) ? SPACES[me.space].zone : 0;
-  const nearbyAllies = Object.values(G.players||{}).filter(p =>
-    p.cls !== MY_CLASS && p.alive &&
-    (SPACES[p.space]||{}).zone === myZone
-  );
-  const bg = '#0f0f12', gold = '#F5D000', cheeseColor = '#FFD96A';
-  var allyBtns = nearbyAllies.length
-    ? nearbyAllies.map(p =>
-        `<button class="btn" style="width:100%;margin-bottom:6px;background:#1a1a1f;border:1px solid #333;color:#eee;" onclick="giftCheeseTo('${p.cls}');">🎁 Gift 1 🧀 to ${p.icon} ${p.name}</button>`
-      ).join('')
-    : '<div style="font-size:11px;color:#888;text-align:center;font-style:italic;margin:6px 0;">No allies in your zone to gift</div>';
+  // 0.14.0: this modal is SELF-eat-only. Gifting moved to the unified Party
+  // give panel (openGivePanel) where bricks, gold, and cheese all transfer
+  // through one interface. Prevents two cheese-gift paths from drifting.
+  const bg = '#0f0f12', cheeseColor = '#FFD96A';
   const html =
     '<div id="cheese-modal" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;" onclick="if(event.target.id===\'cheese-modal\')document.getElementById(\'cheese-modal\').remove()">'
     + '<div style="background:'+bg+';border:2px solid '+cheeseColor+';border-radius:10px;padding:18px;max-width:320px;width:90%;">'
-    + '<div style="font-family:Cinzel,serif;font-size:14px;color:'+cheeseColor+';text-align:center;margin-bottom:10px;letter-spacing:.08em;">🧀 CHEESE ACTIONS</div>'
+    + '<div style="font-family:Cinzel,serif;font-size:14px;color:'+cheeseColor+';text-align:center;margin-bottom:10px;letter-spacing:.08em;">🧀 CHEESE</div>'
     + '<div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:12px;">You have '+cheese+' cheese</div>'
     + '<button class="btn success" style="width:100%;margin-bottom:10px;" onclick="consumeCheese1()">🧀 Eat 1 (+1 Max HP)</button>'
-    + '<div style="font-size:10px;color:#888;text-align:center;margin:8px 0 6px;letter-spacing:.08em;">── GIFT TO ALLY (SAME ZONE) ──</div>'
-    + allyBtns
-    + '<button class="btn" style="width:100%;margin-top:8px;background:#222;color:#888;" onclick="document.getElementById(\'cheese-modal\').remove()">Cancel</button>'
+    + '<div style="font-size:10px;color:#666;text-align:center;margin-top:10px;font-style:italic;">To gift cheese, tap an ally on the Party tab.</div>'
+    + '<button class="btn" style="width:100%;margin-top:10px;background:#222;color:#888;" onclick="document.getElementById(\'cheese-modal\').remove()">Cancel</button>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
 }
@@ -4781,6 +4914,9 @@ function consumeCheese1() {
   toast('Ate 1 cheese — +1 Max HP', 'success');
 }
 
+// giftCheeseTo kept for backwards-compat with any stragglers that still call it
+// (server handler 'giftCheese' also still works). Unified give panel is the
+// preferred path going forward.
 function giftCheeseTo(toCls) {
   client.send('giftCheese', { fromCls: MY_CLASS, toCls: toCls, amount: 1 });
   const m = document.getElementById('cheese-modal'); if (m) m.remove();

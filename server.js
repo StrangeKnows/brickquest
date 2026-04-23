@@ -2678,7 +2678,7 @@ wss.on('connection', (ws, req) => {
 
     // ── GIVE ITEMS (no trade required, direct transfer) ──
     if (type === 'giveItems') {
-      const { fromCls, targetCls, bricks: giveBricks, gold: giveGold } = P;
+      const { fromCls, targetCls, bricks: giveBricks, gold: giveGold, cheese: giveCheese } = P;
       if (isInBattle(fromCls) || isInBattle(targetCls)) {
         ws.send(JSON.stringify({type:'error', msg:'Cannot give items to/from a player in battle'}));
         broadcastState(); return;
@@ -2708,6 +2708,16 @@ wss.on('connection', (ws, req) => {
           from.gold = (from.gold||0) - goldActual;
           to.gold   = (to.gold||0)   + goldActual;
           log(`${fromName} gave ${goldActual} gold to ${toName}`, 'trade');
+        }
+      }
+      // Transfer cheese — 0.14.0: unified give flow now includes cheese so
+      // players don't need a separate gift-cheese modal. Same clamp rules.
+      if (giveCheese && giveCheese > 0) {
+        const cheeseActual = Math.min(giveCheese, from.cheese||0);
+        if (cheeseActual > 0) {
+          from.cheese = (from.cheese||0) - cheeseActual;
+          to.cheese   = (to.cheese||0)   + cheeseActual;
+          log(`${fromName} gave ${cheeseActual} cheese to ${toName}`, 'trade');
         }
       }
     }
