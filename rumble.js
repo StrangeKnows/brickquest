@@ -8059,12 +8059,12 @@ function _reviveTick() {
   var tapPct = Math.min(1, _reviveState.taps / _reviveState.tapsNeeded);
 
   // Inner heart grows with taps; pulse accelerates as life returns.
-  // S013.6: inner is now an SVG <g> wrapper — scale applies via CSS transform
-  // on the group, not translate+scale on a div.
+  // S013.6: inner is SVG <g> — scale applies via SVG transform attribute
+  // (not CSS), which resolves in viewBox coordinates reliably.
   var innerG = document.getElementById('revive-heart-inner-g');
   if (innerG) {
     var innerScale = 0.2 + 0.8 * tapPct;
-    innerG.style.transform = 'scale(' + innerScale.toFixed(3) + ')';
+    innerG.setAttribute('transform', 'scale(' + innerScale.toFixed(3) + ')');
     var pulseSpeed = Math.max(0.3, 1.0 - 0.7 * tapPct); // seconds per cycle
     innerG.style.animationDuration = pulseSpeed.toFixed(2) + 's';
   }
@@ -8171,20 +8171,24 @@ function _showReviveOverlay() {
   // stroke-dashoffset from 0 upward — the outline retreats from its own
   // starting point.
   //
-  // Path coordinates use viewBox -10 -10 20 20 (heart centered at origin).
-  // Drawing method: cusp at (0, 8), up-right via quadratic to peak lobes.
-  var heartPath = 'M 0 8 '
-               + 'C 7 4, 9 -2, 6 -5 '      // right side: cusp up to right peak
-               + 'C 4 -8, 1 -7, 0 -4 '     // right lobe over top to center dip
-               + 'C -1 -7, -4 -8, -6 -5 '  // left lobe from dip over top to left peak
-               + 'C -9 -2, -7 4, 0 8 Z';   // left side down back to cusp
+  // Heart SVG path. Starts at top-center dip (between lobes), traces
+  // right lobe over top, down right side to bottom cusp, up left side,
+  // left lobe over top back to dip. Drain erases from start point first
+  // so outline visibly recedes from the top as time runs out.
+  // Path geometry centered at origin (0,0): x:[-9,9], y:[-8,8]. When the
+  // inner heart scales from origin, it grows from actual geometric center.
+  var heartPath = 'M 0 -4 '
+               + 'C 1 -8, 4 -8, 5 -6 '     // right lobe: dip over top to right peak
+               + 'C 9 -2, 6 5, 0 8 '       // right side: peak down to bottom cusp
+               + 'C -6 5, -9 -2, -5 -6 '   // left side: cusp up to left peak
+               + 'C -4 -8, -1 -8, 0 -4 Z'; // left lobe: peak back to dip
 
   var heartStackHtml =
         '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);overflow:visible;'
       +   'display:flex;align-items:center;justify-content:center;">'
-      // Outer heart — SVG outline, bone white with dark shadow. Acts as a
-      // timer: starts at full perimeter, drains to zero as time runs out.
-      // Stroke width reduced to ~1/3 of prior (0.53 in 20-unit viewBox).
+      // Outer heart — SVG outline, bone white at whisper-thin stroke.
+      // Acts as a timer: starts at full perimeter, drains to zero as time
+      // runs out. stroke-width 0.3 (in 22-unit viewBox ≈ 3.5px actual).
       +   '<svg id="revive-heart-outer-svg" viewBox="-11 -11 22 22" '
       +     'style="position:absolute;top:50%;left:50%;'
       +     'transform:translate(-50%,-50%);'
@@ -8194,26 +8198,24 @@ function _showReviveOverlay() {
       +     '<path id="revive-heart-outer-path" d="' + heartPath + '" '
       +       'fill="none" '
       +       'stroke="#e8dcc0" '
-      +       'stroke-width="0.55" '
-      +       'stroke-linecap="round" '
+      +       'stroke-width="0.3" '
       +       'stroke-linejoin="round" '
-      +       'style="filter:drop-shadow(0 0 0.4px rgba(0,0,0,0.95)) drop-shadow(0 0 2px rgba(0,0,0,0.7));'
+      +       'style="filter:drop-shadow(0 0 1.2px rgba(0,0,0,0.95));'
       +       'transition:stroke-dashoffset 0.1s linear;" />'
       +   '</svg>'
       // Inner heart — SVG filled shape, same path as outer. Grows with taps
-      // via SVG transform on the <g> wrapper. Because it shares the outer
-      // path exactly, when scale reaches 1.0 the inner fill perfectly rings
-      // the outer outline.
+      // via SVG native transform attribute on the <g> wrapper. Using the
+      // SVG transform attribute (not CSS) because it resolves in viewBox
+      // coordinates reliably across browsers — CSS transform-origin on
+      // SVG <g> behaves inconsistently.
       +   '<svg id="revive-heart-inner-svg" viewBox="-11 -11 22 22" '
       +     'style="position:absolute;top:50%;left:50%;'
       +     'transform:translate(-50%,-50%);'
       +     'width:min(260px,60vmin);height:min(260px,60vmin);'
       +     'pointer-events:none;'
       +     'overflow:visible;z-index:2;">'
-      +     '<g id="revive-heart-inner-g" style="transform-origin:center;'
-      +       'transform:scale(0.2);'
-      +       'transition:transform 0.1s linear;'
-      +       'animation:reviveInnerPulse 1s ease-in-out infinite;">'
+      +     '<g id="revive-heart-inner-g" transform="scale(0.2)" '
+      +       'style="animation:reviveInnerPulse 1s ease-in-out infinite;">'
       +       '<path d="' + heartPath + '" '
       +         'fill="' + titleColor + '" '
       +         'style="filter:drop-shadow(0 0 3px ' + titleColor + ');" />'
@@ -8736,6 +8738,7 @@ function _computeState() {
     status:      running ? (player.hp > 0 ? 'active' : 'downed') : 'idle',
     mode:        (cfg && cfg.mode) || 'sandbox',
     overloadCount: player.overloadCount || 0,
+    reviveCount:   player.reviveCount || 0,    // S013.6: heart-revives this run (drives loot penalty)
     battleStats: _battleStats ? {
       damageDealt:    _battleStats.damageDealt || 0,
       damageTaken:    _battleStats.damageTaken || 0,

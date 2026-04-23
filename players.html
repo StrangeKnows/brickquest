@@ -718,6 +718,8 @@ function handleRumbleEvent(type, data) {
       //   finalBricks   = remaining charges (<= ceiling; persists to board as bricksCharged)
       finalBrickMax: snap.playerBrickMax || snap.playerBricks,
       finalBricks:   snap.playerBricks   || snap.playerBrickMax,
+      // S013.6: revive counter from this rumble (drives loot penalty; surfaces on DM card)
+      reviveCount:  snap.reviveCount || 0,
       battleStats: snap.battleStats || null,
     });
     // Victory already showed a full stats screen (dismissed via Continue button),

@@ -97,6 +97,7 @@ function mkPlayer(cls, icon, color, hp, die, bricks) {
     earnedClues: [],      // clues this player earned by solving yellow challenges
     dashUsedThisTurn: false, // reset on each turn advance — one red dash per own turn
     battleDashPenalty: 0,    // if >0, decrement red by this much at battle start (consumed once)
+    reviveCount: 0,          // S013.6: stacking heart-revive counter; drives loot penalty (−10% per)
   };
 }
 
@@ -915,7 +916,7 @@ wss.on('connection', (ws, req) => {
     // Client reports battle end with final state + winner
     if (type === 'battleEnd') {
       if (!G.rumbleBattle) { broadcastState(); return; }
-      const { cls, victor, finalHp, finalHpMax, finalArmor, finalGold, finalCheese, finalBricks, finalBrickMax, reason, battleStats } = P;
+      const { cls, victor, finalHp, finalHpMax, finalArmor, finalGold, finalCheese, finalBricks, finalBrickMax, reason, battleStats, reviveCount } = P;
       if (cls !== G.rumbleBattle.cls) { broadcastState(); return; }
       const p = G.players[cls];
       if (p) {
@@ -931,6 +932,11 @@ wss.on('connection', (ws, req) => {
         // v4: Rumble cheese loot — add to board cheese inventory (rumble starts at 0 cheese, any loot is new).
         if (typeof finalCheese === 'number' && finalCheese > 0) {
           p.cheese = (p.cheese||0) + Math.max(0, finalCheese);
+        }
+        // S013.6: Revive counter persists across rumbles on server player.
+        // Each heart-revive (not cheese-revive) in-rumble stacks loot penalty.
+        if (typeof reviveCount === 'number') {
+          p.reviveCount = Math.max(0, reviveCount);
         }
         // S012 §1.1: rumble reports two brick totals at end:
         //   finalBrickMax = inventory ceiling (grew if player looted bricks in rumble)
@@ -970,6 +976,8 @@ wss.on('connection', (ws, req) => {
           //   finalBricks   = remaining charges post-rumble
           finalBrickMax: p ? { ...p.bricks } : null,
           finalBricks:   p ? { ...(p.bricksCharged || p.bricks) } : null,
+          // S013.6: revive counter (drives loot penalty; surfaces to DM)
+          reviveCount: p ? (p.reviveCount || 0) : 0,
           playerDied: p ? !p.alive : false,
           battleStats: battleStats || null,
         };
@@ -1025,6 +1033,7 @@ wss.on('connection', (ws, req) => {
           finalGold: fqP ? fqP.gold : null,
           finalBrickMax: fqP ? { ...fqP.bricks } : null,
           finalBricks:   fqP ? { ...(fqP.bricksCharged || fqP.bricks) } : null,
+          reviveCount: fqP ? (fqP.reviveCount || 0) : 0,
           playerDied: false,
         };
       }

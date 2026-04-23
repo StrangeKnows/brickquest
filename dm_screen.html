@@ -677,6 +677,12 @@ function renderPlayers() {
     if ((p.queuedPoisonStacks||0) > 0) {
       vBadges += '<span style="display:inline-flex;align-items:center;gap:2px;font-size:9px;padding:1px 5px;border-radius:6px;background:#1a2a10;border:1px solid #4a7a2a;color:#bada7a;">☠ ' + p.queuedPoisonStacks + '</span>';
     }
+    // S013.6: Revive stack badge. Bone-white heart glyph matches the revive
+    // overlay's outline color. Number shows cumulative heart-revives this run.
+    if ((p.reviveCount||0) > 0) {
+      var revPen = Math.min(90, 10 * p.reviveCount);
+      vBadges += '<span style="display:inline-flex;align-items:center;gap:2px;font-size:9px;padding:1px 5px;border-radius:6px;background:#1f1b15;border:1px solid #c8b888;color:#e8dcc0;" title="Heart-revives this run — each cuts loot chance 10% (floor 10%)">♥ ' + p.reviveCount + ' <span style="color:#888;">−' + revPen + '%</span></span>';
+    }
     if (vBadges) html += '<div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:3px;">' + vBadges + '</div>';
     html += '<div class="p-bricks">' + (bkHtml || '<span style="font-size:9px;color:var(--faint);">No bricks</span>') + '</div>';
 
@@ -1387,6 +1393,14 @@ function renderActiveEvent() {
         if (bs.overloadsFired > 0) statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #7B2FBE;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">OVERLOAD</span> <strong style="color:#c8c;">' + bs.overloadsFired + '</strong></span>';
         if (bs.hpLow != null && bs.hpLow < (rr.finalHpMax || 99)) statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #666;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">HP LOW</span> <strong style="color:#d88;">' + bs.hpLow + '</strong></span>';
         if (bs.enemiesKilled && bs.enemiesKilled.length > 0) statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #5a8a5a;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">KILLS</span> <strong style="color:#9adb9a;">' + bs.enemiesKilled.length + '</strong></span>';
+        // S013.6: Revive counter from this rumble. Read from rumbleResult
+        // (reliable) with fallback to live player state (for older saves
+        // that predate this field). Bone-white color matches revive overlay.
+        var rcDisplay = (rr.reviveCount != null) ? rr.reviveCount : (rp && rp.reviveCount ? rp.reviveCount : 0);
+        if (rcDisplay > 0) {
+          var effPen = Math.min(90, 10 * rcDisplay);
+          statChips += '<span style="padding:2px 6px;background:#0a0a0a;border:1px solid #c8b888;border-radius:10px;margin:2px 3px;display:inline-block;"><span style="color:#888;">REVIVES</span> <strong style="color:#e8dcc0;">' + rcDisplay + '</strong> <span style="color:#888;font-size:9px;">(−' + effPen + '% loot)</span></span>';
+        }
 
         if (statChips) {
           body += '<div style="text-align:center;margin-top:8px;padding-top:6px;border-top:1px solid ' + victorColor + '44;">'
