@@ -7952,7 +7952,6 @@ function _reviveTick() {
   // the timer, inner matches outer and revive triggers.
   var innerEl = document.getElementById('revive-heart-inner');
   var outerEl = document.getElementById('revive-heart-outer');
-  var tapCountEl = document.getElementById('revive-tap-count');
   if (innerEl) {
     // Inner heart: scale 0.2 → 1.0 based on tap progress
     var innerScale = 0.2 + 0.8 * tapPct;
@@ -7966,7 +7965,6 @@ function _reviveTick() {
     var outerScale = 1.0 - 0.8 * pct;
     outerEl.style.transform = 'translate(-50%,-50%) scale(' + outerScale.toFixed(3) + ')';
   }
-  if (tapCountEl) tapCountEl.textContent = _reviveState.taps + '/' + _reviveState.tapsNeeded;
 
   // Success?
   if (_reviveState.taps >= _reviveState.tapsNeeded) {
@@ -8015,6 +8013,8 @@ function _showReviveOverlay() {
   // Revive succeeds when taps fill the inner heart (scale 1.0).
   // Revive fails when the time-driven outer scale reaches 0.2 before taps catch up.
   // Entire overlay is the tap target (huge area) — no small button to miss.
+  // Tap counter removed — the visual (inner catching outer) IS the progress indicator.
+  // Centered layout reads equally well in portrait and landscape.
 
   var html =
     '<div id="revive-overlay" style="position:absolute;top:0;left:0;right:0;bottom:0;'
@@ -8025,26 +8025,22 @@ function _showReviveOverlay() {
       + '<div style="font-size:clamp(22px,6vw,38px);font-weight:700;color:' + titleColor
       +   ';letter-spacing:.15em;text-shadow:0 0 20px ' + titleColor + ';margin-bottom:4px;text-align:center;">'
       +   title + '</div>'
-      + '<div style="font-size:clamp(12px,3vw,15px);color:#ddd;margin-bottom:16px;font-family:\'Crimson Pro\',serif;font-style:italic;">'
+      + '<div style="font-size:clamp(12px,3vw,15px);color:#ddd;margin-bottom:16px;font-family:\'Crimson Pro\',serif;font-style:italic;text-align:center;">'
       +   subtitle + '</div>'
-      // Tap count readout
-      + '<div style="font-size:11px;color:#888;letter-spacing:.2em;margin-bottom:10px;">'
-      +   '<span id="revive-tap-count">0/20</span> TAPS'
-      + '</div>'
-      // Two-heart stack — relative container sized around the max outer scale
-      + '<div id="revive-heart-stack" style="position:relative;width:min(260px,70vw);height:min(260px,70vw);'
+      // Two-heart stack — landscape-friendly sizing (uses min of vw and vh)
+      + '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);'
       +   'display:flex;align-items:center;justify-content:center;">'
       // Outer heart (time boundary — shrinks as time runs out)
       +   '<div id="revive-heart-outer" style="position:absolute;top:50%;left:50%;'
       +     'transform:translate(-50%,-50%) scale(1);transform-origin:center;'
-      +     'font-size:min(240px,65vw);line-height:1;'
+      +     'font-size:min(240px,55vmin);line-height:1;'
       +     'color:' + titleColor + '44;'
       +     'text-shadow:0 0 30px ' + titleColor + '33;'
       +     'transition:transform 0.1s linear;pointer-events:none;">❤</div>'
       // Inner heart (tap progress — grows)
       +   '<div id="revive-heart-inner" style="position:absolute;top:50%;left:50%;'
       +     'transform:translate(-50%,-50%) scale(0.2);transform-origin:center;'
-      +     'font-size:min(240px,65vw);line-height:1;'
+      +     'font-size:min(240px,55vmin);line-height:1;'
       +     'color:' + titleColor + ';'
       +     'filter:drop-shadow(0 0 20px ' + titleColor + ');'
       +     'animation:reviveInnerPulse 1s ease-in-out infinite;'
@@ -8343,35 +8339,42 @@ function _showVictoryScreen() {
     : '<span style="color:#888;font-style:italic;">—</span>';
 
   // Fluid sizing — scales smoothly between mobile (405px wide) and desktop.
-  // All typography uses clamp(minPx, fluidVW, maxPx) so a 405px screen gets
-  // comfortable sizes without overflow. Container maxes at 420px regardless.
-  // Continue button is sticky-bottom so it's always visible even when the
-  // stat card overflows a short viewport (e.g. landscape mobile).
+  // S013.3 landscape sweep: sections now have classes for 3-column reflow
+  // under `@media (orientation: landscape) and (max-height: 500px)`.
+  //   .vic-col-stats  — left column (time, hp, damage grid)
+  //   .vic-col-hero   — center column (tier label, flavor, favorite move)
+  //   .vic-col-loot   — right column (charges refilling, loot, felled)
+  // Portrait: columns stack vertically (existing layout preserved).
+  // Landscape: grid-template-columns splits them.
   var html =
-    '<div id="rumble-victory-screen" style="'
+    '<div id="rumble-victory-screen" class="vic-root" style="'
     + 'position:absolute;top:0;left:0;right:0;bottom:0;'
     + 'background:rgba(8,8,14,.92);'
     + 'display:flex;flex-direction:column;align-items:center;'
     + 'z-index:200;box-sizing:border-box;'
     + 'font-family:\'Cinzel\',serif;'
-    + 'pointer-events:none;'  /* guard against stray clicks from kill-stroke */
+    + 'pointer-events:none;'
     + '" id="rumble-victory-screen-outer">'
 
-      // Scrollable content area
-      + '<div style="flex:1 1 auto;width:100%;overflow-y:auto;display:flex;flex-direction:column;align-items:center;'
+      // Scrollable content area — becomes the grid container in landscape
+      + '<div class="vic-scroll" style="flex:1 1 auto;width:100%;overflow-y:auto;display:flex;flex-direction:column;align-items:center;'
       + 'padding:clamp(10px,2.5vw,24px) clamp(10px,3vw,20px) 8px;'
       + 'min-height:0;">'
 
-        + '<div style="font-size:clamp(10px,2.5vw,13px);letter-spacing:.25em;color:' + tier.color + ';margin-bottom:4px;">⚔ VICTORY ⚔</div>'
-        + '<div style="font-size:clamp(22px,6.5vw,38px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 18px ' + tier.color + ';margin-bottom:6px;text-align:center;line-height:1.1;">' + tier.label + '</div>'
+        // ── HERO BLOCK (VICTORY banner + tier label + flavor) ──
+        + '<div class="vic-col-hero" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
+          + '<div style="font-size:clamp(10px,2.5vw,13px);letter-spacing:.25em;color:' + tier.color + ';margin-bottom:4px;">⚔ VICTORY ⚔</div>'
+          + '<div style="font-size:clamp(22px,6.5vw,38px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 18px ' + tier.color + ';margin-bottom:6px;text-align:center;line-height:1.1;">' + tier.label + '</div>'
+          + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(11px,3vw,15px);color:#d8d8d8;text-align:center;max-width:min(420px,94%);margin-bottom:10px;line-height:1.4;">"' + flavor + '"</div>'
+          // Favorite move
+          + '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(10px,2.8vw,12px);color:#aaa;margin-bottom:6px;text-align:center;max-width:92%;">'
+            + '<span style="color:#888;letter-spacing:.1em;">FAVORITE MOVE · </span>' + favLine
+          + '</div>'
+        + '</div>'
 
-        // Flavor text
-        + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(11px,3vw,15px);color:#d8d8d8;text-align:center;max-width:min(420px,94%);margin-bottom:10px;line-height:1.4;">"' + flavor + '"</div>'
-
-        // Stat grid — built dynamically to skip zero-value stats and order sensibly
+        // ── STATS COLUMN ──
+        + '<div class="vic-col-stats" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
         + (function() {
-            // Collect all stat entries; only include those with real values.
-            // Time + HP always show (they're always present). Others are conditional.
             var cells = [];
             cells.push({ label: 'TIME', value: timeStr, color: '#eee', mono: true });
             cells.push({ label: 'HP',   value: player.hp + '/' + player.hpMax, color: '#eee' });
@@ -8394,42 +8397,36 @@ function _showVictoryScreen() {
                    + '<div style="font-size:clamp(13px,3.8vw,18px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
             }).join('');
 
-            return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(4px,1.4vw,10px) clamp(12px,4vw,22px);'
+            return '<div class="vic-stat-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(4px,1.4vw,10px) clamp(12px,4vw,22px);'
               + 'background:#15151e;border:1px solid #2a2a3e;border-radius:10px;'
               + 'padding:clamp(8px,2.5vw,14px) clamp(10px,3vw,18px);'
               + 'width:min(340px,92%);margin-bottom:8px;font-family:ui-sans-serif,system-ui;">'
               + rows
               + '</div>';
           })()
-
-        // Favorite move
-        + '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(10px,2.8vw,12px);color:#aaa;margin-bottom:6px;text-align:center;max-width:92%;">'
-          + '<span style="color:#888;letter-spacing:.1em;">FAVORITE MOVE · </span>' + favLine
         + '</div>'
 
-        // S013.1: Live brick refill display. Pips reflect player.bricks
-        // live state, which is ticking up rapidly thanks to the victory
-        // boost. A separate DOM loop (see _startVictoryRefillLoop below)
-        // re-renders this element ~every 80ms until the card is dismissed.
-        + '<div id="rumble-victory-bricks" style="font-family:ui-sans-serif,system-ui;width:min(340px,92%);text-align:center;margin-bottom:8px;">'
-          + '<div style="font-size:clamp(8px,2vw,9px);letter-spacing:.18em;color:#888;margin-bottom:4px;">CHARGES REFILLING</div>'
-          + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:2px;">' + _renderVictoryPips() + '</div>'
+        // ── LOOT COLUMN ──
+        + '<div class="vic-col-loot" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
+          // S013.1 live brick refill
+          + '<div id="rumble-victory-bricks" style="font-family:ui-sans-serif,system-ui;width:min(340px,92%);text-align:center;margin-bottom:8px;">'
+            + '<div style="font-size:clamp(8px,2vw,9px);letter-spacing:.18em;color:#888;margin-bottom:4px;">CHARGES REFILLING</div>'
+            + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:2px;">' + _renderVictoryPips() + '</div>'
+          + '</div>'
+          // Loot gained
+          + '<div style="font-family:ui-sans-serif,system-ui;width:min(340px,92%);text-align:center;margin-bottom:6px;">'
+            + '<div style="font-size:clamp(8px,2vw,9px);letter-spacing:.18em;color:#888;margin-bottom:4px;">LOOT GAINED</div>'
+            + '<div style="line-height:1.5;">' + gainedLines + '</div>'
+          + '</div>'
+          // Enemies killed
+          + (_battleStats.enemiesKilled.length
+            ? '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(9px,2.4vw,11px);color:#666;margin-bottom:6px;text-align:center;max-width:92%;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
+            : '')
         + '</div>'
 
-        // Loot gained
-        + '<div style="font-family:ui-sans-serif,system-ui;width:min(340px,92%);text-align:center;margin-bottom:6px;">'
-          + '<div style="font-size:clamp(8px,2vw,9px);letter-spacing:.18em;color:#888;margin-bottom:4px;">LOOT GAINED</div>'
-          + '<div style="line-height:1.5;">' + gainedLines + '</div>'
-        + '</div>'
+      + '</div>'  /* end scroll/grid */
 
-        // Enemies killed
-        + (_battleStats.enemiesKilled.length
-          ? '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(9px,2.4vw,11px);color:#666;margin-bottom:6px;text-align:center;max-width:92%;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
-          : '')
-
-      + '</div>'  /* end scrollable content */
-
-      // Sticky Continue button — always visible at bottom, above content
+      // Sticky Continue button
       + '<div style="flex:0 0 auto;width:100%;padding:10px clamp(10px,3vw,20px) clamp(12px,3vw,20px);'
       + 'background:linear-gradient(180deg,rgba(8,8,14,0) 0%,rgba(8,8,14,0.95) 35%);'
       + 'display:flex;justify-content:center;pointer-events:none;">'
@@ -8444,6 +8441,25 @@ function _showVictoryScreen() {
         + 'min-width:160px;'
         + '">CONTINUE →</button>'
       + '</div>'
+
+      // ── Responsive reflow CSS ──
+      + '<style>'
+      +   '@media (orientation: landscape) and (max-height: 500px) {'
+      +     '.vic-root .vic-scroll {'
+      +       ' display: grid !important;'
+      +       ' grid-template-columns: 1fr 1.3fr 1fr;'
+      +       ' grid-template-areas: "stats hero loot";'
+      +       ' align-items: start;'
+      +       ' gap: 14px;'
+      +       ' padding: 10px 14px 6px;'
+      +     '}'
+      +     '.vic-root .vic-col-hero  { grid-area: hero;  }'
+      +     '.vic-root .vic-col-stats { grid-area: stats; }'
+      +     '.vic-root .vic-col-loot  { grid-area: loot;  }'
+      +     '.vic-root .vic-stat-grid { width: 100% !important; }'
+      +     '.vic-root #rumble-victory-bricks { width: 100% !important; }'
+      +   '}'
+      + '</style>'
 
     + '</div>';
 
