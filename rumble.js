@@ -6586,6 +6586,10 @@ function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit) {
       spawnCritFlourish(x, y, '#FF9933', 22);
       spawnCritFlourish(x, y, '#FFC080', 14);
     }
+    // BUGFIX (0.14.3): sealed traps fire damage on spawn. If this kills the
+    // last entity, no hit path will follow up to call triggerVictory. Same
+    // hang pattern as the unsealed-trap trigger site below.
+    triggerVictory();
   }
   traps.push(t);
 }
@@ -8717,44 +8721,44 @@ function _showVictoryScreen() {
     ? '<span style="color:' + (BRICK_COLORS[fav.color]||'#fff') + ';font-weight:700;">' + fav.color + '</span> brick × ' + fav.count
     : '<span style="color:#888;font-style:italic;">—</span>';
 
-  // Fluid sizing — scales smoothly between mobile (405px wide) and desktop.
-  // S013.3 landscape sweep: sections now have classes for 3-column reflow
-  // under `@media (orientation: landscape) and (max-height: 500px)`.
-  //   .vic-col-stats  — left column (time, hp, damage grid)
-  //   .vic-col-hero   — center column (tier label, flavor, favorite move)
-  //   .vic-col-loot   — right column (charges refilling, loot, felled)
-  // Portrait: columns stack vertically (existing layout preserved).
-  // Landscape: grid-template-columns splits them.
-  // S013.6: Victory overlay fades in over 2s for a "settling in" feel
-  // (complements the 3s loot-collection grace period before this fires).
+  // Victory screen layout — v2 "breathe, grouped meaningfully":
+  //   HERO    — VICTORY banner, tier label, flavor, favorite move (a hero stat)
+  //   STATS   — 2-col grid of combat numbers
+  //   REWARDS — charges refilling + loot chips + felled list, one grouped zone
+  // Portrait: vertically centered via flex justify-content (content fits →
+  //   centered; content overflows → scroll container takes over).
+  // Landscape: 3-column grid reflow (existing behavior preserved).
   var html =
     '<div id="rumble-victory-screen" class="vic-root" style="'
     + 'position:absolute;top:0;left:0;right:0;bottom:0;'
     + 'background:rgba(8,8,14,.92);'
-    + 'display:flex;flex-direction:column;align-items:center;'
+    + 'display:flex;flex-direction:column;align-items:center;justify-content:center;'
     + 'z-index:200;box-sizing:border-box;'
     + 'font-family:\'Cinzel\',serif;'
     + 'pointer-events:none;'
     + 'opacity:0;animation:bqVictoryFadeIn 1s ease-out forwards;'
     + '" id="rumble-victory-screen-outer">'
 
-      // Scrollable content area — becomes the grid container in landscape
-      + '<div class="vic-scroll" style="flex:1 1 auto;width:100%;overflow-y:auto;display:flex;flex-direction:column;align-items:center;'
-      + 'padding:clamp(10px,2.5vw,24px) clamp(10px,3vw,20px) 8px;'
+      // Content area — flex:0 1 auto + max-height so it centers when it fits
+      // and scrolls when it doesn't. In landscape it becomes the 3-col grid.
+      + '<div class="vic-scroll" style="flex:0 1 auto;max-height:100%;width:100%;overflow-y:auto;display:flex;flex-direction:column;align-items:center;'
+      + 'padding:clamp(14px,4vw,28px) clamp(14px,4vw,24px) 8px;'
+      + 'gap:clamp(14px,4vw,22px);'
       + 'min-height:0;">'
 
-        // ── HERO BLOCK (VICTORY banner + tier label + flavor) ──
+        // ── HERO ── VICTORY banner + tier + flavor + favorite move
         + '<div class="vic-col-hero" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
-          + '<div style="font-size:clamp(10px,2.5vw,13px);letter-spacing:.25em;color:' + tier.color + ';margin-bottom:4px;">⚔ VICTORY ⚔</div>'
-          + '<div style="font-size:clamp(22px,6.5vw,38px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 18px ' + tier.color + ';margin-bottom:6px;text-align:center;line-height:1.1;">' + tier.label + '</div>'
-          + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(11px,3vw,15px);color:#d8d8d8;text-align:center;max-width:min(420px,94%);margin-bottom:10px;line-height:1.4;">"' + flavor + '"</div>'
-          // Favorite move
-          + '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(10px,2.8vw,12px);color:#aaa;margin-bottom:6px;text-align:center;max-width:92%;">'
-            + '<span style="color:#888;letter-spacing:.1em;">FAVORITE MOVE · </span>' + favLine
+          + '<div style="font-size:clamp(10px,2.5vw,13px);letter-spacing:.25em;color:' + tier.color + ';margin-bottom:6px;">⚔ VICTORY ⚔</div>'
+          + '<div style="font-size:clamp(24px,7vw,40px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 18px ' + tier.color + ';margin-bottom:10px;text-align:center;line-height:1.1;">' + tier.label + '</div>'
+          + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(12px,3.2vw,16px);color:#d8d8d8;text-align:center;max-width:min(420px,94%);margin-bottom:14px;line-height:1.5;">"' + flavor + '"</div>'
+          // Favorite move — styled like a stat line so it reads as a hero-level datum
+          + '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(10px,2.6vw,12px);color:#aaa;text-align:center;max-width:92%;">'
+            + '<span style="color:#888;letter-spacing:.14em;">FAVORITE MOVE</span><br>'
+            + '<span style="font-size:clamp(12px,3vw,14px);">' + favLine + '</span>'
           + '</div>'
         + '</div>'
 
-        // ── STATS COLUMN ──
+        // ── STATS ── 2-col combat numbers
         + '<div class="vic-col-stats" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
         + (function() {
             var cells = [];
@@ -8772,83 +8776,85 @@ function _showVictoryScreen() {
             if (_battleStats.critsLanded > 0) cells.push({ label: 'CRITS', value: _battleStats.critsLanded, color: '#F57C00' });
             if (_battleStats.overloadsFired > 0) cells.push({ label: 'OVERLOADS', value: _battleStats.overloadsFired, color: '#7B2FBE' });
             if (_battleStats.armorAbsorbed > 0) cells.push({ label: 'ARMOR ABSORBED', value: _battleStats.armorAbsorbed, color: '#AAA' });
-            // S013.6: Revive counter — surfaces near-deaths to player since
-            // each one reduces loot chance by 10% (floor 10%). Shows total
-            // revives this run, not just this fight, because the penalty
-            // stacks across rumbles.
+            // Revives across the run — each one penalizes loot rolls by 10%.
             if (player && (player.reviveCount || 0) > 0) {
-              var effPenalty = Math.min(90, 10 * player.reviveCount); // capped at −90% (10% floor)
+              var effPenalty = Math.min(90, 10 * player.reviveCount);
               cells.push({ label: 'REVIVES (−' + effPenalty + '% LOOT)', value: player.reviveCount, color: '#e8dcc0' });
             }
 
             var rows = cells.map(function(c) {
               var monoStyle = c.mono ? 'font-family:ui-monospace,monospace;' : '';
-              return '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;">' + c.label + '</div>'
-                   + '<div style="font-size:clamp(13px,3.8vw,18px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
+              return '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;margin-bottom:2px;">' + c.label + '</div>'
+                   + '<div style="font-size:clamp(14px,4vw,19px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
             }).join('');
 
-            return '<div class="vic-stat-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(4px,1.4vw,10px) clamp(12px,4vw,22px);'
-              + 'background:#15151e;border:1px solid #2a2a3e;border-radius:10px;'
-              + 'padding:clamp(8px,2.5vw,14px) clamp(10px,3vw,18px);'
-              + 'width:min(340px,92%);margin-bottom:8px;font-family:ui-sans-serif,system-ui;">'
+            return '<div class="vic-stat-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(8px,2vw,12px) clamp(14px,4vw,22px);'
+              + 'background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
+              + 'padding:clamp(12px,3vw,18px) clamp(14px,3.5vw,20px);'
+              + 'width:min(340px,92%);font-family:ui-sans-serif,system-ui;">'
               + rows
               + '</div>';
           })()
         + '</div>'
 
-        // ── LOOT COLUMN ──
+        // ── REWARDS ── charges refilling + loot chips + felled, one grouped band
         + '<div class="vic-col-loot" style="display:flex;flex-direction:column;align-items:center;width:100%;">'
-          // S013.1 live brick refill
-          + '<div id="rumble-victory-bricks" style="font-family:ui-sans-serif,system-ui;width:min(340px,92%);text-align:center;margin-bottom:8px;">'
-            + '<div style="font-size:clamp(8px,2vw,9px);letter-spacing:.18em;color:#888;margin-bottom:4px;">CHARGES REFILLING</div>'
-            + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:2px;">' + _renderVictoryPips() + '</div>'
+          + '<div style="width:min(340px,92%);display:flex;flex-direction:column;align-items:center;gap:10px;font-family:ui-sans-serif,system-ui;">'
+            // Single section header for the whole rewards band
+            + '<div style="font-size:clamp(9px,2.2vw,10px);letter-spacing:.2em;color:#888;">REWARDS</div>'
+            // Charges refilling (live pip animation)
+            + '<div id="rumble-victory-bricks" style="width:100%;text-align:center;">'
+              + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:3px;">' + _renderVictoryPips() + '</div>'
+            + '</div>'
+            // Loot chips
+            + '<div style="width:100%;text-align:center;line-height:1.7;">' + gainedLines + '</div>'
+            // Felled list — quiet caption tone
+            + (_battleStats.enemiesKilled.length
+              ? '<div style="font-size:clamp(9px,2.4vw,11px);color:#666;text-align:center;font-style:italic;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
+              : '')
           + '</div>'
-          // Loot gained
-          + '<div style="font-family:ui-sans-serif,system-ui;width:min(340px,92%);text-align:center;margin-bottom:6px;">'
-            + '<div style="font-size:clamp(8px,2vw,9px);letter-spacing:.18em;color:#888;margin-bottom:4px;">LOOT GAINED</div>'
-            + '<div style="line-height:1.5;">' + gainedLines + '</div>'
-          + '</div>'
-          // Enemies killed
-          + (_battleStats.enemiesKilled.length
-            ? '<div style="font-family:ui-sans-serif,system-ui;font-size:clamp(9px,2.4vw,11px);color:#666;margin-bottom:6px;text-align:center;max-width:92%;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
-            : '')
         + '</div>'
 
       + '</div>'  /* end scroll/grid */
 
-      // Sticky Continue button
-      + '<div style="flex:0 0 auto;width:100%;padding:10px clamp(10px,3vw,20px) clamp(12px,3vw,20px);'
+      // Sticky Continue button — sits outside the scroll flex-item so it
+      // doesn't get pushed by centering.
+      + '<div style="flex:0 0 auto;width:100%;padding:12px clamp(10px,3vw,20px) clamp(14px,3.5vw,22px);'
       + 'background:linear-gradient(180deg,rgba(8,8,14,0) 0%,rgba(8,8,14,0.95) 35%);'
       + 'display:flex;justify-content:center;pointer-events:none;">'
         + '<button id="rumble-victory-continue" style="'
         + 'pointer-events:auto;'
-        + 'padding:clamp(10px,3vw,12px) clamp(24px,7vw,32px);'
+        + 'padding:clamp(11px,3vw,13px) clamp(28px,7.5vw,36px);'
         + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
         + 'border:2px solid ' + tier.color + ';color:#000;font-weight:700;'
         + 'font-size:clamp(13px,3.5vw,15px);'
         + 'font-family:\'Cinzel\',serif;letter-spacing:.12em;border-radius:8px;cursor:pointer;'
         + 'box-shadow:0 4px 20px ' + tier.color + '66;'
-        + 'min-width:160px;'
+        + 'min-width:170px;'
         + '">CONTINUE →</button>'
       + '</div>'
 
-      // ── Responsive reflow CSS + fade-in animation ──
+      // Responsive reflow CSS + fade-in animation.
+      // Landscape short-viewport: 3-column grid. Portrait / taller viewports:
+      // fall through to the flex-column default defined inline.
       + '<style>'
       +   '@keyframes bqVictoryFadeIn { from { opacity: 0; } to { opacity: 1; } }'
       +   '@media (orientation: landscape) and (max-height: 500px) {'
+      +     '.vic-root { justify-content: flex-start !important; }'
       +     '.vic-root .vic-scroll {'
       +       ' display: grid !important;'
       +       ' grid-template-columns: 1fr 1.3fr 1fr;'
       +       ' grid-template-areas: "stats hero loot";'
       +       ' align-items: start;'
       +       ' gap: 14px;'
-      +       ' padding: 10px 14px 6px;'
+      +       ' padding: 12px 16px 8px;'
+      +       ' max-height: 100% !important;'
       +     '}'
       +     '.vic-root .vic-col-hero  { grid-area: hero;  }'
       +     '.vic-root .vic-col-stats { grid-area: stats; }'
       +     '.vic-root .vic-col-loot  { grid-area: loot;  }'
       +     '.vic-root .vic-stat-grid { width: 100% !important; }'
-      +     '.vic-root #rumble-victory-bricks { width: 100% !important; }'
+      +     '.vic-root .vic-col-loot > div { width: 100% !important; }'
       +   '}'
       + '</style>'
 
