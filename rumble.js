@@ -6703,6 +6703,12 @@ function updateTraps(dt) {
             spawnCritFlourish(t.x, t.y, '#FF9933', 20);
             spawnCritFlourish(t.x, t.y, '#FFC080', 12);
           }
+          // BUGFIX: trap damage can be the killing blow on the last entity.
+          // Without this, damage applies but no callsite invokes triggerVictory
+          // until another hit occurs — which may never happen if this was the
+          // last enemy. The battle hangs: no victory screen, no loot, traps
+          // remain rendered. Bleeds already handle this at line ~6636.
+          triggerVictory();
         }
       });
     }
@@ -7963,6 +7969,11 @@ function triggerVictory() {
     bleeds = [];
     if (typeof poisonPuddles !== 'undefined') poisonPuddles = [];
     if (typeof greenBurst !== 'undefined') greenBurst = null;
+    // 0.14.3: Also clear traps. They spawn during combat, stay visible after
+    // their hold timer, and otherwise persist past victory because nothing
+    // between here and the next battle's start-reset removes them. Visual
+    // clutter with no functional purpose post-combat.
+    traps = [];
     var victoryDeadline = performance.now() + 5000;
     // Victory always follows a 2s grace period after the last loot pickup
     // (or after vacuum sweep, whichever comes first). The victory overlay
