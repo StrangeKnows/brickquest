@@ -1451,13 +1451,18 @@ let _holdState = null;
 let _holdTicker = null;
 
 function _holdStart(e, color, chipEl) {
+  console.log('[HOLD] _holdStart fired', { color, pointerId: e.pointerId, time: Date.now() });
   e.preventDefault();
   e.stopPropagation();
   if (_holdState) _holdEnd(true); // cancel any leftover
 
   const me = G.players[MY_CLASS];
   const charged = (me?.bricksCharged?.[color]) || 0;
-  if (charged < 1) return;
+  console.log('[HOLD] charges available:', charged);
+  if (charged < 1) {
+    console.log('[HOLD] aborted: no charges');
+    return;
+  }
 
   const rect = chipEl.getBoundingClientRect();
   _holdState = {
@@ -1611,8 +1616,25 @@ function _renderHoldOverlay() {
   const elapsed = performance.now() - s.startTime;
   const inHoldMode = elapsed >= HOLD_TAP_THRESHOLD_MS;
 
+  // Diagnostic panel — always visible during hold so we can see what's
+  // happening in the gesture state machine. REMOVE this block once the
+  // gesture is verified working in the field.
+  let html = `<div style="position:absolute;top:8px;right:8px;background:#0a0a0a;
+    border:1px solid #444;padding:6px 8px;border-radius:6px;
+    font-family:ui-monospace,monospace;font-size:10px;color:#0f0;
+    pointer-events:none;line-height:1.4;max-width:240px;">
+    <div style="color:#ff0;font-weight:bold;">HOLD DEBUG</div>
+    color: ${s.color}<br>
+    elapsed: ${Math.round(elapsed)}ms<br>
+    threshold: ${HOLD_TAP_THRESHOLD_MS}ms<br>
+    inHoldMode: ${inHoldMode}<br>
+    tier: ${s.tier} / max ${Math.min(HOLD_TIER_MAX, s.maxCharges)}<br>
+    isDrag: ${s.isDrag}<br>
+    dragTarget: ${s.dragTarget || 'none'}<br>
+    chipCx,Cy: ${Math.round(s.chipCx)},${Math.round(s.chipCy)}
+  </div>`;
+
   // Charging ring around the chip — only after hold threshold
-  let html = '';
   if (inHoldMode) {
     const ringSize = 72;
     const ringX = s.chipCx - ringSize / 2;
