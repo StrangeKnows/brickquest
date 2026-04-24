@@ -1426,37 +1426,24 @@ function _renderHoldOverlay() {
       box-shadow:0 0 12px ${tierColor}66;pointer-events:none;"></div>`;
   }
 
-  // Heal preview number — shows the actual amount that will heal on release.
-  // Uses the canonical computeHeal formula from characters.js (same source
-  // that rumble fires), so the displayed number IS what gets applied.
-  // Position: opposite side of chip from the fan (balanced visual layout).
+  // Heal preview number — raw amount the formula produces at the current tier.
+  // Uses the canonical computeHeal from characters.js (same source rumble fires).
+  // Shows what the cast WOULD produce, not what gets applied (no clamping to
+  // target HP) — gives stable, learnable read of formula output as tier climbs.
+  // Position: same side as the fan/arc (reads as a unit with the power arc).
   if (inHoldMode && s.color === 'white') {
     const me = G.players[MY_CLASS];
     const ownedW = (me && me.bricks && me.bricks.white) || 0;
-    let raw = computeHeal(MY_CLASS, 'white', ownedW, s.tier);
-    let actual = raw;
-    let target = me;
-    // If dragging onto an ally, preview clamps to that ally's HP deficit
-    if (s.dragTarget && G.players[s.dragTarget]) {
-      target = G.players[s.dragTarget];
-      const deficit = Math.max(0, (target.hpMax || 0) - (target.hp || 0));
-      actual = Math.min(raw, deficit);
-    } else if (me) {
-      const deficit = Math.max(0, (me.hpMax || 0) - (me.hp || 0));
-      actual = Math.min(raw, deficit);
-    }
-    // Position opposite the fan
-    const previewSide = (s.fanCenterAngle === Math.PI) ? 'right' : 'left';
-    const previewX = (previewSide === 'right')
-      ? s.chipCx + 140  // chip on right half, fan opens left, number on right
-      : s.chipCx - 140 - 60; // chip on left half, fan opens right, number on left (60 = approx text width offset)
+    const previewAmt = computeHeal(MY_CLASS, 'white', ownedW, s.tier);
+    // Same side as fan: fan opens left (π) → number on left; opens right (0) → number on right
+    const fanOpensLeft = (s.fanCenterAngle === Math.PI);
+    const previewX = fanOpensLeft ? (s.chipCx - 180) : (s.chipCx + 100);
     const previewY = s.chipCy - 24;
     const tColor = BRICK_COLORS[s.color] || '#fff';
     html += `<div style="position:absolute;left:${previewX}px;top:${previewY}px;
       font-family:Cinzel,serif;font-size:46px;font-weight:700;
       color:${tColor};text-shadow:0 0 14px ${tColor}cc, 0 2px 4px rgba(0,0,0,.8);
-      letter-spacing:.02em;pointer-events:none;line-height:1;
-      ${actual < raw ? 'opacity:.7;' : ''}">+${actual}</div>`;
+      letter-spacing:.02em;pointer-events:none;line-height:1;">+${previewAmt}</div>`;
   }
 
   // Radial fan of ally icons — visible whenever in hold mode for radial-enabled colors.
