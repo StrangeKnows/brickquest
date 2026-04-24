@@ -8728,8 +8728,9 @@ function _showVictoryScreen() {
   // vmin-scaled sizing so content "exhales when it can, contracts when needed".
   // No overflow scroll — content is sized to fit the viewport at any dimension.
   //
-  // Backdrop at .97 opacity so the rumble HUD doesn't ghost through.
-  // Fade keyframes handle enter/exit transitions on card swaps.
+  // Cards size to CONTENT, not to available space. A short stats card doesn't
+  // stretch; a long stats card gets its cells, never overflows. Grid gap
+  // provides breathing room between zones, not empty card interiors.
   var sharedCss =
     '<style>'
     +   '@keyframes bqVictoryFadeIn  { from { opacity: 0; } to { opacity: 1; } }'
@@ -8741,55 +8742,65 @@ function _showVictoryScreen() {
     +     ' z-index:200;box-sizing:border-box;'
     +     ' font-family:\'Cinzel\',serif;'
     +     ' opacity:0;animation:bqVictoryFadeIn .6s ease-out forwards;'
-    +     ' overflow:hidden;'   /* backdrop itself never scrolls */
+    +     ' overflow:hidden;'
     +   '}'
     +   '.bq-vic-backdrop.fading-out { animation:bqVictoryFadeOut .3s ease-in forwards; }'
-    +   /* Card base — responsive via vmin + clamp. Smaller dimension drives
-         sizing so a short landscape phone gets smaller text, a tall desktop
-         gets comfortable text. No overflow. No scroll. Fits the viewport. */
+    +   /* Card base — content-sized. No overflow, no scroll. */
     +   '.bq-vic-card {'
-    +     ' width:min(92vw, 520px);'
+    +     ' width:min(92vw, 480px);'
     +     ' max-height:96%;'
     +     ' display:flex;flex-direction:column;align-items:center;'
-    +     ' padding:clamp(10px, 2.5vmin, 26px) clamp(12px, 3vmin, 28px);'
-    +     ' gap:clamp(8px, 2vmin, 18px);'
+    +     ' padding:clamp(14px, 3vmin, 28px) clamp(16px, 3.5vmin, 32px);'
+    +     ' gap:clamp(10px, 2.2vmin, 20px);'
     +     ' pointer-events:auto;'
     +     ' overflow:hidden;'
     +     ' box-sizing:border-box;'
     +   '}'
-    +   /* Scrollbar suppression — belt-and-suspenders, even though overflow
-         is hidden. Some engines still render zero-height bars. */
     +   '.bq-vic-card::-webkit-scrollbar { display:none; width:0; height:0; }'
     +   'body.bq-vic-active, body.bq-vic-active html { overflow:hidden !important; }'
     +   'body.bq-vic-active::-webkit-scrollbar { display:none; width:0; height:0; }'
     +   '.bq-vic-btn {'
-    +     ' padding:clamp(10px, 2.2vmin, 14px) clamp(24px, 6vmin, 44px);'
+    +     ' padding:clamp(10px, 2.2vmin, 14px) clamp(28px, 6.5vmin, 46px);'
     +     ' font-size:clamp(12px, 2.4vmin, 15px);'
     +     ' font-family:\'Cinzel\',serif;letter-spacing:.14em;font-weight:700;'
     +     ' border-radius:10px;cursor:pointer;border:2px solid;'
-    +     ' min-width:clamp(140px, 32vmin, 190px);'
+    +     ' min-width:clamp(150px, 28vmin, 200px);'
+    +   '}'
+    +   /* Inner zone cards (stats / rewards) — content-sized.
+         Wrapper is a flex column holding a section label + the card body.
+         The body sizes to its content (not 100% of column) and centers in
+         the zone wrapper. Padding inside breathes; outside stays tight. */
+    +   '.vic-zone-wrap {'
+    +     ' display:flex;flex-direction:column;align-items:center;'
+    +     ' gap:clamp(4px, 1vmin, 8px);'
+    +   '}'
+    +   '.vic-zone-label {'
+    +     ' font-size:clamp(9px, 1.7vmin, 11px);letter-spacing:.2em;color:#888;'
+    +     ' font-family:ui-sans-serif,system-ui;'
+    +   '}'
+    +   '.vic-zone-body {'
+    +     ' background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
+    +     ' padding:clamp(12px, 2.6vmin, 20px) clamp(14px, 3vmin, 24px);'
+    +     ' font-family:ui-sans-serif,system-ui;'
+    +     ' box-sizing:border-box;'
     +   '}'
     +   /* ═════════════════════════════════════════════════════════════
-         WIDE LAYOUT (aspect-ratio ≥ 1:1): viewport is at least as wide as
-         tall. Card 2 becomes side-by-side: COMBAT left, REWARDS right,
-         CLAIM spanning below. Card 1 gets a wider cap since landscape has
-         horizontal real estate.
+         WIDE LAYOUT (aspect-ratio ≥ 1:1): Card 2 is two cards side-by-side.
+         Card 1 gets wider cap for more comfortable reading width.
        ═════════════════════════════════════════════════════════════ */
     +   '@media (min-aspect-ratio: 1/1) {'
-    +     '.bq-vic-card.card-moment { width:min(90vw, 580px); }'
+    +     '.bq-vic-card.card-moment { width:min(90vw, 720px); }'
     +     '.bq-vic-card.card-rewards {'
-    +       ' width:min(94vw, 780px);'
+    +       ' width:auto; max-width:96vw;'  /* size to content + padding */
     +       ' display:grid;'
-    +       ' grid-template-columns:1fr 1fr;'
+    +       ' grid-template-columns:auto auto;'  /* content-sized columns */
     +       ' grid-template-areas:"stats rewards" "claim claim";'
-    +       ' align-items:center;'
-    +       ' gap:clamp(8px, 2vmin, 16px) clamp(14px, 3.5vmin, 28px);'
+    +       ' justify-content:center; align-items:center;'
+    +       ' gap:clamp(10px, 2vmin, 18px) clamp(18px, 4vmin, 32px);'
     +     '}'
-    +     '.bq-vic-card.card-rewards .vic-stats-zone   { grid-area:stats;   width:100%; align-self:center; }'
-    +     '.bq-vic-card.card-rewards .vic-rewards-zone { grid-area:rewards; width:100%; align-self:center; }'
-    +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim; margin-top:clamp(2px, 1vmin, 6px); }'
-    +     '.bq-vic-card.card-rewards .vic-stat-grid    { width:100% !important; }'
-    +     '.bq-vic-card.card-rewards .vic-rewards-body { width:100% !important; }'
+    +     '.bq-vic-card.card-rewards .vic-stats-wrap   { grid-area:stats;   }'
+    +     '.bq-vic-card.card-rewards .vic-rewards-wrap { grid-area:rewards; }'
+    +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim; margin-top:clamp(2px,1vmin,8px); }'
     +   '}'
     + '</style>';
 
@@ -8845,33 +8856,28 @@ function _showVictoryScreen() {
 
     return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
       + '<div class="bq-vic-card card-rewards">'
-        // Stats zone
-        + '<div class="vic-stats-zone" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:clamp(4px,1.2vmin,8px);">'
-          + '<div style="font-size:clamp(9px,1.8vmin,11px);letter-spacing:.2em;color:#888;font-family:ui-sans-serif,system-ui;">COMBAT</div>'
-          + '<div class="vic-stat-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(6px,1.6vmin,12px) clamp(12px,3vmin,22px);'
-            + 'background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
-            + 'padding:clamp(10px,2.4vmin,18px) clamp(12px,2.8vmin,20px);'
-            + 'width:100%;box-sizing:border-box;font-family:ui-sans-serif,system-ui;">'
+        // Stats zone — label + body, content-sized
+        + '<div class="vic-zone-wrap vic-stats-wrap">'
+          + '<div class="vic-zone-label">COMBAT</div>'
+          + '<div class="vic-zone-body" style="display:grid;grid-template-columns:auto auto;gap:clamp(6px,1.6vmin,12px) clamp(16px,3.6vmin,28px);">'
             + rows
           + '</div>'
         + '</div>'
-        // Rewards zone
-        + '<div class="vic-rewards-zone" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:clamp(4px,1.2vmin,8px);font-family:ui-sans-serif,system-ui;">'
-          + '<div style="font-size:clamp(9px,1.8vmin,11px);letter-spacing:.2em;color:#888;">REWARDS</div>'
-          + '<div class="vic-rewards-body" style="width:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:clamp(6px,1.8vmin,12px);'
-            + 'background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
-            + 'padding:clamp(10px,2.4vmin,18px) clamp(12px,2.8vmin,20px);">'
-            + '<div id="rumble-victory-bricks" style="width:100%;text-align:center;">'
+        // Rewards zone — label + body, content-sized
+        + '<div class="vic-zone-wrap vic-rewards-wrap">'
+          + '<div class="vic-zone-label">REWARDS</div>'
+          + '<div class="vic-zone-body" style="display:flex;flex-direction:column;align-items:center;gap:clamp(6px,1.8vmin,12px);min-width:clamp(180px,32vmin,260px);">'
+            + '<div id="rumble-victory-bricks" style="text-align:center;">'
               + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:3px;">' + _renderVictoryPips() + '</div>'
             + '</div>'
-            + '<div style="width:100%;text-align:center;line-height:1.7;">' + gainedLines + '</div>'
+            + '<div style="text-align:center;line-height:1.7;">' + gainedLines + '</div>'
             + (_battleStats.enemiesKilled.length
               ? '<div style="font-size:clamp(9px,1.8vmin,11px);color:#666;text-align:center;font-style:italic;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
               : '')
           + '</div>'
         + '</div>'
         // Claim button
-        + '<div class="vic-claim-zone" style="display:flex;justify-content:center;width:100%;margin-top:clamp(2px,1vmin,8px);">'
+        + '<div class="vic-claim-zone" style="display:flex;justify-content:center;">'
           + '<button id="bq-vic-btn-claim" class="bq-vic-btn" style="'
           + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
           + 'border-color:' + tier.color + ';color:#000;'
