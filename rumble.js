@@ -8745,7 +8745,6 @@ function _showVictoryScreen() {
     +     ' overflow:hidden;'
     +   '}'
     +   '.bq-vic-backdrop.fading-out { animation:bqVictoryFadeOut .3s ease-in forwards; }'
-    +   /* Card base — content-sized. No overflow, no scroll. */
     +   '.bq-vic-card {'
     +     ' width:min(92vw, 480px);'
     +     ' max-height:96%;'
@@ -8766,10 +8765,6 @@ function _showVictoryScreen() {
     +     ' border-radius:10px;cursor:pointer;border:2px solid;'
     +     ' min-width:clamp(150px, 28vmin, 200px);'
     +   '}'
-    +   /* Inner zone cards (stats / rewards) — content-sized.
-         Wrapper is a flex column holding a section label + the card body.
-         The body sizes to its content (not 100% of column) and centers in
-         the zone wrapper. Padding inside breathes; outside stays tight. */
     +   '.vic-zone-wrap {'
     +     ' display:flex;flex-direction:column;align-items:center;'
     +     ' gap:clamp(4px, 1vmin, 8px);'
@@ -8787,14 +8782,9 @@ function _showVictoryScreen() {
     +     ' font-family:ui-sans-serif,system-ui;'
     +     ' box-sizing:border-box;'
     +   '}'
-    +   /* ═════════════════════════════════════════════════════════════
-         WIDE LAYOUT (aspect-ratio ≥ 1:1): Card 2 is two cards side-by-side.
-         Card 1 ALSO content-sized so it doesn't stretch wide on big
-         landscape viewports and squish its content in the middle.
-       ═════════════════════════════════════════════════════════════ */
     +   '@media (min-aspect-ratio: 1/1) {'
     +     '.bq-vic-card.card-moment {'
-    +       ' width:min(86vw, 640px);'
+    +       ' width:min(88vw, 720px);'
     +     '}'
     +     '.bq-vic-card.card-rewards {'
     +       ' width:fit-content; max-width:96vw;'
@@ -8936,11 +8926,128 @@ function _showVictoryScreen() {
         btnX.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
       }
     }
+    // Wire the debug overlay toggle
+    _wireVictoryDebug();
   }
   showCard('moment');
 
   // 60s absolute safety fallback in case buttons never get tapped.
   setTimeout(dismiss, 60000);
+}
+
+
+// Debug overlay — a tiny 🔍 button in the top-right of the victory screen.
+// Tapping it outlines all victory elements in colored borders and shows a
+// floating readout of their computed styles + dimensions. Useful for
+// diagnosing layout issues on mobile where devtools aren't available.
+// Tap again to toggle off.
+function _wireVictoryDebug() {
+  // Inject the debug button if it doesn't exist yet in this card's DOM
+  var bd = document.getElementById('bq-vic-backdrop');
+  if (!bd) return;
+  var existing = bd.querySelector('.bq-vic-debug-btn');
+  if (!existing) {
+    var btn = document.createElement('button');
+    btn.className = 'bq-vic-debug-btn';
+    btn.textContent = '🔍';
+    btn.style.cssText = 'position:absolute;top:8px;right:8px;width:32px;height:32px;'
+      + 'border-radius:50%;border:1px solid #333;background:#1a1a24;color:#888;'
+      + 'font-size:14px;cursor:pointer;z-index:210;padding:0;line-height:1;'
+      + 'display:flex;align-items:center;justify-content:center;';
+    btn.addEventListener('click', _toggleVictoryDebug);
+    btn.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+    bd.appendChild(btn);
+  }
+  // If debug was active before card swap, re-apply to the new DOM
+  if (window._bqVicDebugActive) {
+    _applyVictoryDebug();
+  }
+}
+
+function _toggleVictoryDebug() {
+  window._bqVicDebugActive = !window._bqVicDebugActive;
+  if (window._bqVicDebugActive) {
+    _applyVictoryDebug();
+  } else {
+    _removeVictoryDebug();
+  }
+}
+
+function _applyVictoryDebug() {
+  var bd = document.getElementById('bq-vic-backdrop');
+  if (!bd) return;
+
+  // Outline every victory element
+  var outlineRules = [
+    { sel: '.bq-vic-card',        color: '#ff3b3b', label: 'CARD' },
+    { sel: '.vic-zone-wrap',      color: '#3bff3b', label: 'ZONE-WRAP' },
+    { sel: '.vic-zone-label',     color: '#3bbcff', label: 'LABEL' },
+    { sel: '.vic-zone-body',      color: '#ffbc3b', label: 'BODY' },
+    { sel: '.vic-claim-zone',     color: '#bc3bff', label: 'CLAIM-ZONE' },
+  ];
+  outlineRules.forEach(function(r) {
+    var nodes = bd.querySelectorAll(r.sel);
+    nodes.forEach(function(n) {
+      n.setAttribute('data-bq-vicdbg-prev-outline', n.style.outline || '');
+      n.style.outline = '2px dashed ' + r.color;
+      n.style.outlineOffset = '-2px';
+    });
+  });
+
+  // Build a readout panel
+  var readout = document.createElement('div');
+  readout.id = 'bq-vic-debug-readout';
+  readout.style.cssText = 'position:absolute;top:48px;right:8px;max-width:min(340px,60vw);'
+    + 'background:#0a0a0a;border:1px solid #333;border-radius:6px;padding:8px;'
+    + 'font-family:ui-monospace,monospace;font-size:10px;line-height:1.4;'
+    + 'color:#ccc;z-index:210;max-height:80vh;overflow-y:auto;'
+    + 'scrollbar-width:thin;';
+
+  var vw = window.innerWidth;
+  var vh = window.innerHeight;
+  var vmin = Math.min(vw, vh);
+  var aspect = (vw / vh).toFixed(2);
+  var lines = [];
+  lines.push('<div style="color:#ffbc3b;font-weight:bold;">VIEWPORT</div>');
+  lines.push('  w=' + vw + 'px h=' + vh + 'px');
+  lines.push('  vmin=' + vmin + 'px aspect=' + aspect);
+  lines.push('  media min-aspect-ratio:1/1 → ' + (vw >= vh ? '<span style="color:#3bff3b">FIRES</span>' : '<span style="color:#ff3b3b">BLOCKED</span>'));
+  lines.push('');
+
+  outlineRules.forEach(function(r) {
+    var nodes = bd.querySelectorAll(r.sel);
+    if (nodes.length === 0) return;
+    lines.push('<div style="color:' + r.color + ';font-weight:bold;">' + r.label + ' (' + r.sel + ') × ' + nodes.length + '</div>');
+    nodes.forEach(function(n, i) {
+      var cs = window.getComputedStyle(n);
+      var rect = n.getBoundingClientRect();
+      var text = (n.textContent || '').substring(0, 20).replace(/\s+/g, ' ').trim();
+      lines.push('  [' + i + '] "' + text + '"');
+      lines.push('      box: ' + Math.round(rect.width) + '×' + Math.round(rect.height)
+        + ' at (' + Math.round(rect.left) + ',' + Math.round(rect.top) + ')');
+      lines.push('      font: ' + cs.fontSize + ' ' + cs.fontFamily.split(',')[0].replace(/["']/g, ''));
+      lines.push('      display:' + cs.display + ' width:' + cs.width);
+    });
+    lines.push('');
+  });
+  readout.innerHTML = lines.join('<br>');
+  bd.appendChild(readout);
+}
+
+function _removeVictoryDebug() {
+  var bd = document.getElementById('bq-vic-backdrop');
+  if (!bd) return;
+  // Restore outlines
+  var nodes = bd.querySelectorAll('[data-bq-vicdbg-prev-outline]');
+  nodes.forEach(function(n) {
+    var prev = n.getAttribute('data-bq-vicdbg-prev-outline');
+    n.style.outline = prev;
+    n.style.outlineOffset = '';
+    n.removeAttribute('data-bq-vicdbg-prev-outline');
+  });
+  // Remove readout
+  var r = document.getElementById('bq-vic-debug-readout');
+  if (r) r.parentNode.removeChild(r);
 }
 
 
