@@ -1166,7 +1166,7 @@ function _dashHeader(me) {
 // Other colors stay tap-only for this patch. Hold ignored on non-white.
 
 const HOLD_TAP_THRESHOLD_MS = 250;     // < this = tap, ≥ this = hold
-const HOLD_TIER_INTERVAL_MS = 500;     // ms per tier increment
+const HOLD_TIER_INTERVAL_MS = 1000;    // ms per overload step (one full second per tier-up)
 const HOLD_DRAG_THRESHOLD_PX = 15;     // px movement before drag mode
 const HOLD_TIER_MAX = 4;               // ceiling — tier never exceeds this
 
@@ -1193,28 +1193,13 @@ function _holdStart(e, color, chipEl) {
 
   const rect = chipEl.getBoundingClientRect();
 
-  // Compute fan direction based on chip position. Fan should open away from
-  // the nearest viewport edge so ally icons don't clip off-screen.
-  // Returns angle (radians) for the CENTER of the fan. Allies fan symmetrically
-  // around this center across an arc of ±60° (120° total).
+  // Fan direction: always horizontal. Chip on right half of viewport → fan
+  // opens leftward (π). Chip on left half → fan opens rightward (0).
+  // Predictable and avoids vertical clipping at top/bottom edges.
   const vw = window.innerWidth;
-  const vh = window.innerHeight;
   const chipCx = rect.left + rect.width / 2;
   const chipCy = rect.top + rect.height / 2;
-  // Distance from each edge — pick the direction with the most room
-  const distLeft   = chipCx;
-  const distRight  = vw - chipCx;
-  const distTop    = chipCy;
-  const distBottom = vh - chipCy;
-  // Pick primary axis: if vertical room is greater, fan vertically; else horizontally
-  let fanCenterAngle;  // radians, 0=right, π/2=down, π=left, -π/2=up
-  if (Math.max(distTop, distBottom) > Math.max(distLeft, distRight)) {
-    // Vertical axis preferred — fan up or down
-    fanCenterAngle = (distTop >= distBottom) ? -Math.PI / 2 : Math.PI / 2;
-  } else {
-    // Horizontal axis preferred — fan left or right
-    fanCenterAngle = (distLeft >= distRight) ? Math.PI : 0;
-  }
+  const fanCenterAngle = (chipCx > vw / 2) ? Math.PI : 0;
 
   _holdState = {
     color,
@@ -1242,31 +1227,51 @@ function _holdStart(e, color, chipEl) {
   document.addEventListener('pointerup', _holdUp);
   document.addEventListener('pointercancel', _holdUp);
 
-  // Tier ticker — every interval, bump tier up to maxCharges (capped at HOLD_TIER_MAX)
-  _holdTicker = setInterval(() => {
-    if (!_holdState) return;
-    const elapsed = performance.now() - _holdState.startTime;
-    if (elapsed < HOLD_TAP_THRESHOLD_MS) return;
-    _holdState.holdMode = true;
-    const ceiling = Math.min(HOLD_TIER_MAX, _holdState.maxCharges);
-    if (_holdState.tier < ceiling) {
-      _holdState.tier += 1;
-      _holdState.lastTierUpTime = performance.now();  // for pulse animation
-    }
-    _renderHoldOverlay();
-  }, HOLD_TIER_INTERVAL_MS);
-
-  // RAF loop — keeps pulse animations and time-based visuals smooth between
-  // pointermove events and tier ticks. Re-renders every frame while hold is active.
+  // RAF loop is the single source of truth — derives tier from elapsed time,
+  // detects tier-up boundaries, and re-renders. No discrete ticker; arc fills
+  // smoothly because tier is recomputed every frame from continuous time.
   function frame() {
     if (!_holdState) return;
+    _holdUpdateTier();
     _renderHoldOverlay();
     _holdState.rafId = requestAnimationFrame(frame);
   }
   _holdState.rafId = requestAnimationFrame(frame);
 
-  // Initial overlay render so the ring appears immediately
+  // Initial overlay render so the gesture state appears immediately
   _renderHoldOverlay();
+}
+
+// Derive current tier from elapsed hold time. Detects tier-up boundary
+// crossings to trigger pulse animation. Called every frame during hold.
+function _holdUpdateTier() {
+  const s = _holdState;
+  if (!s) return;
+  const elapsed = performance.now() - s.startTime;
+  if (elapsed < HOLD_TAP_THRESHOLD_MS) {
+    s.tier = 1;
+    s.holdMode = false;
+    return;
+  }
+  s.holdMode = true;
+  const overloadSteps = Math.max(0, Math.min(HOLD_TIER_MAX, s.maxCharges) - 1);
+  if (overloadSteps <= 0) {
+    s.tier = 1;
+    return;
+  }
+  const overloadElapsed = elapsed - HOLD_TAP_THRESHOLD_MS;
+  const totalDuration = overloadSteps * HOLD_TIER_INTERVAL_MS;
+  const arcFill = Math.min(1, overloadElapsed / totalDuration);
+  const newTier = 1 + Math.floor(arcFill * overloadSteps);
+  // Cap tier at the available overload ceiling
+  const ceiling = 1 + overloadSteps;
+  s.tier = Math.min(newTier, ceiling);
+  s.arcFill = arcFill;
+  // Detect tier-up: integer tier changed since last frame
+  if (s.tier > (s.lastTier || 1)) {
+    s.lastTierUpTime = performance.now();
+  }
+  s.lastTier = s.tier;
 }
 
 function _holdMove(e) {
@@ -1401,8 +1406,6 @@ function _renderHoldOverlay() {
   // Charging visuals — only after hold threshold
   if (inHoldMode) {
     const tierColor = BRICK_COLORS[s.color] || '#fff';
-    const ceiling = Math.min(HOLD_TIER_MAX, s.maxCharges);
-    const tierPct = ceiling > 0 ? (s.tier / ceiling) : 0;
 
     // Tier-up pulse — expanding fading ring, triggered each time tier bumps.
     // Lives ~600ms then fades. The tick recorded performance.now() at the bump,
@@ -1479,8 +1482,9 @@ function _renderAllyRadialFan(s) {
   const FAN_ARC_RAD = Math.PI * 2 / 3; // 120° total arc
   const center = s.fanCenterAngle;
   const tierColor = BRICK_COLORS[s.color] || '#fff';
-  const ceiling = Math.min(HOLD_TIER_MAX, s.maxCharges);
-  const tierPct = ceiling > 0 ? (s.tier / ceiling) : 0;
+  // arcFill is continuous time-progress (0..1) through the overload range.
+  // Set every frame by _holdUpdateTier. Use this for smooth visual fill.
+  const arcFill = Math.max(0, Math.min(1, s.arcFill || 0));
 
   let html = '';
 
@@ -1495,7 +1499,7 @@ function _renderAllyRadialFan(s) {
   const arcStart = center - FAN_ARC_RAD / 2;
   const arcEnd   = center + FAN_ARC_RAD / 2;
   // Filled portion (based on tier)
-  const arcFillEnd = arcStart + FAN_ARC_RAD * tierPct;
+  const arcFillEnd = arcStart + FAN_ARC_RAD * arcFill;
   // Convert to SVG coords (SVG y is inverted vs math y; we center at svgSize/2)
   const cx = svgSize / 2;
   const cy = svgSize / 2;
@@ -1506,11 +1510,11 @@ function _renderAllyRadialFan(s) {
   const [fillx2, filly2] = polar(ARC_RADIUS, arcFillEnd);
   // Large-arc flag: 120° is less than 180°, so always 0
   const bgArcLargeFlag = 0;
-  const fillArcLargeFlag = (FAN_ARC_RAD * tierPct) > Math.PI ? 1 : 0;
+  const fillArcLargeFlag = (FAN_ARC_RAD * arcFill) > Math.PI ? 1 : 0;
   const bgPath = `M ${bgx1.toFixed(2)} ${bgy1.toFixed(2)} A ${ARC_RADIUS} ${ARC_RADIUS} 0 ${bgArcLargeFlag} 1 ${bgx2.toFixed(2)} ${bgy2.toFixed(2)}`;
   const fillPath = `M ${fillx1.toFixed(2)} ${filly1.toFixed(2)} A ${ARC_RADIUS} ${ARC_RADIUS} 0 ${fillArcLargeFlag} 1 ${fillx2.toFixed(2)} ${filly2.toFixed(2)}`;
   // Halo intensity scales with tier (tier 1 = soft, tier 4 = saturated)
-  const haloIntensity = 4 + 12 * tierPct;
+  const haloIntensity = 4 + 12 * arcFill;
   html += `<svg style="position:absolute;left:${svgX}px;top:${svgY}px;width:${svgSize}px;height:${svgSize}px;pointer-events:none;overflow:visible;">
     <path d="${bgPath}" stroke="${tierColor}33" stroke-width="6" fill="none" stroke-linecap="round"/>
     <path d="${fillPath}" stroke="${tierColor}" stroke-width="6" fill="none" stroke-linecap="round"
