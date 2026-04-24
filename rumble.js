@@ -85,74 +85,30 @@ function brickTier(cls, color) {
   return 'baseline';
 }
 
-// Class-color affinity damage multiplier. Using your class's signature
-// color hits harder; using an off-class (baseline) color hits softer.
-// Secondary sits at neutral. See Combat & Economy v1 spec.
+// ── COMBAT FORMULA WRAPPERS ─────────────────────────────────────────────
+// These functions are THIN WRAPPERS over characters.js (the canonical
+// source). They preserve the 1-argument call signatures used throughout
+// rumble (affinityMult('white'), tapScaleMult('white'), etc.) by reading
+// player.cls and player.brickMax internally. The actual formulas live
+// in characters.js; if values need tuning, edit there, not here.
 function affinityMult(color) {
   if (!player) return 1.0;
-  var tier = brickTier(player.cls, color);
-  if (tier === 'signature') return 1.25;
-  if (tier === 'baseline')  return 0.8;
-  return 1.0;
+  return window.affinityMult(player.cls, color);
 }
 
-// Affinity multiplier specifically for AoE RADIUS output. Uses a gentler
-// signature bonus than the damage version — compounding tap + stack +
-// affinity on the damage curve made signature-color AoEs balloon to
-// screen-filling sizes on overloads (e.g. Wild One green burst hitting
-// 250+ px on a 3-brick overload). Radius gets 1.10× for signature instead
-// of 1.25×; other tiers match the damage multiplier (baseline still penalized,
-// secondary/neutral at 1.0). Sites that compute a RADIUS from affinity
-// should use this helper; damage/poison/heal amounts keep affinityMult.
 function affinityRadiusMult(color) {
   if (!player) return 1.0;
-  var tier = brickTier(player.cls, color);
-  if (tier === 'signature') return 1.10;
-  if (tier === 'baseline')  return 0.8;
-  return 1.0;
+  return window.affinityRadiusMult(player.cls, color);
 }
 
-// Overload stack bonus: each additional brick beyond the first adds 20%
-// per-brick power on top of the linear count scaling. Applied to ALL
-// brick outputs (damage, heal, duration, radius) during overload.
-//
-//   count=1  -> 1.0x  (tap baseline, no bonus)
-//   count=2  -> 1.2x  per-brick (total output = dmg * 2 * 1.2)
-//   count=3  -> 1.4x  per-brick
-//   count=5  -> 1.8x  per-brick
-//   count=10 -> 2.8x  per-brick (unbounded by design; monster scaling
-//                                compensates instead of a curve cap)
-//
-// Usage pattern: final = base * count * overloadStackMult(count) * affinityMult(color)
 function overloadStackMult(count) {
-  if (!count || count < 2) return 1.0;
-  return 1.0 + (count - 1) * 0.2;
+  return window.overloadStackMult(count);
 }
-
-// Tap scaling: base value of every output scales with bricks OWNED beyond the
-// starting kit. Permanent progression. Applies to BOTH tap and overload
-// (because overload multiplies off the scaled base, they compound naturally).
-//
-//   tapScaleMult = 1 + 0.10 * max(0, owned - startingCount)
-//
-// startingCount comes from the original kit; owned is current inventory.
-// Uncapped by design — monster difficulty scales to match.
-var STARTING_KIT_COUNTS = {
-  breaker:     { red: 2, gray: 1 },
-  formwright:  { blue: 2, purple: 1 },
-  snapstep:    { orange: 2, red: 1 },
-  blocksmith:  { gray: 2, orange: 1 },
-  fixer:       { white: 2, black: 1 },
-  wild_one:    { green: 2, yellow: 1 },
-};
 
 function tapScaleMult(color) {
   if (!player || !player.brickMax) return 1.0;
-  var cls = player.cls;
   var owned = player.brickMax[color] || 0;
-  var starting = (STARTING_KIT_COUNTS[cls] && STARTING_KIT_COUNTS[cls][color]) || 0;
-  var extra = Math.max(0, owned - starting);
-  return 1.0 + 0.10 * extra;
+  return window.tapScaleMult(player.cls, color, owned);
 }
 
 // Crit chance: base 10% + 8% per extra brick in overload, +/- affinity bonus.
@@ -1772,8 +1728,9 @@ function fireOverloadWhite(count, ox, oy) {
   var _isDrag = ox !== undefined;
   var isOnPlayer = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) < player.r + 30;
   if (isOnPlayer || !_isDrag) {
-    // Tap or drop-on-player: direct overload heal
-    var healAmt = Math.ceil((player.cls === 'fixer' ? 5 : 3) * tapScaleMult('white') * count * overloadStackMult(count) * affinityMult('white'));
+    // Tap or drop-on-player: direct overload heal (canonical formula in characters.js)
+    var ownedW = (player.brickMax && player.brickMax.white) || 0;
+    var healAmt = window.computeHeal(player.cls, 'white', ownedW, count);
     var prev = player.hp;
     var cap2 = Math.max(player.hpMax, player.hp);
     player.hp = Math.min(cap2, player.hp + healAmt);
@@ -5867,9 +5824,9 @@ function getArmorMax() {
 function startWhiteRegen(tier) {
   var tap = tapScaleMult('white');
   var mult = affinityMult('white');
-  var baseHeal = player.cls === 'fixer' ? 5 : 3;
+  var baseAmt = window.baseHeal(player.cls);
   var baseDur = 5;
-  var hpPerSec = baseHeal * tap * Math.pow(1.25, tier-1) / baseDur * mult;
+  var hpPerSec = baseAmt * tap * Math.pow(1.25, tier-1) / baseDur * mult;
   var duration = baseDur * Math.pow(2, tier-1) * mult;
   if (playerRegen) {
     // Stack — extend duration
@@ -5938,7 +5895,9 @@ function spawnHealSparkles(tier) {
 }
 
 function doWhiteHeal(targetX, targetY) {
-  var healAmt = Math.ceil((player.cls === 'fixer' ? 5 : 3) * tapScaleMult('white') * affinityMult('white'));
+  // Tap heal — canonical formula in characters.js (count=1 for tap, no overload stack)
+  var ownedW = (player.brickMax && player.brickMax.white) || 0;
+  var healAmt = window.computeHeal(player.cls, 'white', ownedW, 1);
   var prev = player.hp;
   var cap = Math.max(player.hpMax, player.hp);
   player.hp = Math.min(cap, player.hp + healAmt);

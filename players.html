@@ -470,6 +470,7 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 </div>
 
 <script src="game.js"></script>
+<script src="characters.js"></script>
 <script src="rumble.js"></script>
 <script>
 // ═══════════════════════════════════════════
@@ -477,12 +478,6 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 // ═══════════════════════════════════════════
 let MY_CLASS = null;
 
-// SELF_HEAL_AMT — orphan from the ripped turn-based combat system. The
-// white-brick selfHeal button still references it. Defined here as a
-// fallback until the post-rip cleanup happens.
-var SELF_HEAL_AMT = {
-  breaker: 2, formwright: 2, snapstep: 2, blocksmith: 2, fixer: 4, wild_one: 2,
-};
 let client   = null;
 let G        = null; // full game state
 let pendingTradeOffer = null;
@@ -1317,10 +1312,8 @@ function _holdUp(e) {
     _fireTierAction(s.color, s.tier, targetCls);
   } else if (releasedOnOwnChip) {
     _fireTierAction(s.color, s.tier, null);
-  } else {
-    // Cancel — released off-target
-    toast('Action cancelled', 'info');
   }
+  // Released off-target → silent cancel (no charges spent, no toast noise)
 }
 
 function _holdEnd(cancelled) {
@@ -1433,9 +1426,43 @@ function _renderHoldOverlay() {
       box-shadow:0 0 12px ${tierColor}66;pointer-events:none;"></div>`;
   }
 
-  // Radial fan of ally icons (white at tier ≥ 2 only, for now)
+  // Heal preview number — shows the actual amount that will heal on release.
+  // Uses the canonical computeHeal formula from characters.js (same source
+  // that rumble fires), so the displayed number IS what gets applied.
+  // Position: opposite side of chip from the fan (balanced visual layout).
+  if (inHoldMode && s.color === 'white') {
+    const me = G.players[MY_CLASS];
+    const ownedW = (me && me.bricks && me.bricks.white) || 0;
+    let raw = computeHeal(MY_CLASS, 'white', ownedW, s.tier);
+    let actual = raw;
+    let target = me;
+    // If dragging onto an ally, preview clamps to that ally's HP deficit
+    if (s.dragTarget && G.players[s.dragTarget]) {
+      target = G.players[s.dragTarget];
+      const deficit = Math.max(0, (target.hpMax || 0) - (target.hp || 0));
+      actual = Math.min(raw, deficit);
+    } else if (me) {
+      const deficit = Math.max(0, (me.hpMax || 0) - (me.hp || 0));
+      actual = Math.min(raw, deficit);
+    }
+    // Position opposite the fan
+    const previewSide = (s.fanCenterAngle === Math.PI) ? 'right' : 'left';
+    const previewX = (previewSide === 'right')
+      ? s.chipCx + 140  // chip on right half, fan opens left, number on right
+      : s.chipCx - 140 - 60; // chip on left half, fan opens right, number on left (60 = approx text width offset)
+    const previewY = s.chipCy - 24;
+    const tColor = BRICK_COLORS[s.color] || '#fff';
+    html += `<div style="position:absolute;left:${previewX}px;top:${previewY}px;
+      font-family:Cinzel,serif;font-size:46px;font-weight:700;
+      color:${tColor};text-shadow:0 0 14px ${tColor}cc, 0 2px 4px rgba(0,0,0,.8);
+      letter-spacing:.02em;pointer-events:none;line-height:1;
+      ${actual < raw ? 'opacity:.7;' : ''}">+${actual}</div>`;
+  }
+
+  // Radial fan of ally icons — visible whenever in hold mode for radial-enabled colors.
+  // Allies available from tier 1 (drag immediately to ally for tier-1 ally heal).
   // The arc OUTSIDE the icons is the tier indicator — drawn by _renderAllyRadialFan.
-  if (inHoldMode && s.tier >= 2 && HOLD_RADIAL_COLORS.indexOf(s.color) >= 0) {
+  if (inHoldMode && HOLD_RADIAL_COLORS.indexOf(s.color) >= 0) {
     html += _renderAllyRadialFan(s);
   }
 
@@ -1711,7 +1738,8 @@ function _dashActions(me) {
 function _dashActionsSelf(me) {
   const whiteC = (me.bricksCharged && me.bricksCharged.white) || 0;
   const grayC  = (me.bricksCharged && me.bricksCharged.gray)  || 0;
-  const healAmt = (typeof SELF_HEAL_AMT !== 'undefined' && SELF_HEAL_AMT[MY_CLASS]) || 2;
+  const ownedW = (me.bricks && me.bricks.white) || 0;
+  const healAmt = computeHeal(MY_CLASS, 'white', ownedW, 1);
   const atHpMax = me.hp >= me.hpMax;
   const atShieldMax = (me.armor || 0) >= me.hpMax;
   let buttons = '';
@@ -2308,7 +2336,8 @@ function buildPrepareActions(me) {
 
   // ── SELF HEAL — always shown unless no white brick ──
   if ((me.bricks.white||0) > 0 || true) {
-    var healAmt = (typeof SELF_HEAL_AMT !== 'undefined' && SELF_HEAL_AMT[MY_CLASS]) ? SELF_HEAL_AMT[MY_CLASS] : 2;
+    var ownedW2 = (me.bricks && me.bricks.white) || 0;
+    var healAmt = computeHeal(MY_CLASS, 'white', ownedW2, 1);
     list.push({
       id: 'self_heal',
       label: '💊 Self Heal',
