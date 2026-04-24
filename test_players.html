@@ -1318,7 +1318,7 @@ function collapsibleCard(id, titleHtml, bodyHtml, startOpen) {
 //
 // Structure (top-down):
 //   _dashHeader        — class/HP/armor/resource chips + status badges
-//   _dashBrickGrid     — per-color pip rows with signature markers
+//   _dashBrickBar      — horizontal chip row, rumble-style (icon + embedded pips)
 //   _dashPhaseContext  — prepare/move/land/rumble cards when phase applies
 //   _dashActions       — SELF / ALLY (brick-action target) / CLASS / BOARD
 //   renderStatusClues  — existing clue panel
@@ -1420,52 +1420,47 @@ function _dashHeader(me) {
 }
 
 // ── BRICK GRID ── per-color row with pips, signature ★, row tinting (doc §7.2)
-function _dashBrickGrid(me) {
+function _dashBrickBar(me) {
   const sigs = CLASS_SIGNATURE[MY_CLASS] || [];
-  const secs = CLASS_SECONDARY[MY_CLASS] || [];
   const bricks = me.bricks || {};
   const charged = me.bricksCharged || {};
   const ld = me.lastDropped || {};
-  const rows = BRICK_NAMES.filter(c => (bricks[c] || 0) > 0);
-  if (!rows.length) {
+  const owned = BRICK_NAMES.filter(c => (bricks[c] || 0) > 0);
+  if (!owned.length) {
     return `<div class="card"><div class="card-title">Brick Charges</div>
       <div style="font-size:12px;color:var(--text-dim);padding:6px 0;">No bricks owned.</div></div>`;
   }
-  let body = '';
-  rows.forEach(color => {
-    const owned = bricks[color] || 0;
-    const chg = Math.min(owned, charged[color] || 0);
+  let chips = '';
+  owned.forEach(color => {
+    const qty = bricks[color] || 0;
+    const chg = Math.min(qty, charged[color] || 0);
     const bg = BRICK_COLORS[color] || '#555';
-    const tier = _pulseTier(ld[color]);
+    const pulseTier = _pulseTier(ld[color]);
     const isSig = sigs.indexOf(color) >= 0;
-    const isSec = !isSig && secs.indexOf(color) >= 0;
-    const rowTint = isSig
-      ? `background:linear-gradient(90deg, ${bg}11, transparent);border-left:2px solid ${bg}aa;`
-      : isSec
-        ? `background:linear-gradient(90deg, ${bg}08, transparent);border-left:1px solid ${bg}66;`
-        : '';
-    const starHtml = isSig ? `<span style="color:${bg};font-size:11px;margin-left:4px;" title="Signature color">★</span>` : '';
-    let pipHtml = '';
-    const MAX_PIPS = 10;
-    const showCount = Math.min(owned, MAX_PIPS);
-    for (let i = 0; i < showCount; i++) {
+    const chipBorder = isSig ? `${bg}cc` : `${bg}66`;
+    const chipBg     = isSig ? `${bg}22` : `${bg}11`;
+    let pips = '';
+    for (let i = 0; i < qty; i++) {
       const lit = i < chg;
-      const cls = lit ? 'pip-lit' : ('pip-empty ' + tier);
-      pipHtml += `<span class="${cls}" style="display:inline-block;width:14px;height:14px;border-radius:2px;margin:1px;`
+      const cls = lit ? 'pip-lit' : ('pip-empty ' + pulseTier);
+      pips += `<span class="${cls}" style="display:inline-block;width:6px;height:6px;border-radius:2px;margin:1px;`
         + (lit
             ? `background:${bg};box-shadow:0 0 4px ${bg};`
             : `background:#1a1a1a;border:1px solid ${bg}aa;box-sizing:border-box;`)
-        + '"></span>';
+        + `"></span>`;
     }
-    const overflow = owned > MAX_PIPS ? `<span style="font-size:10px;color:#aaa;margin-left:4px;">×${owned}</span>` : '';
-    const colorLabel = color.charAt(0).toUpperCase() + color.slice(1);
-    body += `<div style="display:flex;align-items:center;padding:4px 8px;margin:2px 0;border-radius:4px;${rowTint}">
-      <div style="width:60px;font-family:Cinzel,serif;font-size:11px;color:${bg};letter-spacing:.04em;">${colorLabel}</div>
-      <div style="flex:1;display:flex;align-items:center;flex-wrap:wrap;">${pipHtml}${overflow}</div>
-      <div style="font-family:monospace;font-size:11px;color:#888;min-width:32px;text-align:right;">${chg}/${owned}${starHtml}</div>
-    </div>`;
+    chips += `<div class="dash-brick-chip" data-color="${color}" style="`
+      + `display:flex;flex-direction:column;align-items:center;justify-content:flex-start;`
+      + `padding:6px 4px 4px 4px;margin:2px;border-radius:6px;`
+      + `background:${chipBg};border:2px solid ${chipBorder};min-width:44px;">`
+      + `<span style="width:22px;height:22px;border-radius:4px;background:${bg};`
+      + `box-shadow:0 1px 4px rgba(0,0,0,.5);margin-bottom:4px;"></span>`
+      + `<div style="display:flex;flex-wrap:wrap;justify-content:center;max-width:40px;">${pips}</div>`
+      + `</div>`;
   });
-  return `<div class="card"><div class="card-title">Brick Charges</div>${body}</div>`;
+  return `<div class="card"><div class="card-title">Brick Charges</div>
+    <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:2px;padding:4px 0;">${chips}</div>
+  </div>`;
 }
 
 // ── TOP SLOT ── above the character card. Holds one of:
@@ -1705,7 +1700,7 @@ function renderDashboard(me) {
   el.innerHTML = `
     ${topSlotHtml}
     ${_dashHeader(me)}
-    ${_dashBrickGrid(me)}
+    ${_dashBrickBar(me)}
     ${_dashPhaseContext(me)}
     ${_dashActions(me)}
     ${marketPanel}
