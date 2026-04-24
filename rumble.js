@@ -8773,10 +8773,13 @@ function _showVictoryScreen() {
     +   '.vic-zone-wrap {'
     +     ' display:flex;flex-direction:column;align-items:center;'
     +     ' gap:clamp(4px, 1vmin, 8px);'
+    +     ' text-align:center;'
     +   '}'
     +   '.vic-zone-label {'
-    +     ' font-size:clamp(9px, 1.7vmin, 11px);letter-spacing:.2em;color:#888;'
-    +     ' font-family:ui-sans-serif,system-ui;'
+    +     ' font-size:clamp(9px, 1.7vmin, 11px) !important;'
+    +     ' letter-spacing:.2em;color:#888;'
+    +     ' font-family:ui-sans-serif,system-ui !important;'
+    +     ' font-weight:500;'
     +   '}'
     +   '.vic-zone-body {'
     +     ' background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
@@ -8786,16 +8789,19 @@ function _showVictoryScreen() {
     +   '}'
     +   /* ═════════════════════════════════════════════════════════════
          WIDE LAYOUT (aspect-ratio ≥ 1:1): Card 2 is two cards side-by-side.
-         Card 1 gets wider cap for more comfortable reading width.
+         Card 1 ALSO content-sized so it doesn't stretch wide on big
+         landscape viewports and squish its content in the middle.
        ═════════════════════════════════════════════════════════════ */
     +   '@media (min-aspect-ratio: 1/1) {'
-    +     '.bq-vic-card.card-moment { width:min(90vw, 720px); }'
+    +     '.bq-vic-card.card-moment {'
+    +       ' width:fit-content; max-width:min(92vw, 420px);'  /* content-sized, like portrait's reference shot */
+    +     '}'
     +     '.bq-vic-card.card-rewards {'
-    +       ' width:auto; max-width:96vw;'  /* size to content + padding */
+    +       ' width:fit-content; max-width:96vw;'
     +       ' display:grid;'
-    +       ' grid-template-columns:auto auto;'  /* content-sized columns */
+    +       ' grid-template-columns:auto auto;'
     +       ' grid-template-areas:"stats rewards" "claim claim";'
-    +       ' justify-content:center; align-items:center;'
+    +       ' justify-content:center; align-items:center; justify-items:center;'
     +       ' gap:clamp(10px, 2vmin, 18px) clamp(18px, 4vmin, 32px);'
     +     '}'
     +     '.bq-vic-card.card-rewards .vic-stats-wrap   { grid-area:stats;   }'
