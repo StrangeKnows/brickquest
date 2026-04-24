@@ -8752,19 +8752,19 @@ function _showVictoryScreen() {
     +     ' border-radius:10px;cursor:pointer;border:2px solid;'
     +     ' min-width:190px;'
     +   '}'
-    +   /* Landscape mobile: card 2 becomes a balanced side-by-side.
-         Two zone cards sit next to each other, vertically centered relative
-         to each other, claim button centered below. Same breathing room as
-         portrait, just reorganized. */
-    +   '@media (orientation: landscape) and (max-width: 900px) {'
+    +   /* Landscape ANY width: card 2 becomes side-by-side so stats and
+         rewards sit next to each other — one on the left, one on the right,
+         claim centered below. Portrait keeps the vertical stack (single
+         column is more readable on narrow portrait phones). */
+    +   '@media (orientation: landscape) {'
     +     '.bq-vic-card.card-rewards {'
-    +       ' width:min(680px,96%);'
-    +       ' padding:clamp(14px,3.5vw,22px) clamp(14px,3.5vw,22px);'
+    +       ' width:min(720px,96%);'
+    +       ' padding:clamp(12px,3vw,20px) clamp(14px,3vw,22px);'
     +       ' display:grid;'
     +       ' grid-template-columns:1fr 1fr;'
     +       ' grid-template-areas:"stats rewards" "claim claim";'
     +       ' align-items:center;'
-    +       ' gap:clamp(14px,3vw,22px) clamp(16px,4vw,26px);'
+    +       ' gap:clamp(10px,2.5vw,18px) clamp(16px,4vw,26px);'
     +     '}'
     +     '.bq-vic-card.card-rewards .vic-stats-zone   { grid-area:stats;   width:100%; align-self:center; }'
     +     '.bq-vic-card.card-rewards .vic-rewards-zone { grid-area:rewards; width:100%; align-self:center; }'
