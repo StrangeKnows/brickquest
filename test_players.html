@@ -1521,6 +1521,12 @@ function _holdUpdateTier() {
     s.holdMode = false;
     return;
   }
+  // First frame entering hold mode → fire pulse for tier 1 (the gesture
+  // just confirmed as a hold rather than a tap). This is the "you're now
+  // overloading" signal even before the arc starts climbing.
+  if (!s.holdMode) {
+    s.lastTierUpTime = performance.now();
+  }
   s.holdMode = true;
   const overloadSteps = Math.max(0, Math.min(HOLD_TIER_MAX, s.maxCharges) - 1);
   if (overloadSteps <= 0) {
@@ -1535,7 +1541,7 @@ function _holdUpdateTier() {
   const ceiling = 1 + overloadSteps;
   s.tier = Math.min(newTier, ceiling);
   s.arcFill = arcFill;
-  // Detect tier-up: integer tier changed since last frame
+  // Detect tier-up boundary: integer tier increased since last frame
   if (s.tier > (s.lastTier || 1)) {
     s.lastTierUpTime = performance.now();
   }
@@ -1673,23 +1679,6 @@ function _renderHoldOverlay() {
   if (inHoldMode) {
     const tierColor = BRICK_COLORS[s.color] || '#fff';
 
-    // Tier-up pulse — expanding fading ring, triggered each time tier bumps.
-    // Lives ~600ms then fades. The tick recorded performance.now() at the bump,
-    // we read remaining time and draw the pulse if still alive.
-    const pulseAge = performance.now() - (s.lastTierUpTime || 0);
-    const PULSE_DURATION = 600;
-    if (s.lastTierUpTime && pulseAge < PULSE_DURATION) {
-      const progress = pulseAge / PULSE_DURATION;          // 0..1
-      const pulseSize = 60 + 80 * progress;                // grows from 60 → 140px
-      const pulseAlpha = 1 - progress;                     // fades 1 → 0
-      const px = s.chipCx - pulseSize / 2;
-      const py = s.chipCy - pulseSize / 2;
-      html += `<div style="position:absolute;left:${px}px;top:${py}px;
-        width:${pulseSize}px;height:${pulseSize}px;border-radius:50%;
-        border:2px solid ${tierColor};opacity:${pulseAlpha.toFixed(2)};
-        pointer-events:none;"></div>`;
-    }
-
     // Subtle chip ring — shows the gesture is active, no tier info embedded
     const ringSize = 64;
     const ringX = s.chipCx - ringSize / 2;
@@ -1737,6 +1726,28 @@ function _renderHoldOverlay() {
       width:${len}px;height:2px;background:linear-gradient(90deg, ${lineColor}cc, ${lineColor}33);
       transform:rotate(${angle}deg);transform-origin:0 50%;
       pointer-events:none;border-radius:1px;"></div>`;
+  }
+
+  // Tier-up pulse — rendered LAST so it draws on top of the radial fan and
+  // ally icons. Fires on every tier boundary crossing, including the first
+  // entry into hold mode (tier 1 confirm). Lives ~600ms then fades. Sized
+  // to clearly radiate past the 90px ally icon ring.
+  if (inHoldMode) {
+    const pulseAge = performance.now() - (s.lastTierUpTime || 0);
+    const PULSE_DURATION = 600;
+    if (s.lastTierUpTime && pulseAge < PULSE_DURATION) {
+      const tierColor = BRICK_COLORS[s.color] || '#fff';
+      const progress = pulseAge / PULSE_DURATION;          // 0..1
+      const pulseSize = 50 + 130 * progress;               // 50 → 180px
+      const pulseAlpha = 1 - progress;                     // 1 → 0
+      const px = s.chipCx - pulseSize / 2;
+      const py = s.chipCy - pulseSize / 2;
+      html += `<div style="position:absolute;left:${px}px;top:${py}px;
+        width:${pulseSize}px;height:${pulseSize}px;border-radius:50%;
+        border:3px solid ${tierColor};opacity:${pulseAlpha.toFixed(2)};
+        box-shadow:0 0 24px ${tierColor}, inset 0 0 12px ${tierColor}66;
+        pointer-events:none;"></div>`;
+    }
   }
 
   overlay.innerHTML = html;
