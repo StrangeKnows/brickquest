@@ -8794,7 +8794,7 @@ function _showVictoryScreen() {
        ═════════════════════════════════════════════════════════════ */
     +   '@media (min-aspect-ratio: 1/1) {'
     +     '.bq-vic-card.card-moment {'
-    +       ' width:fit-content; max-width:min(92vw, 420px);'  /* content-sized, like portrait's reference shot */
+    +       ' width:min(86vw, 640px);'
     +     '}'
     +     '.bq-vic-card.card-rewards {'
     +       ' width:fit-content; max-width:96vw;'
@@ -8814,12 +8814,12 @@ function _showVictoryScreen() {
   function buildCardMoment() {
     return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
       + '<div class="bq-vic-card card-moment">'
-        + '<div style="font-size:clamp(9px,2vmin,13px);letter-spacing:.25em;color:' + tier.color + ';">⚔ VICTORY ⚔</div>'
-        + '<div style="font-size:clamp(22px,6vmin,44px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 22px ' + tier.color + ';text-align:center;line-height:1.1;">' + tier.label + '</div>'
-        + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(12px,2.6vmin,17px);color:#d8d8d8;text-align:center;max-width:94%;line-height:1.5;">"' + flavor + '"</div>'
-        + '<div style="font-family:ui-sans-serif,system-ui;text-align:center;color:#aaa;display:flex;flex-direction:column;gap:4px;">'
-          + '<span style="font-size:clamp(8px,1.8vmin,11px);color:#888;letter-spacing:.18em;">FAVORITE MOVE</span>'
-          + '<span style="font-size:clamp(12px,2.5vmin,15px);">' + favLine + '</span>'
+        + '<div style="font-size:clamp(10px,2.2vmin,14px);letter-spacing:.25em;color:' + tier.color + ';font-family:\'Cinzel\',serif;">⚔ VICTORY ⚔</div>'
+        + '<div style="font-size:clamp(26px,7vmin,56px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 22px ' + tier.color + ';text-align:center;line-height:1.1;font-family:\'Cinzel\',serif;">' + tier.label + '</div>'
+        + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(13px,2.8vmin,19px);color:#d8d8d8;text-align:center;max-width:94%;line-height:1.5;">"' + flavor + '"</div>'
+        + '<div style="font-family:ui-sans-serif,system-ui;text-align:center;color:#aaa;display:flex;flex-direction:column;align-items:center;gap:4px;">'
+          + '<span style="font-size:clamp(9px,1.9vmin,12px);color:#888;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">FAVORITE MOVE</span>'
+          + '<span style="font-size:clamp(13px,2.6vmin,16px);font-family:ui-sans-serif,system-ui;">' + favLine + '</span>'
         + '</div>'
         + '<button id="bq-vic-btn-continue" class="bq-vic-btn" style="'
         + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
@@ -8864,14 +8864,14 @@ function _showVictoryScreen() {
       + '<div class="bq-vic-card card-rewards">'
         // Stats zone — label + body, content-sized
         + '<div class="vic-zone-wrap vic-stats-wrap">'
-          + '<div class="vic-zone-label">COMBAT</div>'
+          + '<div class="vic-zone-label" style="font-size:clamp(10px,1.9vmin,12px);letter-spacing:.22em;color:#888;font-family:ui-sans-serif,system-ui;font-weight:500;">COMBAT</div>'
           + '<div class="vic-zone-body" style="display:grid;grid-template-columns:auto auto;gap:clamp(6px,1.6vmin,12px) clamp(16px,3.6vmin,28px);">'
             + rows
           + '</div>'
         + '</div>'
         // Rewards zone — label + body, content-sized
         + '<div class="vic-zone-wrap vic-rewards-wrap">'
-          + '<div class="vic-zone-label">REWARDS</div>'
+          + '<div class="vic-zone-label" style="font-size:clamp(10px,1.9vmin,12px);letter-spacing:.22em;color:#888;font-family:ui-sans-serif,system-ui;font-weight:500;">REWARDS</div>'
           + '<div class="vic-zone-body" style="display:flex;flex-direction:column;align-items:center;gap:clamp(6px,1.8vmin,12px);min-width:clamp(180px,32vmin,260px);">'
             + '<div id="rumble-victory-bricks" style="text-align:center;">'
               + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:3px;">' + _renderVictoryPips() + '</div>'
