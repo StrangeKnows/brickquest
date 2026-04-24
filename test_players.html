@@ -1419,7 +1419,307 @@ function _dashHeader(me) {
   </div>`;
 }
 
-// ── BRICK GRID ── per-color row with pips, signature ★, row tinting (doc §7.2)
+// ─────────────────────────────────────────────────────────────────
+// HOLD-TO-CHARGE GESTURE — bones (per doc §1.3)
+// ─────────────────────────────────────────────────────────────────
+// State machine for the chip hold gesture:
+//   - Tap (release in <250ms, no drag) → fires existing tier-1 action
+//   - Hold (≥250ms) → enters tier mode, charging ring animates around chip
+//   - Tier increments every 500ms (1 → 2 → 3 → 4), capped at charged count
+//   - White at tier ≥2: ally icons fan radially around the chip
+//   - Drag onto an ally icon → that icon highlights as target
+//   - Release on chip = self action at reached tier
+//   - Release on ally icon = ally action at reached tier
+//   - Release elsewhere = cancel
+//
+// Tier-specific scaling (heal amounts, cleanse counts, party-wide effects)
+// is NOT implemented in this patch — bones first, content lands when
+// per-class abilities are designed (0.16+).
+//
+// Other colors stay tap-only for this patch. Hold ignored on non-white.
+
+const HOLD_TAP_THRESHOLD_MS = 250;     // < this = tap, ≥ this = hold
+const HOLD_TIER_INTERVAL_MS = 500;     // ms per tier increment
+const HOLD_DRAG_THRESHOLD_PX = 15;     // px movement before drag mode
+const HOLD_TIER_MAX = 4;               // ceiling — tier never exceeds this
+
+// White is currently the only color with tier-2+ radial targets.
+// Other colors fall through to tap-only behavior on hold-release.
+const HOLD_RADIAL_COLORS = ['white'];
+
+let _holdState = null;
+let _holdTicker = null;
+
+function _holdStart(e, color, chipEl) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (_holdState) _holdEnd(true); // cancel any leftover
+
+  const me = G.players[MY_CLASS];
+  const charged = (me?.bricksCharged?.[color]) || 0;
+  if (charged < 1) return;
+
+  const rect = chipEl.getBoundingClientRect();
+  _holdState = {
+    color,
+    chipEl,
+    chipRect: rect,
+    chipCx: rect.left + rect.width / 2,
+    chipCy: rect.top + rect.height / 2,
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    startTime: performance.now(),
+    tier: 1,
+    maxCharges: charged,
+    isDrag: false,
+    dragX: e.clientX,
+    dragY: e.clientY,
+    dragTarget: null,        // class id of ally currently hovered
+    cancelled: false,
+    holdMode: false,         // true once HOLD_TAP_THRESHOLD_MS passed
+  };
+
+  document.addEventListener('pointermove', _holdMove);
+  document.addEventListener('pointerup', _holdUp);
+  document.addEventListener('pointercancel', _holdUp);
+
+  // Tier ticker — every interval, bump tier up to maxCharges (capped at HOLD_TIER_MAX)
+  _holdTicker = setInterval(() => {
+    if (!_holdState) return;
+    const elapsed = performance.now() - _holdState.startTime;
+    if (elapsed < HOLD_TAP_THRESHOLD_MS) return;
+    _holdState.holdMode = true;
+    const ceiling = Math.min(HOLD_TIER_MAX, _holdState.maxCharges);
+    if (_holdState.tier < ceiling) {
+      _holdState.tier += 1;
+    }
+    _renderHoldOverlay();
+  }, HOLD_TIER_INTERVAL_MS);
+
+  // Initial overlay render so the ring appears immediately
+  _renderHoldOverlay();
+}
+
+function _holdMove(e) {
+  if (!_holdState) return;
+  if (e.pointerId !== _holdState.pointerId) return;
+  _holdState.dragX = e.clientX;
+  _holdState.dragY = e.clientY;
+  const moved = Math.hypot(e.clientX - _holdState.startX, e.clientY - _holdState.startY);
+  if (moved > HOLD_DRAG_THRESHOLD_PX) {
+    _holdState.isDrag = true;
+  }
+  // Drag-target detection — find ally icon under cursor, if any
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const allyIcon = el ? el.closest('[data-ally-target]') : null;
+  _holdState.dragTarget = allyIcon ? allyIcon.getAttribute('data-ally-target') : null;
+  _renderHoldOverlay();
+}
+
+function _holdUp(e) {
+  if (!_holdState) return;
+  if (e.pointerId !== _holdState.pointerId) return;
+  const s = _holdState;
+  const heldMs = performance.now() - s.startTime;
+  const isTap = heldMs < HOLD_TAP_THRESHOLD_MS && !s.isDrag;
+
+  // Determine release target: chip itself, ally icon, or off-target
+  const releaseEl = document.elementFromPoint(e.clientX, e.clientY);
+  const onChip = releaseEl ? releaseEl.closest('[data-brick-chip]') : null;
+  const onAlly = releaseEl ? releaseEl.closest('[data-ally-target]') : null;
+  const releasedOnOwnChip = onChip && onChip.getAttribute('data-brick-chip') === s.color;
+
+  _holdEnd(false);
+
+  if (isTap) {
+    // Plain tap — fire existing tier-1 baseline action (no change in behavior)
+    _fireTierAction(s.color, 1, null);
+    return;
+  }
+
+  // Hold release routing
+  if (onAlly) {
+    const targetCls = onAlly.getAttribute('data-ally-target');
+    _fireTierAction(s.color, s.tier, targetCls);
+  } else if (releasedOnOwnChip) {
+    _fireTierAction(s.color, s.tier, null);
+  } else {
+    // Cancel — released off-target
+    toast('Action cancelled', 'info');
+  }
+}
+
+function _holdEnd(cancelled) {
+  if (_holdTicker) { clearInterval(_holdTicker); _holdTicker = null; }
+  document.removeEventListener('pointermove', _holdMove);
+  document.removeEventListener('pointerup', _holdUp);
+  document.removeEventListener('pointercancel', _holdUp);
+  if (_holdState) _holdState.cancelled = cancelled;
+  _holdState = null;
+  _clearHoldOverlay();
+}
+
+// Fire an action with tier and optional target. For tier > 1, currently
+// just calls existing tier-1 endpoint. Real tier scaling (extra charge
+// burn, scaled output, multi-target effects) lands when per-ability
+// content is designed in 0.16+. The gesture mechanic ships now; the
+// payoff math waits for real ability design.
+function _fireTierAction(color, tier, targetCls) {
+  // White actions
+  if (color === 'white') {
+    if (targetCls === null) {
+      // Self heal — existing endpoint
+      client.healPlayer(MY_CLASS);
+    } else {
+      // Ally heal — existing endpoint, just routed to ally cls
+      client.healPlayer(targetCls);
+    }
+    if (tier > 1) {
+      toast('Tier ' + tier + ' release — scaling lands with class abilities', 'info');
+    }
+    return;
+  }
+  // Gray = brace (existing tier-1 only)
+  if (color === 'gray' && tier === 1) {
+    client.addShield(MY_CLASS);
+    return;
+  }
+  // Other colors: tap-only baseline for now (defer to 0.16 abilities)
+  if (tier === 1) {
+    toast('Tap action for ' + color + ' — coming with class abilities', 'info');
+  } else {
+    toast(color + ' tier ' + tier + ' — abilities land in 0.16', 'info');
+  }
+}
+
+// ── HOLD OVERLAY RENDERER ─────────────────────────────────────────
+// Draws the charging ring, tier indicator, and ally radial fan during
+// an active hold. Positioned absolutely over the dashboard.
+function _renderHoldOverlay() {
+  let overlay = document.getElementById('hold-overlay');
+  if (!_holdState) { _clearHoldOverlay(); return; }
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'hold-overlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;'
+      + 'pointer-events:none;z-index:1000;';
+    document.body.appendChild(overlay);
+  }
+
+  const s = _holdState;
+  const elapsed = performance.now() - s.startTime;
+  const inHoldMode = elapsed >= HOLD_TAP_THRESHOLD_MS;
+
+  // Charging ring around the chip — only after hold threshold
+  let html = '';
+  if (inHoldMode) {
+    const ringSize = 72;
+    const ringX = s.chipCx - ringSize / 2;
+    const ringY = s.chipCy - ringSize / 2;
+    const tierProgress = Math.min(1, ((elapsed - HOLD_TAP_THRESHOLD_MS) % HOLD_TIER_INTERVAL_MS) / HOLD_TIER_INTERVAL_MS);
+    const tierColor = BRICK_COLORS[s.color] || '#fff';
+    html += `<div style="position:absolute;left:${ringX}px;top:${ringY}px;width:${ringSize}px;height:${ringSize}px;
+      border:3px solid ${tierColor}aa;border-radius:50%;
+      box-shadow:0 0 16px ${tierColor}88;
+      animation:holdRingPulse .5s infinite alternate;">
+      <div style="position:absolute;top:-22px;left:50%;transform:translateX(-50%);
+        font-family:Cinzel,serif;font-size:14px;color:${tierColor};font-weight:700;
+        text-shadow:0 0 8px ${tierColor}aa;letter-spacing:.1em;">
+        TIER ${s.tier}
+      </div>
+    </div>`;
+  }
+
+  // Radial fan of ally icons (white at tier ≥ 2 only, for now)
+  if (inHoldMode && s.tier >= 2 && HOLD_RADIAL_COLORS.indexOf(s.color) >= 0) {
+    html += _renderAllyRadialFan(s);
+  }
+
+  // Drag line from chip to current pointer (visual feedback)
+  if (s.isDrag && inHoldMode) {
+    const dx = s.dragX - s.chipCx;
+    const dy = s.dragY - s.chipCy;
+    const len = Math.hypot(dx, dy);
+    const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+    const lineColor = BRICK_COLORS[s.color] || '#fff';
+    html += `<div style="position:absolute;left:${s.chipCx}px;top:${s.chipCy}px;
+      width:${len}px;height:2px;background:linear-gradient(90deg, ${lineColor}cc, ${lineColor}33);
+      transform:rotate(${angle}deg);transform-origin:0 50%;
+      pointer-events:none;border-radius:1px;"></div>`;
+  }
+
+  overlay.innerHTML = html;
+}
+
+function _clearHoldOverlay() {
+  const overlay = document.getElementById('hold-overlay');
+  if (overlay) overlay.innerHTML = '';
+}
+
+function _renderAllyRadialFan(s) {
+  // Fan ally icons radially around the chip. Allies = same-zone party members
+  // not me. Each icon: 36×36, class color, name initial, HP bar.
+  const me = G.players[MY_CLASS];
+  if (!me) return '';
+  const myZone = (typeof SPACES !== 'undefined' && SPACES[me.space]) ? SPACES[me.space].zone : 0;
+  const allies = Object.values(G.players || {}).filter(p => {
+    if (p.cls === MY_CLASS) return false;
+    if (p.hp <= 0) return false;
+    const pz = (typeof SPACES !== 'undefined' && SPACES[p.space]) ? SPACES[p.space].zone : 0;
+    return pz === myZone;
+  });
+  if (allies.length === 0) return '';
+  const RADIUS = 90;
+  const ICON_SIZE = 44;
+  let html = '';
+  allies.forEach((ally, i) => {
+    // Distribute allies across the upper semicircle (top of chip)
+    const angle = -Math.PI / 2 + (i - (allies.length - 1) / 2) * (Math.PI / Math.max(2, allies.length));
+    const ax = s.chipCx + Math.cos(angle) * RADIUS - ICON_SIZE / 2;
+    const ay = s.chipCy + Math.sin(angle) * RADIUS - ICON_SIZE / 2;
+    const meta = (typeof PLAYER_META !== 'undefined' ? PLAYER_META[ally.cls] : null) || {};
+    const clsColor = (CLS_STYLES[ally.cls] || {}).color || '#888';
+    const isTarget = s.dragTarget === ally.cls;
+    const hpPct = Math.max(0, Math.min(1, (ally.hp || 0) / Math.max(1, ally.hpMax || 10)));
+    const hpBarColor = hpPct < 0.3 ? '#e44' : (hpPct < 0.6 ? '#fa3' : '#5d5');
+    const scale = isTarget ? 1.2 : 1.0;
+    const ringGlow = isTarget ? `0 0 16px ${clsColor},0 0 24px #fff` : `0 2px 8px rgba(0,0,0,.5)`;
+    html += `<div data-ally-target="${ally.cls}" style="position:absolute;left:${ax}px;top:${ay}px;
+      width:${ICON_SIZE}px;height:${ICON_SIZE}px;pointer-events:auto;cursor:pointer;
+      transform:scale(${scale});transition:transform .12s;">
+      <div style="width:${ICON_SIZE}px;height:${ICON_SIZE}px;border-radius:50%;
+        background:${clsColor};border:2px solid ${isTarget?'#fff':clsColor+'cc'};
+        box-shadow:${ringGlow};
+        display:flex;align-items:center;justify-content:center;
+        font-family:Cinzel,serif;font-size:18px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.7);">
+        ${meta.icon || (ally.cls || '?')[0].toUpperCase()}
+      </div>
+      <div style="position:absolute;bottom:-6px;left:0;right:0;height:4px;
+        background:#222;border-radius:2px;overflow:hidden;">
+        <div style="width:${hpPct*100}%;height:100%;background:${hpBarColor};transition:width .15s;"></div>
+      </div>
+      <div style="position:absolute;top:-14px;left:50%;transform:translateX(-50%);
+        font-family:ui-monospace,monospace;font-size:9px;color:#ccc;
+        background:rgba(0,0,0,.7);padding:1px 4px;border-radius:3px;white-space:nowrap;">
+        ${ally.hp || 0}/${ally.hpMax || 10}
+      </div>
+    </div>`;
+  });
+  return html;
+}
+
+// CSS keyframe injection for the charging ring pulse
+(function injectHoldCss() {
+  if (document.getElementById('hold-css')) return;
+  const s = document.createElement('style');
+  s.id = 'hold-css';
+  s.textContent = '@keyframes holdRingPulse { from { box-shadow: 0 0 12px currentColor; } to { box-shadow: 0 0 24px currentColor, 0 0 36px currentColor; } }';
+  document.head.appendChild(s);
+})();
+
+
+// ── BRICK BAR ── horizontal chip row (rumble-style: icon + embedded pips).
 function _dashBrickBar(me) {
   const sigs = CLASS_SIGNATURE[MY_CLASS] || [];
   const bricks = me.bricks || {};
@@ -1449,10 +1749,17 @@ function _dashBrickBar(me) {
             : `background:#1a1a1a;border:1px solid ${bg}aa;box-sizing:border-box;`)
         + `"></span>`;
     }
-    chips += `<div class="dash-brick-chip" data-color="${color}" style="`
+    // Only wire pointer events for colors with defined actions today.
+    // Other colors render as inert chips until 0.16 fills in abilities.
+    const hasAction = (color === 'white' || color === 'gray');
+    chips += `<div class="dash-brick-chip" data-brick-chip="${color}" data-color="${color}" `
+      + (hasAction ? `onpointerdown="_holdStart(event, '${color}', this)" ` : '')
+      + `style="`
       + `display:flex;flex-direction:column;align-items:center;justify-content:flex-start;`
       + `padding:6px 4px 4px 4px;margin:2px;border-radius:6px;`
-      + `background:${chipBg};border:2px solid ${chipBorder};min-width:44px;">`
+      + (hasAction ? 'cursor:pointer;' : 'cursor:default;opacity:.85;')
+      + `background:${chipBg};border:2px solid ${chipBorder};min-width:44px;`
+      + `touch-action:none;user-select:none;-webkit-user-select:none;">`
       + `<span style="width:22px;height:22px;border-radius:4px;background:${bg};`
       + `box-shadow:0 1px 4px rgba(0,0,0,.5);margin-bottom:4px;"></span>`
       + `<div style="display:flex;flex-wrap:wrap;justify-content:center;max-width:40px;">${pips}</div>`
