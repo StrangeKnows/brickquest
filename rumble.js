@@ -8752,19 +8752,23 @@ function _showVictoryScreen() {
     +     ' border-radius:10px;cursor:pointer;border:2px solid;'
     +     ' min-width:190px;'
     +   '}'
-    +   /* Landscape short-viewport: card 2 uses 2-col grid */
-    +   '@media (orientation: landscape) and (max-height: 500px) {'
+    +   /* Landscape mobile: card 2 becomes a balanced side-by-side.
+         Two zone cards sit next to each other, vertically centered relative
+         to each other, claim button centered below. Same breathing room as
+         portrait, just reorganized. */
+    +   '@media (orientation: landscape) and (max-width: 900px) {'
     +     '.bq-vic-card.card-rewards {'
-    +       ' width:min(720px,96%);'
+    +       ' width:min(680px,96%);'
+    +       ' padding:clamp(14px,3.5vw,22px) clamp(14px,3.5vw,22px);'
     +       ' display:grid;'
     +       ' grid-template-columns:1fr 1fr;'
     +       ' grid-template-areas:"stats rewards" "claim claim";'
-    +       ' align-items:start;'
-    +       ' gap:16px;'
+    +       ' align-items:center;'
+    +       ' gap:clamp(14px,3vw,22px) clamp(16px,4vw,26px);'
     +     '}'
-    +     '.bq-vic-card.card-rewards .vic-stats-zone   { grid-area:stats; width:100%; }'
-    +     '.bq-vic-card.card-rewards .vic-rewards-zone { grid-area:rewards; width:100%; }'
-    +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim; }'
+    +     '.bq-vic-card.card-rewards .vic-stats-zone   { grid-area:stats;   width:100%; align-self:center; }'
+    +     '.bq-vic-card.card-rewards .vic-rewards-zone { grid-area:rewards; width:100%; align-self:center; }'
+    +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim;   margin-top:clamp(2px,1vw,6px); }'
     +     '.bq-vic-card.card-rewards .vic-stat-grid    { width:100% !important; }'
     +     '.bq-vic-card.card-rewards .vic-rewards-body { width:100% !important; }'
     +   '}'
