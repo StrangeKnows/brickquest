@@ -7909,6 +7909,8 @@ function _internalStart(config) {
   var stale;
   stale = document.getElementById('rumble-victory-screen'); if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
   stale = document.getElementById('rumble-exit-overlay');   if (stale) stale.classList.remove('visible');
+  // Also clear the body scroll-lock class from any stale victory state.
+  document.body.classList.remove('bq-vic-active');
 
   lastTs = performance.now();
   updateHUD();
@@ -8722,9 +8724,12 @@ function _showVictoryScreen() {
     : '<span style="color:#888;font-style:italic;">—</span>';
 
   // ── Shared CSS block for both cards ──
-  // Backdrop bumped from .92 to .97 opacity so the rumble HUD (HP bar,
-  // zoom pill, magnifying glass) doesn't ghost through. Fade keyframes
-  // handle the enter/exit transitions on card swaps.
+  // Responsive approach: aspect-ratio-based layout (wide vs tall),
+  // vmin-scaled sizing so content "exhales when it can, contracts when needed".
+  // No overflow scroll — content is sized to fit the viewport at any dimension.
+  //
+  // Backdrop at .97 opacity so the rumble HUD doesn't ghost through.
+  // Fade keyframes handle enter/exit transitions on card swaps.
   var sharedCss =
     '<style>'
     +   '@keyframes bqVictoryFadeIn  { from { opacity: 0; } to { opacity: 1; } }'
@@ -8736,39 +8741,53 @@ function _showVictoryScreen() {
     +     ' z-index:200;box-sizing:border-box;'
     +     ' font-family:\'Cinzel\',serif;'
     +     ' opacity:0;animation:bqVictoryFadeIn .6s ease-out forwards;'
+    +     ' overflow:hidden;'   /* backdrop itself never scrolls */
     +   '}'
     +   '.bq-vic-backdrop.fading-out { animation:bqVictoryFadeOut .3s ease-in forwards; }'
+    +   /* Card base — responsive via vmin + clamp. Smaller dimension drives
+         sizing so a short landscape phone gets smaller text, a tall desktop
+         gets comfortable text. No overflow. No scroll. Fits the viewport. */
     +   '.bq-vic-card {'
-    +     ' width:min(420px,92%);max-height:calc(100% - 24px);overflow-y:auto;'
+    +     ' width:min(92vw, 520px);'
+    +     ' max-height:96%;'
     +     ' display:flex;flex-direction:column;align-items:center;'
-    +     ' padding:clamp(18px,5vw,32px) clamp(18px,5vw,28px);'
-    +     ' gap:clamp(14px,4vw,22px);'
+    +     ' padding:clamp(10px, 2.5vmin, 26px) clamp(12px, 3vmin, 28px);'
+    +     ' gap:clamp(8px, 2vmin, 18px);'
     +     ' pointer-events:auto;'
+    +     ' overflow:hidden;'
+    +     ' box-sizing:border-box;'
     +   '}'
+    +   /* Scrollbar suppression — belt-and-suspenders, even though overflow
+         is hidden. Some engines still render zero-height bars. */
+    +   '.bq-vic-card::-webkit-scrollbar { display:none; width:0; height:0; }'
+    +   'body.bq-vic-active, body.bq-vic-active html { overflow:hidden !important; }'
+    +   'body.bq-vic-active::-webkit-scrollbar { display:none; width:0; height:0; }'
     +   '.bq-vic-btn {'
-    +     ' padding:clamp(12px,3.2vw,14px) clamp(32px,8vw,44px);'
-    +     ' font-size:clamp(13px,3.5vw,15px);'
+    +     ' padding:clamp(10px, 2.2vmin, 14px) clamp(24px, 6vmin, 44px);'
+    +     ' font-size:clamp(12px, 2.4vmin, 15px);'
     +     ' font-family:\'Cinzel\',serif;letter-spacing:.14em;font-weight:700;'
     +     ' border-radius:10px;cursor:pointer;border:2px solid;'
-    +     ' min-width:190px;'
+    +     ' min-width:clamp(140px, 32vmin, 190px);'
     +   '}'
-    +   /* Landscape ANY width: card 2 becomes side-by-side so stats and
-         rewards sit next to each other — one on the left, one on the right,
-         claim centered below. Portrait keeps the vertical stack (single
-         column is more readable on narrow portrait phones). */
-    +   '@media (orientation: landscape) {'
+    +   /* ═════════════════════════════════════════════════════════════
+         WIDE LAYOUT (aspect-ratio ≥ 1:1): viewport is at least as wide as
+         tall. Card 2 becomes side-by-side: COMBAT left, REWARDS right,
+         CLAIM spanning below. Card 1 gets a wider cap since landscape has
+         horizontal real estate.
+       ═════════════════════════════════════════════════════════════ */
+    +   '@media (min-aspect-ratio: 1/1) {'
+    +     '.bq-vic-card.card-moment { width:min(90vw, 580px); }'
     +     '.bq-vic-card.card-rewards {'
-    +       ' width:min(720px,96%);'
-    +       ' padding:clamp(12px,3vw,20px) clamp(14px,3vw,22px);'
+    +       ' width:min(94vw, 780px);'
     +       ' display:grid;'
     +       ' grid-template-columns:1fr 1fr;'
     +       ' grid-template-areas:"stats rewards" "claim claim";'
     +       ' align-items:center;'
-    +       ' gap:clamp(10px,2.5vw,18px) clamp(16px,4vw,26px);'
+    +       ' gap:clamp(8px, 2vmin, 16px) clamp(14px, 3.5vmin, 28px);'
     +     '}'
     +     '.bq-vic-card.card-rewards .vic-stats-zone   { grid-area:stats;   width:100%; align-self:center; }'
     +     '.bq-vic-card.card-rewards .vic-rewards-zone { grid-area:rewards; width:100%; align-self:center; }'
-    +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim;   margin-top:clamp(2px,1vw,6px); }'
+    +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim; margin-top:clamp(2px, 1vmin, 6px); }'
     +     '.bq-vic-card.card-rewards .vic-stat-grid    { width:100% !important; }'
     +     '.bq-vic-card.card-rewards .vic-rewards-body { width:100% !important; }'
     +   '}'
@@ -8778,18 +8797,18 @@ function _showVictoryScreen() {
   function buildCardMoment() {
     return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
       + '<div class="bq-vic-card card-moment">'
-        + '<div style="font-size:clamp(10px,2.5vw,13px);letter-spacing:.25em;color:' + tier.color + ';">⚔ VICTORY ⚔</div>'
-        + '<div style="font-size:clamp(28px,8vw,44px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 22px ' + tier.color + ';text-align:center;line-height:1.1;">' + tier.label + '</div>'
-        + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(13px,3.4vw,17px);color:#d8d8d8;text-align:center;max-width:94%;line-height:1.5;">"' + flavor + '"</div>'
+        + '<div style="font-size:clamp(9px,2vmin,13px);letter-spacing:.25em;color:' + tier.color + ';">⚔ VICTORY ⚔</div>'
+        + '<div style="font-size:clamp(22px,6vmin,44px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 22px ' + tier.color + ';text-align:center;line-height:1.1;">' + tier.label + '</div>'
+        + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(12px,2.6vmin,17px);color:#d8d8d8;text-align:center;max-width:94%;line-height:1.5;">"' + flavor + '"</div>'
         + '<div style="font-family:ui-sans-serif,system-ui;text-align:center;color:#aaa;display:flex;flex-direction:column;gap:4px;">'
-          + '<span style="font-size:clamp(9px,2.2vw,11px);color:#888;letter-spacing:.18em;">FAVORITE MOVE</span>'
-          + '<span style="font-size:clamp(13px,3.2vw,15px);">' + favLine + '</span>'
+          + '<span style="font-size:clamp(8px,1.8vmin,11px);color:#888;letter-spacing:.18em;">FAVORITE MOVE</span>'
+          + '<span style="font-size:clamp(12px,2.5vmin,15px);">' + favLine + '</span>'
         + '</div>'
         + '<button id="bq-vic-btn-continue" class="bq-vic-btn" style="'
         + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
         + 'border-color:' + tier.color + ';color:#000;'
         + 'box-shadow:0 4px 20px ' + tier.color + '66;'
-        + 'margin-top:clamp(6px,2vw,12px);'
+        + 'margin-top:clamp(4px,1.5vmin,12px);'
         + '">CONTINUE →</button>'
       + '</div>'
       + sharedCss
@@ -8820,39 +8839,39 @@ function _showVictoryScreen() {
     }
     var rows = cells.map(function(c) {
       var monoStyle = c.mono ? 'font-family:ui-monospace,monospace;' : '';
-      return '<div><div style="font-size:clamp(8px,2vw,9px);letter-spacing:.12em;color:#888;margin-bottom:2px;">' + c.label + '</div>'
-           + '<div style="font-size:clamp(14px,4vw,19px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
+      return '<div><div style="font-size:clamp(8px,1.6vmin,9px);letter-spacing:.12em;color:#888;margin-bottom:2px;">' + c.label + '</div>'
+           + '<div style="font-size:clamp(12px,3vmin,18px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
     }).join('');
 
     return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
       + '<div class="bq-vic-card card-rewards">'
         // Stats zone
-        + '<div class="vic-stats-zone" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:8px;">'
-          + '<div style="font-size:clamp(9px,2.2vw,10px);letter-spacing:.2em;color:#888;font-family:ui-sans-serif,system-ui;">COMBAT</div>'
-          + '<div class="vic-stat-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(8px,2vw,12px) clamp(14px,4vw,22px);'
+        + '<div class="vic-stats-zone" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:clamp(4px,1.2vmin,8px);">'
+          + '<div style="font-size:clamp(9px,1.8vmin,11px);letter-spacing:.2em;color:#888;font-family:ui-sans-serif,system-ui;">COMBAT</div>'
+          + '<div class="vic-stat-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(6px,1.6vmin,12px) clamp(12px,3vmin,22px);'
             + 'background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
-            + 'padding:clamp(12px,3vw,18px) clamp(14px,3.5vw,20px);'
-            + 'width:min(340px,100%);font-family:ui-sans-serif,system-ui;">'
+            + 'padding:clamp(10px,2.4vmin,18px) clamp(12px,2.8vmin,20px);'
+            + 'width:100%;box-sizing:border-box;font-family:ui-sans-serif,system-ui;">'
             + rows
           + '</div>'
         + '</div>'
         // Rewards zone
-        + '<div class="vic-rewards-zone" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:8px;font-family:ui-sans-serif,system-ui;">'
-          + '<div style="font-size:clamp(9px,2.2vw,10px);letter-spacing:.2em;color:#888;">REWARDS</div>'
-          + '<div class="vic-rewards-body" style="width:min(340px,100%);display:flex;flex-direction:column;align-items:center;gap:10px;'
+        + '<div class="vic-rewards-zone" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:clamp(4px,1.2vmin,8px);font-family:ui-sans-serif,system-ui;">'
+          + '<div style="font-size:clamp(9px,1.8vmin,11px);letter-spacing:.2em;color:#888;">REWARDS</div>'
+          + '<div class="vic-rewards-body" style="width:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:clamp(6px,1.8vmin,12px);'
             + 'background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
-            + 'padding:clamp(12px,3vw,18px) clamp(14px,3.5vw,20px);">'
+            + 'padding:clamp(10px,2.4vmin,18px) clamp(12px,2.8vmin,20px);">'
             + '<div id="rumble-victory-bricks" style="width:100%;text-align:center;">'
               + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:3px;">' + _renderVictoryPips() + '</div>'
             + '</div>'
             + '<div style="width:100%;text-align:center;line-height:1.7;">' + gainedLines + '</div>'
             + (_battleStats.enemiesKilled.length
-              ? '<div style="font-size:clamp(9px,2.4vw,11px);color:#666;text-align:center;font-style:italic;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
+              ? '<div style="font-size:clamp(9px,1.8vmin,11px);color:#666;text-align:center;font-style:italic;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
               : '')
           + '</div>'
         + '</div>'
         // Claim button
-        + '<div class="vic-claim-zone" style="display:flex;justify-content:center;width:100%;margin-top:clamp(4px,1.5vw,8px);">'
+        + '<div class="vic-claim-zone" style="display:flex;justify-content:center;width:100%;margin-top:clamp(2px,1vmin,8px);">'
           + '<button id="bq-vic-btn-claim" class="bq-vic-btn" style="'
           + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
           + 'border-color:' + tier.color + ';color:#000;'
@@ -8871,12 +8890,16 @@ function _showVictoryScreen() {
   var wrapper = document.createElement('div');
   wrapper.id = 'rumble-victory-screen';
   root.appendChild(wrapper);
+  // Body flag — suppresses viewport-level scrollbars while victory is up.
+  // The backdrop covers everything, so no ambient scroll should peek through.
+  document.body.classList.add('bq-vic-active');
 
   var dismissed = false;
   var dismiss = function() {
     if (dismissed) return;
     dismissed = true;
     if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+    document.body.classList.remove('bq-vic-active');
     _internalEnd('victory');
   };
 
