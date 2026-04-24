@@ -42,6 +42,47 @@ When a build is complete (all items shipped, exit criteria met), the NEXT commit
 
 ---
 
+## Debugging Protocol (standing practice)
+
+**For any non-trivial bug, the first patch is a diagnostic, not a fix.**
+
+Diagnostics reduce uncertainty. Speculative fixes don't. Guessing at fixes without ground truth produces guess-iterate-reload loops that burn hours to find something a 5-minute diagnostic would have surfaced immediately.
+
+### The rule
+
+When a bug is reported:
+1. **First response is a question in two parts:** (a) best guess at the bug category (rendering / state / timing / data / integration), (b) a diagnostic patch that will print or display what is actually happening at the suspected failure point.
+2. **Ship the diagnostic, not the fix.** User runs it, reports the output.
+3. **Fix is then targeted and informed** by the diagnostic's actual data, not by speculation about what might be wrong.
+
+### Exception — skip the diagnostic when
+
+The bug is screamingly obvious from the symptom alone:
+- Typo in a variable name surfaced in a stack trace
+- `undefined is not a function` pointing at a specific line
+- Missing closing brace causing a syntax error
+- User pastes the exact error message and the cause is unambiguous
+
+When in doubt, ship the diagnostic first. The cost of a diagnostic that wasn't needed is one extra reload. The cost of skipping a diagnostic that was needed is ten iterations of guessing.
+
+### Diagnostic patterns that work in this codebase
+
+- **On-screen debug overlays** (the victory 🔍 button is the template — colored element outlines + readout panel of computed styles/dimensions/state). Tap to toggle. Reusable across any DOM layout issue.
+- **Console dumps with console.table** for any data structure under suspicion (RIDDLES pool, player state, activeEvent). Dump the whole object; don't pre-filter because you might filter out the wrong field.
+- **State snapshot buttons** — a hidden admin button that exports current game state as JSON for copy-paste inspection.
+- **Inline assertions** that throw descriptive errors when an invariant breaks mid-flow. Throw early, throw loud; the stack trace tells you where.
+- **Temporary log spam** around a suspected code path, removed once the bug is located.
+
+### Historical example (why this rule exists)
+
+**April 2026 victory-layout bug (~15 wasted iterations):** User reported landscape mobile victory cards looked wrong. Claude iterated on CSS values — `max-width`, `fit-content`, media query thresholds, `vmin` vs `vw` — shipping each guess and asking for a screenshot. Nothing worked. Fifteen patches in, user suggested a debug overlay. First debug output showed `.bq-vic-card` rendering `display:block width:269px` when CSS specified `display:flex width:480px`. That single discrepancy led directly to the root cause: JavaScript `/* comments */` inside string concatenation were evaluating to `NaN` via unary plus coercion, corrupting the rendered CSS and invalidating entire rule blocks. Five minutes of diagnostic work replaced fifteen iterations of guesswork. This is the default failure mode when diagnostics are skipped. Don't repeat it.
+
+### The meta-principle
+
+Debugging is NOT the same as writing new code. Writing new code: you know the goal, plan a path, execute, check. Debugging: you don't know what's wrong, so any "plan a path" is a guess and "execute" is speculation. The right shape of debugging is **reduce uncertainty first, act second.** Every guess-and-check iteration that doesn't reduce uncertainty is wasted motion.
+
+---
+
 ## Major Cleanup — April 2026
 
 The turn-based battle system and all class skills were ripped out to make room for the real-time rumble system (v1 shipped Phase 1, Phase 2 next). Removed server-side: all `startBattle`, `rollAttack`, `useBrickInBattle`, `monsterAttack`, `endBattle`, `resolveBattle*`, `advanceBattleTurn`, `nextBattleRound`, `setComplication`, `bossPhase2`, `monsterHPDelta`, `battleTrapPersist`, plus all skill handlers (`unlockSkill`, `activateEnhanced`, `consumeEnhanced`, `deconstructGate`, `rebuildBridge`, `blueprint`, `forge`, `infiniteBlueprint`, `salvage`, `wrecking_ball`, `tameAttempt`, `commandTamed`, `catapult`), plus the legacy out-of-battle brick actions (`addShield`, `healPlayer`, `massRepair`, `revivePlayer`). Game.js lost `MONSTER_TEMPLATES`, `COMPLICATIONS`, and the entire `SKILLS` block. Player state no longer has `skills`, `tamed`, `scavengeRolled` fields; global no longer has `enhancedMovement` or `battleResult`.
