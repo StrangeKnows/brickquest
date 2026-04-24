@@ -503,12 +503,39 @@ if (process.stdin.isTTY) {
 // ── RIDDLES ───────────────────────────────────────────────
 const RIDDLES = require('./game.js').RIDDLES;
 
-// Wrong answer pool for multiple choice distractors
-const WRONG_ANSWERS = [
-  'a shadow','a mirror','a candle','the wind','a key','a secret','silence','a door',
-  'a bridge','a coin','an hourglass','a flame','a needle','a ladder','a stone',
-  'a ring','a book','a well','a thread','a bell','a feather','a riddle'
-];
+// Wrong-answer distractor pools for multiple-choice. Selection is driven
+// by the riddle's answerType field (see game.js RIDDLES). Before the pool
+// was flat and nouns-only — which made color and number answers trivial
+// to spot. Categorized pools mean a color riddle's distractors are all
+// colors (with one ironic outlier like 'boot' for flavor), a number
+// riddle's distractors are all numbers, etc.
+const WRONG_POOLS = {
+  noun: [
+    'a shadow','a mirror','a candle','the wind','a key','a secret','silence','a door',
+    'a bridge','a coin','an hourglass','a flame','a needle','a ladder','a stone',
+    'a ring','a book','a well','a thread','a bell','a feather','a riddle',
+    'a name','a promise','a breath','a whisper'
+  ],
+  color: [
+    'red','blue','green','yellow','white','black','gray','orange','purple','boot'
+    // 'boot' is the ironic outlier — intentionally not a color. Keep the joke rare
+    // by only surfacing as one of several distractors; players find it occasionally.
+  ],
+  number: [
+    '1','2','3','4','6','7','8','10','a dozen','zero','none','thirteen'
+    // Excluded: '5' — the current '5' riddle's correct answer. Filtered further at pick-time.
+  ],
+  entity: [
+    'goblin','skeleton','slinger','shadow wolf','creeping vines',
+    'stone troll','cursed knight','void wraith','stone colossus','blight worm'
+  ],
+  class: [
+    'breaker','formwright','snapstep','blocksmith','fixer','wild one','the dungeon master'
+    // 'the dungeon master' is the ironic outlier — a real role in the game but not a player class.
+  ],
+};
+// Back-compat — any legacy code referring to the flat array still works.
+const WRONG_ANSWERS = WRONG_POOLS.noun;
 
 const CHALLENGES = [
   "First to stack 5 bricks end-on-end with one hand wins!",
@@ -1477,12 +1504,19 @@ wss.on('connection', (ws, req) => {
       if (!pool.length) pool = RIDDLES.map((r,i)=>({r,i}));
       const picked = pool[Math.floor(Math.random()*pool.length)];
       const r = picked.r;
-      // Generate 4 options: correct + 3 distractors
-      const wrongPool = WRONG_ANSWERS.filter(w => w !== r.a);
+      // Generate 4 options: correct + 3 distractors.
+      // Distractor pool picked by answerType so color riddles show colors,
+      // number riddles show numbers, entity riddles show entity names.
+      // Falls back to noun pool for untagged riddles.
+      const distractorType = r.answerType && WRONG_POOLS[r.answerType] ? r.answerType : 'noun';
+      const excluded = [r.a].concat(r.a_alt || []).map(s => String(s).toLowerCase());
+      const wrongPool = WRONG_POOLS[distractorType].filter(w => excluded.indexOf(String(w).toLowerCase()) === -1);
       const wrongs = [];
-      while (wrongs.length < 3) {
+      while (wrongs.length < 3 && wrongPool.length > 0) {
         const w = wrongPool[Math.floor(Math.random()*wrongPool.length)];
         if (!wrongs.includes(w)) wrongs.push(w);
+        // Safety: if pool is too small, break to avoid infinite loop.
+        if (wrongs.length >= wrongPool.length) break;
       }
       const options = [r.a, ...wrongs].sort(() => Math.random()-0.5);
       const endsAt = Date.now() + 30000; // 30 second timer

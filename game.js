@@ -191,189 +191,237 @@ const STORE_PRICES = {
 // ── ZONE-SPECIFIC CLUES ─────────────────────────────────
 // Each clue teaches zone-relevant tactics. clueZone matches ZONES index (0-4).
 const RIDDLES = [
-  // Zone 1 — Courtyard
+  // ══════════════════════════════════════════════════════
+  // Zone 1 — Courtyard (tutorial, core mechanics)
+  // ══════════════════════════════════════════════════════
   {
     q: "The more you take, the more you leave behind. What am I?",
     a: "footsteps",
     zone: 0,
-    clue: "GATE AHEAD: The Blocksmith can deconstruct the Zone 1→2 gate using their Deconstruct skill — no damage taken. Others can force it open (roll 5+) but take 2 damage trying. Let Blocksmith lead.",
-    category: "Zone Progression"
+    clue: "GATES & FORCE: Every gate that isn't magic-locked can be forced open. Roll 5+ on the attempt or take damage trying. Breaker and Blocksmith — hold red and DASH — break gates clean without a roll.",
+    category: "Zone Progression",
+    answerType: "noun"
   },
-  {
-    q: "I speak without a mouth and hear without ears. I have no body but I come alive with wind. What am I?",
-    a: "an echo",
-    zone: 0,
-    clue: "BRICKS MATTER: Red bricks deal damage ignoring armor. Gray bricks add shield. White bricks heal. Purple bricks deal damage AND heal you. Yellow bricks confuse monsters — they skip their next attack.",
-    category: "Core Mechanics"
-  },
-  {
-    q: "The more you have of it, the less you see. What is it?",
-    a: "darkness",
-    zone: 0,
-    clue: "SHIELD UP: Breaker and Blocksmith stack shields efficiently (1 gray = 1 shield). All others need 2 gray bricks per shield. Max shields = 50% of your HP. Get shields before fighting.",
-    category: "Combat Tips"
-  },
-  // Zone 2 — Corridor
+
+  // ══════════════════════════════════════════════════════
+  // Zone 2 — Corridor (magic awakening, class identity)
+  // ══════════════════════════════════════════════════════
   {
     q: "I have cities but no houses, mountains but no trees, water but no fish. What am I?",
     a: "a map",
     zone: 1,
-    clue: "MAGIC GATE AHEAD: The Zone 2→3 gate is sealed by magic. The Skeleton Guard in this zone carries the Blue Key. Defeat it to claim the key — then any player can unlock the gate.",
-    category: "Zone Progression"
+    clue: "KEY GATES: Some gates refuse brute force — they want a key. The key is held by whatever blocks your path. Defeat the keeper, claim the key, let anyone turn it. The Corridor's gate waits for one such keeper.",
+    category: "Zone Progression",
+    answerType: "noun"
   },
   {
     q: "What gets wetter the more it dries?",
     a: "a towel",
     zone: 1,
-    clue: "FORMWRIGHT POWER: Stock up on blue and purple bricks now. In the Phase 2 boss fight, ONLY magic bricks deal damage. The Formwright's blue brick hits 4-8 ignoring armor — the hardest single hit in the game.",
-    category: "Boss Preparation"
+    clue: "FORMWRIGHT'S GIFT: Blue and purple bricks cut where iron won't. The Formwright's blue bolt ignores armor entirely. Stockpile magic now — deeper foes have skin that laughs at steel.",
+    category: "Class Tips",
+    answerType: "noun"
   },
   {
     q: "What has hands but cannot clap?",
     a: "a clock",
     zone: 1,
-    clue: "FIXER IS VITAL: Fixer heals 4 HP per white brick — double everyone else. In battle, Fixer can revive fallen players using 1 purple + 1 white brick. Keep Fixer near the back of initiative order.",
-    category: "Party Tips"
+    clue: "FIXER'S PRESENCE: The Fixer heals +4 HP per white brick where others get +3. When an ally falls, the Fixer can lead the revive minigame — tap-rhythm to pull them back. Keep the Fixer alive above all else.",
+    category: "Party Tips",
+    answerType: "noun"
   },
-  // Zone 3 — Guard Post
-  {
-    q: "The man who made it doesn't need it. The man who bought it doesn't want it. The man who uses it doesn't know it. What is it?",
-    a: "a coffin",
-    zone: 2,
-    clue: "GATE AHEAD: Zone 3→4 is a structural gate. Blocksmith can dismantle it free. Others must force it (roll 5+, take 2 damage). A Breaker with Fortress Stance gains +3 shield before attempting — worth doing first.",
-    category: "Zone Progression"
-  },
+
+  // ══════════════════════════════════════════════════════
+  // Zone 3 — Guard Post (pressure, hard choices)
+  // ══════════════════════════════════════════════════════
   {
     q: "What has one eye but cannot see?",
     a: "a needle",
     zone: 2,
-    clue: "WILD ONE SECRET: Tamed monsters fight alongside you every turn for 1 green brick. A tamed Shadow Wolf or Stone Troll hits with its full stats. Easy Tame skill lowers the capture roll from 3+ to 2+.",
-    category: "Class Tips"
+    clue: "WILD ONE'S POISON: Green brick lays a slow curse that bleeds HP tick by tick. The Wild One's poison bites harder than any other class — and every stack on a corpse counts toward Whistle. Learn what that word means before Zone 4.",
+    category: "Class Tips",
+    answerType: "noun"
   },
   {
     q: "What can run but never walks, has a mouth but never talks, has a head but never weeps?",
     a: "a river",
     zone: 2,
-    clue: "SNAPSTEP ADVANTAGE: Snapstep gets +1 to every movement roll automatically. Orange battle traps deal 2-4 damage (others do 1-2). Snapstep also finds bricks on 3+ while searching in battle — others need 5+.",
-    category: "Class Tips"
+    clue: "SNAPSTEP'S DANCE: Orange brick lays a trap at your feet or where you drag it. The Snapstep's traps bite harder and place faster than anyone else. A well-placed snare buys the whole party three free seconds.",
+    category: "Class Tips",
+    answerType: "noun"
   },
-  // Zone 4 — Flood Chamber
+
+  // ══════════════════════════════════════════════════════
+  // Zone 4 — Flood Chamber (boss approach)
+  // ══════════════════════════════════════════════════════
   {
-    q: "Feed me and I live. Give me water and I die. What am I?",
-    a: "fire",
+    q: "Heaviest step, hardest swing, last to fall. What class stands at the front of every line?",
+    a: "breaker",
+    a_alt: ["the breaker"],
     zone: 3,
-    clue: "BOSS PHASE 1: The Colossus Shell has 28 HP and 3 armor. Physical attacks work in Phase 1 — use them freely. Save all blue, purple, and yellow bricks for Phase 2 when only magic deals damage.",
-    category: "Boss Preparation"
+    clue: "BREAKER'S STRENGTH: The Breaker rolls a d8 on movement — the biggest die in the party. Shoulder-rushes gates clean like Blocksmith. Stacks shields 1-to-1 from gray. Built to eat damage so the softer classes can work. First through the gate, last from the field.",
+    category: "Class Tips",
+    answerType: "class"
   },
-  {
-    q: "I have a head and a tail but no body. What am I?",
-    a: "a coin",
-    zone: 3,
-    clue: "WINNING COMBO: In Phase 2, use yellow brick to confuse the boss (skips attack), then Formwright hits with blue for 4-8 magic damage. Confused boss cannot retaliate. Chain this with Fixer healing between rounds.",
-    category: "Boss Preparation"
-  },
-  // Zone 5 — Throne Room
+
+  // ══════════════════════════════════════════════════════
+  // Zone 5 — Throne Room (final, warnings)
+  // ══════════════════════════════════════════════════════
   {
     q: "I am always hungry and must always be fed. The finger I touch will soon turn red. What am I?",
     a: "fire",
     zone: 4,
-    clue: "PHASE 2 WARNING: When the Shell's HP hits 0, the Void Core emerges. It has 3 armor and is immune to ALL physical damage. Only blue bricks, purple bricks, and yellow bricks can harm it. Hoard these now.",
-    category: "Boss Warning"
+    clue: "ETHEREAL FOES: Void Wraiths phase out of reach and teleport when you lash at them. Red steel barely touches them. Hoard blue, purple, yellow — the colors that pass through shadow — before the throne.",
+    category: "Boss Warning",
+    answerType: "noun"
   },
-  // ── v4 NEW RIDDLES (gameplay + mechanics teaching pool) ──
+
+  // ══════════════════════════════════════════════════════
+  // BRICKS — color-answer riddles (each teaches a color's role)
+  // ══════════════════════════════════════════════════════
   {
-    q: "I turn a locked door to rubble in a single rush. What am I?",
+    q: "I turn a locked door to rubble in a single rush. What color am I?",
     a: "red",
     zone: 0,
-    clue: "RED BRICK CHARGE: Breakers and Blocksmiths can SHOULDER-RUSH gates for guaranteed break using the red dash action. Other classes may force-gate (roll 5+, 2 damage on fail).",
-    category: "Bricks"
+    clue: "RED BRICK DASH: Breaker and Blocksmith can shoulder-rush gates for a guaranteed break — no roll, no damage. Light-weight classes can try but break only some of the time. Red is the key to every forceable gate.",
+    category: "Bricks",
+    answerType: "color"
   },
   {
-    q: "Two of me stack as one shield pip for the armored. One of me is all others need, twice over. What am I?",
+    q: "Two of me stack as one shield pip for the armored. One of me is all others need, twice over. What color am I?",
     a: "gray",
     zone: 0,
-    clue: "SHIELD ECONOMY: Gray becomes shield pips. Breaker and Blocksmith: 1 gray per pip. All others: 2 gray per pip. Max shields = 50% of your HP (Breaker with Iron Hide unlock: 75%).",
-    category: "Bricks"
+    clue: "GRAY AS ARMOR: Breaker and Blocksmith convert 1 gray → 1 shield pip. Everyone else needs 2. Max shield caps at 50% of your HP. Gray is the class-inequality color — the armored are built to carry it.",
+    category: "Bricks",
+    answerType: "color"
   },
   {
     q: "I heal the wounded and cleanse the cursed. What color drinks like water and burns like fire?",
     a: "white",
     zone: 0,
-    clue: "WHITE BRICK — HEAL & CLEANSE: Tap white for +3 HP (Fixer heals +4). White TAP also purges all debuffs. Spend 1 white on board to cleanse queued poison.",
-    category: "Bricks"
+    clue: "WHITE — HEAL & CLEANSE: Tap white for +3 HP (Fixer: +4). White also purges every active debuff in one press — poison, slow, daze, confuse, weaken, all sweep away. Carry at least one white into every deep rumble.",
+    category: "Bricks",
+    answerType: "color"
   },
   {
-    q: "I confuse the mind and steal the next attack. The boss will skip their turn when I strike true. What am I?",
+    q: "I confuse the mind and steal the next attack. The beast will skip its turn when I strike true. What color am I?",
     a: "yellow",
     zone: 1,
-    clue: "YELLOW BRICK — CONFUSE: Tap yellow to confuse a monster; it skips next attack. In Rumble Arena confuse also inverts player input — be careful casting on yourself.",
-    category: "Bricks"
+    clue: "YELLOW — CONFUSE: Tap yellow at an enemy; they skip their next attack. In the rumble, confuse also inverts movement inputs on the caster's first throw — be careful casting near yourself.",
+    category: "Bricks",
+    answerType: "color"
   },
   {
-    q: "I scatter and sow. The path you walked becomes the path I burn. What color am I?",
+    q: "I scatter and sow. The ground I touch becomes a blade. What color am I?",
     a: "orange",
     zone: 1,
-    clue: "ORANGE BRICK — SHRAPNEL: Orange tap throws shrapnel in an arc. Every 3rd slinger projectile leaves a shrapnel hazard — Snapstep can disarm these.",
-    category: "Bricks"
+    clue: "ORANGE — TRAP & SHRAPNEL: Orange lays traps at your feet or drag-placed elsewhere. On crit, traps detonate AoE shrapnel. Snapstep places them larger, faster, deadlier than any other class.",
+    category: "Bricks",
+    answerType: "color"
   },
   {
     q: "The hungry one. Take as I give, give as I take. What color heals the caster while it harms the enemy?",
     a: "purple",
     zone: 2,
-    clue: "PURPLE BRICK — VAMPIRIC: Purple tap does 2-4 damage AND heals caster 3-4 HP. Colossus unlocks this mid-fight at 50% HP — he heals off every hit in phase 2.",
-    category: "Bricks"
-  },
-  {
-    q: "Two chests. One blesses. One curses. Which color forces this choice?",
-    a: "purple",
-    zone: 2,
-    clue: "PURPLE EVENT: Fated Choice offers 2 chests — 67% blessed (+1 purple +2-3 gold), 33% cursed (random curse from pool). PASS for safe 1 cheese. Fixer can spend 1 black to cleanse a cursed result.",
-    category: "Events"
-  },
-  {
-    q: "Three lines of thorn. Cut them or pay in poison. What color event am I?",
-    a: "green",
-    zone: 2,
-    clue: "GREEN EVENT: Vine Path — trace 3 vines without straying. All 3 cut = 1 green + 2-3 gold. 0 cut = damage + queued poison for next rumble battle.",
-    category: "Events"
+    clue: "PURPLE — VAMPIRIC: Purple damages the target AND heals the caster. When the Colossus hits 50% HP, he unlocks purple too — and his swings start feeding him. Kill him before then.",
+    category: "Bricks",
+    answerType: "color"
   },
   {
     q: "I am the shadow's offer. I take your blood, your bricks, sometimes your allies'. What color am I?",
     a: "black",
     zone: 3,
-    clue: "BLACK BARGAIN: Trade offers from the wraith. BLOOD PRICE costs permanent max HP. BINDING PACT (rare) costs ALL allies a random brick. Refuse for 97% cheese, 3% black.",
-    category: "Events"
+    clue: "BLACK — BARGAIN: The wraith at Zone 3 offers pacts. BLOOD PRICE costs permanent max HP. BINDING PACT takes a random brick from every ally. Refuse for a safe cheese — fail a pact for curses that last rumbles.",
+    category: "Events",
+    answerType: "color"
   },
   {
-    q: "How many bricks max fit in a single overload?",
+    q: "Two chests. One blesses. One curses. Which color forces this choice?",
+    a: "purple",
+    zone: 2,
+    clue: "PURPLE EVENT — FATED CHOICE: Two chests appear. 67% chance the blessed path yields +1 purple and gold. 33% the cursed path fires a random curse. Pass for 1 safe cheese. Fixer can spend 1 black to cleanse a cursed result.",
+    category: "Events",
+    answerType: "color"
+  },
+  {
+    q: "Three lines of thorn. Cut them or pay in poison. What color event am I?",
+    a: "green",
+    zone: 2,
+    clue: "GREEN EVENT — VINE PATH: Trace three vines without slipping. Three cuts clean yields +1 green and gold. Zero cuts yields damage AND queued poison for your next rumble. Trace carefully.",
+    category: "Events",
+    answerType: "color"
+  },
+
+  // ══════════════════════════════════════════════════════
+  // NUMBERS & ENTITIES — combat-lore riddles
+  // ══════════════════════════════════════════════════════
+  {
+    q: "How many bricks at most can I hold in a single overload?",
     a: "5",
     a_alt: ["five"],
     zone: 3,
-    clue: "OVERLOAD HOLD: Press and hold a brick button to charge. Each tier (0.5s hold) consumes one more brick up to 5. Tier 5 = max damage, max radius, max crit chance.",
-    category: "Combat"
+    clue: "OVERLOAD TIERS: Press and hold a brick button to charge. Each half-second adds one brick to the stack, up to 5. Tier 5 is max damage, max radius, max crit chance — but also drains your reserve fast.",
+    category: "Combat",
+    answerType: "number"
   },
   {
-    q: "At half HP I enrage. My speed jumps, my telegraph shrinks, my swings heal me. What beast am I?",
-    a: "colossus",
-    a_alt: ["stone colossus", "stone_colossus"],
+    q: "At half HP I enrage. My speed climbs, my telegraph shrinks, my swings heal me. What beast am I?",
+    a: "stone colossus",
+    a_alt: ["colossus", "stone_colossus"],
     zone: 3,
-    clue: "COLOSSUS ENRAGE: At 50% HP: speed 90→140, telegraph 0.75s→0.40s, swings heal +3 HP via purple vampirism. Burn him down fast or phase 2 wins.",
-    category: "Bosses"
+    clue: "COLOSSUS ENRAGE: At 50% HP the Colossus speeds up, his wind-up collapses, and his swings drain you to heal him. If he crosses that line, the fight usually ends. Burn him down fast.",
+    category: "Bosses",
+    answerType: "entity"
   },
   {
-    q: "Poison. Slow. Daze. Confuse. Weaken. One brick tap cleanses all of me. Which?",
-    a: "white",
+    q: "I split when I die. One becomes two, two become four. What worm am I?",
+    a: "blight worm",
+    a_alt: ["blight_worm", "worm", "blightworm"],
+    zone: 3,
+    clue: "MITOSIS: The Blight Worm's death spawns smaller clones. Each clone can split once more. Big AoE overloads on the parent kill multiple children at once — single-target hits just scatter the swarm.",
+    category: "Entities",
+    answerType: "entity"
+  },
+
+  // ══════════════════════════════════════════════════════
+  // FUTURE — hints at cheese, fusion, achievements
+  // (These teach players to look forward. Clues describe
+  //  mechanics being built. Answer puzzles remain classic.)
+  // ══════════════════════════════════════════════════════
+  {
+    q: "Soft in hand, yellow as gold, mine to eat — or mine to throw. What am I?",
+    a: "cheese",
+    zone: 2,
+    clue: "CHEESE IS A WEAPON: Every wheel can be eaten for permanent max HP — or thrown before a rumble for a battlefield effect. Sour cheese skips the fight. Smoky distracts. Aged halves the horde. Used either way, the cheese is gone. No refills, no refresh. Save the rare wheels.",
+    category: "Cheese",
+    answerType: "noun"
+  },
+  {
+    q: "Six wheels in the cellar, each its own secret. How many ways can cheese be spent?",
+    a: "6",
+    a_alt: ["six"],
+    zone: 3,
+    clue: "CHEESE VARIANTS: Standard, Sour, Smoky, Rich, Bleu, Aged — six wheels with distinct effects. Rarer wheels grant more max HP when eaten and stronger effects when thrown. Cheese drops from monsters and events — rare wheels rarest of all.",
+    category: "Cheese",
+    answerType: "number"
+  },
+  {
+    q: "Two become one, and one strikes harder than either. What power waits in the combining?",
+    a: "fusion",
+    a_alt: ["brick fusion"],
+    zone: 3,
+    clue: "FUSION IS COMING: A future power will let you combine charged bricks across colors — spending multiple charges to forge a single higher-tier piece. Mastery means knowing which colors to fuse. Watch the Fusion tab.",
+    category: "Future",
+    answerType: "noun"
+  },
+  {
+    q: "Dodge a hundred strikes and a new path opens. What is earned through trial?",
+    a: "an achievement",
+    a_alt: ["achievement", "mastery", "unlock"],
     zone: 4,
-    clue: "STATUS CLEANSE: White brick TAP removes ALL active debuffs on player. Critical during worm and wraith fights. Also cleanses the queued poison from failed GREEN or BLACK bargains.",
-    category: "Combat"
-  },
-  {
-    q: "I split when I die. Two of me become four. What grub am I?",
-    a: "rot grub",
-    a_alt: ["rot_grub", "rotgrub", "grub"],
-    zone: 3,
-    clue: "MITOSIS: Rot grubs split on death into 2 half-size grubs (2-level recursion: 1 → 2 → 4). Big AoE overloads kill multiple clones efficiently.",
-    category: "Entities"
+    clue: "ACHIEVEMENTS GATE ABILITIES: Each class has abilities locked behind milestones. Snapstep unlocks GHOST STEP after 100 dodges — pass through enemies without triggering rumbles. The Status tab tracks progress. Play your class to learn its secrets.",
+    category: "Future",
+    answerType: "noun"
   },
 ];
 

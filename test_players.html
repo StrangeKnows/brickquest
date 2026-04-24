@@ -1750,7 +1750,19 @@ function renderStatusClues() {
   html += '<div class="card-title" style="color:var(--yellow);display:flex;align-items:center;gap:6px;"><span style=\"width:12px;height:12px;border-radius:2px;background:#F5D000;display:inline-block;\"></span>Clues Discovered</div>';
   clues.forEach(function(c) {
     var zoneName = c.zone !== undefined && ZONES[c.zone] ? ZONES[c.zone].name : '';
-    var catColor = { 'Zone Progression':'var(--green)', 'Boss Preparation':'var(--red)', 'Combat Tips':'var(--orange)', 'Class Tips':'var(--cls-color)', 'Core Mechanics':'#8888cc', 'Party Tips':'var(--green)', 'Boss Warning':'var(--red)' }[c.category] || 'var(--yellow)';
+    var catColor = {
+      'Zone Progression':'var(--green)',
+      'Bosses':'var(--red)',
+      'Boss Warning':'var(--red)',
+      'Combat':'var(--orange)',
+      'Class Tips':'var(--cls-color)',
+      'Party Tips':'var(--green)',
+      'Bricks':'#ccaa66',
+      'Events':'var(--purple)',
+      'Entities':'var(--cls-color)',
+      'Cheese':'#F5C800',
+      'Future':'#4db8ff',
+    }[c.category] || 'var(--yellow)';
     html += '<div style="padding:8px 0;border-bottom:1px solid #1a1a1a;">';
     if (c.category) html += '<div style="font-size:9px;font-family:Cinzel,serif;letter-spacing:.06em;color:'+catColor+';margin-bottom:4px;">'+c.category.toUpperCase()+(zoneName?' · '+zoneName:'')+'</div>';
     html += '<div style="font-size:13px;color:var(--text);line-height:1.5;">' + c.clue + '</div>';
