@@ -7909,6 +7909,7 @@ function _internalStart(config) {
   var stale;
   stale = document.getElementById('rumble-victory-screen'); if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
   stale = document.getElementById('rumble-exit-overlay');   if (stale) stale.classList.remove('visible');
+  stale = document.getElementById('bq-vic-styles');         if (stale) stale.remove();
   // Also clear the body scroll-lock class from any stale victory state.
   document.body.classList.remove('bq-vic-active');
 
@@ -8746,14 +8747,14 @@ function _showVictoryScreen() {
     +   '}'
     +   '.bq-vic-backdrop.fading-out { animation:bqVictoryFadeOut .3s ease-in forwards; }'
     +   '.bq-vic-card {'
-    +     ' width:min(92vw, 480px);'
-    +     ' max-height:96%;'
-    +     ' display:flex;flex-direction:column;align-items:center;'
-    +     ' padding:clamp(14px, 3vmin, 28px) clamp(16px, 3.5vmin, 32px);'
-    +     ' gap:clamp(10px, 2.2vmin, 20px);'
+    +     ' width:min(92vw, 480px) !important;'
+    +     ' max-height:96% !important;'
+    +     ' display:flex !important;flex-direction:column !important;align-items:center !important;'
+    +     ' padding:clamp(14px, 3vmin, 28px) clamp(16px, 3.5vmin, 32px) !important;'
+    +     ' gap:clamp(10px, 2.2vmin, 20px) !important;'
     +     ' pointer-events:auto;'
-    +     ' overflow:hidden;'
-    +     ' box-sizing:border-box;'
+    +     ' overflow:hidden !important;'
+    +     ' box-sizing:border-box !important;'
     +   '}'
     +   '.bq-vic-card::-webkit-scrollbar { display:none; width:0; height:0; }'
     +   'body.bq-vic-active, body.bq-vic-active html { overflow:hidden !important; }'
@@ -8784,7 +8785,7 @@ function _showVictoryScreen() {
     +   '}'
     +   '@media (min-aspect-ratio: 1/1) {'
     +     '.bq-vic-card.card-moment {'
-    +       ' width:min(88vw, 720px);'
+    +       ' width:min(88vw, 720px) !important;'
     +     '}'
     +     '.bq-vic-card.card-rewards {'
     +       ' width:fit-content; max-width:96vw;'
@@ -8889,6 +8890,15 @@ function _showVictoryScreen() {
   var root = document.getElementById('rumble-root') || document.body;
   var existing = document.getElementById('rumble-victory-screen');
   if (existing) existing.remove();
+  // Inject CSS into <head> — guarantees rules are active regardless of
+  // where card DOM is injected. Previous runs replace their own style node.
+  var oldStyleNode = document.getElementById('bq-vic-styles');
+  if (oldStyleNode) oldStyleNode.remove();
+  var styleNode = document.createElement('style');
+  styleNode.id = 'bq-vic-styles';
+  styleNode.textContent = sharedCss.replace(/^<style>/, '').replace(/<\/style>$/, '');
+  document.head.appendChild(styleNode);
+
   var wrapper = document.createElement('div');
   wrapper.id = 'rumble-victory-screen';
   root.appendChild(wrapper);
@@ -8901,6 +8911,8 @@ function _showVictoryScreen() {
     if (dismissed) return;
     dismissed = true;
     if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+    var s = document.getElementById('bq-vic-styles');
+    if (s) s.remove();
     document.body.classList.remove('bq-vic-active');
     _internalEnd('victory');
   };
