@@ -1192,12 +1192,37 @@ function _holdStart(e, color, chipEl) {
   }
 
   const rect = chipEl.getBoundingClientRect();
+
+  // Compute fan direction based on chip position. Fan should open away from
+  // the nearest viewport edge so ally icons don't clip off-screen.
+  // Returns angle (radians) for the CENTER of the fan. Allies fan symmetrically
+  // around this center across an arc of ±60° (120° total).
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const chipCx = rect.left + rect.width / 2;
+  const chipCy = rect.top + rect.height / 2;
+  // Distance from each edge — pick the direction with the most room
+  const distLeft   = chipCx;
+  const distRight  = vw - chipCx;
+  const distTop    = chipCy;
+  const distBottom = vh - chipCy;
+  // Pick primary axis: if vertical room is greater, fan vertically; else horizontally
+  let fanCenterAngle;  // radians, 0=right, π/2=down, π=left, -π/2=up
+  if (Math.max(distTop, distBottom) > Math.max(distLeft, distRight)) {
+    // Vertical axis preferred — fan up or down
+    fanCenterAngle = (distTop >= distBottom) ? -Math.PI / 2 : Math.PI / 2;
+  } else {
+    // Horizontal axis preferred — fan left or right
+    fanCenterAngle = (distLeft >= distRight) ? Math.PI : 0;
+  }
+
   _holdState = {
     color,
     chipEl,
     chipRect: rect,
-    chipCx: rect.left + rect.width / 2,
-    chipCy: rect.top + rect.height / 2,
+    chipCx,
+    chipCy,
+    fanCenterAngle,
     pointerId: e.pointerId,
     startX: e.clientX,
     startY: e.clientY,
@@ -1210,6 +1235,7 @@ function _holdStart(e, color, chipEl) {
     dragTarget: null,        // class id of ally currently hovered
     cancelled: false,
     holdMode: false,         // true once HOLD_TAP_THRESHOLD_MS passed
+    lastTierUpTime: 0,       // performance.now() timestamp of most recent tier increment
   };
 
   document.addEventListener('pointermove', _holdMove);
@@ -1225,9 +1251,19 @@ function _holdStart(e, color, chipEl) {
     const ceiling = Math.min(HOLD_TIER_MAX, _holdState.maxCharges);
     if (_holdState.tier < ceiling) {
       _holdState.tier += 1;
+      _holdState.lastTierUpTime = performance.now();  // for pulse animation
     }
     _renderHoldOverlay();
   }, HOLD_TIER_INTERVAL_MS);
+
+  // RAF loop — keeps pulse animations and time-based visuals smooth between
+  // pointermove events and tier ticks. Re-renders every frame while hold is active.
+  function frame() {
+    if (!_holdState) return;
+    _renderHoldOverlay();
+    _holdState.rafId = requestAnimationFrame(frame);
+  }
+  _holdState.rafId = requestAnimationFrame(frame);
 
   // Initial overlay render so the ring appears immediately
   _renderHoldOverlay();
@@ -1284,6 +1320,7 @@ function _holdUp(e) {
 
 function _holdEnd(cancelled) {
   if (_holdTicker) { clearInterval(_holdTicker); _holdTicker = null; }
+  if (_holdState && _holdState.rafId) { cancelAnimationFrame(_holdState.rafId); }
   document.removeEventListener('pointermove', _holdMove);
   document.removeEventListener('pointerup', _holdUp);
   document.removeEventListener('pointercancel', _holdUp);
@@ -1361,26 +1398,40 @@ function _renderHoldOverlay() {
     chipCx,Cy: ${Math.round(s.chipCx)},${Math.round(s.chipCy)}
   </div>`;
 
-  // Charging ring around the chip — only after hold threshold
+  // Charging visuals — only after hold threshold
   if (inHoldMode) {
-    const ringSize = 72;
+    const tierColor = BRICK_COLORS[s.color] || '#fff';
+    const ceiling = Math.min(HOLD_TIER_MAX, s.maxCharges);
+    const tierPct = ceiling > 0 ? (s.tier / ceiling) : 0;
+
+    // Tier-up pulse — expanding fading ring, triggered each time tier bumps.
+    // Lives ~600ms then fades. The tick recorded performance.now() at the bump,
+    // we read remaining time and draw the pulse if still alive.
+    const pulseAge = performance.now() - (s.lastTierUpTime || 0);
+    const PULSE_DURATION = 600;
+    if (s.lastTierUpTime && pulseAge < PULSE_DURATION) {
+      const progress = pulseAge / PULSE_DURATION;          // 0..1
+      const pulseSize = 60 + 80 * progress;                // grows from 60 → 140px
+      const pulseAlpha = 1 - progress;                     // fades 1 → 0
+      const px = s.chipCx - pulseSize / 2;
+      const py = s.chipCy - pulseSize / 2;
+      html += `<div style="position:absolute;left:${px}px;top:${py}px;
+        width:${pulseSize}px;height:${pulseSize}px;border-radius:50%;
+        border:2px solid ${tierColor};opacity:${pulseAlpha.toFixed(2)};
+        pointer-events:none;"></div>`;
+    }
+
+    // Subtle chip ring — shows the gesture is active, no tier info embedded
+    const ringSize = 64;
     const ringX = s.chipCx - ringSize / 2;
     const ringY = s.chipCy - ringSize / 2;
-    const tierProgress = Math.min(1, ((elapsed - HOLD_TAP_THRESHOLD_MS) % HOLD_TIER_INTERVAL_MS) / HOLD_TIER_INTERVAL_MS);
-    const tierColor = BRICK_COLORS[s.color] || '#fff';
     html += `<div style="position:absolute;left:${ringX}px;top:${ringY}px;width:${ringSize}px;height:${ringSize}px;
-      border:3px solid ${tierColor}aa;border-radius:50%;
-      box-shadow:0 0 16px ${tierColor}88;
-      animation:holdRingPulse .5s infinite alternate;">
-      <div style="position:absolute;top:-22px;left:50%;transform:translateX(-50%);
-        font-family:Cinzel,serif;font-size:14px;color:${tierColor};font-weight:700;
-        text-shadow:0 0 8px ${tierColor}aa;letter-spacing:.1em;">
-        TIER ${s.tier}
-      </div>
-    </div>`;
+      border:2px solid ${tierColor}88;border-radius:50%;
+      box-shadow:0 0 12px ${tierColor}66;pointer-events:none;"></div>`;
   }
 
   // Radial fan of ally icons (white at tier ≥ 2 only, for now)
+  // The arc OUTSIDE the icons is the tier indicator — drawn by _renderAllyRadialFan.
   if (inHoldMode && s.tier >= 2 && HOLD_RADIAL_COLORS.indexOf(s.color) >= 0) {
     html += _renderAllyRadialFan(s);
   }
@@ -1407,8 +1458,10 @@ function _clearHoldOverlay() {
 }
 
 function _renderAllyRadialFan(s) {
-  // Fan ally icons radially around the chip. Allies = same-zone party members
-  // not me. Each icon: 36×36, class color, name initial, HP bar.
+  // Fan ally icons radially around the chip, oriented by fanCenterAngle so
+  // we open into the largest empty viewport quadrant. Power arc drawn at
+  // larger radius OUTSIDE the icons, filling with tier progress — primary
+  // tier indicator (distinct from rumble's vertical overload bar).
   const me = G.players[MY_CLASS];
   if (!me) return '';
   const myZone = (typeof SPACES !== 'undefined' && SPACES[me.space]) ? SPACES[me.space].zone : 0;
@@ -1419,12 +1472,56 @@ function _renderAllyRadialFan(s) {
     return pz === myZone;
   });
   if (allies.length === 0) return '';
+
   const RADIUS = 90;
   const ICON_SIZE = 44;
+  const ARC_RADIUS = RADIUS + 30;     // 30px beyond icon centers
+  const FAN_ARC_RAD = Math.PI * 2 / 3; // 120° total arc
+  const center = s.fanCenterAngle;
+  const tierColor = BRICK_COLORS[s.color] || '#fff';
+  const ceiling = Math.min(HOLD_TIER_MAX, s.maxCharges);
+  const tierPct = ceiling > 0 ? (s.tier / ceiling) : 0;
+
   let html = '';
+
+  // ── POWER ARC ─────────────────────────────────────────────
+  // SVG arc at ARC_RADIUS, spanning FAN_ARC_RAD centered on s.fanCenterAngle.
+  // Fills progressively as tier grows. Distinct from rumble's linear overload
+  // bar — this is a curved "crown of power" wrapping the radial.
+  const svgSize = (ARC_RADIUS + 30) * 2;
+  const svgX = s.chipCx - svgSize / 2;
+  const svgY = s.chipCy - svgSize / 2;
+  // Arc start/end angles
+  const arcStart = center - FAN_ARC_RAD / 2;
+  const arcEnd   = center + FAN_ARC_RAD / 2;
+  // Filled portion (based on tier)
+  const arcFillEnd = arcStart + FAN_ARC_RAD * tierPct;
+  // Convert to SVG coords (SVG y is inverted vs math y; we center at svgSize/2)
+  const cx = svgSize / 2;
+  const cy = svgSize / 2;
+  function polar(r, a) { return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
+  const [bgx1, bgy1] = polar(ARC_RADIUS, arcStart);
+  const [bgx2, bgy2] = polar(ARC_RADIUS, arcEnd);
+  const [fillx1, filly1] = polar(ARC_RADIUS, arcStart);
+  const [fillx2, filly2] = polar(ARC_RADIUS, arcFillEnd);
+  // Large-arc flag: 120° is less than 180°, so always 0
+  const bgArcLargeFlag = 0;
+  const fillArcLargeFlag = (FAN_ARC_RAD * tierPct) > Math.PI ? 1 : 0;
+  const bgPath = `M ${bgx1.toFixed(2)} ${bgy1.toFixed(2)} A ${ARC_RADIUS} ${ARC_RADIUS} 0 ${bgArcLargeFlag} 1 ${bgx2.toFixed(2)} ${bgy2.toFixed(2)}`;
+  const fillPath = `M ${fillx1.toFixed(2)} ${filly1.toFixed(2)} A ${ARC_RADIUS} ${ARC_RADIUS} 0 ${fillArcLargeFlag} 1 ${fillx2.toFixed(2)} ${filly2.toFixed(2)}`;
+  // Halo intensity scales with tier (tier 1 = soft, tier 4 = saturated)
+  const haloIntensity = 4 + 12 * tierPct;
+  html += `<svg style="position:absolute;left:${svgX}px;top:${svgY}px;width:${svgSize}px;height:${svgSize}px;pointer-events:none;overflow:visible;">
+    <path d="${bgPath}" stroke="${tierColor}33" stroke-width="6" fill="none" stroke-linecap="round"/>
+    <path d="${fillPath}" stroke="${tierColor}" stroke-width="6" fill="none" stroke-linecap="round"
+      style="filter:drop-shadow(0 0 ${haloIntensity.toFixed(1)}px ${tierColor});"/>
+  </svg>`;
+
+  // ── ALLY ICONS ────────────────────────────────────────────
   allies.forEach((ally, i) => {
-    // Distribute allies across the upper semicircle (top of chip)
-    const angle = -Math.PI / 2 + (i - (allies.length - 1) / 2) * (Math.PI / Math.max(2, allies.length));
+    // Distribute allies across the 120° arc centered on fanCenterAngle
+    const step = (allies.length > 1) ? FAN_ARC_RAD / (allies.length - 1) : 0;
+    const angle = center - FAN_ARC_RAD / 2 + i * step;
     const ax = s.chipCx + Math.cos(angle) * RADIUS - ICON_SIZE / 2;
     const ay = s.chipCy + Math.sin(angle) * RADIUS - ICON_SIZE / 2;
     const meta = (typeof PLAYER_META !== 'undefined' ? PLAYER_META[ally.cls] : null) || {};
