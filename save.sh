@@ -12,6 +12,18 @@
 
 cd ~/Desktop/BrickQuest
 
+# Refuse to commit if there are no real code changes.
+# Without this, accidental double-runs (e.g., from a mis-paste) produce
+# meaningless version-bump-only commits. We check the working tree for
+# any modified file other than package.json. If everything's already
+# committed (or only package.json drifted), exit cleanly.
+REAL_CHANGES=$(git status --porcelain | grep -v ' package.json$' | grep -v ' package-lock.json$')
+if [ -z "$REAL_CHANGES" ]; then
+  echo "No code changes detected. Nothing to commit."
+  echo "(If you meant to commit a version-only bump, run: git commit --allow-empty -m '...')"
+  exit 0
+fi
+
 BUMP=""
 
 # Parse optional version flag
