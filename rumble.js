@@ -7822,7 +7822,8 @@ function _internalStart(config) {
   //   As players earn bricks via fragments/fusion, inventory grows and so
   //   does available rumble capacity.
   // Sandbox mode: keeps makePlayer's random 1-10 per color.
-  if (cfg.mode === 'spec') {
+  // Waves mode: same treatment as spec — kit is the inventory ceiling.
+  if (cfg.mode === 'spec' || cfg.mode === 'waves') {
     var rates = BRICK_ECONOMY.refreshRates;
     Object.keys(player.bricks).forEach(function(c) {
       var tier = brickTier(cls, c);
