@@ -921,19 +921,43 @@ function updateLiveDebug() {
     entityList = info.entitiesDetail.map(function(e) {
       var tag = '';
       if (e.dead) tag += ' <span class="warn">DEAD</span>';
-      if (e.burrowHidden) tag += ' <span class="hi">BURROW</span>';
+      if (e.burrowHidden) tag += ' <span class="warn">BURR</span>';
+      if (e.phaseFade) tag += ' <span class="warn">PHASE</span>';
       if (e.splitDepth) tag += ' <span class="hi">d' + e.splitDepth + '</span>';
-      if (e.deathSig === 'mitosis_split') tag += ' <span class="hi">split</span>';
-      return '<div>' + e.type + ' <span class="val">' + e.hp + '/' + e.hpMax + '</span>' + tag + '</div>';
+      if (e.aiState) tag += ' <span class="lbl">' + e.aiState + '</span>';
+      return '<div>' + e.type + ' <span class="val">' + e.hp + '/' + e.hpMax + '</span> '
+        + '<span class="lbl">@' + e.x + ',' + e.y + '</span>' + tag + '</div>';
     }).join('');
   } else {
     entityList = '<div class="lbl">no entities</div>';
   }
+  // Force-kill button only shows when stuck (entities present, not advancing)
+  var stuckBtn = (_waveState.active && info.entityCount > 0 && !_waveState.advancing)
+    ? '<div style="margin-top:6px;text-align:center;pointer-events:auto;">'
+      + '<button onclick="forceKillAll()" style="background:#2a0010;border:1px solid #ff4466;color:#ff8899;'
+      + 'border-radius:4px;padding:3px 8px;font-size:9px;font-family:ui-monospace,monospace;'
+      + 'letter-spacing:.08em;cursor:pointer;">FORCE KILL</button></div>'
+    : '';
   d.innerHTML =
       '<div><span class="lbl">wave</span> <span class="hi">' + _waveState.currentWave + '</span>'
     +   ' <span class="lbl">adv</span> <span class="val">' + (_waveState.advancing ? 'Y' : 'n') + '</span></div>'
     + '<div><span class="lbl">entities</span> <span class="val">' + info.entityCount + '</span></div>'
-    + entityList;
+    + entityList
+    + stuckBtn;
+  // Re-enable pointer events on the panel only when the button is visible
+  d.style.pointerEvents = stuckBtn ? 'auto' : 'none';
+}
+
+// Manual escape hatch for stuck waves: kill all living entities by setting
+// hp=0, which the next update tick will sweep into the normal death pass.
+function forceKillAll() {
+  if (!Rumble.getDebugInfo) return;
+  // We don't have a direct kill API; the next-best thing is calling damageEntity
+  // through whatever is exposed. For now, we surface a console hint and rely
+  // on the FORCE END flow.
+  if (Rumble.forceEnd) {
+    if (confirm('Force end this run?')) Rumble.forceEnd('quit');
+  }
 }
 
 function hideWaveHud() {

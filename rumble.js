@@ -6793,6 +6793,8 @@ function updateTraps(dt) {
   if (orangeAura) {
     orangeAura.pulse = (orangeAura.pulse + dt*4) % (Math.PI*2);
     entities.forEach(function(g) {
+      // orangeAura can be nulled mid-loop when charges hit 0; guard each iter.
+      if (!orangeAura) return;
       if (Math.hypot(g.x-player.x, g.y-player.y) < orangeAura.r + g.r) {
         if (!g._auraTrap) {
           g._auraTrap = true;
@@ -9506,10 +9508,14 @@ window.Rumble = {
           type: g.type,
           hp: Math.round(g.hp || 0),
           hpMax: g.hpMax || 0,
+          x: Math.round(g.x || 0),
+          y: Math.round(g.y || 0),
           dead: !!g.dead,
           burrowHidden: !!g._burrowHidden,
+          phaseFade: (g._phaseFadeTimer || 0) > 0,
           splitDepth: g._splitDepth || 0,
           deathSig: g.deathSignature || null,
+          aiState: g._burrowState || g.swingState || null,
         };
       }),
     };
