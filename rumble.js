@@ -8077,6 +8077,11 @@ function triggerVictory() {
       setTimeout(waitLoot, 200);
     };
     setTimeout(waitLoot, 800); // brief delay after FELLED before we start waiting
+  } else if (cfg && cfg.suppressRespawn) {
+    // Waves mode (or any host that wants to manage spawns externally) —
+    // skip auto-respawn. Host polls entity count and spawns next wave
+    // via Rumble.spawnEntity().
+    return;
   } else {
     // Sandbox mode — respawn
     entityRespawnPending = true;
@@ -9433,6 +9438,34 @@ window.Rumble = {
     var g = entities.find(function(x){ return x.hp > 0; });
     if (!g) return;
     g.hp = Math.max(0, Math.min(g.hpMax, n|0));
+  },
+  // Spawn a single entity into an active rumble. Used by waves mode in
+  // rumble_test for staged enemy reveals. Type defaults to cfg.entityType
+  // (which may be 'random'). Re-applies any dialer resistances. Returns
+  // the spawned entity reference, or null if rumble isn't running.
+  spawnEntity: function(type) {
+    if (!_initialized || !player) return null;
+    var bounds = getRumbleBounds();
+    // Spread angle around existing entities so new spawns don't all land
+    // in the same spot. Pseudo-random offset is fine for a dev tool.
+    var angleOffset = (entities.length / Math.max(1, entities.length + 1)) * Math.PI * 2
+                       + Math.random() * 0.5;
+    var ent = makeEntity(bounds, angleOffset, type || (cfg && cfg.entityType));
+    if (cfg && cfg.entityResistances) {
+      ent.resistances = Object.assign(ent.resistances || {}, cfg.entityResistances);
+    }
+    entities.push(ent);
+    return ent;
+  },
+  // Instantly refill all brick charges to their max. Used between waves
+  // (waves mode skips the post-rumble refill loop). No animation; the
+  // brick bar just shows full pips next render.
+  refillBricks: function() {
+    if (!player || !player.bricks || !player.brickMax) return;
+    Object.keys(player.brickMax).forEach(function(c) {
+      player.bricks[c] = player.brickMax[c];
+    });
+    if (typeof renderBrickBar === 'function') renderBrickBar();
   },
 };
 

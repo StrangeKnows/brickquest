@@ -88,6 +88,36 @@
   #readout .off   { color:#ff9944; }
   #readout.hidden { display:none; }
 
+  /* Waves mode: top-center banner showing current wave + theme.
+     Fades in 250ms when wave starts, holds, fades out as enemies engage. */
+  #wave-hud {
+    position:fixed; top:14px; left:50%; transform:translateX(-50%);
+    z-index:200; pointer-events:none;
+    background:rgba(8,8,12,0.85);
+    border:1px solid #F5D00044;
+    border-radius:6px;
+    padding:8px 16px;
+    font-family:'Cinzel',serif; letter-spacing:.08em;
+    color:#eee; text-align:center;
+    opacity:0;
+    transition:opacity 280ms ease-out;
+  }
+  #wave-hud.visible { opacity:1; }
+  #wave-hud .wave-num { font-size:18px; color:#F5D000; font-weight:700; }
+  #wave-hud .wave-theme { font-size:10px; color:#888; margin-top:2px; }
+
+  /* Tiny persistent badge in top-left while waves run — current wave number. */
+  #wave-badge {
+    position:fixed; top:8px; left:8px; z-index:199;
+    background:#0a0a0a; border:1px solid #444;
+    padding:4px 8px; border-radius:5px;
+    font-family:ui-monospace,monospace; font-size:11px;
+    color:#F5D000;
+    pointer-events:none;
+    opacity:0; transition:opacity 200ms;
+  }
+  #wave-badge.visible { opacity:1; }
+
   /* Resistance dialer — compact 3x3 grid of color rows under ENTITIES.
      Each row: tiny color swatch + 3-letter abbrev + numeric input.
      All values are floats (e.g. 0, 0.5, 1, 1.5, 2) representing resist mult. */
@@ -168,6 +198,7 @@
       <div class="mode-toggle">
         <button class="mode-btn active" id="mode-sandbox" onclick="setMode('sandbox')">SANDBOX</button>
         <button class="mode-btn"        id="mode-spec"    onclick="setMode('spec')">SPEC</button>
+        <button class="mode-btn"        id="mode-waves"   onclick="setMode('waves')">WAVES</button>
       </div>
 
       <h2>ENTITIES</h2>
@@ -289,6 +320,7 @@ function setMode(m) {
   currentMode = m;
   document.getElementById('mode-sandbox').classList.toggle('active', m === 'sandbox');
   document.getElementById('mode-spec').classList.toggle('active', m === 'spec');
+  document.getElementById('mode-waves').classList.toggle('active', m === 'waves');
   renderClassGrid();
 }
 
@@ -329,13 +361,164 @@ function tryFullscreen() {
   else if (el.msRequestFullscreen)   el.msRequestFullscreen();
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// WAVES MODE — staged enemy reveals for AI / pairing / balance testing.
+// ═══════════════════════════════════════════════════════════════════════
+// Each wave def: { count, types, theme }
+//   count: number of entities to spawn this wave
+//   types: array of entity type strings, OR 'random' string (rolls per spawn)
+//          If types.length < count, repeat-cycle through types.
+//   theme: short label shown in the wave banner — describes the design intent.
+//
+// First 10 waves are hand-tuned to expose specific AI/pairing behaviors:
+// solo baseline → paired grunts → ranged+melee → fast pressure → tank+ranged →
+// physical+zone → ethereal mix → boss-light+adds → splitter solo → boss+adds.
+// After wave 10, generate random scaling waves: count grows, type pool widens.
+var WAVE_DEFS = [
+  { count: 1, types: ['goblin'],                                theme: 'BASELINE' },
+  { count: 2, types: ['goblin', 'skeleton'],                    theme: 'PAIRED GRUNTS' },
+  { count: 2, types: ['slinger', 'goblin'],                     theme: 'RANGED + MELEE' },
+  { count: 2, types: ['shadow_wolf'],                           theme: 'FAST PRESSURE' },
+  { count: 2, types: ['stone_troll', 'slinger'],                theme: 'TANK + RANGED' },
+  { count: 2, types: ['cursed_knight', 'creeping_vines'],       theme: 'PHYSICAL + ZONE' },
+  { count: 2, types: ['void_wraith', 'cursed_knight'],          theme: 'ETHEREAL MIX' },
+  { count: 3, types: ['stone_troll', 'goblin', 'goblin'],       theme: 'TANK + ADDS' },
+  { count: 1, types: ['blight_worm'],                           theme: 'SPLITTER' },
+  { count: 3, types: ['stone_colossus', 'goblin', 'goblin'],    theme: 'BOSS + ADDS' },
+];
+
+// Entity pool for random waves past wave 10.
+var WAVE_POOL_NORMAL = ['goblin','skeleton','slinger','shadow_wolf','rot_grub','creeping_vines'];
+var WAVE_POOL_HEAVY  = ['stone_troll','cursed_knight','void_wraith'];
+var WAVE_POOL_BOSS   = ['stone_colossus','blight_worm'];
+
+// Generate a random wave definition for wave number n (1-indexed).
+function generateRandomWave(n) {
+  // Past wave 10: scale count gently, mix in heavies, occasional boss.
+  // n=11 → 3 normals; n=15 → 4 with a heavy; n=20+ → 5+ with boss roll
+  var count = 3 + Math.floor((n - 10) / 4);
+  count = Math.min(count, 6);  // hard cap so it doesn't get silly
+  var types = [];
+  // 20% boss roll past wave 12, 40% past wave 18
+  var bossChance = n >= 18 ? 0.4 : (n >= 12 ? 0.2 : 0);
+  if (Math.random() < bossChance) {
+    types.push(WAVE_POOL_BOSS[Math.floor(Math.random() * WAVE_POOL_BOSS.length)]);
+  }
+  // 50% chance of including a heavy
+  if (Math.random() < 0.5) {
+    types.push(WAVE_POOL_HEAVY[Math.floor(Math.random() * WAVE_POOL_HEAVY.length)]);
+  }
+  // Fill rest with normals
+  while (types.length < count) {
+    types.push(WAVE_POOL_NORMAL[Math.floor(Math.random() * WAVE_POOL_NORMAL.length)]);
+  }
+  return { count: count, types: types, theme: 'WAVE ' + n };
+}
+
+var _waveState = {
+  active: false,
+  currentWave: 0,
+  highestReached: 0,
+  advancing: false,
+};
+
+// Spawn the entities for wave n (1-indexed). Shows the banner + badge.
+function spawnWave(n) {
+  var def = (n <= WAVE_DEFS.length) ? WAVE_DEFS[n - 1] : generateRandomWave(n);
+  // Cycle through type list to fill count
+  for (var i = 0; i < def.count; i++) {
+    var t = def.types[i % def.types.length];
+    Rumble.spawnEntity(t);
+  }
+  showWaveBanner(n, def.theme);
+  updateWaveBadge(n);
+}
+
+// Show the WAVE N · THEME banner briefly. Fades in fast, holds, fades out.
+function showWaveBanner(n, theme) {
+  var hud = document.getElementById('wave-hud');
+  if (!hud) {
+    hud = document.createElement('div');
+    hud.id = 'wave-hud';
+    document.body.appendChild(hud);
+  }
+  hud.innerHTML = '<div class="wave-num">WAVE ' + n + '</div>'
+    + '<div class="wave-theme">' + (theme || '') + '</div>';
+  hud.classList.add('visible');
+  // Fade out after 2.2s — leaves badge as the persistent reference
+  clearTimeout(hud._fadeTimer);
+  hud._fadeTimer = setTimeout(function() {
+    hud.classList.remove('visible');
+  }, 2200);
+}
+
+function updateWaveBadge(n) {
+  var b = document.getElementById('wave-badge');
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'wave-badge';
+    document.body.appendChild(b);
+  }
+  b.textContent = 'WAVE ' + n;
+  b.classList.add('visible');
+}
+
+function hideWaveHud() {
+  var b = document.getElementById('wave-badge');
+  if (b) b.classList.remove('visible');
+  var h = document.getElementById('wave-hud');
+  if (h) h.classList.remove('visible');
+}
+
+// Called when the last entity in the active wave dies. Refills bricks
+// instantly, delays briefly for the player to breathe, then spawns next.
+function onWaveCleared() {
+  if (!_waveState.active || _waveState.advancing) return;
+  _waveState.advancing = true;
+  _waveState.highestReached = Math.max(_waveState.highestReached, _waveState.currentWave);
+  // Instant brick refill — no shimmer, just full pips for the next wave
+  if (Rumble.refillBricks) Rumble.refillBricks();
+  setTimeout(function() {
+    if (!_waveState.active) return;  // player might have died during the gap
+    _waveState.currentWave += 1;
+    _waveState.advancing = false;
+    spawnWave(_waveState.currentWave);
+  }, 1500);
+}
+
+// Hook called from Rumble's onEvent — checks if a kill was the last in the wave.
+function _onEnemyKilled() {
+  if (!_waveState.active) return;
+  // Check entity count via debug info. enemyKilled fires AFTER death so the
+  // entity should already be removed; but we also need to wait for any
+  // pack_flank twin or splitter spawn to NOT be present.
+  setTimeout(function() {
+    if (!_waveState.active) return;
+    var info = Rumble.getDebugInfo();
+    if (info && info.entityCount === 0) {
+      onWaveCleared();
+    }
+  }, 100);  // tiny delay to let any post-death spawns (rot_grub split) settle
+}
+
 // Initialize the Rumble module ONCE on page load.
 Rumble.init({
   onEvent: function(type, data) {
     // Suppress tick spam; log the rest.
     if (type !== 'tick') console.log('[Rumble]', type, data || '');
     if (type === 'tick') updateReadout(data);
-    if (type === 'end')  showEndOverlay(data && data.reason);
+    if (type === 'enemyKilled') _onEnemyKilled();
+    if (type === 'end')  {
+      // Record current wave as highest reached if player was IN a wave
+      // when defeated. "Reached wave 5" reads as "got to wave 5" — being
+      // in it counts even if you didn't clear it.
+      if (_waveState.active) {
+        _waveState.highestReached = Math.max(_waveState.highestReached, _waveState.currentWave);
+      }
+      _waveState.active = false;
+      hideWaveHud();
+      showEndOverlay(data && data.reason);
+    }
   }
 });
 
@@ -344,14 +527,19 @@ function startTestRumble(cls) {
   tryFullscreen();
 
   var m = SPEC_CLASSES[cls];
+  var isWaves = currentMode === 'waves';
   var startConfig = {
     cls: cls,
     hp: m.hp,
     hpMax: m.hp,
     armor: 0,
     mode: currentMode,
+    // Waves mode uses a random sandbox kit (full color pool — waves are
+    // varied, you'll want all colors available).
     bricks: currentMode === 'spec' ? Object.assign({}, m.kit) : randomSandboxBricks(),
-    entityCount: currentEntityCount,
+    // In waves mode, start with 0 entities — wave 1 spawns immediately
+    // after Rumble.start via spawnWave(1).
+    entityCount: isWaves ? 0 : currentEntityCount,
     // Entity type — either a specific type name from ENTITY_REGISTRY or
     // the literal string 'random' which tells rumble.js to roll a fresh
     // type per spawn (initial + respawns). See _resolveEntityType in
@@ -360,12 +548,26 @@ function startTestRumble(cls) {
     // Per-color resistance overrides from the dialer UI. Applied to every
     // spawned entity. See rumble.js startup code.
     entityResistances: Object.assign({}, currentResistances),
+    // Waves mode bypasses the sandbox auto-respawn — the test page manages
+    // wave-to-wave spawns externally via Rumble.spawnEntity.
+    suppressRespawn: isWaves,
   };
   Rumble.start(startConfig);
 
   // Show live readout in spec mode (refresh rates visible here)
   var readout = document.getElementById('readout');
   readout.classList.toggle('hidden', currentMode !== 'spec');
+
+  // Initialize waves mode if selected
+  if (isWaves) {
+    _waveState.active = true;
+    _waveState.currentWave = 1;
+    _waveState.advancing = false;
+    spawnWave(1);
+  } else {
+    _waveState.active = false;
+    hideWaveHud();
+  }
 }
 
 function updateReadout(state) {
@@ -392,8 +594,13 @@ function showEndOverlay(reason) {
             : reason === 'defeat'  ? 'DEFEATED'
             : 'RUMBLE ENDED';
   var color = reason === 'victory' ? '#F5D000' : '#888';
+  // Surface highest wave reached if this was a waves run
+  var waveLine = _waveState.highestReached > 0
+    ? '<p style="color:#F5D000;font-size:18px;letter-spacing:.1em;margin:8px 0;">REACHED WAVE ' + _waveState.highestReached + '</p>'
+    : '';
   overlay.innerHTML =
     '<h1 style="color:' + color + ';">' + title + '</h1>'
+    + waveLine
     + '<p>' + (reason || 'ended') + '</p>'
     + '<div class="class-grid" style="width:180px;grid-template-columns:1fr;">'
     +   '<div class="class-pick" onclick="location.reload()">Play Again</div>'
