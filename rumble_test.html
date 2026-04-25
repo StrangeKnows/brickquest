@@ -1363,28 +1363,37 @@ function buildOverloadAuditMarkup(info) {
 function updateLiveDebug() {
   var d = document.getElementById('waves-live-debug');
   if (!d) return;
-  // ── Anchor icon + panel to the rumble canvas rect ──
-  // Re-measure each tick so the panel tracks resize/orientation changes.
-  // The icon sits inside the bottom-left of the arena; the expanded panel
-  // pins to the same arena rect so it never spills over the brick bars
-  // or button gutters. Falls back to viewport bottom-left if the canvas
-  // hasn't mounted yet.
+  // ── Anchor icon + panel to the playable arena (NOT the full canvas) ──
+  // The canvas spans the entire viewport; the brick bars and HUD overlay
+  // it at z-index, so canvas.getBoundingClientRect() includes the gutters
+  // we want to avoid. The actual arena rect is getRumbleBounds() — given
+  // in canvas-internal pixels — which we map into viewport pixels via the
+  // canvas rect and its width/height ratio. Re-measured each tick so the
+  // panel tracks resize/orientation/scale changes.
   var canvas = document.getElementById('rumble-canvas');
   var icon = document.getElementById('waves-debug-icon');
-  if (canvas) {
-    var r = canvas.getBoundingClientRect();
+  var arena = (Rumble.getArenaInfo && Rumble.getArenaInfo()) || null;
+  if (canvas && arena) {
+    var crect = canvas.getBoundingClientRect();
+    // Scale factors: canvas-internal px → viewport px.
+    var sx = crect.width / (canvas.width || 1);
+    var sy = crect.height / (canvas.height || 1);
+    // Arena rect in canvas-internal coords comes straight from
+    // getArenaInfo (x,y,w,h). No constant-duplication in this file.
+    var vLeft   = crect.left + arena.x * sx;
+    var vTop    = crect.top  + arena.y * sy;
+    var vWidth  = arena.w * sx;
+    var vHeight = arena.h * sy;
+    var vBottom = vTop + vHeight;
     if (icon) {
-      icon.style.left = Math.round(r.left + 6) + 'px';
-      icon.style.top  = Math.round(r.bottom - 50) + 'px'; // 44 + 6 gutter
+      icon.style.left = Math.round(vLeft + 6) + 'px';
+      icon.style.top  = Math.round(vBottom - 50) + 'px';
     }
-    d.style.left   = Math.round(r.left) + 'px';
-    d.style.width  = Math.round(r.width) + 'px';
-    // Bottom of panel sits just above the icon. Top is computed from
-    // an ideal max-height of 60% of arena height, capped to fit above
-    // the icon row.
-    var maxH = Math.max(120, Math.min(Math.round(r.height * 0.6), Math.round(r.height) - 60));
+    d.style.left  = Math.round(vLeft) + 'px';
+    d.style.width = Math.round(vWidth) + 'px';
+    var maxH = Math.max(120, Math.min(Math.round(vHeight * 0.6), Math.round(vHeight) - 60));
     d.style.maxHeight = maxH + 'px';
-    d.style.top    = Math.round(r.bottom - 56 - maxH) + 'px';
+    d.style.top = Math.round(vBottom - 56 - maxH) + 'px';
   }
 
   var info = Rumble.getDebugInfo && Rumble.getDebugInfo();

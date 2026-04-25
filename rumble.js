@@ -9790,12 +9790,16 @@ window.Rumble = {
   },
 
   // Arena geometry, exposed for the rumble_test overload-audit panel
-  // so it can show the arena clamp size in the radius table.
+  // so it can show the arena clamp size in the radius table — and so
+  // the panel anchor can map arena-internal pixel coords to viewport
+  // coords without duplicating the gutter/HUD constants.
   getArenaInfo: function() {
     if (typeof getRumbleBounds !== 'function') return null;
     var b = getRumbleBounds();
     if (!b) return null;
     return {
+      x: b.x,
+      y: b.y,
       w: b.w,
       h: b.h,
       halfMin: Math.min(b.w, b.h) / 2,
