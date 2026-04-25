@@ -906,6 +906,9 @@ function render() {
   if (!G || !MY_CLASS) return;
   const me = G.players[MY_CLASS];
   if (!me) return;
+  // Detect HP increases on any player and fire heal feedback visuals for MY_CLASS.
+  // (Ally heals show on their own screen when their state propagates.)
+  try { _detectHealsAndFire(); } catch (e) {}
   // v4: Auto-collapse header during active unresolved event on my turn — maximizes
   // action-pane space for minigames. Restored when event resolved or not mine.
   try {
@@ -1111,7 +1114,7 @@ function _dashHeader(me) {
       <span class="hp-big" style="color:${hc};">${me.hp}</span>
       <span class="hp-max">/ ${me.hpMax} HP</span>
     </div>
-    <div class="hpbar-outer">
+    <div class="hpbar-outer" id="my-hp-bar">
       <div class="hpbar-inner" style="width:${pct}%;background:${hpBg};${hpShadow}"></div>
     </div>
     <div style="margin-top:10px;">
@@ -1253,6 +1256,7 @@ function _holdUpdateTier() {
   // overloading" signal even before the arc starts climbing.
   if (!s.holdMode) {
     s.lastTierUpTime = performance.now();
+    s.lastTierUpValue = 1;
   }
   s.holdMode = true;
   const overloadSteps = Math.max(0, Math.min(HOLD_TIER_MAX, s.maxCharges) - 1);
@@ -1271,6 +1275,7 @@ function _holdUpdateTier() {
   // Detect tier-up boundary: integer tier increased since last frame
   if (s.tier > (s.lastTier || 1)) {
     s.lastTierUpTime = performance.now();
+    s.lastTierUpValue = s.tier;  // which tier we just celebrated (for pulse scaling)
   }
   s.lastTier = s.tier;
 }
@@ -1304,6 +1309,13 @@ function _holdUp(e) {
   const onAlly = releaseEl ? releaseEl.closest('[data-ally-target]') : null;
   const releasedOnOwnChip = onChip && onChip.getAttribute('data-brick-chip') === s.color;
 
+  // Capture ally icon location BEFORE _holdEnd destroys the overlay.
+  // Used to fire a caster-acknowledgment flash at the spot the ally was released.
+  let allyIconRect = null;
+  if (onAlly) {
+    allyIconRect = onAlly.getBoundingClientRect();
+  }
+
   _holdEnd(false);
 
   if (isTap) {
@@ -1316,10 +1328,38 @@ function _holdUp(e) {
   if (onAlly) {
     const targetCls = onAlly.getAttribute('data-ally-target');
     _fireTierAction(s.color, s.tier, targetCls);
+    // Caster acknowledgment — brief white flash at the ally icon's last position.
+    // Confirms gesture succeeded; actual heal visual fires on target's own dashboard.
+    if (allyIconRect) _fireCasterAck(allyIconRect);
   } else if (releasedOnOwnChip) {
     _fireTierAction(s.color, s.tier, null);
   }
   // Released off-target → silent cancel (no charges spent, no toast noise)
+}
+
+// Caster acknowledgment flash — brief white ring that pops at the position an
+// ally icon was when drag-released. Lives ~400ms then fades.
+function _fireCasterAck(rect) {
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  let layer = document.getElementById('heal-feedback-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.id = 'heal-feedback-layer';
+    layer.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;'
+      + 'pointer-events:none;z-index:1001;';
+    document.body.appendChild(layer);
+  }
+  const flash = document.createElement('div');
+  flash.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;
+    transform:translate(-50%, -50%);
+    width:50px;height:50px;border-radius:50%;
+    border:3px solid #ffeeee;
+    box-shadow:0 0 20px #ffffff, inset 0 0 12px #ffddff88;
+    pointer-events:none;
+    animation:casterAck 500ms ease-out forwards;`;
+  layer.appendChild(flash);
+  setTimeout(() => flash.remove(), 550);
 }
 
 function _holdEnd(cancelled) {
@@ -1460,23 +1500,28 @@ function _renderHoldOverlay() {
   }
 
   // Tier-up pulse — rendered LAST so it draws on top of the radial fan and
-  // ally icons. Fires on every tier boundary crossing, including the first
-  // entry into hold mode (tier 1 confirm). Lives ~600ms then fades. Sized
-  // to clearly radiate past the 90px ally icon ring.
+  // ally icons. Fires on every tier boundary crossing. Size + duration scale
+  // with the tier being celebrated (capped at tier 7 — higher tiers use t7
+  // values). Higher tier = bigger, longer-lasting pulse.
   if (inHoldMode) {
+    const celebratedTier = Math.min(7, s.lastTierUpValue || 1);
+    const PULSE_DURATION = 350 + 150 * celebratedTier;     // 500ms @ t1, 1400ms @ t7
     const pulseAge = performance.now() - (s.lastTierUpTime || 0);
-    const PULSE_DURATION = 600;
     if (s.lastTierUpTime && pulseAge < PULSE_DURATION) {
       const tierColor = BRICK_COLORS[s.color] || '#fff';
       const progress = pulseAge / PULSE_DURATION;          // 0..1
-      const pulseSize = 50 + 130 * progress;               // 50 → 180px
+      const startSize = 40 + 10 * celebratedTier;          // 50 @ t1, 110 @ t7
+      const endSize   = 80 + 40 * celebratedTier;          // 120 @ t1, 360 @ t7
+      const pulseSize = startSize + (endSize - startSize) * progress;
       const pulseAlpha = 1 - progress;                     // 1 → 0
+      const borderWidth = Math.max(2, Math.round(2 + celebratedTier * 0.4));  // thicker at high tier
+      const glowRadius = 18 + celebratedTier * 4;           // stronger glow at high tier
       const px = s.chipCx - pulseSize / 2;
       const py = s.chipCy - pulseSize / 2;
       html += `<div style="position:absolute;left:${px}px;top:${py}px;
         width:${pulseSize}px;height:${pulseSize}px;border-radius:50%;
-        border:3px solid ${tierColor};opacity:${pulseAlpha.toFixed(2)};
-        box-shadow:0 0 24px ${tierColor}, inset 0 0 12px ${tierColor}66;
+        border:${borderWidth}px solid ${tierColor};opacity:${pulseAlpha.toFixed(2)};
+        box-shadow:0 0 ${glowRadius}px ${tierColor}, inset 0 0 ${Math.round(glowRadius/2)}px ${tierColor}66;
         pointer-events:none;"></div>`;
     }
   }
@@ -1594,6 +1639,133 @@ function _renderAllyRadialFan(s) {
   const s = document.createElement('style');
   s.id = 'hold-css';
   s.textContent = '@keyframes holdRingPulse { from { box-shadow: 0 0 12px currentColor; } to { box-shadow: 0 0 24px currentColor, 0 0 36px currentColor; } }';
+  document.head.appendChild(s);
+})();
+
+// ═══════════════════════════════════════════════════════════════════════
+// HEAL FEEDBACK — visual reward when the dashboard player's HP increases.
+// ═══════════════════════════════════════════════════════════════════════
+// Detects HP increases on any player during render() and fires feedback for
+// MY_CLASS specifically (I only see my own dashboard — ally heals show on
+// their own screen when their state propagates).
+//
+// Palette mirrors rumble's heal visuals: white + pink (#ffffff, #ffeeee,
+// #ffe0f0, #ffddff). Symbols ✧ / ✦ for sparkle particles.
+
+let _prevHpByCls = {};
+
+function _detectHealsAndFire() {
+  if (!G || !G.players) return;
+  Object.values(G.players).forEach(p => {
+    const prev = _prevHpByCls[p.cls];
+    if (prev !== undefined && p.hp > prev) {
+      const delta = p.hp - prev;
+      if (p.cls === MY_CLASS) _fireHealFeedback(delta);
+    }
+    _prevHpByCls[p.cls] = p.hp;
+  });
+}
+
+function _fireHealFeedback(delta) {
+  const hpBar = document.getElementById('my-hp-bar');
+  if (!hpBar) return;
+  const rect = hpBar.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+
+  // Overlay layer (reuse the hold-overlay pattern — fixed-position, non-interactive)
+  let layer = document.getElementById('heal-feedback-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.id = 'heal-feedback-layer';
+    layer.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;'
+      + 'pointer-events:none;z-index:1001;';
+    document.body.appendChild(layer);
+  }
+
+  const HEAL_COLORS = ['#ffffff', '#ffeeee', '#ffe0f0', '#ffddff'];
+  const pickColor = () => HEAL_COLORS[Math.floor(Math.random() * HEAL_COLORS.length)];
+
+  // 1. FLOATER — "+N HP" text drifts upward from HP bar, fades
+  const floater = document.createElement('div');
+  floater.textContent = '+' + delta + ' HP';
+  floater.style.cssText = `position:absolute;left:${cx}px;top:${cy - 12}px;
+    transform:translate(-50%, 0);
+    font-family:Cinzel,serif;font-size:28px;font-weight:700;
+    color:#ffeeee;text-shadow:0 0 12px #ffe0f0, 0 0 20px #ffddff, 0 2px 4px rgba(0,0,0,.8);
+    pointer-events:none;letter-spacing:.04em;
+    animation:healFloater 1200ms ease-out forwards;`;
+  layer.appendChild(floater);
+
+  // 2. RING PULSE — expanding circle over the HP bar, fades
+  const ring = document.createElement('div');
+  ring.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;
+    transform:translate(-50%, -50%);
+    width:40px;height:40px;border-radius:50%;
+    border:3px solid #ffeeee;
+    box-shadow:0 0 20px #ffe0f0, inset 0 0 10px #ffddff66;
+    pointer-events:none;
+    animation:healRing 900ms ease-out forwards;`;
+  layer.appendChild(ring);
+
+  // 3. PARTICLES — sparkles radiate outward, count scales with delta (capped)
+  const particleCount = Math.min(20, 3 + delta);
+  const symbol = delta >= 10 ? '✦' : '✧';
+  for (let i = 0; i < particleCount; i++) {
+    const angle = (Math.PI * 2 * i) / particleCount + (Math.random() - 0.5) * 0.4;
+    const distance = 40 + Math.random() * 40;
+    const dx = Math.cos(angle) * distance;
+    const dy = Math.sin(angle) * distance - 20; // slight upward bias
+    const sparkle = document.createElement('div');
+    sparkle.textContent = symbol;
+    sparkle.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;
+      transform:translate(-50%, -50%);
+      font-size:${14 + Math.random() * 8}px;
+      color:${pickColor()};
+      text-shadow:0 0 8px currentColor;
+      pointer-events:none;
+      --dx:${dx}px;--dy:${dy}px;
+      animation:healSparkle ${800 + Math.random() * 400}ms ease-out forwards;`;
+    layer.appendChild(sparkle);
+  }
+
+  // Cleanup after max animation duration
+  setTimeout(() => {
+    floater.remove();
+    ring.remove();
+    layer.querySelectorAll('div').forEach(el => {
+      if (el !== floater && el !== ring) el.remove();
+    });
+  }, 1250);
+}
+
+// CSS for heal feedback animations — injected once
+(function injectHealCss() {
+  if (document.getElementById('heal-css')) return;
+  const s = document.createElement('style');
+  s.id = 'heal-css';
+  s.textContent = `
+    @keyframes healFloater {
+      0%   { transform:translate(-50%, 0) scale(0.8); opacity:0; }
+      15%  { transform:translate(-50%, -8px) scale(1.1); opacity:1; }
+      100% { transform:translate(-50%, -60px) scale(1); opacity:0; }
+    }
+    @keyframes healRing {
+      0%   { width:40px; height:40px; opacity:0; border-width:4px; }
+      20%  { opacity:1; }
+      100% { width:180px; height:180px; opacity:0; border-width:1px; }
+    }
+    @keyframes healSparkle {
+      0%   { transform:translate(-50%, -50%); opacity:0; }
+      15%  { opacity:1; }
+      100% { transform:translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))); opacity:0; }
+    }
+    @keyframes casterAck {
+      0%   { width:30px; height:30px; opacity:0; }
+      30%  { width:60px; height:60px; opacity:1; }
+      100% { width:100px; height:100px; opacity:0; }
+    }
+  `;
   document.head.appendChild(s);
 })();
 
