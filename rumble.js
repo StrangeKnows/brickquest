@@ -153,6 +153,9 @@ var _battleStats = {
   // Damage source/target attribution for run-summary tuning analysis
   damageByColor: {},    // { red: 247, purple: 102, ... }
   damageByTarget: {},   // { goblin: 96, stone_troll: 240, ... }
+  // Heal source attribution. Mirrors damageByColor — used by audit panel
+  // to compute expected-vs-actual ratios for healing colors (white).
+  healedByColor: {},    // { white: 28, ... }
 };
 
 function _addBrickStat(bucket, color, amount) {
@@ -912,6 +915,7 @@ function update(dt) {
 
   // Blue bolts, traps, armor
   updateBlueBolts(dt, bounds);
+  updateBlueFieldFlashes(dt);
   updateWitherbolts(dt);
   updateTraps(dt);
   updateGrayWalls(dt);
@@ -1045,6 +1049,7 @@ function draw() {
   drawCastIndicator('black',  '#888888', (typeof blackDragPos  !== 'undefined') ? blackDragPos  : null);
   drawCastIndicator('gray',   '#AAAAAA', (typeof grayDragPos   !== 'undefined') ? grayDragPos   : null);
   // ── Blue bolts ──
+  drawBlueFieldFlashes();
   drawBlueBolts();
   drawWitherbolts();
 
@@ -1524,21 +1529,70 @@ function fireOverload(dragX, dragY, bricksUsed) {
     triggerCritSignature(color, player.x, player.y - 80);
   }
 
-  // Audit diagnostic snapshot. Captures expected-vs-actual damage data
-  // for the rumble_test overload-audit panel. expected* uses the unified
-  // pipeline directly — same call the fire function will make. Persistent
-  // effects flag warns the audit that DoT contamination may inflate the
-  // actualDamage delta in the comparison window. No gameplay effect.
+  // Audit diagnostic snapshot. Captures expected-vs-actual data for the
+  // rumble_test overload-audit panel. expected* uses the unified pipeline
+  // directly — same call the fire function will make. Persistent effects
+  // flag warns the audit that DoT contamination may inflate the actual
+  // delta in the comparison window. No gameplay effect.
+  //
+  // expectedDmg sums ALL damage paths so ratios are honest:
+  //   primary (.dmg) + burst (.burstDmg, applied to each non-primary in radius)
+  //   + wither (.witherDmg, applied per stack to all in radius)
+  // For colors with no damage (white, gray, yellow), expectedDmg is 0.
+  //
+  // expectedHeal mirrors the same shape for healing colors:
+  //   burst (.burst) + total field pool (.totalHeal)
+  // For white: target gets burst + ticks up to totalHeal.
   if (_battleStats && window.effectiveAt) {
     var _aOwned = (player.brickMax && player.brickMax[color]) || 0;
     var _aFx = window.effectiveAt(color, count, player.cls, _aOwned);
     var _persistentActive = !!(blackEffect || (whiteFields && whiteFields.length > 0) || (orangeAura && orangeAura.charges > 0)
       || (greenBurst && !greenBurst.done) || (yellowAura && yellowAura.timer > 0));
+    // Estimate "entities likely in radius" — used to scale burst dmg.
+    // For honest expected-vs-actual we'd need to know exactly which
+    // entities are inside, but this is a snapshot at fire time, before
+    // travel/impact. Conservative estimate: count entities currently
+    // within the AoE of the cast origin (player position).
+    var _aoeR = _aFx.radiusPx || 0;
+    var _aEntsInRadius = 0;
+    if (_aoeR > 0 && entities && entities.length) {
+      for (var _ai = 0; _ai < entities.length; _ai++) {
+        var _ag = entities[_ai];
+        if (_ag.hp <= 0) continue;
+        if (Math.hypot(_ag.x - player.x, _ag.y - player.y) <= _aoeR + (_ag.r || 0)) {
+          _aEntsInRadius++;
+        }
+      }
+    }
+    // Sum damage paths
+    var _expDmg = 0;
+    if (_aFx.dmg) _expDmg += _aFx.dmg;
+    // Burst applies to non-primary entities (estimate: total in radius minus 1)
+    if (_aFx.burstDmg && _aEntsInRadius > 1) {
+      _expDmg += _aFx.burstDmg * (_aEntsInRadius - 1);
+    }
+    // Wither: per stack to each entity in radius (initial application)
+    if (_aFx.witherDmg) _expDmg += _aFx.witherDmg * Math.max(1, _aEntsInRadius);
+    // Stack damage (green): per slow tick — show as one-tick value
+    if (_aFx.stackDmg && !_aFx.dmg) _expDmg = _aFx.stackDmg;
+    // Healing path
+    var _expHeal = 0;
+    if (_aFx.totalHeal) _expHeal = _aFx.totalHeal;
+    else if (_aFx.heal) _expHeal = _aFx.heal;
+    if (_aFx.burst && _expHeal === 0) _expHeal = _aFx.burst;
     _battleStats.lastOverload = {
       color: color,
       tier: count,
-      expectedDmg: _aFx.dmg || _aFx.heal || _aFx.stackDmg || 0,
+      expectedDmg: _expDmg,
+      expectedHeal: _expHeal,
       expectedRadius: _aFx.radiusPx,
+      // Components for transparency in the panel
+      expDmgPrimary: _aFx.dmg || 0,
+      expDmgBurst: _aFx.burstDmg || 0,
+      expDmgWither: _aFx.witherDmg || 0,
+      expHealBurst: _aFx.burst || 0,
+      expHealTotal: _aFx.totalHeal || 0,
+      entsInRadius: _aEntsInRadius,
       mult: _aFx.mult,
       tapMult: _aFx.tap,
       affMult: _aFx.aff,
@@ -1546,7 +1600,9 @@ function fireOverload(dragX, dragY, bricksUsed) {
       isCrit: !!_currentCrit,
       ts: performance.now(),
       dmgSnapshot: (_battleStats.damageByColor && _battleStats.damageByColor[color]) || 0,
+      healSnapshot: (_battleStats.healedByColor && _battleStats.healedByColor[color]) || 0,
       actualDamage: 0,
+      actualHeal: 0,
       frozen: false,
       persistentFx: _persistentActive,
     };
@@ -1606,6 +1662,8 @@ function fireOverloadWhite(count, ox, oy) {
         if (_battleStats) {
           _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actualBurst;
           if (actualBurst > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actualBurst;
+          if (!_battleStats.healedByColor) _battleStats.healedByColor = {};
+          _battleStats.healedByColor.white = (_battleStats.healedByColor.white || 0) + actualBurst;
         }
         showFloatingText(player.x, player.y - 50, actualBurst + ' ✚', '#EFEFEF', player);
       }
@@ -1802,6 +1860,8 @@ function updateWhiteField(dt) {
           if (_battleStats) {
             _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actual;
             if (actual > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actual;
+            if (!_battleStats.healedByColor) _battleStats.healedByColor = {};
+            _battleStats.healedByColor.white = (_battleStats.healedByColor.white || 0) + actual;
           }
           showFloatingText(player.x, player.y - 40, actual + ' ✚', '#EFEFEF', player);
         }
@@ -6297,6 +6357,8 @@ function doWhiteHeal(targetX, targetY) {
         if (_battleStats) {
           _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actualBurst;
           if (actualBurst > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actualBurst;
+          if (!_battleStats.healedByColor) _battleStats.healedByColor = {};
+          _battleStats.healedByColor.white = (_battleStats.healedByColor.white || 0) + actualBurst;
         }
         showFloatingText(player.x, player.y - 50, actualBurst + ' ✚', '#EFEFEF', player);
       }
@@ -6656,6 +6718,39 @@ function updateEntityConfusion(g, dt) {
 // ═══════════════════════════════════════════════════
 var blueBolts = [];
 
+// Lingering glow rings at blue impact sites. Each entry fades from full
+// alpha to 0 over `duration` seconds, then is removed. Drawn behind bolts
+// for layering. Filled by impact handler in updateBlueBolts.
+var blueFieldFlashes = [];
+
+function updateBlueFieldFlashes(dt) {
+  for (var i = blueFieldFlashes.length - 1; i >= 0; i--) {
+    blueFieldFlashes[i].timer -= dt;
+    if (blueFieldFlashes[i].timer <= 0) blueFieldFlashes.splice(i, 1);
+  }
+}
+
+function drawBlueFieldFlashes() {
+  if (!blueFieldFlashes.length || !ctx) return;
+  blueFieldFlashes.forEach(function(f) {
+    var pct = Math.max(0, f.timer / f.duration);
+    ctx.save();
+    // Soft fading radial glow
+    var grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.radius);
+    grad.addColorStop(0,    'rgba(110, 184, 255, ' + (pct * 0.45) + ')');
+    grad.addColorStop(0.55, 'rgba(77, 184, 255, '  + (pct * 0.25) + ')');
+    grad.addColorStop(1.0,  'rgba(77, 184, 255, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.radius, 0, Math.PI * 2); ctx.fill();
+    // Subtle edge ring
+    ctx.globalAlpha = pct * 0.6;
+    ctx.strokeStyle = '#6fb8ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.radius, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  });
+}
+
 function startBlueBolt(lockedTarget) {
   var target = lockedTarget || (entities.length ? entities.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null);
   if (!target || !player) return;
@@ -6753,8 +6848,19 @@ function updateBlueBolts(dt, bounds) {
           }
         }
       });
+      // BLUE LANDING FLASH (every cast, not just crits): snappy shockwave
+      // sized to the actual blast radius + lingering glow that fades over
+      // ~0.4s. Players see exactly where the AoE landed and how big it was.
+      spawnCritShockwave(ix, iy, '#4db8ff', { r0: 6, maxR: impactR, thickness: 3, growth: impactR * 4 });
+      blueFieldFlashes.push({
+        x: ix, y: iy,
+        radius: impactR,
+        timer: 0.4,
+        duration: 0.4,
+      });
+      // CRIT-only extra flourish layered on top
       if (b.isCrit) {
-        spawnCritShockwave(ix, iy, '#4db8ff', { r0: 8, maxR: scaleDist(140), thickness: 3, growth: 280 });
+        spawnCritShockwave(ix, iy, '#4db8ff', { r0: 8, maxR: impactR * 1.4, thickness: 3, growth: 280 });
         spawnCritFlourish(ix, iy, '#6fb8ff', 14);
         spawnCritFlourish(ix, iy, '#a0dfff', 10);
       }
@@ -8294,6 +8400,8 @@ function _internalStart(config) {
     // Damage attribution
     damageByColor: {},
     damageByTarget: {},
+    // Heal attribution (mirrors damageByColor for white audit ratios)
+    healedByColor: {},
     // Audit diagnostic: snapshot of the most recent overload fire.
     // Captured by fireOverload(), resolved lazily by getDebugInfo().
     // Used by rumble_test overload-audit panel for expected-vs-actual
@@ -8377,7 +8485,7 @@ function _internalStart(config) {
   // singleton that could persist between battles needs to be cleared here —
   // otherwise a fresh battle starts with leftover corpses, floating text, or
   // mid-flight projectiles from the previous fight.
-  blueBolts = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = [];
+  blueBolts = []; blueFieldFlashes = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = [];
   greenBurst = null; greenDragActive = false; greenDragPos = null; purpleBursts = []; purpleParticles = []; greenSlowAuras = []; greenBubbles = []; _greenBubbleAccum = 0;
   blackEffect = null; playerSparkles = []; entityRespawnPending = false; playerRegen = null;
   yellowAura = null; whiteFields = [];
@@ -9839,13 +9947,15 @@ window.Rumble = {
   getState: function() { return _computeState(); },
   getConfig: function() { return cfg ? JSON.parse(JSON.stringify(cfg)) : null; },
   getDebugInfo: function() {
-    // Lazy-resolve actualDamage on lastOverload during the 600ms window
-    // after fire. After that, freeze the value so the audit panel keeps
-    // showing the last result until the next overload.
+    // Lazy-resolve actualDamage and actualHeal on lastOverload during the
+    // 600ms window after fire. After that, freeze the values so the audit
+    // panel keeps showing the last result until the next overload.
     var _lo = _battleStats && _battleStats.lastOverload;
     if (_lo && !_lo.frozen) {
       var dmgNow = (_battleStats.damageByColor && _battleStats.damageByColor[_lo.color]) || 0;
       _lo.actualDamage = Math.max(0, dmgNow - _lo.dmgSnapshot);
+      var healNow = (_battleStats.healedByColor && _battleStats.healedByColor[_lo.color]) || 0;
+      _lo.actualHeal = Math.max(0, healNow - _lo.healSnapshot);
       if (performance.now() - _lo.ts > 600) {
         _lo.frozen = true;
       }
@@ -9860,18 +9970,30 @@ window.Rumble = {
       floatingTexts: (floatingTexts||[]).length,
       // Most recent overload snapshot. null until first cast. After
       // each cast, holds expected vs actual damage for ~600ms then
-      // frozen until the next cast overwrites.
+      // frozen until the next cast overwrites. expected* are the SUM
+      // of all damage/heal paths so ratios reflect what the engine
+      // actually delivered. expDmg* / expHeal* component breakdown is
+      // available for transparent audit display.
       lastOverload: _lo ? {
         color: _lo.color,
         tier: _lo.tier,
         expectedDmg: _lo.expectedDmg,
+        expectedHeal: _lo.expectedHeal,
         expectedRadius: _lo.expectedRadius,
+        // Component breakdown (audit transparency)
+        expDmgPrimary: _lo.expDmgPrimary,
+        expDmgBurst: _lo.expDmgBurst,
+        expDmgWither: _lo.expDmgWither,
+        expHealBurst: _lo.expHealBurst,
+        expHealTotal: _lo.expHealTotal,
+        entsInRadius: _lo.entsInRadius,
         mult: _lo.mult,
         tapMult: _lo.tapMult,
         affMult: _lo.affMult,
         curveMult: _lo.curveMult,
         isCrit: _lo.isCrit,
         actualDamage: _lo.actualDamage,
+        actualHeal: _lo.actualHeal || 0,
         ageMs: performance.now() - _lo.ts,
         frozen: _lo.frozen,
         persistentFx: _lo.persistentFx,

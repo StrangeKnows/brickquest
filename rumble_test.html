@@ -1237,6 +1237,20 @@ var AUDIT_COLORS = ['red','white','yellow','orange','gray','green','blue','purpl
 // LAST FIRED line showing expected-vs-actual. Reads window.effectiveAt
 // directly — same source as engine — so audit numbers cannot drift from
 // payload. Cells of the LAST FIRED color/tier get pulse-highlighted.
+//
+// Compact dual format reflects what casts ACTUALLY do, no fallbacks:
+//   red:    primary dmg ("3")
+//   blue:   "primary/burst" ("5/3") — prim to closest, burst to AoE others
+//           tap-drag fires burst-only, so when overload count is 1 the
+//           "primary" column is the bolt-strike value; β all-burst tap-drag
+//           uses the burst column for the actual cast
+//   purple: damage ("4")
+//   black:  "impact+wither" ("2+3w") — AoE + wither stack damage
+//   green:  stack damage ("1")
+//   white:  "burst+pool" ("3+2") — instant burst + field HoT pool
+//   yellow: "·" (no headline damage; aura applies confuse)
+//   orange: damage ("2") — per-pulse spike value
+//   gray:   wall HP ("4") — what the wall takes to break
 function buildOverloadAuditMarkup(info) {
   if (!window.effectiveAt || !window.STARTING_KIT_COUNTS) return '';
   var state = (Rumble.getState && Rumble.getState()) || {};
@@ -1251,10 +1265,50 @@ function buildOverloadAuditMarkup(info) {
     return (brickMax[c] || 0) !== (canonical[c] || 0);
   });
 
+  // Compact cell formatter — returns the truth about this color's cast
+  // at this tier, in the format the player will see floating up.
+  function cellValue(color, fx) {
+    if (color === 'blue') {
+      // primary/burst — prim is bolt-strike, burst is AoE-others
+      var p = fx.dmg || 0, b = fx.burstDmg || 0;
+      if (p && b) return p + '/' + b;
+      if (p) return String(p);
+      if (b) return String(b);
+      return '·';
+    }
+    if (color === 'black') {
+      // impact + wither
+      var d = fx.dmg || 0, w = fx.witherDmg || 0;
+      if (d && w) return d + '+' + w + 'w';
+      if (d) return String(d);
+      if (w) return w + 'w';
+      return '·';
+    }
+    if (color === 'white') {
+      // burst + field-pool (excludes target, available to allies)
+      var bu = fx.burst || 0, pool = fx.fieldPool || 0;
+      if (bu && pool) return bu + '+' + pool;
+      if (bu) return String(bu);
+      if (pool) return String(pool);
+      return '·';
+    }
+    if (color === 'green') {
+      // stack damage per slow tick
+      return String(fx.stackDmg || 0);
+    }
+    if (color === 'gray') {
+      // wall HP
+      return String(fx.hp || 0);
+    }
+    if (color === 'yellow') {
+      // confuse aura — no damage number
+      return '·';
+    }
+    // red, purple, orange — single damage value
+    return String(fx.dmg || 0);
+  }
+
   // ── Helper: render one tier table for a given owned-counts map ──
-  // metric: 'dmg' or 'radiusPx'. The cell value is whatever the unified
-  // pipeline produces for that color; for damage we fall back across
-  // dmg → heal → stackDmg → hp so every color has a visible number.
   function renderTable(ownedMap, metric, lastColor, lastTier) {
     var maxTier = 4; // show up to T4 columns; cells beyond owned grey out
     var html = '<table class="audit-table"><thead><tr><th></th>';
@@ -1264,22 +1318,14 @@ function buildOverloadAuditMarkup(info) {
       var owned = ownedMap[c] || 0;
       html += '<tr><td class="color-cell">' + c + ' <span class="lbl">(' + owned + ')</span></td>';
       for (var t = 1; t <= maxTier; t++) {
-        // Cap tier at what the player can actually overload — owning N
-        // bricks means max tier is N. Cells beyond that show as N/A.
-        if (t > owned && owned > 0) {
-          html += '<td class="t-na">·</td>';
-          continue;
-        }
-        if (owned <= 0) {
-          html += '<td class="t-na">·</td>';
-          continue;
-        }
+        if (t > owned && owned > 0) { html += '<td class="t-na">·</td>'; continue; }
+        if (owned <= 0) { html += '<td class="t-na">·</td>'; continue; }
         var fx = window.effectiveAt(c, t, cls, owned);
         var v;
         if (metric === 'radiusPx') {
           v = Math.round(fx.radiusPx);
         } else {
-          v = fx.dmg || fx.heal || fx.stackDmg || fx.hp || 0;
+          v = cellValue(c, fx);
         }
         var hl = (lastColor === c && lastTier === t) ? ' hl' : '';
         html += '<td class="t' + t + hl + '">' + v + '</td>';
@@ -1291,6 +1337,12 @@ function buildOverloadAuditMarkup(info) {
   }
 
   // ── LAST FIRED block ──
+  // Shows expected vs actual for whichever metric the cast produces:
+  //   damage colors → expectedDmg / actualDamage
+  //   white         → expectedHeal / actualHeal
+  // Component breakdown ("prim 5 + burst 3×N + wither 2") is shown so
+  // the ratio is fully transparent: every number is sourced from the
+  // unified pipeline.
   var lo = info && info.lastOverload;
   var lastColor = lo ? lo.color : null;
   var lastTier  = lo ? lo.tier : null;
@@ -1298,19 +1350,43 @@ function buildOverloadAuditMarkup(info) {
   if (!lo) {
     lastBlock = '<div class="audit-last idle">LAST FIRED: <span class="lbl">no overloads cast yet</span></div>';
   } else {
-    var ratio = lo.expectedDmg > 0 ? (lo.actualDamage / lo.expectedDmg) : 0;
+    var isHealCast = lo.color === 'white';
+    var expected, actual, breakdown;
+    if (isHealCast) {
+      expected = lo.expectedHeal || 0;
+      actual = lo.actualHeal || 0;
+      var parts = [];
+      if (lo.expHealBurst) parts.push('burst ' + lo.expHealBurst);
+      if (lo.expHealTotal) parts.push('pool ' + (lo.expHealTotal - (lo.expHealBurst || 0)));
+      breakdown = parts.length ? ' <span class="lbl">[' + parts.join(' + ') + ']</span>' : '';
+    } else {
+      expected = lo.expectedDmg || 0;
+      actual = lo.actualDamage || 0;
+      var dParts = [];
+      if (lo.expDmgPrimary) dParts.push('prim ' + lo.expDmgPrimary);
+      if (lo.expDmgBurst && lo.entsInRadius > 1) {
+        dParts.push('burst ' + lo.expDmgBurst + '×' + (lo.entsInRadius - 1));
+      } else if (lo.expDmgBurst) {
+        dParts.push('burst ' + lo.expDmgBurst);
+      }
+      if (lo.expDmgWither) dParts.push('wither ' + lo.expDmgWither);
+      breakdown = dParts.length ? ' <span class="lbl">[' + dParts.join(' + ') + ']</span>' : '';
+    }
+    var ratio = expected > 0 ? (actual / expected) : 0;
     var ratioCls = 'lf-ratio-good';
-    if (lo.persistentFx) ratioCls = 'lf-ratio-warn';      // DoT contamination likely
+    if (lo.persistentFx) ratioCls = 'lf-ratio-warn';      // DoT/HoT contamination likely
     else if (ratio > 1.4 || ratio < 0.6) ratioCls = 'lf-ratio-bad';
     else if (ratio > 1.15 || ratio < 0.85) ratioCls = 'lf-ratio-warn';
     var stateCls = lo.frozen ? ' frozen' : '';
     var critBadge = lo.isCrit ? ' <span class="lf-crit">CRIT</span>' : '';
-    var fxNote = lo.persistentFx ? ' <span class="lf-fx">(persistent fx active — actual may include DoT)</span>' : '';
+    var fxNote = lo.persistentFx ? ' <span class="lf-fx">(persistent fx active — actual may include DoT/HoT)</span>' : '';
+    var label = isHealCast ? 'heal' : 'dmg';
     lastBlock = '<div class="audit-last' + stateCls + '">'
       + 'LAST FIRED: <span class="lf-color">' + lo.color + '</span> '
       + '<span class="lf-tier">T' + lo.tier + '</span>' + critBadge
-      + ' &nbsp; expected <span class="val">' + lo.expectedDmg + '</span>'
-      + ' &middot; actual <span class="val">' + lo.actualDamage + '</span>'
+      + ' &nbsp; expected ' + label + ' <span class="val">' + expected + '</span>'
+      + breakdown
+      + ' &middot; actual <span class="val">' + actual + '</span>'
       + ' &nbsp; ratio <span class="' + ratioCls + '">' + ratio.toFixed(2) + '×</span>'
       + ' &nbsp; <span class="lbl">mult ' + lo.mult.toFixed(2) + '</span>'
       + fxNote
@@ -1328,10 +1404,10 @@ function buildOverloadAuditMarkup(info) {
   html += '<h4>OVERLOAD AUDIT (WIP)</h4>';
   html += arenaLine;
   html += lastBlock;
-  html += '<div class="audit-meta">DAMAGE / HEAL / STACK-DMG &middot; canonical kit</div>';
+  html += '<div class="audit-meta">CAST VALUES &middot; canonical kit &middot; <span class="lbl">prim/burst &middot; impact+wither &middot; burst+pool</span></div>';
   html += renderTable(canonical, 'dmg', lastColor, lastTier);
   if (differsFromCanonical) {
-    html += '<div class="audit-meta">DAMAGE &middot; current kit (this run)</div>';
+    html += '<div class="audit-meta">CAST VALUES &middot; current kit (this run)</div>';
     html += renderTable(brickMax, 'dmg', lastColor, lastTier);
   }
   html += '<div class="audit-meta">RADIUS (px, after arena clamp)</div>';
