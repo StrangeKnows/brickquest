@@ -470,12 +470,15 @@ function hideWaveHud() {
   if (h) h.classList.remove('visible');
 }
 
-// Called when the last entity in the active wave dies. Refills bricks
-// instantly, delays briefly for the player to breathe, then spawns next.
+// Called when the last entity in the active wave dies. Auto-consumes any
+// cheese picked up, refills bricks instantly, delays briefly for the
+// player to breathe, then spawns next wave.
 function onWaveCleared() {
   if (!_waveState.active || _waveState.advancing) return;
   _waveState.advancing = true;
   _waveState.highestReached = Math.max(_waveState.highestReached, _waveState.currentWave);
+  // Auto-eat any cheese picked up this wave (+1 max HP per wheel)
+  if (Rumble.eatAllCheese) Rumble.eatAllCheese();
   // Instant brick refill — no shimmer, just full pips for the next wave
   if (Rumble.refillBricks) Rumble.refillBricks();
   setTimeout(function() {
@@ -534,9 +537,10 @@ function startTestRumble(cls) {
     hpMax: m.hp,
     armor: 0,
     mode: currentMode,
-    // Waves mode uses a random sandbox kit (full color pool — waves are
-    // varied, you'll want all colors available).
-    bricks: currentMode === 'spec' ? Object.assign({}, m.kit) : randomSandboxBricks(),
+    // Waves mode uses the canonical class starter kit (2 sig + 1 sec) — same
+    // as spec mode. Tests class identity progression with the intended
+    // baseline rather than muddying with random sandbox quantities.
+    bricks: (currentMode === 'spec' || isWaves) ? Object.assign({}, m.kit) : randomSandboxBricks(),
     // In waves mode, start with 0 entities — wave 1 spawns immediately
     // after Rumble.start via spawnWave(1).
     entityCount: isWaves ? 0 : currentEntityCount,

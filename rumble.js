@@ -9467,6 +9467,21 @@ window.Rumble = {
     });
     if (typeof renderBrickBar === 'function') renderBrickBar();
   },
+  // Eat all cheese in player inventory. Each wheel grants +1 max HP and
+  // +1 current HP (the simplified pre-0.17.0 cheese behavior). Returns
+  // the number of wheels consumed. Used by waves mode auto-consume; will
+  // be wired to the real cheese-eat UI when the cheese system ships.
+  eatAllCheese: function() {
+    if (!player) return 0;
+    var n = player.cheese || 0;
+    if (n <= 0) return 0;
+    player.cheese = 0;
+    player.hpMax += n;
+    player.hp += n;
+    showFloatingText(player.x, player.y - 70, '🧀 +' + n + ' HP MAX', '#FFD96A', player);
+    if (typeof updateHUD === 'function') updateHUD();
+    return n;
+  },
 };
 
 })(); // end IIFE
