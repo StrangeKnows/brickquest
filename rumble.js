@@ -6389,12 +6389,19 @@ function doWhiteHeal(targetX, targetY) {
   var fy = targetY !== undefined ? targetY : player.y;
   showFloatingText(fx, fy - 50, actual + ' ✚', '#EFEFEF', player);
   spawnHealSparkles(1);
-  // WHITE BLESSING: on crit, purge player debuffs.
+  // WHITE BLESSING: on crit, purge player debuffs IF any are active.
+  // Without the active-check the CLEANSED floater spammed on every
+  // crit tap-white regardless of whether anything was actually cleansed.
   if (_currentCrit) {
-    // PHASE B — cleanse all player status effects (poison/slow/daze/confuse/weaken).
-    clearStatuses();
-    showFloatingText(fx, fy - 68, 'CLEANSED', '#FFFFFF', player);
-    // WHITE flourish: white radiant halo + pink-tinted sparkle burst
+    var hasAny = hasStatus('poison') || hasStatus('slow')
+      || hasStatus('daze') || hasStatus('confuse') || hasStatus('weaken');
+    if (hasAny) {
+      clearStatuses();
+      showFloatingText(fx, fy - 68, 'CLEANSED', '#FFFFFF', player);
+    }
+    // WHITE flourish: white radiant halo + pink-tinted sparkle burst.
+    // Always plays on crit (the visual flourish is the crit signature
+    // payoff for white, independent of whether cleanse triggered).
     spawnCritShockwave(fx, fy, '#FFFFFF', { r0: 6, maxR: scaleDist(160), thickness: 3, growth: 240 });
     spawnCritFlourish(fx, fy, '#FFEEFF', 16);
     spawnCritFlourish(fx, fy, '#FFAACC', 10);
