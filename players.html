@@ -1427,7 +1427,7 @@ function _renderHoldOverlay() {
     // Same side as fan: fan opens left (π) → number on left; opens right (0) → number on right
     // Offset clears the arc (radius ~140) plus a small gap. Tight enough to fit on mobile.
     const fanOpensLeft = (s.fanCenterAngle === Math.PI);
-    let previewX = fanOpensLeft ? (s.chipCx - 190) : (s.chipCx + 120);
+    let previewX = fanOpensLeft ? (s.chipCx - 210) : (s.chipCx + 140);
     // Clamp to viewport so the number never clips on narrow screens
     const ESTIMATED_TEXT_W = 90;
     previewX = Math.max(8, Math.min(window.innerWidth - ESTIMATED_TEXT_W - 8, previewX));
@@ -1507,7 +1507,7 @@ function _renderAllyRadialFan(s) {
 
   const RADIUS = 80;
   const ICON_SIZE = 44;
-  const ARC_RADIUS = RADIUS + 30;     // 30px beyond icon centers
+  const ARC_RADIUS = RADIUS + 40;     // 40px beyond icon centers — room for HP labels
   const FAN_ARC_RAD = Math.PI; // 180° — full half-circle around the chip
   const center = s.fanCenterAngle;
   const tierColor = BRICK_COLORS[s.color] || '#fff';
