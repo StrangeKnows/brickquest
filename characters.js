@@ -137,7 +137,7 @@ Object.keys(CHARACTERS).forEach(function(cls) {
   STARTING_KIT_COUNTS[cls] = CHARACTERS[cls].startingKit;
 });
 
-// CLASS_AFFINITY — used by affinityMult / affinityRadiusMult / brickTier.
+// CLASS_AFFINITY — used by affinityMult / brickTier.
 var CLASS_AFFINITY = {};
 Object.keys(CHARACTERS).forEach(function(cls) {
   CLASS_AFFINITY[cls] = {
@@ -170,9 +170,10 @@ function baseHeal(cls) {
 }
 
 // ── AFFINITY MULTIPLIER ─────────────────────────────────────────────────
-// Multiplier applied to amounts/durations/radii based on the relationship
-// between the class and the color being used. Signature colors hit harder,
-// baseline (off-class) colors hit softer.
+// Class-color relationship multiplier. Signature colors hit harder,
+// baseline (off-class) colors hit softer. Used uniformly across all
+// tier-scaled outputs (damage, radius, duration, HP, charges, etc.) —
+// the "per-class bonus" knob.
 //   signature: ×1.25   secondary: ×1.00   baseline: ×0.80
 function affinityMult(cls, color) {
   var aff = CLASS_AFFINITY[cls];
@@ -182,27 +183,8 @@ function affinityMult(cls, color) {
   return 0.8;
 }
 
-// ── AFFINITY RADIUS MULTIPLIER ──────────────────────────────────────────
-// Same concept as affinityMult, but tuned for AoE RADIUS specifically.
-// Signature gets a gentler 1.10× (vs 1.25× for amounts) — preventing
-// signature-color AoE radii from ballooning to screen-filling sizes on
-// overloads when compounded with tapScale + overloadStack.
-//   signature: ×1.10   secondary: ×1.00   baseline: ×0.80
-//
-// Sites that compute a RADIUS from affinity should use this helper;
-// damage/heal/duration amounts keep the regular affinityMult.
-function affinityRadiusMult(cls, color) {
-  var aff = CLASS_AFFINITY[cls];
-  if (!aff) return 1.0;
-  if (aff.signature.indexOf(color) >= 0) return 1.10;
-  if (aff.secondary.indexOf(color) >= 0) return 1.0;
-  return 0.8;
-}
-
 // ── BRICK TIER ──────────────────────────────────────────────────────────
-// Returns the affinity tier name for a class+color combination. Unlike the
-// multiplier helpers above which return numbers, this returns strings that
-// legacy callers switch on.
+// String form of the affinity tier, for legacy callers that switch on it.
 //   Returns: 'signature' | 'secondary' | 'baseline'
 function brickTier(cls, color) {
   var aff = CLASS_AFFINITY[cls];
@@ -213,55 +195,102 @@ function brickTier(cls, color) {
 }
 
 // ── TAP SCALING ─────────────────────────────────────────────────────────
-// Owning more bricks of a color than your starting kit permanently boosts
-// output for that color. +10% per extra brick beyond starting count.
-// Compounds with overload (overload multiplies off the scaled base).
-//
-// Caller passes `owned` directly (player.brickMax in rumble, me.bricks
-// on the board) so this works regardless of where the inventory state lives.
+// Owning more bricks of a color than your starting kit boosts output
+// for that color. +10% per extra brick beyond starting count.
 function tapScaleMult(cls, color, owned) {
   var starting = (STARTING_KIT_COUNTS[cls] && STARTING_KIT_COUNTS[cls][color]) || 0;
   var extra = Math.max(0, (owned || 0) - starting);
   return 1.0 + 0.10 * extra;
 }
 
-// ── OVERLOAD STACK MULTIPLIER ───────────────────────────────────────────
-// Spending multiple charges in one cast bonuses output beyond linear.
-// Tier 2 (2 charges): +20%, Tier 3: +40%, Tier 4: +60%.
-// Single-charge taps return 1.0 (no overload bonus, no fatigue).
-function overloadStackMult(count) {
-  if (!count || count < 2) return 1.0;
-  return 1.0 + (count - 1) * 0.2;
+// ════════════════════════════════════════════════════════════════════════
+// UNIFIED OVERLOAD PIPELINE
+// ════════════════════════════════════════════════════════════════════════
+// Single source of truth for every tier-scaled output (damage, radius,
+// duration, HP, charges, status seed). Engine fire sites, preview
+// drawers, and audit panels all call effectiveAt() — preview = payload
+// guaranteed because both compute from the same function.
+//
+// Architecture:
+//   final = BASE × COLOR[c].thing × tap × aff × tierCurve(tier)
+//
+// Knobs:
+//   BASE       — universal yardstick. 5 means "average tier-1 output".
+//   BASE_R     — universal radius (px). 50 = small AoE.
+//   COLOR[c]   — per-color profile, fractions of BASE per output type.
+//   tierCurve  — shared scaling curve. Linear gentle: 1 + 0.15(n-1).
+//
+// Class differentiation lives in affinityMult (sig/sec/base).
+// Inventory ceiling is enforced upstream by the brick-spend mechanic.
+// Fusion will add a fusionMult parameter when it lands.
+// ════════════════════════════════════════════════════════════════════════
+
+var BASE = 5;
+var BASE_R = 50;
+
+// Per-color output profile. Each color uses only the keys relevant to it.
+// All values are FRACTIONS OF BASE — e.g. red.dmg=0.60 means red's base
+// damage is 5×0.60=3 dmg before scaling. Calibrated to preserve current
+// T1 numerics at canonical (level-1) inventory and aff=1.0.
+var COLOR = {
+  red:    { dmg: 0.60 },
+  blue:   { dmg: 0.80, burstDmg: 0.40 },
+  purple: { dmg: 0.60 },
+  black:  { dmg: 0.20, dur: 0.60 },
+  green:  { stackDmg: 0.20, stacks: 0.40 },
+  white:  { heal: 0.40, dur: 0.60 },
+  yellow: { dur: 0.60, confuseSeed: 0.40 },
+  orange: { dmg: 0.40, bleedDur: 0.60, charges: 0.40 },
+  gray:   { hp: 0.80 },
+};
+
+// Tier curve. Linear gentle: T1=1.0, T4=1.45, T8=2.05.
+// Replaces the old `count × stack` multiplicative chain. Inventory cap
+// (player.brickMax[color]) is enforced at the spend site, not here.
+function tierCurve(tier) {
+  var n = Math.max(1, tier || 1);
+  return 1 + (n - 1) * 0.15;
 }
 
-// ── COMPUTE HEAL ────────────────────────────────────────────────────────
-// Canonical heal-amount calculation. Used by:
-//   - Rumble:    when a white tap or overload heal fires.
-//   - Dashboard: when the hold-gesture overlay previews a heal amount.
-//   - Server:    when board white actions resolve.
+// Compute every tier-scaled output for a (color, tier, class, owned)
+// situation. Returns only the keys defined in COLOR[color]; callers
+// pick what they need. Radius is always returned (every effect has
+// some spatial footprint, including projectile impact bursts).
 //
-// Inputs:
-//   cls          — class id ('fixer', 'breaker', etc.)
-//   color        — brick color ('white' for heal; future colors as designed)
-//   owned        — total bricks of `color` the player owns (for tap scaling)
-//   overload     — overload count (1 = tap, 2..N = overload tier)
-// Returns: integer heal amount (rounded up).
+// Damage and integer fields are pre-rounded with Math.ceil/Math.round
+// so call sites can use them directly. Duration fields stay floats.
+function effectiveAt(color, tier, cls, owned) {
+  var tap   = tapScaleMult(cls, color, owned);
+  var aff   = affinityMult(cls, color);
+  var curve = tierCurve(tier);
+  var m     = tap * aff * curve;
+  var c     = COLOR[color] || {};
+
+  var out = { mult: m, radiusPx: BASE_R * m, tap: tap, aff: aff, curve: curve };
+  if (c.dmg         != null) out.dmg         = Math.max(1, Math.ceil(BASE * c.dmg         * m));
+  if (c.burstDmg    != null) out.burstDmg    = Math.max(1, Math.ceil(BASE * c.burstDmg    * m));
+  if (c.heal        != null) out.heal        = Math.max(1, Math.ceil(BASE * c.heal        * m));
+  if (c.stackDmg    != null) out.stackDmg    = Math.max(1, Math.ceil(BASE * c.stackDmg    * m));
+  if (c.hp          != null) out.hp          = Math.max(1, Math.ceil(BASE * c.hp          * m));
+  if (c.dur         != null) out.duration    = BASE * c.dur         * m;
+  if (c.bleedDur    != null) out.bleedDur    = BASE * c.bleedDur    * m;
+  if (c.confuseSeed != null) out.confuseSeed = BASE * c.confuseSeed * m;
+  if (c.charges     != null) out.charges     = Math.max(1, Math.round(BASE * c.charges    * m));
+  if (c.stacks      != null) out.stacks      = Math.max(1, Math.round(BASE * c.stacks     * m));
+  return out;
+}
+
+// ── COMPUTE HEAL (compatibility wrapper) ────────────────────────────────
+// Stable interface for board / server / preview callers that don't yet
+// use effectiveAt directly. Returns the integer heal amount, same shape
+// as before. Internally just reads effectiveAt(...).heal.
 function computeHeal(cls, color, owned, overload) {
-  var count = Math.max(1, overload || 1);
-  return Math.ceil(
-    baseHeal(cls)
-    * tapScaleMult(cls, color, owned)
-    * count
-    * overloadStackMult(count)
-    * affinityMult(cls, color)
-  );
+  var fx = effectiveAt(color, overload || 1, cls, owned);
+  return fx.heal || 0;
 }
 
 // ── BROWSER GLOBAL EXPORTS ──────────────────────────────────────────────
-// Rumble.js runs inside an IIFE and reaches for these via window.X. In a
-// classic script tag, top-level `function foo` declarations are global
-// (callable as `foo()`) but do NOT auto-attach to window.foo. We attach
-// them explicitly here so the IIFE can reach them.
+// Rumble.js runs inside an IIFE and reaches for these via window.X.
 if (typeof window !== 'undefined') {
   window.CHARACTERS = CHARACTERS;
   window.PLAYER_META = PLAYER_META;
@@ -276,16 +305,19 @@ if (typeof window !== 'undefined') {
   window.getSecondary = getSecondary;
   window.baseHeal = baseHeal;
   window.affinityMult = affinityMult;
-  window.affinityRadiusMult = affinityRadiusMult;
   window.brickTier = brickTier;
   window.tapScaleMult = tapScaleMult;
-  window.overloadStackMult = overloadStackMult;
+  // Unified pipeline
+  window.BASE = BASE;
+  window.BASE_R = BASE_R;
+  window.COLOR_PROFILE = COLOR;
+  window.tierCurve = tierCurve;
+  window.effectiveAt = effectiveAt;
+  // Compatibility wrapper
   window.computeHeal = computeHeal;
 }
 
 // ── CommonJS export for server-side reuse ───────────────────────────────
-// Browser ignores this. Node require('./characters.js') grabs the same
-// values the browser uses via globals.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     CHARACTERS,
@@ -295,10 +327,13 @@ if (typeof module !== 'undefined' && module.exports) {
     getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
     getSignature, getSecondary,
     baseHeal,
-    affinityMult, affinityRadiusMult,
+    affinityMult,
     brickTier,
     tapScaleMult,
-    overloadStackMult,
+    BASE, BASE_R,
+    COLOR_PROFILE: COLOR,
+    tierCurve,
+    effectiveAt,
     computeHeal,
   };
 }

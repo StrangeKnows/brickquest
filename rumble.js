@@ -82,19 +82,25 @@ function affinityMult(color) {
   return window.affinityMult(player.cls, color);
 }
 
-function affinityRadiusMult(color) {
-  if (!player) return 1.0;
-  return window.affinityRadiusMult(player.cls, color);
-}
-
-function overloadStackMult(count) {
-  return window.overloadStackMult(count);
-}
-
 function tapScaleMult(color) {
   if (!player || !player.brickMax) return 1.0;
   var owned = player.brickMax[color] || 0;
   return window.tapScaleMult(player.cls, color, owned);
+}
+
+// ── EFFECTIVE-AT FOR PLAYER ─────────────────────────────────────────────
+// Convenience wrapper that closes over the active player. Single call
+// site shape `_fx('red', count)` returns the unified-pipeline output
+// (damage, radius, duration, charges, etc.) for the player's class +
+// inventory. Every overload fire site and preview drawer goes through
+// this — preview = payload guaranteed because they read the same call.
+//
+// Returns `null` if there's no active player (e.g. drawing a leftover
+// reticle during teardown). Callers should null-check.
+function _fx(color, tier) {
+  if (!player) return null;
+  var owned = (player.brickMax && player.brickMax[color]) || 0;
+  return window.effectiveAt(color, tier, player.cls, owned);
 }
 
 // Crit chance: base 10% + 8% per extra brick in overload, +/- affinity bonus.
@@ -187,6 +193,23 @@ function getDisplayScale() {
 // thresholds, effect radii, burst sizes. Called per-frame but cheap.
 function scaleDist(px) {
   return px * getDisplayScale();
+}
+
+// Clamp an effect radius to the arena half-min. All overload AoEs run
+// through this. Targeting reticles and payload share the same call so
+// previews never lie about the fire's reach.
+//   halfMin = min(arena width, arena height) / 2
+// (Conservative reference: largest circle that fits regardless of where
+// the cast is centered.)
+//
+// Fusion will eventually produce effects that escape the arena. When
+// that lands, fusion casts skip this clamp; until then, all overload
+// effects respect the bounds.
+function clampRadiusToArena(r) {
+  if (typeof getRumbleBounds !== 'function') return r;
+  var b = getRumbleBounds();
+  if (!b) return r;
+  return Math.min(r, Math.min(b.w, b.h) / 2);
 }
 
 const BRICK_COLORS = {
@@ -1026,13 +1049,10 @@ function draw() {
       gcx2 = player.x; gcy2 = player.y;
       isActiveDrag = false;
     }
-    // Match startGreenBurst / fireOverloadGreen: scaleDist(113 * tap * affR * stack).
     var gnTier = (overloadState && overloadState.color === 'green') ?
       Math.max(1, Math.min(player.brickMax?player.brickMax['green']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-    var gnTap = tapScaleMult('green');
-    var gnAff = affinityRadiusMult('green');
-    var gnStack = overloadStackMult(gnTier);
-    var gnRadius = scaleDist(113 * gnTap * gnAff * gnStack);
+    var gnFx = _fx('green', gnTier);
+    var gnRadius = clampRadiusToArena(gnFx ? gnFx.radiusPx : 0);
     ctx.save();
     // Pulsing alpha between barely-visible (0.08) and visible (0.35)
     var gPulse = isActiveDrag ? 0.35 : (0.08 + 0.15 * (0.5 + 0.5 * Math.sin(performance.now() * 0.003)));
@@ -1080,13 +1100,8 @@ function draw() {
       ctx.lineWidth = 1.5;
       ctx.setLineDash([6, 8]);
       var yTier = (overloadState && overloadState.color==='yellow') ? Math.max(1, Math.floor(overloadState.timer / OVERLOAD_TIER) + 1) : 1;
-      var yTap = tapScaleMult('yellow');
-      var yAff = affinityRadiusMult('yellow');
-      var yStack = overloadStackMult(yTier);
-      // Match fireOverloadYellow cap at scaleDist(500) — prevents preview
-      // from growing past the actual effect radius on high-tier overloads.
-      var yCapR = scaleDist(500);
-      var yRadius = Math.min(yCapR, scaleDist((120 + (yTier - 1) * 40) * yTap * yAff * yStack));
+      var yFx = _fx('yellow', yTier);
+      var yRadius = clampRadiusToArena(yFx ? yFx.radiusPx : 0);
       ctx.beginPath(); ctx.arc(ycx, ycy, yRadius, 0, Math.PI*2); ctx.stroke();
       ctx.setLineDash([]);
       // Center dot
@@ -1107,13 +1122,8 @@ function draw() {
       var ocy = (orangeDragPos.y - rectO.top)  * (canvas.height / rectO.height);
       var oTier = overloadState && overloadState.color==='orange' ?
         Math.max(1, Math.min(player.brickMax?player.brickMax['orange']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-      // Match fireOverloadOrangeScatter / startOrangeTrap: raw (25 + count*15) * tap * affR * stack.
-      // Trap radius is stored raw (not scaleDist-wrapped), so preview must
-      // omit scaleDist to line up with the rendered trap ring.
-      var oTap = tapScaleMult('orange');
-      var oAff = affinityRadiusMult('orange');
-      var oStack = overloadStackMult(oTier);
-      var oRadius = (25 + oTier * 15) * oTap * oAff * oStack;
+      var oFx = _fx('orange', oTier);
+      var oRadius = clampRadiusToArena(oFx ? oFx.radiusPx : 0);
       ctx.save();
       // Dashed line from player
       ctx.setLineDash([4,6]); ctx.strokeStyle='#F57C00aa'; ctx.lineWidth=1.5;
@@ -1152,11 +1162,8 @@ function draw() {
     if (showGrayRing) {
       var gTier = overloadState && overloadState.color === 'gray' ?
         Math.min(Math.floor(overloadState.timer / OVERLOAD_TIER) + 1, player.brickMax ? (player.brickMax['gray']||1) : 1) : 1;
-      // Match startGrayWall: scaleDist((30 + tier * 22) * tap * affR * stack)
-      var gTap = tapScaleMult('gray');
-      var gAff = affinityRadiusMult('gray');
-      var gStack = overloadStackMult(gTier);
-      var gWallR = scaleDist((30 + gTier * 22) * gTap * gAff * gStack);
+      var gFx = _fx('gray', gTier);
+      var gWallR = clampRadiusToArena(gFx ? gFx.radiusPx : 0);
       ctx.save();
       var gPulse = 0.3 + 0.15 * Math.sin(performance.now() * 0.004);
       if (grayOverRumble) {
@@ -1188,21 +1195,10 @@ function draw() {
       pcx2 = player.x; pcy2 = player.y;
       isActiveDragP = false;
     }
-    // Preview radius matches startPurpleBurst / fireOverloadPurple threshold
-    // tiers: 237px (1 brick / tap), 400 (2), 600 (3), 900 (4+). Brick count
-    // is the sole tier unlocker; tap/aff/stack scale within tier.
     var puTier = (overloadState && overloadState.color === 'purple') ?
       Math.max(1, Math.min(player.brickMax?player.brickMax['purple']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-    var puTap = tapScaleMult('purple');
-    var puAff = affinityMult('purple');
-    var puStack = overloadStackMult(puTier);
-    var puBaseR;
-    if (puTier >= 4)      puBaseR = 900;
-    else if (puTier >= 3) puBaseR = 600;
-    else if (puTier >= 2) puBaseR = 400;
-    else                  puBaseR = 237;
-    var puTierCeil = scaleDist(puBaseR);
-    var puRadius = Math.min(puTierCeil, scaleDist(puBaseR * puTap * puAff * puStack));
+    var puFx = _fx('purple', puTier);
+    var puRadius = clampRadiusToArena(puFx ? puFx.radiusPx : 0);
     ctx.save();
     var pPulse = isActiveDragP ? 0.35 : (0.08 + 0.15 * (0.5 + 0.5 * Math.sin(performance.now() * 0.003)));
     ctx.globalAlpha = pPulse;
@@ -1224,17 +1220,10 @@ function draw() {
     var wcy = whiteOverRumble ? (whiteDragPos.y - rectW.top)  * (canvas.height / rectW.height) : player.y;
     var showWhiteRing = (overloadState && overloadState.color === 'white') || whiteDragPos;
     if (showWhiteRing) {
-      // Field radius preview — match startWhiteField: scaleDist((60 + count*20) * tap * affR * stack).
-      // Tap white has no field, so for tap-hold we show a small tap-heal drop point.
       var wTier = (overloadState && overloadState.color === 'white') ?
         Math.max(1, Math.min(player.brickMax?player.brickMax['white']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-      var wTap = tapScaleMult('white');
-      var wAff = affinityRadiusMult('white');
-      var wStack = overloadStackMult(wTier);
-      var isOverload = wTier > 1;
-      var wRadius = isOverload
-        ? scaleDist((60 + wTier * 20) * wTap * wAff * wStack)
-        : scaleDist(40 * wTap * wAff); // tap heal "drop" visualization radius
+      var wFx = _fx('white', wTier);
+      var wRadius = clampRadiusToArena(wFx ? wFx.radiusPx : 0);
       ctx.save();
       // Line from player to drop zone when dragging over rumble area
       if (whiteOverRumble) {
@@ -1276,12 +1265,8 @@ function draw() {
     if (showBlackRing) {
       var bTierR = (overloadState && overloadState.color === 'black') ?
         Math.max(1, Math.min(player.brickMax?player.brickMax['black']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-      // Match fireOverloadBlack: scaleDist((50+(count-1)*100) * tap * aff * stack), clamped to 900*mult
-      var bTap = tapScaleMult('black');
-      var bAff = affinityMult('black');
-      var bStack = overloadStackMult(bTierR);
-      var bMult = bTap * bAff * bStack;
-      var bRadius = Math.min(scaleDist((50 + (bTierR - 1) * 100) * bMult), scaleDist(900 * bMult));
+      var bFx = _fx('black', bTierR);
+      var bRadius = clampRadiusToArena(bFx ? bFx.radiusPx : 0);
       ctx.save();
       if (blackOverRumble) {
         ctx.setLineDash([4,6]); ctx.strokeStyle = '#55555588'; ctx.lineWidth = 1.5;
@@ -1780,30 +1765,31 @@ function fireOverload(dragX, dragY, bricksUsed) {
     triggerCritSignature(color, player.x, player.y - 80);
   }
 
-  // Audit-diagnostic snapshot. Captures the model's expected damage
-  // multiplier (count × stack × tap × aff × critX) and the current
-  // damageByColor[color] value at fire-time. The audit panel diffs
-  // damageByColor against this snapshot for ~600ms to produce the
-  // "actual damage" half of the comparison. Used to validate the
-  // tier-curve before the v0.15 overload nerf. No gameplay effect.
-  if (_battleStats) {
-    var _auditTap   = tapScaleMult(color);
-    var _auditAff   = affinityMult(color);
-    var _auditStack = overloadStackMult(count);
-    var _auditCrit  = _currentCrit ? 2.0 : 1.0;
-    var _auditMult  = count * _auditStack * _auditTap * _auditAff * _auditCrit;
+  // Audit diagnostic snapshot. Captures expected-vs-actual damage data
+  // for the rumble_test overload-audit panel. expected* uses the unified
+  // pipeline directly — same call the fire function will make. Persistent
+  // effects flag warns the audit that DoT contamination may inflate the
+  // actualDamage delta in the comparison window. No gameplay effect.
+  if (_battleStats && window.effectiveAt) {
+    var _aOwned = (player.brickMax && player.brickMax[color]) || 0;
+    var _aFx = window.effectiveAt(color, count, player.cls, _aOwned);
+    var _persistentActive = !!(blackEffect || whiteField || (orangeAura && orangeAura.charges > 0)
+      || (greenBurst && !greenBurst.done) || (yellowAura && yellowAura.timer > 0));
     _battleStats.lastOverload = {
       color: color,
       tier: count,
-      expectedMult: _auditMult,
+      expectedDmg: _aFx.dmg || _aFx.heal || _aFx.stackDmg || 0,
+      expectedRadius: _aFx.radiusPx,
+      mult: _aFx.mult,
+      tapMult: _aFx.tap,
+      affMult: _aFx.aff,
+      curveMult: _aFx.curve,
       isCrit: !!_currentCrit,
-      tapMult: _auditTap,
-      affMult: _auditAff,
-      stackMult: _auditStack,
       ts: performance.now(),
       dmgSnapshot: (_battleStats.damageByColor && _battleStats.damageByColor[color]) || 0,
       actualDamage: 0,
       frozen: false,
+      persistentFx: _persistentActive,
     };
   }
 
@@ -1894,18 +1880,14 @@ function fireOverloadWhite(count, ox, oy) {
 var whiteField = null; // { timer, duration, ox, oy, radius, healPerTick, tickTimer, pulse, sparkleTimer }
 
 function startWhiteField(ox, oy, count) {
-  var tap = tapScaleMult('white');
-  var aff = affinityMult('white');           // for heal amount
-  var affR = affinityRadiusMult('white');    // for field radius
-  var stack = overloadStackMult(count);
-  var duration = 3.0 * count * stack;
-  var radius = scaleDist((60 + count * 20) * tap * affR * stack);
+  var fx = _fx('white', count);
+  if (!fx) return;
   whiteField = {
-    timer: duration,
-    duration: duration,
+    timer: fx.duration,
+    duration: fx.duration,
     ox: ox, oy: oy,
-    radius: radius,
-    healPerTick: Math.max(1, Math.ceil((1 + count) * tap * aff * stack)),
+    radius: clampRadiusToArena(fx.radiusPx),
+    healPerTick: fx.heal,
     tickTimer: 0,
     pulse: 0,
     sparkleTimer: 0,
@@ -2012,26 +1994,18 @@ function spawnHealSparkleAt(x, y) {
 
 
 function fireOverloadYellow(count, ox, oy) {
-  // 3s aura. Radius scales with count. If cast from drag-target coords,
-  // aura is anchored there. Otherwise it follows the player.
-  // Per-entity confuse duration is extended each frame they're in the aura,
-  // so overloading (bigger radius, higher hit chance) naturally produces
-  // longer confuses on the entities you manage to keep inside.
+  // Aura with tier-scaled radius and duration. Drag-cast anchors to coords;
+  // tap-cast follows player.
   var dragOrigin = ox !== undefined && Math.hypot(ox - player.x, oy - player.y) > scaleDist(40);
-  var tap = tapScaleMult('yellow');
-  var aff = affinityMult('yellow');           // for confuse damage/duration
-  var affR = affinityRadiusMult('yellow');    // for aura radius
-  var stack = overloadStackMult(count);
-  // Radius cap: yellow is a utility confusion field, capping at 500 keeps
-  // overload stacks focused rather than rumble-wide. Tap base is 120.
-  var yCapR = scaleDist(500);
-  var r = Math.min(yCapR, scaleDist((120 + (count - 1) * 40) * tap * affR * stack));
+  var fx = _fx('yellow', count);
+  if (!fx) return;
   startYellowAura({
     follow: !dragOrigin,
     ox: dragOrigin ? ox : player.x,
     oy: dragOrigin ? oy : player.y,
-    radius: r,
-    duration: 3.0 * tap * stack,
+    radius: clampRadiusToArena(fx.radiusPx),
+    duration: fx.duration,
+    confuseSeed: fx.confuseSeed,
     label: 'MIND SHATTER x' + count + '!',
     isCrit: _currentCrit,
   });
@@ -2040,30 +2014,25 @@ function fireOverloadBlue(count) {
   var target = entities.length ? entities.reduce(function(a,b){
     return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null;
   if (!target) return;
-  // Single bolt. Damage scales with overload count, class affinity, inventory,
-  // and crit. Overload bolts also create a minor impact burst radius that
-  // damages nearby entities for half damage. Burst radius scales with count.
-  //
   // BLUE CRUSHING STRIKE: crit doubles bolt damage (matches red/gray/purple
   // convention). Previously blue crit only marked targets for +50% follow-up
   // damage, which was wasted on solo kills and made blue crit feel weak.
-  var tap = tapScaleMult('blue');
-  var aff = affinityMult('blue');
-  var stack = overloadStackMult(count);
+  var fx = _fx('blue', count);
+  if (!fx) return;
   var bcritMult = _currentCrit ? 2.0 : 1.0;
   blueBolts.push({
     x: player.x, y: player.y,
     target: target,
     speed: 400 + count * 40,
-    dmg: Math.ceil(4 * tap * count * aff * stack * bcritMult),
-    r: 6 + count * 4,       // x1=10, x5=26
+    dmg: Math.ceil(fx.dmg * bcritMult),
+    r: 6 + count * 4,       // x1=10, x5=26  (visual size, not damage)
     dead: false,
     travelled: 0,
     tier: count,
     glow: count * 10,
     delayTimer: 0,
-    burstRadius: scaleDist((30 + count * 15) * stack),  // impact burst AoE
-    burstDmg: Math.ceil(2 * tap * count * aff * stack * bcritMult),      // ~half primary dmg
+    burstRadius: clampRadiusToArena(fx.radiusPx),
+    burstDmg: Math.ceil(fx.burstDmg * bcritMult),
     isCrit: _currentCrit,
   });
 }
@@ -2072,8 +2041,9 @@ function fireOverloadOrange(count, ox, oy) {
   if (isDrag) {
     fireOverloadOrangeScatter(count, ox, oy);
   } else {
-    // Tap overload — spike aura with count charges (tap scaling + affinity + stack boost charges)
-    var charges = Math.max(1, Math.ceil(count * tapScaleMult('orange') * affinityMult('orange') * overloadStackMult(count)));
+    // Tap overload — spike aura with tier-scaled charges
+    var oFx = _fx('orange', count);
+    var charges = oFx ? oFx.charges : 1;
     if (orangeAura) {
       orangeAura.charges += charges;
     } else {
@@ -2088,10 +2058,11 @@ function fireOverloadGray(count, ox, oy) {
   } else {
     var aMax2 = getArmorMax();
     var prevArmor = player.armor||0;
-    // Base: 1 armor pip per brick × tap scaling × affinity × overload stack.
-    // GRAY REINFORCE: crit doubles pip count.
+    // Tap-gray = armor pips. Uses gray's hp curve (gray's only scaled output)
+    // as the pip count, with crit doubling. GRAY REINFORCE: crit doubles pips.
     var gcritMult = _currentCrit ? 2.0 : 1.0;
-    var pips = Math.max(1, Math.ceil(count * tapScaleMult('gray') * affinityMult('gray') * overloadStackMult(count) * gcritMult));
+    var grFx = _fx('gray', count);
+    var pips = Math.max(1, Math.ceil((grFx ? grFx.hp : 1) * gcritMult));
     player.armor = Math.min(aMax2, prevArmor + pips);
     var gained = player.armor - prevArmor;
     if (_currentCrit) {
@@ -2102,52 +2073,39 @@ function fireOverloadGray(count, ox, oy) {
   }
 }
 function fireOverloadGreen(count, ox, oy, followPlayer) {
-  // Each brick beyond the first doubles poison damage (1-2-4-8-16)
-  var tap = tapScaleMult('green');
-  var aff = affinityMult('green');          // for poison damage
-  var affR = affinityRadiusMult('green');   // for burst radius (gentler)
-  var stack = overloadStackMult(count);
+  // Green burst applies poison stacks. Stacks count and per-stack damage
+  // both scale via the unified pipeline. Burst radius shared with payload.
+  var fx = _fx('green', count);
+  if (!fx) return;
+  var radius = clampRadiusToArena(fx.radiusPx);
   if (greenBurst && !greenBurst.done) {
     greenBurst._poisonedIds=[]; greenBurst._pushIds=[];
   } else {
-    greenBurst = { r:0, maxR:scaleDist(113 * tap * affR * stack), alpha:1, done:false, _poisonedIds:[], _pushIds:[], ox:ox, oy:oy };
+    greenBurst = { r:0, maxR:radius, alpha:1, done:false, _poisonedIds:[], _pushIds:[], ox:ox, oy:oy };
   }
-  greenBurst._poisonMult = count * tap * aff * stack; // inventory + affinity + stack scale poison
+  // Poison-mult drives per-tick damage on entities in the burst. We feed
+  // it the unified per-stack damage so callers downstream don't need to
+  // know about BASE/COLOR; they just multiply this against their stack
+  // count as before.
+  greenBurst._poisonMult = fx.stackDmg;
+  greenBurst._stacksApplied = fx.stacks;       // tier-scaled stack count
   greenBurst._castCount = count; // for duration extension (3 + count)
   // GREEN NECROSIS: on crit, poison applied by this burst doesn't decay.
   greenBurst._necrosis = !!_currentCrit;
-  // Follow flag: true when cast on-player (release on bar, or drag dropped
-  // back onto player). When true, both the burst expansion and the spawned
-  // afterimage track the player's position each frame instead of sitting
-  // at the fixed cast origin.
   greenBurst._followPlayer = !!followPlayer;
   if (_currentCrit) {
-    var gr = scaleDist(113 * tap * affR * stack);
-    spawnCritShockwave(ox, oy, '#39d67a', { r0: 10, maxR: gr, thickness: 4, growth: 350 });
+    spawnCritShockwave(ox, oy, '#39d67a', { r0: 10, maxR: radius, thickness: 4, growth: 350 });
     spawnCritFlourish(ox, oy, '#1D9E75', 24);
     spawnCritFlourish(ox, oy, '#7ce39a', 16);
   }
 }
 function fireOverloadPurple(count, ox, oy) {
-  var tap = tapScaleMult('purple');
-  var aff = affinityMult('purple');           // for damage
-  var affR = affinityRadiusMult('purple');    // for radius
-  var stack = overloadStackMult(count);
-  // Threshold tier table:
-  //   1 brick  (tap)     → 237px, tier I   (handled by startPurpleBurst)
-  //   2 bricks           → 400px, tier II
-  //   3 bricks           → 600px, tier III
-  //   4+ bricks          → 900px, tier IV (cap)
-  // Tap scaling / affinity still modulate within tier but can't cross the
-  // next threshold — brick count is the sole tier-unlocker.
-  var baseR, purpleTier;
-  if (count >= 4)      { baseR = 900; purpleTier = 4; }
-  else if (count >= 3) { baseR = 600; purpleTier = 3; }
-  else if (count >= 2) { baseR = 400; purpleTier = 2; }
-  else                 { baseR = 237; purpleTier = 1; }
-  var tierCeil = scaleDist(baseR);
-  var maxR = Math.min(tierCeil, scaleDist(baseR * tap * affR * stack));
-  purpleBursts.push({ r:0, maxR:maxR, alpha:1, done:false, hit:false, ox:ox, oy:oy, dmgMult:count * tap * aff * stack, isCrit: _currentCrit, purpleTier: purpleTier });
+  var fx = _fx('purple', count);
+  if (!fx) return;
+  var maxR = clampRadiusToArena(fx.radiusPx);
+  // dmg field on purpleBurst: pre-rounded final damage (replaces old
+  // dmgMult × base-3 multiplication at the consumer site).
+  purpleBursts.push({ r:0, maxR:maxR, alpha:1, done:false, hit:false, ox:ox, oy:oy, dmg:fx.dmg, isCrit: _currentCrit, purpleTier: count });
   if (_currentCrit) {
     spawnCritShockwave(ox, oy, '#7B2FBE', { r0: 14, maxR: maxR, thickness: 4, growth: 380 });
     spawnCritFlourish(ox, oy, '#9B6FD4', 26);
@@ -2155,22 +2113,22 @@ function fireOverloadPurple(count, ox, oy) {
   }
 }
 function fireOverloadBlack(count, ox, oy) {
-  var tap = tapScaleMult('black');
-  var aff = affinityMult('black');           // for damage/duration
-  var affR = affinityRadiusMult('black');    // for radius
-  var stack = overloadStackMult(count);
-  var mult = tap * aff * stack;              // damage/duration multiplier
-  var multR = tap * affR * stack;            // radius multiplier
+  var fx = _fx('black', count);
+  if (!fx) return;
   var crit = !!_currentCrit;
+  var radius = clampRadiusToArena(fx.radiusPx);
   if (blackEffect) {
-    blackEffect.RADIUS = Math.min(blackEffect.RADIUS + scaleDist(count * 100 * multR), scaleDist(900 * multR));
-    blackEffect.timer = 3.0 * count * mult;
-    blackEffect.DURATION = 3.0 * count * mult;
-    blackEffect.tickDmg = Math.max(1, Math.ceil(count * mult));
-    if (crit) blackEffect.isCrit = true; // elevate to singularity on crit stack
+    // Existing effect: take the larger of the new cast's radius and the
+    // current radius (effects expand to encompass the new cast, never
+    // shrink). Reset duration to the fresh cast's window.
+    blackEffect.RADIUS = Math.max(blackEffect.RADIUS, radius);
+    blackEffect.timer = fx.duration;
+    blackEffect.DURATION = fx.duration;
+    blackEffect.tickDmg = fx.dmg;
+    if (crit) blackEffect.isCrit = true;
   } else {
-    blackEffect = { timer:3.0*count*mult, DURATION:3.0*count*mult, tickTimer:0, TICK:0.5, alpha:0,
-      FADE_IN:0.8, FADE_OUT:0.8, ox:ox, oy:oy, RADIUS:scaleDist((50+(count-1)*100)*multR), tickDmg:Math.max(1, Math.ceil(count*mult)), isCrit: crit };
+    blackEffect = { timer: fx.duration, DURATION: fx.duration, tickTimer: 0, TICK: 0.5, alpha: 0,
+      FADE_IN: 0.8, FADE_OUT: 0.8, ox: ox, oy: oy, RADIUS: radius, tickDmg: fx.dmg, isCrit: crit };
   }
   if (crit) {
     spawnCritShockwave(ox, oy, '#552288', { r0: 12, maxR: blackEffect.RADIUS, thickness: 4, growth: 280 });
@@ -2485,10 +2443,14 @@ function onBrickDown(e, color) {
     black:  function(cx,cy){ startWitherbolt(cx,cy); },
     orange: function(cx,cy,isDrag,tier){ startOrangeTrap(cx,cy,isDrag?tier:undefined); },
     yellow: function(cx,cy,isDrag){
+      var yfx = _fx('yellow', 1);
+      if (!yfx) return;
       if (isDrag) {
-        startYellowConfuse(cx, cy, scaleDist(87 * tapScaleMult('yellow') * affinityRadiusMult('yellow')));
+        // Tap-drag = small confuse spike at target. Use radius / 2 since
+        // tap-drag is sharper-targeted than the broader aura.
+        startYellowConfuse(cx, cy, clampRadiusToArena(yfx.radiusPx * 0.5));
       } else {
-        startYellowAura({ follow: true, radius: scaleDist(120), duration: 3.0, label: 'DAZE FIELD', isCrit: _currentCrit });
+        startYellowAura({ follow: true, radius: clampRadiusToArena(yfx.radiusPx), duration: yfx.duration, confuseSeed: yfx.confuseSeed, label: 'DAZE FIELD', isCrit: _currentCrit });
       }
     },
     red:    function(cx,cy,isDrag){
@@ -5899,7 +5861,12 @@ function useBrickAction(color) {
 
   if (color === 'red')    startRedCharge(1);
   if (color === 'white')  doWhiteHeal(player.x, player.y);
-  if (color === 'yellow') startYellowAura({ follow: true, radius: scaleDist(120 * tapScaleMult('yellow') * affinityRadiusMult('yellow')), duration: 3.0, label: 'DAZE FIELD', isCrit: _currentCrit });
+  if (color === 'yellow') {
+    var yTapFx = _fx('yellow', 1);
+    if (yTapFx) {
+      startYellowAura({ follow: true, radius: clampRadiusToArena(yTapFx.radiusPx), duration: yTapFx.duration, confuseSeed: yTapFx.confuseSeed, label: 'DAZE FIELD', isCrit: _currentCrit });
+    }
+  }
   if (color === 'blue')   startBlueBolt(null);
   if (color === 'orange') startOrangeTrap(player.x, player.y);
   if (color === 'gray')   startGrayArmor(player.x, player.y);
@@ -6352,7 +6319,7 @@ function doWhiteHeal(targetX, targetY) {
 var yellowAura = null; // { timer, baseRadius, followPlayer, ox, oy, label }
 
 function startYellowAura(opts) {
-  // opts = { radius, duration, follow (bool), ox, oy, label, isCrit }
+  // opts = { radius, duration, follow, ox, oy, label, isCrit, confuseSeed }
   yellowAura = {
     timer: opts.duration || 3.0,
     duration: opts.duration || 3.0,
@@ -6363,9 +6330,12 @@ function startYellowAura(opts) {
     label: opts.label || 'DAZE FIELD',
     pulse: 0,
     isCrit: !!opts.isCrit,  // YELLOW DAZE flag
+    // Tier-scaled confuse-seed duration. Set by callers who pass tier
+    // through the unified pipeline. Falls back to 2.0s legacy default
+    // for any callers that don't supply it.
+    confuseSeed: opts.confuseSeed || 2.0,
   };
   if (opts.isCrit) {
-    // YELLOW flourish: electric yellow shockwave + static spark burst
     spawnCritShockwave(yellowAura.ox, yellowAura.oy, '#F5D000', { r0: 10, maxR: yellowAura.baseRadius, thickness: 3, growth: 300 });
     spawnCritFlourish(yellowAura.ox, yellowAura.oy, '#FFEE44', 20);
     spawnCritFlourish(yellowAura.ox, yellowAura.oy, '#FFD700', 12);
@@ -6381,17 +6351,19 @@ function updateYellowAura(dt) {
   var cx = yellowAura.followPlayer ? player.x : yellowAura.ox;
   var cy = yellowAura.followPlayer ? player.y : yellowAura.oy;
   var r = yellowAura.baseRadius;
-  var mult = tapScaleMult('yellow') * affinityMult('yellow');
+  // Confuse seed comes from the unified pipeline (set at aura creation,
+  // tier-scaled). Top-up duration is half the seed, mimicking the old
+  // 2.0/1.0 ratio.
+  var seed = yellowAura.confuseSeed || 2.0;
+  var topUp = seed * 0.5;
   var isCrit = !!yellowAura.isCrit;
   entities.forEach(function(g) {
     if (Math.hypot(g.x - cx, g.y - cy) <= r) {
       if (!g.confused) {
-        // First entry: seed a 2s confuse (scaled by inventory × affinity)
         g.confused = true;
-        g.confuseTimer = Math.max(g.confuseTimer || 0, 2.0 * mult);
+        g.confuseTimer = Math.max(g.confuseTimer || 0, seed);
       } else {
-        // Already confused: top up each frame in contact (scaled by inventory × affinity)
-        g.confuseTimer = Math.max(g.confuseTimer || 0, 1.0 * mult);
+        g.confuseTimer = Math.max(g.confuseTimer || 0, topUp);
       }
       // YELLOW DAZE: entities caught by crit aura take 2x damage while confused.
       if (isCrit) g.dazed = true;
@@ -6438,19 +6410,18 @@ function drawYellowAura() {
 }
 
 function startYellowConfuse(ox, oy, radius) {
-  // Retained for drag-to-point instant bursts. Aura behavior now lives in
-  // startYellowAura; taps and overloads route through there.
-  var mult = tapScaleMult('yellow') * affinityMult('yellow');
+  // Drag-to-point instant burst. Aura behavior lives in startYellowAura.
+  var fx = _fx('yellow', 1);
+  var seed = fx ? fx.confuseSeed : 2.0;
   var cx = ox !== undefined ? ox : player.x;
   var cy = oy !== undefined ? oy : player.y;
-  var r = radius || scaleDist(300 * mult);
+  var r = radius || (fx ? clampRadiusToArena(fx.radiusPx) : scaleDist(50));
   var hit = 0;
   var isCrit = _currentCrit;
   entities.forEach(function(g) {
     if (Math.hypot(g.x-cx, g.y-cy) <= r) {
       g.confused = true;
-      g.confuseTimer = (g.confuseTimer||0) + 2.0 * mult;
-      // YELLOW DAZE: drag-burst crit also applies daze.
+      g.confuseTimer = (g.confuseTimer||0) + seed;
       if (isCrit) g.dazed = true;
       hit++;
     }
@@ -6525,11 +6496,12 @@ function updateBrickAction(dt, bounds) {
       if (!brickAction.hit) {
         var hitG = entities.find(function(g){ return Math.hypot(player.x-g.x,player.y-g.y) < player.r+g.r; });
         if (hitG) {
-          var rMult = brickAction.dmgMult||1;
+          var rTier = brickAction.dmgMult||1;
           var crit = !!brickAction.isCrit;
           var critMult = crit ? 2.0 : 1.0; // CRUSHING BLOW: 2x damage
           var knockMult = crit ? 2.0 : 1.0; // 2x knockback
-          var rDmg = Math.ceil(3 * tapScaleMult('red') * rMult * overloadStackMult(rMult) * affinityMult('red') * critMult);
+          var rfx = _fx('red', rTier);
+          var rDmg = Math.ceil((rfx ? rfx.dmg : 3) * critMult);
           var rRes = damageEntity(hitG, rDmg, undefined, 'red'); hitG.flashTimer = 0.3;
           showDamageNumber(hitG.x, hitG.y - 30, rRes.applied, crit ? '#FFAA00' : '#E24B4A', rRes.tier, hitG.x, hitG.y, undefined, rRes.witherBoost, hitG);
           if (crit) {
@@ -6538,13 +6510,13 @@ function updateBrickAction(dt, bounds) {
             spawnCritShockwave(hitG.x, hitG.y, '#FF4400', { r0: 10, maxR: scaleDist(140), thickness: 2, growth: 220, fadeRate: 2.6 });
             spawnCritFlourish(hitG.x, hitG.y, '#FFAA00', 24);
           }
-          var rBurst = 8 + rMult * 4; // consistent count regardless of vScale
+          var rBurst = 8 + rTier * 4; // consistent count regardless of vScale
           for (var rbi = 0; rbi < rBurst; rbi++) {
             var rba = Math.random()*Math.PI*2;
-            var rbs = (1.5+Math.random())*(30+rMult*15);
+            var rbs = (1.5+Math.random())*(30+rTier*15);
             purpleParticles.push({ x:hitG.x, y:hitG.y,
               vx:Math.cos(rba)*rbs, vy:Math.sin(rba)*rbs,
-              r:3+rMult+Math.random()*3, alpha:0.9, color:'#ff3300' });
+              r:3+rTier+Math.random()*3, alpha:0.9, color:'#ff3300' });
           }
           var kx = hitG.x - player.x, ky = hitG.y - player.y;
           var kd = Math.sqrt(kx*kx+ky*ky)||1;
@@ -6975,36 +6947,28 @@ function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit) {
 }
 
 function startOrangeTrap(ox, oy, tier) {
-  var tap = tapScaleMult('orange');
-  var aff = affinityMult('orange');           // for damage
-  var affR = affinityRadiusMult('orange');    // for radius
-  var mult = tap * aff;
-  var multR = tap * affR;
   var crit = _currentCrit;
   var isDrag = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) > scaleDist(40);
+  var fx = _fx('orange', tier || 1);
+  if (!fx) return;
   if (isDrag) {
-    var tr = (25 + (tier||1) * 15) * multR;
-    var dmg = Math.max(1, Math.ceil((1 + (tier||1)) * mult));
-    spawnSpikeTrap(ox, oy, tr, dmg, true, crit);
+    spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, crit);
   } else {
-    // Tap — just place small trap at feet
-    spawnSpikeTrap(player.x, player.y, 20 * multR, Math.max(1, Math.round(2 * mult)), false, crit);
+    // Tap-on-self trap is half-radius (sharper, focused at feet) but full damage.
+    spawnSpikeTrap(player.x, player.y, clampRadiusToArena(fx.radiusPx * 0.5), fx.dmg, false, crit);
   }
 }
 
 function fireOverloadOrangeScatter(count, ox, oy) {
-  var tap = tapScaleMult('orange');
-  var aff = affinityMult('orange');           // for damage
-  var affR = affinityRadiusMult('orange');    // for radius
-  var stack = overloadStackMult(count);
-  var tr = (25 + count * 15) * tap * affR * stack;
-  var dmg = Math.max(1, Math.ceil((1 + count) * tap * aff * stack));
-  spawnSpikeTrap(ox, oy, tr, dmg, true, _currentCrit);
+  var fx = _fx('orange', count);
+  if (!fx) return;
+  spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, _currentCrit);
 }
 
 function applyBleed(g, dmg, tier) {
   var bleedDmg = Math.max(1, Math.floor(dmg * 0.5));
-  var duration = 3.0 * Math.pow(1.25, (tier || 1) - 1) * tapScaleMult('orange') * affinityMult('orange');
+  var fx = _fx('orange', tier || 1);
+  var duration = fx ? fx.bleedDur : 3.0;
   bleeds.push({ target: g, dmg: bleedDmg, timer: duration, tick: 0 });
 }
 
@@ -7206,21 +7170,14 @@ function startGrayArmor(targetX, targetY, tier) {
 }
 
 function startGrayWall(cx, cy, tier) {
-  var tap = tapScaleMult('gray');
-  var aff = affinityMult('gray');           // for wall HP
-  var affR = affinityRadiusMult('gray');    // for wall radius
-  var stack = overloadStackMult(tier);
-  // GRAY REINFORCE: wall HP doubles on crit.
+  var fx = _fx('gray', tier);
+  if (!fx) return;
   var wcritMult = _currentCrit ? 2.0 : 1.0;
-  var maxR = scaleDist((30 + tier * 22) * tap * affR * stack);
-  // Cap maxR to 40% of the arena's shorter side so the wall can never
-  // fill the arena (which would push the player out of bounds on mobile).
-  // The cap is generous enough to let overloads feel big while leaving
-  // room for the player to maneuver.
+  // Wall radius: arena clamp baked in. The 40%-of-arena-min wall cap
+  // is now handled by clampRadiusToArena (half-min) — strictly tighter
+  // than 40%, so the old 40% rule is subsumed.
+  var maxR = clampRadiusToArena(fx.radiusPx);
   var _bounds = getRumbleBounds();
-  var _arenaMin = Math.min(_bounds.w, _bounds.h);
-  var _maxAllowed = Math.max(40, Math.round(_arenaMin * 0.40));
-  if (maxR > _maxAllowed) maxR = _maxAllowed;
 
   // RULE 1 — wall spawns from player position outward when it would contain
   // the player. Shifts the wall center AWAY from the player along the
@@ -7230,9 +7187,6 @@ function startGrayWall(cx, cy, tier) {
     var pdist = Math.sqrt(pdx*pdx + pdy*pdy);
     var insideThreshold = maxR + player.r;
     if (pdist < insideThreshold) {
-      // Direction the wall should be pushed away from the player.
-      // If tap was exactly on the player (pdist=0), default to tapping
-      // toward the arena center so the wall lands inside the arena.
       var dirX, dirY;
       if (pdist > 0.5) {
         dirX = pdx / pdist;
@@ -7245,20 +7199,16 @@ function startGrayWall(cx, cy, tier) {
         dirX = ax / amag;
         dirY = ay / amag;
       }
-      // Place wall center such that its near edge is just past the player
       cx = player.x + dirX * insideThreshold;
       cy = player.y + dirY * insideThreshold;
     }
   }
 
-  // RULE 2 — clamp wall center to arena bounds so the full circle stays
-  // inside the arena. Without this, walls placed near edges extend past
-  // playable space and are unreachable / ungainly.
+  // RULE 2 — clamp wall center to arena bounds so the full circle fits.
   cx = Math.max(_bounds.x + maxR, Math.min(_bounds.x + _bounds.w - maxR, cx));
   cy = Math.max(_bounds.y + maxR, Math.min(_bounds.y + _bounds.h - maxR, cy));
 
-  var hp = Math.max(1, Math.ceil(4 * tier * tap * aff * stack * wcritMult));
-  // Mark which entities start inside — only they get contained
+  var hp = Math.max(1, Math.ceil(fx.hp * wcritMult));
   var containedIds = [];
   entities.forEach(function(g, i) {
     if (Math.hypot(g.x-cx, g.y-cy) < maxR) containedIds.push(i);
@@ -7438,22 +7388,23 @@ var greenBurst = null;
 function startGreenBurst(ox, oy) {
   var x = (ox !== undefined) ? ox : player.x;
   var y = (oy !== undefined) ? oy : player.y;
-  var BURST_R = scaleDist(113 * tapScaleMult('green') * affinityRadiusMult('green'));
+  var fx = _fx('green', 1);
+  if (!fx) return;
+  var BURST_R = clampRadiusToArena(fx.radiusPx);
   if (greenBurst && !greenBurst.done) {
-    // Already active — just trigger a new push wave without restarting radius
     greenBurst._poisonedIds = []; // allow re-poison on reuse
     greenBurst._pushIds = [];     // allow re-push
     return;
   }
   greenBurst = { r: 0, maxR: BURST_R, alpha: 1, done: false, _poisonedIds: [], _pushIds: [], ox: x, oy: y };
-  greenBurst._poisonMult = 1 * tapScaleMult('green') * affinityMult('green');
+  greenBurst._poisonMult = fx.stackDmg;
+  greenBurst._stacksApplied = fx.stacks;
   greenBurst._castCount = 1;
   // GREEN NECROSIS: tap crit also sets necrosis flag.
   greenBurst._necrosis = !!_currentCrit;
   // Tap (and release-on-bar) always anchors to the player — aura follows.
   greenBurst._followPlayer = true;
   if (_currentCrit) {
-    // GREEN flourish: toxic green shockwave + dense virulent spore burst
     spawnCritShockwave(x, y, '#39d67a', { r0: 8, maxR: BURST_R, thickness: 3, growth: 320 });
     spawnCritFlourish(x, y, '#1D9E75', 20);
     spawnCritFlourish(x, y, '#7ce39a', 14);
@@ -7825,17 +7776,11 @@ var purpleBursts = [];
 function startPurpleBurst(ox, oy) {
   var x = (ox !== undefined) ? ox : player.x;
   var y = (oy !== undefined) ? oy : player.y;
-  var tap = tapScaleMult('purple');
-  var aff = affinityMult('purple');           // for damage
-  var affR = affinityRadiusMult('purple');    // for radius
-  // Tap is tier I: 237px base. Overload fireOverloadPurple steps through
-  // tier II (400px, 2 bricks), III (600px, 3 bricks), IV (900px, 4+ bricks).
-  // Tap scaling + affinity still apply but won't cross the tier II threshold
-  // since overload is the only way to step up.
-  var maxR = scaleDist(237 * tap * affR);
-  purpleBursts.push({ r: 0, maxR: maxR, alpha: 1, done: false, hit: false, ox: x, oy: y, dmgMult: tap * aff, isCrit: _currentCrit, purpleTier: 1 });
+  var fx = _fx('purple', 1);
+  if (!fx) return;
+  var maxR = clampRadiusToArena(fx.radiusPx);
+  purpleBursts.push({ r: 0, maxR: maxR, alpha: 1, done: false, hit: false, ox: x, oy: y, dmg: fx.dmg, isCrit: _currentCrit, purpleTier: 1 });
   if (_currentCrit) {
-    // PURPLE flourish: arcane violet shockwave + deep wisp burst
     spawnCritShockwave(x, y, '#7B2FBE', { r0: 12, maxR: maxR, thickness: 4, growth: 340 });
     spawnCritFlourish(x, y, '#9B6FD4', 22);
     spawnCritFlourish(x, y, '#CC99FF', 14);
@@ -7872,7 +7817,7 @@ function updatePurpleBursts(dt) {
     var dist = Math.hypot(entity.x-purpleBurst.ox, entity.y-purpleBurst.oy);
     if (purpleBurst.r >= dist) {
       var pbRemote = Math.hypot(purpleBurst.ox-player.x, purpleBurst.oy-player.y) > 20;
-      var purpleDmg = Math.max(1, Math.ceil(3 * (purpleBurst.dmgMult||1)));
+      var purpleDmg = purpleBurst.dmg || Math.max(1, Math.ceil(3 * (purpleBurst.dmgMult||1)));
       var prevHp = entity.hp;
       var puRes = damageEntity(entity, purpleDmg, !pbRemote, 'purple'); entity.flashTimer = 0.2;
       var actualDmg = prevHp - entity.hp; // actual damage dealt (may be less if entity low HP)
@@ -7961,21 +7906,23 @@ function drawPurpleBursts() {
 function startBlackEffect(ox, oy) {
   var x = (ox !== undefined) ? ox : player.x;
   var y = (oy !== undefined) ? oy : player.y;
-  var mult = tapScaleMult('black') * affinityMult('black');
+  var fx = _fx('black', 1);
+  if (!fx) return;
   var crit = !!_currentCrit;
+  var radius = clampRadiusToArena(fx.radiusPx);
   if (blackEffect) {
-    // Already active — expand radius by 1.3x, reset timer, shift origin toward new cast
-    blackEffect.RADIUS = Math.min(blackEffect.RADIUS * 1.3, scaleDist(900 * mult));
+    // Existing effect: take the larger of new and current radius (effects
+    // expand to encompass new casts, never shrink). Refresh timer.
+    blackEffect.RADIUS = Math.max(blackEffect.RADIUS, radius);
     blackEffect.timer = blackEffect.DURATION;
     blackEffect.ox = (blackEffect.ox + x) / 2;
     blackEffect.oy = (blackEffect.oy + y) / 2;
     if (crit) blackEffect.isCrit = true;
   } else {
-    blackEffect = { timer: 3.0 * mult, DURATION: 3.0 * mult, tickTimer: 0, TICK: 0.5, alpha: 0,
-      FADE_IN: 0.8, FADE_OUT: 0.8, ox: x, oy: y, RADIUS: scaleDist(50 * mult), tickDmg: Math.max(1, Math.ceil(1 * mult)), isCrit: crit };
+    blackEffect = { timer: fx.duration, DURATION: fx.duration, tickTimer: 0, TICK: 0.5, alpha: 0,
+      FADE_IN: 0.8, FADE_OUT: 0.8, ox: x, oy: y, RADIUS: radius, tickDmg: fx.dmg, isCrit: crit };
   }
   if (crit) {
-    // BLACK flourish: dark violet shockwave + void particle burst
     spawnCritShockwave(x, y, '#552288', { r0: 10, maxR: blackEffect.RADIUS, thickness: 4, growth: 260 });
     spawnCritShockwave(x, y, '#BB88FF', { r0: 14, maxR: blackEffect.RADIUS * 0.8, thickness: 2, growth: 220 });
     spawnCritFlourish(x, y, '#7744AA', 22);
@@ -8240,9 +8187,9 @@ function _internalStart(config) {
     damageByColor: {},
     damageByTarget: {},
     // Audit diagnostic: snapshot of the most recent overload fire.
-    // Set by fireOverload(); read by Rumble.getDebugInfo() so the
-    // rumble_test overload-audit panel can compare expected vs actual
-    // damage per (color, tier). 600ms window after fire, then frozen.
+    // Captured by fireOverload(), resolved lazily by getDebugInfo().
+    // Used by rumble_test overload-audit panel for expected-vs-actual
+    // damage comparison. No gameplay effect.
     lastOverload: null,
   };
 
@@ -9784,10 +9731,9 @@ window.Rumble = {
   getState: function() { return _computeState(); },
   getConfig: function() { return cfg ? JSON.parse(JSON.stringify(cfg)) : null; },
   getDebugInfo: function() {
-    // Audit-diagnostic: resolve actualDamage lazily for the most
-    // recent overload. While in the 600ms window, accumulate the
-    // damageByColor delta. After 600ms, freeze the value so the
-    // panel keeps showing the last result until the next overload.
+    // Lazy-resolve actualDamage on lastOverload during the 600ms window
+    // after fire. After that, freeze the value so the audit panel keeps
+    // showing the last result until the next overload.
     var _lo = _battleStats && _battleStats.lastOverload;
     if (_lo && !_lo.frozen) {
       var dmgNow = (_battleStats.damageByColor && _battleStats.damageByColor[_lo.color]) || 0;
@@ -9805,19 +9751,22 @@ window.Rumble = {
       wallCount: (grayWalls||[]).length,
       floatingTexts: (floatingTexts||[]).length,
       // Most recent overload snapshot. null until first cast. After
-      // each cast, contains expected vs actual damage for ~600ms,
-      // then frozen until the next cast overwrites it.
+      // each cast, holds expected vs actual damage for ~600ms then
+      // frozen until the next cast overwrites.
       lastOverload: _lo ? {
         color: _lo.color,
         tier: _lo.tier,
-        expectedMult: _lo.expectedMult,
-        isCrit: _lo.isCrit,
+        expectedDmg: _lo.expectedDmg,
+        expectedRadius: _lo.expectedRadius,
+        mult: _lo.mult,
         tapMult: _lo.tapMult,
         affMult: _lo.affMult,
-        stackMult: _lo.stackMult,
+        curveMult: _lo.curveMult,
+        isCrit: _lo.isCrit,
         actualDamage: _lo.actualDamage,
         ageMs: performance.now() - _lo.ts,
         frozen: _lo.frozen,
+        persistentFx: _lo.persistentFx,
       } : null,
       // Per-entity details — shown by waves-live-debug to identify what's
       // hanging around when a wave doesn't advance. Keep it cheap; this gets
@@ -9837,6 +9786,20 @@ window.Rumble = {
           aiState: g._burrowState || g.swingState || null,
         };
       }),
+    };
+  },
+
+  // Arena geometry, exposed for the rumble_test overload-audit panel
+  // so it can show the arena clamp size in the radius table.
+  getArenaInfo: function() {
+    if (typeof getRumbleBounds !== 'function') return null;
+    var b = getRumbleBounds();
+    if (!b) return null;
+    return {
+      w: b.w,
+      h: b.h,
+      halfMin: Math.min(b.w, b.h) / 2,
+      halfDiag: Math.sqrt(b.w*b.w + b.h*b.h) / 2,
     };
   },
 
@@ -9918,23 +9881,6 @@ window.Rumble = {
     showFloatingText(player.x, player.y - 70, '🧀 +' + n + ' HP MAX', '#FFD96A', player);
     if (typeof updateHUD === 'function') updateHUD();
     return n;
-  },
-  // Arena geometry, exposed for the rumble_test overload-audit panel
-  // so it can compute how many tiers of an effect would exceed the
-  // arena bounds. halfDiag is the worst-case "cast at center, effect
-  // reaches corner" reference; halfMin is the conservative reference
-  // most effects clamp against in practice. Cheap to call.
-  getArenaInfo: function() {
-    if (typeof getRumbleBounds !== 'function') return null;
-    var b = getRumbleBounds();
-    var scale = (typeof getDisplayScale === 'function') ? getDisplayScale() : 1;
-    return {
-      w: b.w,
-      h: b.h,
-      scale: scale,
-      halfMin: Math.min(b.w, b.h) / 2,
-      halfDiag: Math.sqrt(b.w*b.w + b.h*b.h) / 2,
-    };
   },
 };
 

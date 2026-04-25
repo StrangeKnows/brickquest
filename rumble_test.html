@@ -347,8 +347,7 @@
      a stuck-state is detected so the user knows to tap in.       */
   #waves-debug-icon {
     position:fixed; bottom:6px; left:6px; z-index:199;
-    /* Hit target 44x44 (Apple HIG min). Inner glyph keeps the
-       small look via padding; outer box absorbs the tap. */
+    /* 44x44 hit target (Apple HIG min). Inner glyph keeps small look. */
     width:44px; height:44px; border-radius:50%;
     background:rgba(8,8,12,0.92);
     border:1px solid #2a2a35;
@@ -358,9 +357,10 @@
     align-items:center; justify-content:center;
     cursor:pointer;
     user-select:none;
-    /* Override body{touch-action:none}. Without this, iOS suppresses
-       synthetic clicks on this element and tap requires two fingers.
-       'manipulation' tells iOS this is a tap target, not a drag/scroll. */
+    /* Override body{touch-action:none} so iOS dispatches single-tap
+       click events. Without this, iOS suppresses synthetic clicks on
+       elements inside touch-action:none surfaces and tap requires two
+       fingers. */
     touch-action:manipulation;
     -webkit-touch-callout:none;
     transition:color 200ms, border-color 200ms;
@@ -375,6 +375,9 @@
     0%,100% { box-shadow:0 0 0 0 rgba(255,68,102,0.0); }
     50%     { box-shadow:0 0 0 6px rgba(255,68,102,0.25); }
   }
+  /* Debug panel spans full arena width when expanded — see-all layout
+     for screenshot capture. Brick bars sit at ~12+48px each side with a
+     gutter, so subtracting ~156px from viewport leaves them visible. */
   #waves-live-debug {
     position:fixed; bottom:54px; left:6px; z-index:198;
     background:rgba(8,8,12,0.95);
@@ -383,18 +386,11 @@
     padding:6px 10px;
     font-family:ui-monospace,monospace; font-size:10px;
     color:#aaa; line-height:1.5;
-    /* Debug mode: take the full arena width so the audit fits on
-       one screen for screenshot capture. Brick bars sit outside
-       the arena (left:12px and right:12px, 48px wide each + gutter)
-       so subtracting ~150px from viewport leaves them visible.
-       Vertical: cap so it never crowds the icon at the very bottom. */
     width:calc(100vw - 156px);
     max-width:calc(100vw - 156px);
     max-height:calc(100vh - 100px);
     overflow-y:auto;
     pointer-events:auto;
-    /* Override body{touch-action:none} so taps inside the panel
-       reach the buttons (END RUN, audit toggle) reliably on iOS. */
     touch-action:manipulation;
     opacity:0; transform:translateY(8px);
     transition:opacity 180ms ease-out, transform 180ms ease-out;
@@ -405,12 +401,11 @@
   #waves-live-debug .val { color:#eee; }
   #waves-live-debug .hi  { color:#F5D000; }
   #waves-live-debug .warn { color:#ff6680; }
-
-  /* ── OVERLOAD AUDIT (sub-section inside debug panel) ─────────
-     Toggleable WIP table showing the current overload scaling
-     curve per color. Read-only diagnostic for the v0.15 nerf
-     pass: surfaces final damage multiplier per (color, tier)
-     given the player's current class + owned brick counts. */
+  /* ── OVERLOAD AUDIT (sub-section) ────────────────────────
+     Read-only diagnostic showing the current overload pipeline
+     output per (color, tier) for the active class + inventory.
+     Drives off window.effectiveAt — the same function the engine
+     uses, so audit numbers match payload exactly. */
   #waves-live-debug .audit-toggle {
     margin-top:6px; padding:4px 6px;
     background:#15151f; border:1px solid #2a2a35; border-radius:4px;
@@ -429,14 +424,12 @@
     margin:0 0 4px 0; font-size:9px; color:#F5D000;
     letter-spacing:.1em; font-family:'Cinzel',serif; font-weight:600;
   }
-  #waves-live-debug .audit-section .audit-meta {
+  #waves-live-debug .audit-meta {
     color:#666; font-size:9px; margin-bottom:4px;
   }
   #waves-live-debug table.audit-table {
     border-collapse:collapse; font-size:9px; width:auto;
     margin-bottom:4px;
-    /* Don't let row labels wrap onto multiple lines. Tables flow
-       at full natural width inside the now-arena-wide panel. */
     white-space:nowrap;
   }
   #waves-live-debug table.audit-table th,
@@ -455,9 +448,6 @@
   #waves-live-debug table.audit-table td.t3 { color:#F5D000; }
   #waves-live-debug table.audit-table td.t4 { color:#ff8866; }
   #waves-live-debug table.audit-table td.t-na { color:#333; }
-  /* Cell highlight when LAST FIRED matches (color, tier). Pulses for
-     ~600ms via the audit-section's poll cycle — the cell carries the
-     hl class while lastOverload.frozen is false. */
   #waves-live-debug table.audit-table td.hl {
     background:rgba(245,208,0,0.15);
     box-shadow:inset 0 0 0 1px rgba(245,208,0,0.55);
@@ -481,10 +471,11 @@
   #waves-live-debug .audit-last .lf-color { color:#F5D000; font-weight:600; }
   #waves-live-debug .audit-last .lf-tier  { color:#ff8866; }
   #waves-live-debug .audit-last .lf-crit  { color:#ff4466; font-weight:700; }
+  #waves-live-debug .audit-last .lf-fx    { color:#ff8866; font-style:italic; }
   #waves-live-debug .audit-last .lf-ratio-good { color:#9adb9a; }
   #waves-live-debug .audit-last .lf-ratio-warn { color:#ff8866; }
   #waves-live-debug .audit-last .lf-ratio-bad  { color:#ff4466; }
-  #waves-live-debug .audit-section .audit-note {
+  #waves-live-debug .audit-note {
     color:#666; font-size:9px; font-style:italic;
     margin-top:4px; line-height:1.4;
   }
@@ -1194,11 +1185,8 @@ function updateWaveBadge(n) {
 }
 
 // ── LIVE DEBUG PANEL ────────────────────────────────────────────────
-// Polled every 250ms whenever a rumble is active (any mode). Surfaces
-// entity state for stuck-detection in waves, plus the overload audit
-// table for tuning work in sandbox/spec. The stuck-state pulse and
-// END RUN button only appear under wave conditions; the audit section
-// works in every mode.
+// Polled every 250ms during a waves run. Surfaces entity state so we can
+// see exactly what's hanging around when a wave fails to advance.
 var _liveDebugTimer = null;
 function startLiveDebug() {
   stopLiveDebug();
@@ -1209,19 +1197,16 @@ function startLiveDebug() {
     icon.id = 'waves-debug-icon';
     icon.textContent = '⛁';
     icon.title = 'Wave debug';
-    // iOS Safari: with body{touch-action:none} (set for the canvas
-    // gesture pipeline), synthetic clicks on small icons fire
-    // unreliably — taps often require two fingers. Bind touchend
-    // explicitly so a single-finger tap toggles the panel without
-    // waiting for the click synthesis. preventDefault stops the
-    // doubled (touchend + click) firing.
-    var _toggleFromTouch = function(ev) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      toggleLiveDebug();
-    };
-    icon.addEventListener('touchend', _toggleFromTouch, { passive: false });
     icon.addEventListener('click', toggleLiveDebug);
+    // iOS click suppression workaround: the body has touch-action:none for
+    // gameplay, which makes Safari skip dispatching synthetic clicks on
+    // single taps. Bind touchend explicitly and call preventDefault to
+    // claim the gesture before the engine sees it. Without this, iOS users
+    // need a two-finger tap to open the panel.
+    icon.addEventListener('touchend', function(ev) {
+      ev.preventDefault();
+      toggleLiveDebug();
+    }, { passive: false });
     document.body.appendChild(icon);
   }
   icon.classList.add('visible');
@@ -1252,6 +1237,127 @@ function toggleLiveDebug() {
 // the force-kill button. Avoids showing it during normal play.
 var _lastEntityChangeAt = 0;
 var _lastEntityCount = -1;
+
+// Audit panel open/closed state. Persists across panel re-renders so the
+// section stays open between updateLiveDebug ticks.
+var _auditOpen = false;
+function toggleAuditSection() {
+  _auditOpen = !_auditOpen;
+  // Force an immediate re-render rather than waiting for the next tick so
+  // the section pops open/closed without lag.
+  updateLiveDebug();
+}
+
+// Per-color row order in audit tables. Same order as the brick bar so
+// the table reads visually like the bar (red on bottom, black on top).
+var AUDIT_COLORS = ['red','white','yellow','orange','gray','green','blue','purple','black'];
+
+// Build the overload-audit markup. Two tables (DAMAGE + RADIUS) plus a
+// LAST FIRED line showing expected-vs-actual. Reads window.effectiveAt
+// directly — same source as engine — so audit numbers cannot drift from
+// payload. Cells of the LAST FIRED color/tier get pulse-highlighted.
+function buildOverloadAuditMarkup(info) {
+  if (!window.effectiveAt || !window.STARTING_KIT_COUNTS) return '';
+  var state = (Rumble.getState && Rumble.getState()) || {};
+  var cls = state.playerCls || (window.MY_CLASS || 'fixer');
+  var brickMax = state.playerBrickMax || {};
+  var canonical = window.STARTING_KIT_COUNTS[cls] || {};
+  var arena = (Rumble.getArenaInfo && Rumble.getArenaInfo()) || null;
+
+  // Detect "current kit differs from canonical" — only show the second
+  // table when something has been added beyond starting inventory.
+  var differsFromCanonical = AUDIT_COLORS.some(function(c) {
+    return (brickMax[c] || 0) !== (canonical[c] || 0);
+  });
+
+  // ── Helper: render one tier table for a given owned-counts map ──
+  // metric: 'dmg' or 'radiusPx'. The cell value is whatever the unified
+  // pipeline produces for that color; for damage we fall back across
+  // dmg → heal → stackDmg → hp so every color has a visible number.
+  function renderTable(ownedMap, metric, lastColor, lastTier) {
+    var maxTier = 4; // show up to T4 columns; cells beyond owned grey out
+    var html = '<table class="audit-table"><thead><tr><th></th>';
+    for (var t = 1; t <= maxTier; t++) html += '<th>T' + t + '</th>';
+    html += '</tr></thead><tbody>';
+    AUDIT_COLORS.forEach(function(c) {
+      var owned = ownedMap[c] || 0;
+      html += '<tr><td class="color-cell">' + c + ' <span class="lbl">(' + owned + ')</span></td>';
+      for (var t = 1; t <= maxTier; t++) {
+        // Cap tier at what the player can actually overload — owning N
+        // bricks means max tier is N. Cells beyond that show as N/A.
+        if (t > owned && owned > 0) {
+          html += '<td class="t-na">·</td>';
+          continue;
+        }
+        if (owned <= 0) {
+          html += '<td class="t-na">·</td>';
+          continue;
+        }
+        var fx = window.effectiveAt(c, t, cls, owned);
+        var v;
+        if (metric === 'radiusPx') {
+          v = Math.round(fx.radiusPx);
+        } else {
+          v = fx.dmg || fx.heal || fx.stackDmg || fx.hp || 0;
+        }
+        var hl = (lastColor === c && lastTier === t) ? ' hl' : '';
+        html += '<td class="t' + t + hl + '">' + v + '</td>';
+      }
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+  }
+
+  // ── LAST FIRED block ──
+  var lo = info && info.lastOverload;
+  var lastColor = lo ? lo.color : null;
+  var lastTier  = lo ? lo.tier : null;
+  var lastBlock;
+  if (!lo) {
+    lastBlock = '<div class="audit-last idle">LAST FIRED: <span class="lbl">no overloads cast yet</span></div>';
+  } else {
+    var ratio = lo.expectedDmg > 0 ? (lo.actualDamage / lo.expectedDmg) : 0;
+    var ratioCls = 'lf-ratio-good';
+    if (lo.persistentFx) ratioCls = 'lf-ratio-warn';      // DoT contamination likely
+    else if (ratio > 1.4 || ratio < 0.6) ratioCls = 'lf-ratio-bad';
+    else if (ratio > 1.15 || ratio < 0.85) ratioCls = 'lf-ratio-warn';
+    var stateCls = lo.frozen ? ' frozen' : '';
+    var critBadge = lo.isCrit ? ' <span class="lf-crit">CRIT</span>' : '';
+    var fxNote = lo.persistentFx ? ' <span class="lf-fx">(persistent fx active — actual may include DoT)</span>' : '';
+    lastBlock = '<div class="audit-last' + stateCls + '">'
+      + 'LAST FIRED: <span class="lf-color">' + lo.color + '</span> '
+      + '<span class="lf-tier">T' + lo.tier + '</span>' + critBadge
+      + ' &nbsp; expected <span class="val">' + lo.expectedDmg + '</span>'
+      + ' &middot; actual <span class="val">' + lo.actualDamage + '</span>'
+      + ' &nbsp; ratio <span class="' + ratioCls + '">' + ratio.toFixed(2) + '×</span>'
+      + ' &nbsp; <span class="lbl">mult ' + lo.mult.toFixed(2) + '</span>'
+      + fxNote
+      + '</div>';
+  }
+
+  // ── Assemble ──
+  var arenaLine = arena
+    ? '<div class="audit-meta">class <span class="val">' + cls + '</span>'
+      + ' &middot; arena ' + Math.round(arena.w) + '×' + Math.round(arena.h)
+      + ' &middot; clamp ≤ <span class="val">' + Math.round(arena.halfMin) + 'px</span></div>'
+    : '<div class="audit-meta">class <span class="val">' + cls + '</span></div>';
+
+  var html = '';
+  html += '<h4>OVERLOAD AUDIT (WIP)</h4>';
+  html += arenaLine;
+  html += lastBlock;
+  html += '<div class="audit-meta">DAMAGE / HEAL / STACK-DMG &middot; canonical kit</div>';
+  html += renderTable(canonical, 'dmg', lastColor, lastTier);
+  if (differsFromCanonical) {
+    html += '<div class="audit-meta">DAMAGE &middot; current kit (this run)</div>';
+    html += renderTable(brickMax, 'dmg', lastColor, lastTier);
+  }
+  html += '<div class="audit-meta">RADIUS (px, after arena clamp)</div>';
+  html += renderTable(differsFromCanonical ? brickMax : canonical, 'radiusPx', lastColor, lastTier);
+  html += '<div class="audit-note">Numbers come from window.effectiveAt — same call the engine fires. Highlighted cell = last cast.</div>';
+  return html;
+}
 
 function updateLiveDebug() {
   var d = document.getElementById('waves-live-debug');
@@ -1303,315 +1409,29 @@ function updateLiveDebug() {
     ? '<div style="margin-top:6px;text-align:center;pointer-events:auto;">'
       + '<div class="warn" style="font-size:9px;margin-bottom:3px;">STUCK ' + Math.round(stuckMs/1000) + 's</div>'
       + '<button onclick="forceKillAll()" style="background:#2a0010;border:1px solid #ff4466;color:#ff8899;'
-      + 'border-radius:4px;padding:6px 12px;font-size:10px;font-family:ui-monospace,monospace;'
+      + 'border-radius:4px;padding:6px 14px;font-size:11px;font-family:ui-monospace,monospace;'
       + 'letter-spacing:.08em;cursor:pointer;touch-action:manipulation;">END RUN</button></div>'
     : '';
-  // ── OVERLOAD AUDIT (sub-section, WIP diagnostic) ──
-  // Remember open-state across the 250ms innerHTML rebuilds. The flag
-  // lives on the panel element itself so the toggle persists.
-  var auditOpen = !!(d._auditOpen);
-  var auditMarkup = buildOverloadAuditMarkup();
-  var auditBlock =
-      '<div class="audit-toggle" onclick="toggleAuditSection()">'
-    +   (auditOpen ? '▼' : '▸') + ' OVERLOAD AUDIT (WIP)'
-    + '</div>'
-    + '<div class="audit-section' + (auditOpen ? ' open' : '') + '" id="audit-section">'
-    +   auditMarkup
+  // Overload-audit toggle + section. Available in every mode (waves,
+  // sandbox, spec) so screenshots can capture canonical vs current
+  // kit behavior anywhere.
+  var auditToggle = '<div class="audit-toggle" onclick="toggleAuditSection()">'
+    + (_auditOpen ? '▼' : '▸') + ' OVERLOAD AUDIT (WIP)</div>';
+  var auditSection = '<div class="audit-section' + (_auditOpen ? ' open' : '') + '">'
+    + (_auditOpen ? buildOverloadAuditMarkup(info) : '')
     + '</div>';
-
   d.innerHTML =
       '<div><span class="lbl">wave</span> <span class="hi">' + _waveState.currentWave + '</span>'
     +   ' <span class="lbl">adv</span> <span class="val">' + (_waveState.advancing ? 'Y' : 'n') + '</span></div>'
     + '<div><span class="lbl">entities</span> <span class="val">' + info.entityCount + '</span></div>'
     + entityList
     + stuckBtn
-    + auditBlock;
+    + auditToggle
+    + auditSection;
   // Pulse the collapsed icon red when stuck — draws the eye toward the
   // affordance even when the panel itself is closed.
   var icon = document.getElementById('waves-debug-icon');
   if (icon) icon.classList.toggle('stuck', isStuck);
-}
-
-// Toggle the audit section open/closed. State is stored on the panel
-// element so it survives the 250ms innerHTML refresh in updateLiveDebug.
-function toggleAuditSection() {
-  var d = document.getElementById('waves-live-debug');
-  if (!d) return;
-  d._auditOpen = !d._auditOpen;
-  // Force an immediate redraw so the chevron flips without a 250ms wait.
-  updateLiveDebug();
-}
-
-// ── OVERLOAD AUDIT TABLES ───────────────────────────────────
-// Read-only diagnostic. Computes the effective per-tier overload
-// scaling for the current class + current owned-brick counts.
-//
-// Two tables:
-//   1. Output multiplier per (color, tier).  count × stack × tap × aff.
-//      This is the lever the v0.15 nerf is targeting. Tier-1 baseline
-//      stays; tier-4 is what we're compressing.
-//   2. Radius growth per color.  Hardcoded from rumble.js fire formulas
-//      (see rumble.js:1029-1284 comments). Highlights black as the
-//      outlier flagged by the handoff.
-//
-// All math runs client-side off characters.js global helpers
-// (window.affinityMult, window.tapScaleMult, window.overloadStackMult).
-// No rumble.js edits needed.
-// All 9 overload-capable brick colors. Blue is a homing single-target
-// bolt with small impact burst — different shape from the AoE colors,
-// but its damage chain (count × stack × tap × aff × crit) is identical
-// to the others, so it belongs in the audit. Order: lighter to darker.
-var AUDIT_COLORS = ['red','white','yellow','orange','gray','green','blue','purple','black'];
-
-function buildOverloadAuditMarkup() {
-  var st = (Rumble.getState && Rumble.getState()) || null;
-  if (!st || !st.playerCls) {
-    return '<div class="audit-meta">no active rumble — start a run to see numbers</div>';
-  }
-  var cls = st.playerCls;
-  var ownedCurrent = st.playerBrickMax || {};
-  var clsName = (window.getCharName && window.getCharName(cls)) || cls;
-  var startingKit = (window.STARTING_KIT_COUNTS && window.STARTING_KIT_COUNTS[cls]) || {};
-
-  // LAST FIRED block — pulled from getDebugInfo().lastOverload.
-  // Compares model-expected multiplier against actual damage delta
-  // captured in the 600ms after the fire. Big mismatches surface
-  // hidden multipliers we missed in the model (crit, signature
-  // radius, witherBoost, etc.). The ratio is the headline number.
-  var info = (Rumble.getDebugInfo && Rumble.getDebugInfo()) || {};
-  var lo = info.lastOverload;
-  var lastFiredHtml = '';
-  var hlColor = null, hlTier = null;
-  if (lo) {
-    hlColor = lo.color; hlTier = lo.tier;
-    var stateClass = lo.frozen ? 'frozen' : '';
-    var critTag = lo.isCrit ? ' <span class="lf-crit">CRIT</span>' : '';
-    // Damage ratio diagnostic. expectedMult is unitless; actualDamage
-    // is real damage dealt in the 600ms window. Ratio = dmg per unit
-    // of multiplier — should be roughly constant across tiers if the
-    // model is accurate. Divergence means a hidden multiplier exists.
-    var ratioStr = '';
-    if (lo.actualDamage > 0) {
-      var perMultDamage = lo.actualDamage / lo.expectedMult;
-      var ratioCls = perMultDamage > 6 ? 'lf-ratio-bad'
-                    : perMultDamage > 4 ? 'lf-ratio-warn'
-                    : 'lf-ratio-good';
-      ratioStr = ' → <span class="' + ratioCls + '">'
-               + perMultDamage.toFixed(1) + ' dmg/mult</span>';
-    }
-    lastFiredHtml =
-        '<div class="audit-last ' + stateClass + '">'
-      +   'LAST: <span class="lf-color">' + lo.color + '</span> '
-      +   '<span class="lf-tier">T' + lo.tier + '</span>' + critTag
-      +   ' · expect <span class="hi">' + lo.expectedMult.toFixed(2) + '×</span>'
-      +   ' · actual <span class="val">' + Math.round(lo.actualDamage) + ' dmg</span>'
-      +   ratioStr
-      + '</div>';
-  } else {
-    lastFiredHtml = '<div class="audit-last idle">LAST: (no overload fired yet)</div>';
-  }
-
-  // ── CANONICAL TABLE ─────────────────────────────────────
-  // What the curve actually looks like at level-1 starting inventory.
-  // tap=1.0 across the board, brickMax = startingKit. Most colors
-  // can't even reach T2 here; that's the truth — the typical fight
-  // uses T1-T2 casts on sig colors. Tuning to this is what matters.
-  // Cells past brickMax for that color show "—".
-  var canonMaxN = 0;
-  AUDIT_COLORS.forEach(function(c) { canonMaxN = Math.max(canonMaxN, startingKit[c] || 0); });
-  canonMaxN = Math.max(canonMaxN, 2); // always show at least T1-T2 columns
-
-  // ── SANDBOX TABLE ───────────────────────────────────────
-  // Current playthrough inventory. Inflated in sandbox by random
-  // 1-10 rolls per color, so sig-color casts here can climb to T8+.
-  // This is where fusion-headroom lives — what does the high end
-  // look like at carry-everything inventory?
-  var sandMaxN = 0;
-  AUDIT_COLORS.forEach(function(c) { sandMaxN = Math.max(sandMaxN, ownedCurrent[c] || 0); });
-  sandMaxN = Math.max(sandMaxN, 2);
-
-  function buildTable(label, owned, maxN, kindClass) {
-    var headerCells = '';
-    for (var th = 1; th <= maxN; th++) {
-      headerCells += '<th>T' + th + '</th>';
-    }
-    var rows = '';
-    AUDIT_COLORS.forEach(function(color) {
-      var ownedN = owned[color] || 0;
-      var tap = (window.tapScaleMult && window.tapScaleMult(cls, color, ownedN)) || 1;
-      var aff = (window.affinityMult && window.affinityMult(cls, color)) || 1;
-      var cells = '';
-      for (var t = 1; t <= maxN; t++) {
-        if (t > ownedN) {
-          // Beyond this color's ceiling for this kit.
-          cells += '<td class="t-na">—</td>';
-        } else {
-          var stack = (window.overloadStackMult && window.overloadStackMult(t)) || 1;
-          var mult = t * stack * tap * aff;
-          // Tier color escalation: 1=dim, 2=mid, 3=warn, 4+=hot.
-          // Caps display class at t4 for ≥4 so colors don't run out.
-          var tCls = 't' + Math.min(t, 4);
-          var isHl = !lo || lo.frozen ? false
-                   : (color === hlColor && t === hlTier && kindClass === 'sandbox');
-          cells += '<td class="' + tCls + (isHl ? ' hl' : '') + '">' + mult.toFixed(2) + '×</td>';
-        }
-      }
-      var affTag = aff === 1.25 ? 'sig' : (aff === 0.8 ? 'base' : 'sec');
-      rows += '<tr><td class="color-cell">' + color
-            + ' <span class="lbl">(' + affTag + ' · ' + ownedN + ')</span></td>'
-            + cells + '</tr>';
-    });
-    return '<h4>' + label + '</h4>'
-         + '<table class="audit-table"><tr><th>color</th>' + headerCells + '</tr>'
-         + rows + '</table>';
-  }
-
-  var canonTable = buildTable('CANONICAL — level-1 kit', startingKit, canonMaxN, 'canon');
-  // Only show sandbox table if it differs meaningfully from canonical
-  // (i.e., player has more than starting kit somewhere). In waves/spec
-  // modes the kit IS the starting kit, so the second table would be
-  // redundant.
-  var differsFromCanon = AUDIT_COLORS.some(function(c) {
-    return (ownedCurrent[c] || 0) !== (startingKit[c] || 0);
-  });
-  var sandTable = differsFromCanon
-    ? buildTable('CURRENT KIT — this run', ownedCurrent, sandMaxN, 'sandbox')
-    : '';
-
-  // ── RADIUS — live computed, mirrors the DAMAGE format ──
-  // Each color's radius formula sourced from rumble.js fire functions.
-  // baseR(n) → raw px before tap/affR/stack. internalCap → optional
-  // per-color hard cap inside the engine BEFORE arena clamp. Arena
-  // clamp applied last via Rumble.getArenaInfo().halfMin.
-  //
-  // SOURCE: rumble.js fire site comments (lines 1029, 1075-89, 1115,
-  // 1158, 1191-1205, 1233-37, 1284, 2038).
-  //   red    — projectile, no AoE radius
-  //   white  — 60 + tier×20         (no internal cap)
-  //   yellow — 120 + (n-1)×40       (capped at scaleDist(500))
-  //   orange — 25 + n×15            (no internal cap)
-  //   gray   — 30 + tier×22         (no internal cap)
-  //   green  — 113                  (constant, no scaling at all)
-  //   blue   — 30 + count×15        (no internal cap, impact burst)
-  //   purple — 237/400/600/900      (TIER-FIXED ceiling per count band)
-  //   black  — 50 + (n-1)×100       (capped at 900×mult — itself scales)
-  //
-  // For each, applies `tap × affR × stack` on top of baseR (per the
-  // engine), then internal cap, then arena clamp.
-  var RADIUS_FORMULAS = {
-    red:    { kind: 'projectile' },
-    white:  { kind: 'aoe', baseR: function(n) { return 60 + n*20; } },
-    yellow: { kind: 'aoe', baseR: function(n) { return 120 + (n-1)*40; }, internalCap: 500 },
-    orange: { kind: 'aoe', baseR: function(n) { return 25 + n*15; } },
-    gray:   { kind: 'aoe', baseR: function(n) { return 30 + n*22; } },
-    green:  { kind: 'aoe', baseR: function(n) { return 113; } },
-    blue:   { kind: 'aoe', baseR: function(n) { return 30 + n*15; } },
-    purple: { kind: 'aoe', baseR: function(n) {
-                if (n >= 4) return 900;
-                if (n >= 3) return 600;
-                if (n >= 2) return 400;
-                return 237;
-              }, tierFixedCeiling: true },
-    black:  { kind: 'aoe', baseR: function(n) { return 50 + (n-1)*100; },
-              // black's internal cap is 900×mult (itself scales) — modeled
-              // by passing a scaling cap callback; see compute below.
-              internalCapScales: true },
-  };
-
-  var arena = (Rumble.getArenaInfo && Rumble.getArenaInfo()) || null;
-  var arenaR = arena ? arena.halfMin : Infinity; // px
-
-  function computeRadius(color, n, tap, affR, stack) {
-    var f = RADIUS_FORMULAS[color];
-    if (!f || f.kind === 'projectile') return null;
-    var base = f.baseR(n);
-    var cap = null;
-    if (f.tierFixedCeiling) {
-      // Purple: tier baseline IS the ceiling. tap/affR/stack scale
-      // within tier but cannot exceed it.
-      cap = base; // pre-multiplier ceiling
-      var raw = base * tap * affR * stack;
-      var capped = Math.min(cap, raw);
-      return { px: Math.min(capped, arenaR), internalCapped: raw > cap, arenaCapped: capped > arenaR };
-    }
-    var raw = base * tap * affR * stack;
-    if (f.internalCap) {
-      var beforeArena = Math.min(f.internalCap, raw);
-      return { px: Math.min(beforeArena, arenaR), internalCapped: raw > f.internalCap, arenaCapped: beforeArena > arenaR };
-    }
-    if (f.internalCapScales) {
-      // black: cap is 900 × (tap × aff × stack). Model uses affinityMult
-      // for damage-side mult (matches engine line 1284 `bMult` = tap*aff*stack
-      // — note: damage aff, not affR, in source).
-      var blackMult = tap * affR * stack;  // approximation for diagnostic
-      var capped2 = Math.min(900 * blackMult, raw);
-      return { px: Math.min(capped2, arenaR), internalCapped: raw > 900*blackMult, arenaCapped: capped2 > arenaR };
-    }
-    return { px: Math.min(raw, arenaR), internalCapped: false, arenaCapped: raw > arenaR };
-  }
-
-  function buildRadiusTable(label, owned, maxN) {
-    var headerCells = '';
-    for (var th = 1; th <= maxN; th++) headerCells += '<th>T' + th + '</th>';
-    var rows = '';
-    var anyArenaCap = false, anyInternalCap = false;
-    AUDIT_COLORS.forEach(function(color) {
-      var ownedN = owned[color] || 0;
-      var tap = (window.tapScaleMult && window.tapScaleMult(cls, color, ownedN)) || 1;
-      var affR = (window.affinityRadiusMult && window.affinityRadiusMult(cls, color)) || 1;
-      var f = RADIUS_FORMULAS[color];
-      var cells = '';
-      if (!f || f.kind === 'projectile') {
-        cells = '<td colspan="' + maxN + '" class="lbl" style="text-align:left;">projectile (no AoE)</td>';
-      } else {
-        for (var t = 1; t <= maxN; t++) {
-          if (t > ownedN) {
-            cells += '<td class="t-na">—</td>';
-          } else {
-            var stack = (window.overloadStackMult && window.overloadStackMult(t)) || 1;
-            var r = computeRadius(color, t, tap, affR, stack);
-            if (!r) { cells += '<td class="t-na">—</td>'; continue; }
-            var marker = '';
-            if (r.arenaCapped)    { marker += '†'; anyArenaCap = true; }
-            if (r.internalCapped) { marker += '*'; anyInternalCap = true; }
-            // Tier color escalation matches damage table.
-            var tCls = 't' + Math.min(t, 4);
-            cells += '<td class="' + tCls + '">' + Math.round(r.px) + 'px' + marker + '</td>';
-          }
-        }
-      }
-      rows += '<tr><td class="color-cell">' + color + '</td>' + cells + '</tr>';
-    });
-    var legend = '';
-    if (anyInternalCap || anyArenaCap) {
-      legend = '<div class="audit-meta" style="margin-top:2px;">'
-             + (anyInternalCap ? '<span class="hi">*</span> internal cap · ' : '')
-             + (anyArenaCap ? '<span class="warn">†</span> arena clamp ('
-                  + (arena ? Math.round(arenaR) : '?') + 'px)' : '')
-             + '</div>';
-    }
-    return '<h4>' + label + '</h4>'
-         + '<table class="audit-table"><tr><th>color</th>' + headerCells + '</tr>'
-         + rows + '</table>'
-         + legend;
-  }
-
-  var canonRadiusTable = buildRadiusTable('RADIUS — canonical', startingKit, canonMaxN);
-  var sandRadiusTable = differsFromCanon
-    ? buildRadiusTable('RADIUS — current kit', ownedCurrent, sandMaxN)
-    : '';
-
-  return '<h4 style="margin-top:0;">' + clsName.toUpperCase() + '</h4>'
-       + '<div class="audit-meta">final = count × stack × tap × aff'
-       + ' · row label (affinity · ownedN)</div>'
-       + lastFiredHtml
-       + canonTable
-       + sandTable
-       + canonRadiusTable
-       + sandRadiusTable
-       + '<div class="audit-note">target: T4 ≈ 2.0× T1 across the board after nerf. '
-       + 'reserves headroom for fusion. black radius needs the heaviest compression. '
-       + 'fusion may push beyond arena bounds (deferred).</div>';
 }
 
 // Manual escape hatch for stuck waves: kill all living entities by setting
@@ -2439,12 +2259,9 @@ function startTestRumble(cls) {
     _waveState.active = false;
     hideWaveHud();
   }
-
-  // Live debug icon — available in ALL modes so the overload audit
-  // panel is reachable from sandbox and spec, not just waves. The
-  // stuck-state pulse only fires under wave conditions, so non-wave
-  // modes just see a quiet icon. The audit panel runs the same way
-  // in every mode (driven by Rumble.getState/getDebugInfo).
+  // Debug icon + overload-audit panel are useful in every mode (sandbox,
+  // spec, waves) — gate-free so screenshots and tier-output checks can
+  // happen wherever the rumble is running.
   startLiveDebug();
 }
 
