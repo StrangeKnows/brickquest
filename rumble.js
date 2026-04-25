@@ -1597,11 +1597,18 @@ function roundRect(ctx, x, y, w, h, r) {
 // ═══════════════════════════════════════════════════
 // GAME LOOP
 // ═══════════════════════════════════════════════════
+// External pause flag — host pages set this via Rumble.setExternalPause(bool)
+// when an overlay/screen is up that should freeze gameplay (wave-victory,
+// run-summary). Same gating semantics as _revivePaused: update is skipped,
+// draw + HUD continue. Without this, enemies still tick and damage still
+// applies while the player is reading stats.
+var _externalPause = false;
+
 function loop(ts) {
   try {
     var dt = Math.min((ts - lastTs) / 1000, 0.05);
     lastTs = ts;
-    if (!_revivePaused) update(dt);
+    if (!_revivePaused && !_externalPause) update(dt);
     draw();
     updateHUD();
     renderBrickBar();
@@ -9657,6 +9664,18 @@ window.Rumble = {
     }
     entities.push(ent);
     return ent;
+  },
+  // Pause/unpause gameplay sim from a host page. While true, update(dt) is
+  // skipped — entities don't tick, damage doesn't apply, DoTs don't fire.
+  // draw() and HUD continue rendering so visuals stay accurate. Used by
+  // test harness when wave-victory or run-summary screens are showing.
+  setExternalPause: function(paused) {
+    _externalPause = !!paused;
+    // Clear the active-combat timestamp on unpause so the tracker doesn't
+    // count the pause window as engagement time.
+    if (!paused && _battleStats) {
+      _battleStats._lastDamageAt = 0;
+    }
   },
   // Instantly refill all brick charges to their max. Used between waves
   // (waves mode skips the post-rumble refill loop). No animation; the

@@ -1371,6 +1371,9 @@ function showWaveVictoryScreen(waveNum, theme, delta, infoAtClear) {
     +   'wave=' + _waveState.currentWave + ' · entityCount=' + (infoAtClear && infoAtClear.entityCount) + ' · advancing=' + _waveState.advancing
     + '</div>';
   v.classList.add('visible');
+  // Pause gameplay sim — no more entity ticks or damage application
+  // while the player is reading the wave summary.
+  if (Rumble.setExternalPause) Rumble.setExternalPause(true);
 }
 
 function hideWaveVictoryScreen() {
@@ -1437,6 +1440,8 @@ function continueToNextWave() {
   _waveState.advancing = false;
   captureWaveSnapshot();
   spawnWave(_waveState.currentWave);
+  // Resume sim after the new wave is spawned and ready
+  if (Rumble.setExternalPause) Rumble.setExternalPause(false);
 }
 
 // ── RUN-SUMMARY SCREEN ──────────────────────────────────────────────
@@ -1826,6 +1831,9 @@ function showRunSummary() {
     + '</div>';
   rs.classList.remove('fading-out');
   rs.classList.add('visible');
+  // Pause gameplay sim if waves still active (mid-run ESC). When summary
+  // shows on run-end, _waveState.active is already false; pause is harmless.
+  if (Rumble.setExternalPause) Rumble.setExternalPause(true);
 }
 
 function hideRunSummary() {
@@ -1844,12 +1852,16 @@ function resumeFromSummary() {
   hideRunSummary();
   if (_waveVictoryWasUnderSummary) {
     _waveVictoryWasUnderSummary = false;
-    // Re-show wave-victory using the most recent wave data
+    // Re-show wave-victory using the most recent wave data.
+    // showWaveVictoryScreen will engage pause again.
     if (_waveHistory.length > 0) {
       var last = _waveHistory[_waveHistory.length - 1];
       var infoNow = Rumble.getDebugInfo && Rumble.getDebugInfo();
       showWaveVictoryScreen(last.waveNum, last.theme, last.delta, infoNow);
     }
+  } else {
+    // No screen underneath — gameplay resumes
+    if (Rumble.setExternalPause) Rumble.setExternalPause(false);
   }
 }
 
