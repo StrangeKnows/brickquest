@@ -1698,8 +1698,9 @@ function _renderHoldOverlay() {
     const ownedW = (me && me.bricks && me.bricks.white) || 0;
     const previewAmt = computeHeal(MY_CLASS, 'white', ownedW, s.tier);
     // Same side as fan: fan opens left (π) → number on left; opens right (0) → number on right
+    // Offset clears the arc (radius ~120) plus padding so the text doesn't crowd the curve
     const fanOpensLeft = (s.fanCenterAngle === Math.PI);
-    const previewX = fanOpensLeft ? (s.chipCx - 180) : (s.chipCx + 100);
+    const previewX = fanOpensLeft ? (s.chipCx - 260) : (s.chipCx + 180);
     const previewY = s.chipCy - 24;
     const tColor = BRICK_COLORS[s.color] || '#fff';
     html += `<div style="position:absolute;left:${previewX}px;top:${previewY}px;
