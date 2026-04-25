@@ -1182,8 +1182,11 @@ function updateWaveBadge(n) {
 }
 
 // ── LIVE DEBUG PANEL ────────────────────────────────────────────────
-// Polled every 250ms during a waves run. Surfaces entity state so we can
-// see exactly what's hanging around when a wave fails to advance.
+// Polled every 250ms whenever a rumble is active (any mode). Surfaces
+// entity state for stuck-detection in waves, plus the overload audit
+// table for tuning work in sandbox/spec. The stuck-state pulse and
+// END RUN button only appear under wave conditions; the audit section
+// works in every mode.
 var _liveDebugTimer = null;
 function startLiveDebug() {
   stopLiveDebug();
@@ -2277,11 +2280,17 @@ function startTestRumble(cls) {
     _runStartTime = performance.now();  // for elapsed-run-time display
     captureWaveSnapshot();
     spawnWave(1);
-    startLiveDebug();
   } else {
     _waveState.active = false;
     hideWaveHud();
   }
+
+  // Live debug icon — available in ALL modes so the overload audit
+  // panel is reachable from sandbox and spec, not just waves. The
+  // stuck-state pulse only fires under wave conditions, so non-wave
+  // modes just see a quiet icon. The audit panel runs the same way
+  // in every mode (driven by Rumble.getState/getDebugInfo).
+  startLiveDebug();
 }
 
 function updateReadout(state) {
