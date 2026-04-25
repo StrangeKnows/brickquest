@@ -337,6 +337,27 @@
   }
   #wave-badge.visible { opacity:1; }
 
+  /* Live diagnostic panel — top-right, always visible during waves runs.
+     Shows entityCount and per-entity HP so we can see exactly what's left
+     alive when a wave doesn't advance. */
+  #waves-live-debug {
+    position:fixed; top:8px; right:8px; z-index:198;
+    background:rgba(8,8,12,0.92);
+    border:1px solid #2a2a35;
+    border-radius:6px;
+    padding:6px 10px;
+    font-family:ui-monospace,monospace; font-size:10px;
+    color:#aaa; line-height:1.5;
+    max-width:200px;
+    pointer-events:none;
+    opacity:0; transition:opacity 200ms;
+  }
+  #waves-live-debug.visible { opacity:0.85; }
+  #waves-live-debug .lbl { color:#666; }
+  #waves-live-debug .val { color:#eee; }
+  #waves-live-debug .hi  { color:#F5D000; }
+  #waves-live-debug .warn { color:#ff6680; }
+
   /* ── WAVE-VICTORY OVERLAY ─────────────────────────────────
      Inter-wave beat: shows what happened in the wave just cleared.
      Stats from getState().battleStats (delta from previous snapshot).
@@ -856,6 +877,55 @@ function updateWaveBadge(n) {
   b.classList.add('visible');
 }
 
+// ── LIVE DEBUG PANEL ────────────────────────────────────────────────
+// Polled every 250ms during a waves run. Surfaces entity state so we can
+// see exactly what's hanging around when a wave fails to advance.
+var _liveDebugTimer = null;
+function startLiveDebug() {
+  stopLiveDebug();
+  var d = document.getElementById('waves-live-debug');
+  if (!d) {
+    d = document.createElement('div');
+    d.id = 'waves-live-debug';
+    document.body.appendChild(d);
+  }
+  d.classList.add('visible');
+  _liveDebugTimer = setInterval(updateLiveDebug, 250);
+  updateLiveDebug();
+}
+function stopLiveDebug() {
+  if (_liveDebugTimer) { clearInterval(_liveDebugTimer); _liveDebugTimer = null; }
+  var d = document.getElementById('waves-live-debug');
+  if (d) d.classList.remove('visible');
+}
+function updateLiveDebug() {
+  var d = document.getElementById('waves-live-debug');
+  if (!d) return;
+  var info = Rumble.getDebugInfo && Rumble.getDebugInfo();
+  if (!info) {
+    d.innerHTML = '<span class="warn">no debug info</span>';
+    return;
+  }
+  var entityList = '';
+  if (info.entitiesDetail && info.entitiesDetail.length) {
+    entityList = info.entitiesDetail.map(function(e) {
+      var tag = '';
+      if (e.dead) tag += ' <span class="warn">DEAD</span>';
+      if (e.burrowHidden) tag += ' <span class="hi">BURROW</span>';
+      if (e.splitDepth) tag += ' <span class="hi">d' + e.splitDepth + '</span>';
+      if (e.deathSig === 'mitosis_split') tag += ' <span class="hi">split</span>';
+      return '<div>' + e.type + ' <span class="val">' + e.hp + '/' + e.hpMax + '</span>' + tag + '</div>';
+    }).join('');
+  } else {
+    entityList = '<div class="lbl">no entities</div>';
+  }
+  d.innerHTML =
+      '<div><span class="lbl">wave</span> <span class="hi">' + _waveState.currentWave + '</span>'
+    +   ' <span class="lbl">adv</span> <span class="val">' + (_waveState.advancing ? 'Y' : 'n') + '</span></div>'
+    + '<div><span class="lbl">entities</span> <span class="val">' + info.entityCount + '</span></div>'
+    + entityList;
+}
+
 function hideWaveHud() {
   var b = document.getElementById('wave-badge');
   if (b) b.classList.remove('visible');
@@ -1120,6 +1190,7 @@ Rumble.init({
       _waveState.active = false;
       hideWaveHud();
       hideWaveVictoryScreen();
+      stopLiveDebug();
       showEndOverlay(data && data.reason);
     }
   }
@@ -1173,6 +1244,7 @@ function startTestRumble(cls) {
     _waveState.advancing = false;
     captureWaveSnapshot();
     spawnWave(1);
+    startLiveDebug();
   } else {
     _waveState.active = false;
     hideWaveHud();

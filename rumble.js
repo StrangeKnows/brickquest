@@ -9466,6 +9466,20 @@ window.Rumble = {
       trapCount: (traps||[]).length,
       wallCount: (grayWalls||[]).length,
       floatingTexts: (floatingTexts||[]).length,
+      // Per-entity details — shown by waves-live-debug to identify what's
+      // hanging around when a wave doesn't advance. Keep it cheap; this gets
+      // polled every frame.
+      entitiesDetail: entities.map(function(g) {
+        return {
+          type: g.type,
+          hp: Math.round(g.hp || 0),
+          hpMax: g.hpMax || 0,
+          dead: !!g.dead,
+          burrowHidden: !!g._burrowHidden,
+          splitDepth: g._splitDepth || 0,
+          deathSig: g.deathSignature || null,
+        };
+      }),
     };
   },
 
