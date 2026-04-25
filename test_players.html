@@ -1698,9 +1698,12 @@ function _renderHoldOverlay() {
     const ownedW = (me && me.bricks && me.bricks.white) || 0;
     const previewAmt = computeHeal(MY_CLASS, 'white', ownedW, s.tier);
     // Same side as fan: fan opens left (π) → number on left; opens right (0) → number on right
-    // Offset clears the arc (radius ~120) plus padding so the text doesn't crowd the curve
+    // Offset clears the arc (radius ~140) plus a small gap. Tight enough to fit on mobile.
     const fanOpensLeft = (s.fanCenterAngle === Math.PI);
-    const previewX = fanOpensLeft ? (s.chipCx - 260) : (s.chipCx + 180);
+    let previewX = fanOpensLeft ? (s.chipCx - 220) : (s.chipCx + 150);
+    // Clamp to viewport so the number never clips on narrow screens
+    const ESTIMATED_TEXT_W = 90;
+    previewX = Math.max(8, Math.min(window.innerWidth - ESTIMATED_TEXT_W - 8, previewX));
     const previewY = s.chipCy - 24;
     const tColor = BRICK_COLORS[s.color] || '#fff';
     html += `<div style="position:absolute;left:${previewX}px;top:${previewY}px;
@@ -1775,10 +1778,10 @@ function _renderAllyRadialFan(s) {
   });
   if (allies.length === 0) return '';
 
-  const RADIUS = 90;
+  const RADIUS = 110;
   const ICON_SIZE = 44;
   const ARC_RADIUS = RADIUS + 30;     // 30px beyond icon centers
-  const FAN_ARC_RAD = Math.PI * 2 / 3; // 120° total arc
+  const FAN_ARC_RAD = Math.PI * 5 / 6; // 150° total arc — gives icons breathing room on mobile
   const center = s.fanCenterAngle;
   const tierColor = BRICK_COLORS[s.color] || '#fff';
   // arcFill is continuous time-progress (0..1) through the overload range.
