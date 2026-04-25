@@ -1439,7 +1439,6 @@ function _dashHeader(me) {
 const HOLD_TAP_THRESHOLD_MS = 250;     // < this = tap, ≥ this = hold
 const HOLD_TIER_INTERVAL_MS = 1000;    // ms per overload step (one full second per tier-up)
 const HOLD_DRAG_THRESHOLD_PX = 15;     // px movement before drag mode
-const HOLD_TIER_MAX = 4;               // ceiling — tier never exceeds this
 
 // White is currently the only color with tier-2+ radial targets.
 // Other colors fall through to tap-only behavior on hold-release.
@@ -1532,7 +1531,10 @@ function _holdUpdateTier() {
     s.lastTierUpValue = 1;
   }
   s.holdMode = true;
-  const overloadSteps = Math.max(0, Math.min(HOLD_TIER_MAX, s.maxCharges) - 1);
+  // Tier progression is inventory-driven. With N charges you can reach tier N.
+  // Arc fills smoothly across ALL N-1 overload steps. Pulse visuals cap at
+  // tier 7 (handled in the pulse renderer); tier values themselves uncapped.
+  const overloadSteps = Math.max(0, s.maxCharges - 1);
   if (overloadSteps <= 0) {
     s.tier = 1;
     return;
@@ -1541,9 +1543,8 @@ function _holdUpdateTier() {
   const totalDuration = overloadSteps * HOLD_TIER_INTERVAL_MS;
   const arcFill = Math.min(1, overloadElapsed / totalDuration);
   const newTier = 1 + Math.floor(arcFill * overloadSteps);
-  // Cap tier at the available overload ceiling
-  const ceiling = 1 + overloadSteps;
-  s.tier = Math.min(newTier, ceiling);
+  // Cap tier at player's charge ceiling (== maxCharges, == 1 + overloadSteps)
+  s.tier = Math.min(newTier, s.maxCharges);
   s.arcFill = arcFill;
   // Detect tier-up boundary: integer tier increased since last frame
   if (s.tier > (s.lastTier || 1)) {
@@ -1709,7 +1710,7 @@ function _renderHoldOverlay() {
     elapsed: ${Math.round(elapsed)}ms<br>
     threshold: ${HOLD_TAP_THRESHOLD_MS}ms<br>
     inHoldMode: ${inHoldMode}<br>
-    tier: ${s.tier} / max ${Math.min(HOLD_TIER_MAX, s.maxCharges)}<br>
+    tier: ${s.tier} / max ${s.maxCharges}<br>
     isDrag: ${s.isDrag}<br>
     dragTarget: ${s.dragTarget || 'none'}<br>
     chipCx,Cy: ${Math.round(s.chipCx)},${Math.round(s.chipCy)}
