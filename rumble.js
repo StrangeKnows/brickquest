@@ -8600,33 +8600,90 @@ function _favoriteMove() {
 // card and poll it every 80ms so players see charges filling in.
 var _victoryRefillInterval = null;
 
-function _renderVictoryPips() {
+// Build initial pip DOM. One wrapper div per color that needs refilling.
+// Each wrapper holds individual pip spans. Subsequent updates MUTATE these
+// nodes in place (see _updateVictoryPips) so CSS transitions can run when
+// a color tops off and fades out.
+//
+// Returns empty string if no colors are currently refilling (all full).
+function _renderVictoryPipsInitial() {
   if (!player || !player.bricks || !player.brickMax) return '';
   var ALL = ['red','blue','green','white','gray','purple','yellow','orange','black'];
   var out = '';
   ALL.forEach(function(c) {
     var max = player.brickMax[c] || 0;
-    if (max <= 0) return; // only show colors the player brought into rumble (or looted)
+    if (max <= 0) return;                          // didn't bring this color
     var cur = Math.min(max, player.bricks[c] || 0);
+    if (cur >= max) return;                        // already full — skip entirely
     var bg = BRICK_COLORS[c] || '#555';
+    out += '<span class="vic-pip-group" data-color="' + c + '" data-state="refilling" '
+      +    'style="display:inline-flex;gap:3px;margin-right:6px;'
+      +    'transition:opacity 600ms ease-out, transform 600ms ease-out;">';
     for (var i = 0; i < max; i++) {
       var lit = i < cur;
-      out += '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;'
+      out += '<span data-pip-idx="' + i + '" style="display:inline-block;width:10px;height:10px;border-radius:2px;'
         + (lit
           ? 'background:' + bg + ';box-shadow:0 0 4px ' + bg + ';'
           : 'background:#1a1a1a;border:1px solid ' + bg + 'aa;box-sizing:border-box;')
         + '"></span>';
     }
+    out += '</span>';
   });
   return out;
+}
+
+// Mutate existing pip DOM in place. For each color group wrapper:
+//   - update individual pip spans' lit/unlit state to match current charges
+//   - when the color tops off, flip data-state="filled" (CSS fades opacity)
+//   - after fade completes, remove the wrapper from DOM
+function _updateVictoryPips() {
+  if (!player || !player.bricks || !player.brickMax) return;
+  var container = document.getElementById('rumble-victory-pips');
+  if (!container) return;
+  var groups = container.querySelectorAll('.vic-pip-group');
+  groups.forEach(function(group) {
+    var c = group.getAttribute('data-color');
+    var state = group.getAttribute('data-state');
+    if (state === 'filled') return;                // already fading; CSS owns it
+    var max = player.brickMax[c] || 0;
+    var cur = Math.min(max, player.bricks[c] || 0);
+    var bg = BRICK_COLORS[c] || '#555';
+    // Update pip lit states
+    var pips = group.querySelectorAll('[data-pip-idx]');
+    pips.forEach(function(pip, i) {
+      var lit = i < cur;
+      // Avoid re-styling unless changed (prevents layout thrash + lets CSS settle)
+      var isLit = pip.style.background && pip.style.background !== 'rgb(26, 26, 26)';
+      if (lit && !isLit) {
+        pip.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:2px;'
+          + 'background:' + bg + ';box-shadow:0 0 4px ' + bg + ';';
+      } else if (!lit && isLit) {
+        pip.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:2px;'
+          + 'background:#1a1a1a;border:1px solid ' + bg + 'aa;box-sizing:border-box;';
+      }
+    });
+    // If now full, mark for fade-out
+    if (cur >= max) {
+      group.setAttribute('data-state', 'filled');
+      group.style.opacity = '0';
+      group.style.transform = 'scale(0.85)';
+      // Remove from layout after fade completes (700ms = 600ms transition + buffer)
+      setTimeout(function() {
+        if (group.parentNode) group.parentNode.removeChild(group);
+      }, 700);
+    }
+  });
 }
 
 function _startVictoryRefillLoop() {
   if (_victoryRefillInterval) clearInterval(_victoryRefillInterval);
   _victoryRefillInterval = setInterval(function() {
+    // Element may be briefly missing during card cross-fade (DOM swap).
+    // Don't kill the loop — just skip this tick. Loop is only stopped by
+    // _stopVictoryRefillLoop when victory ends.
     var el = document.getElementById('rumble-victory-pips');
-    if (!el) { clearInterval(_victoryRefillInterval); _victoryRefillInterval = null; return; }
-    el.innerHTML = _renderVictoryPips();
+    if (!el) return;
+    _updateVictoryPips();
   }, 80);
 }
 
@@ -8750,18 +8807,26 @@ function _showVictoryScreen() {
     +       ' width:fit-content; max-width:96vw;'
     +       ' display:grid;'
     +       ' grid-template-columns:auto auto;'
-    +       ' grid-template-areas:"stats rewards" "claim claim";'
+    +       ' grid-template-areas:"stats rewards" "refill refill" "claim claim";'
     +       ' justify-content:center; align-items:center; justify-items:center;'
     +       ' gap:clamp(10px, 2vmin, 18px) clamp(18px, 4vmin, 32px);'
     +     '}'
     +     '.bq-vic-card.card-rewards .vic-stats-wrap   { grid-area:stats;   }'
     +     '.bq-vic-card.card-rewards .vic-rewards-wrap { grid-area:rewards; }'
+    +     '.bq-vic-card.card-rewards .vic-refill-wrap  { grid-area:refill;  }'
     +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim; margin-top:clamp(2px,1vmin,8px); }'
     +   '}'
     + '</style>';
 
   // ── Card 1 HTML: THE MOMENT ──
   function buildCardMoment() {
+    var refillHtml = _renderVictoryPipsInitial();
+    var refillBlock = refillHtml
+      ? ('<div style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:clamp(4px,1.5vmin,10px);">'
+         + '<span style="font-size:clamp(9px,1.7vmin,11px);color:#666;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">REFILLING</span>'
+         + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;">' + refillHtml + '</div>'
+         + '</div>')
+      : '';
     return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
       + '<div class="bq-vic-card card-moment">'
         + '<div style="font-size:clamp(10px,2.2vmin,14px);letter-spacing:.25em;color:' + tier.color + ';font-family:\'Cinzel\',serif;">⚔ VICTORY ⚔</div>'
@@ -8771,6 +8836,7 @@ function _showVictoryScreen() {
           + '<span style="font-size:clamp(9px,1.9vmin,12px);color:#888;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">FAVORITE MOVE</span>'
           + '<span style="font-size:clamp(13px,2.6vmin,16px);font-family:ui-sans-serif,system-ui;">' + favLine + '</span>'
         + '</div>'
+        + refillBlock
         + '<button id="bq-vic-btn-continue" class="bq-vic-btn" style="'
         + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
         + 'border-color:' + tier.color + ';color:#000;'
@@ -8810,6 +8876,14 @@ function _showVictoryScreen() {
            + '<div style="font-size:clamp(12px,3vmin,18px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
     }).join('');
 
+    var refillHtml = _renderVictoryPipsInitial();
+    var refillBlock = refillHtml
+      ? ('<div class="vic-zone-wrap vic-refill-wrap" style="display:flex;flex-direction:column;align-items:center;gap:6px;">'
+         + '<span style="font-size:clamp(9px,1.7vmin,11px);color:#666;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">REFILLING</span>'
+         + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;">' + refillHtml + '</div>'
+         + '</div>')
+      : '';
+
     return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
       + '<div class="bq-vic-card card-rewards">'
         // Stats zone — label + body, content-sized
@@ -8819,19 +8893,18 @@ function _showVictoryScreen() {
             + rows
           + '</div>'
         + '</div>'
-        // Rewards zone — label + body, content-sized
+        // Rewards zone — pure loot content (gold/cheese/bricks gained, felled list)
         + '<div class="vic-zone-wrap vic-rewards-wrap">'
           + '<div class="vic-zone-label" style="font-size:clamp(10px,1.9vmin,12px);letter-spacing:.22em;color:#888;font-family:ui-sans-serif,system-ui;font-weight:500;">REWARDS</div>'
           + '<div class="vic-zone-body" style="display:flex;flex-direction:column;align-items:center;gap:clamp(6px,1.8vmin,12px);min-width:clamp(180px,32vmin,260px);">'
-            + '<div id="rumble-victory-bricks" style="text-align:center;">'
-              + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;gap:3px;">' + _renderVictoryPips() + '</div>'
-            + '</div>'
             + '<div style="text-align:center;line-height:1.7;">' + gainedLines + '</div>'
             + (_battleStats.enemiesKilled.length
               ? '<div style="font-size:clamp(9px,1.8vmin,11px);color:#666;text-align:center;font-style:italic;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
               : '')
           + '</div>'
         + '</div>'
+        // Refill zone — own row below stats|rewards. Only included when refilling.
+        + refillBlock
         // Claim button
         + '<div class="vic-claim-zone" style="display:flex;justify-content:center;">'
           + '<button id="bq-vic-btn-claim" class="bq-vic-btn" style="'
