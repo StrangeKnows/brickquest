@@ -238,27 +238,39 @@ var COLOR = {
   purple: { dmg: 0.60 },
   black:  { dmg: 0.20, dur: 0.60, witherDmg: 0.40, witherStacks: 0.20 },
   green:  { stackDmg: 0.20, stacks: 0.40 },
-  // White uses a custom linear tier function instead of universal m-based
-  // scaling. Heal-over-time accumulates discretely, so we need integer
-  // total HP that grows strictly monotonic per tier — universal m can't
-  // deliver that without plateau collisions. Same effectiveAt interface,
+  // White uses a custom tier function instead of universal m-based scaling.
+  // Heal-over-time accumulates discretely, so universal m can't deliver
+  // strict integer growth without plateaus. Same effectiveAt interface,
   // different per-tier shape. Class affinity and inventory still multiply
-  // on top of the linear total.
+  // on top of these raw values.
   //
-  // Linear total = 4 + (tier - 1) × 2  →  T1=4, T2=6, T3=8 ... T10=22
-  // Tick value scales smoothly: 1 + tier × 0.4, ceil → 2,3,3,3,3,4,4,5,5,5
-  // Tick interval = 0.5s constant.
+  //   total      = BASE + (tier-1) × 2     →  5, 7, 9, 11, ..., 23  (strict +2)
+  //   burst      = ceil(total / 2)         →  3, 4, 5, 6, ..., 12   (strict +1)
+  //   fieldPool  = total - burst           →  2, 3, 4, 5, ..., 11   (strict +1)
+  //   tickValue  = floor(burst / 2)        →  1, 2, 2, 3, ..., 6    (gentle ramp)
+  //   ticks      = ceil(fieldPool / tickV) →  derived
+  //   duration   = ticks × 0.5             →  1.0s flat at low tier, grows late
+  //
+  // Self-cast: target receives `burst` instantly, field follows target
+  //   with `fieldPool` HP available for OTHER allies in radius (HoT).
+  // Drag-far: no burst, stationary field with `total` HP available
+  //   for anyone who enters (HoT).
+  // Crit: burst × 2 (matches red/blue/gray convention).
   white: {
     customTierFn: function(tier) {
       var n = Math.max(1, tier || 1);
-      var tickHeal = Math.max(1, Math.ceil(1 + n * 0.4));
-      var totalHeal = 4 + (n - 1) * 2;
-      var ticks = Math.max(1, Math.ceil(totalHeal / tickHeal));
+      var total      = BASE + (n - 1) * 2;
+      var burst      = Math.ceil(total / 2);
+      var fieldPool  = total - burst;
+      var tickValue  = Math.max(1, Math.floor(burst / 2));
+      var ticks      = Math.max(1, Math.ceil(fieldPool / tickValue));
       return {
-        heal: tickHeal,        // per-tick heal value (pre-affinity)
-        totalHeal: totalHeal,  // total HP delivered over field lifetime (pre-affinity)
-        ticks: ticks,
-        duration: ticks * 0.5, // implicit from tick count × 0.5s interval
+        burst:     burst,      // instant heal to self-cast target (pre-affinity)
+        heal:      tickValue,  // per-tick value for allies in field (pre-affinity)
+        totalHeal: total,      // total HP this cast can deliver (pre-affinity)
+        fieldPool: fieldPool,  // HoT pool after burst (pre-affinity)
+        ticks:     ticks,
+        duration:  ticks * 0.5,
       };
     }
   },
@@ -300,6 +312,8 @@ function effectiveAt(color, tier, cls, owned) {
     var custom = c.customTierFn(tier);
     var classMult = aff * tap; // skip tierCurve since custom owns the curve
     if (custom.heal      != null) out.heal       = Math.max(1, Math.ceil(custom.heal      * classMult));
+    if (custom.burst     != null) out.burst      = Math.max(1, Math.ceil(custom.burst     * classMult));
+    if (custom.fieldPool != null) out.fieldPool  = Math.max(1, Math.ceil(custom.fieldPool * classMult));
     if (custom.totalHeal != null) out.totalHeal  = Math.max(1, Math.ceil(custom.totalHeal * classMult));
     if (custom.ticks     != null) out.ticks      = custom.ticks; // tick count is structural, not class-scaled
     if (custom.duration  != null) out.duration   = custom.duration;

@@ -1773,7 +1773,7 @@ function fireOverload(dragX, dragY, bricksUsed) {
   if (_battleStats && window.effectiveAt) {
     var _aOwned = (player.brickMax && player.brickMax[color]) || 0;
     var _aFx = window.effectiveAt(color, count, player.cls, _aOwned);
-    var _persistentActive = !!(blackEffect || whiteField || (orangeAura && orangeAura.charges > 0)
+    var _persistentActive = !!(blackEffect || (whiteFields && whiteFields.length > 0) || (orangeAura && orangeAura.charges > 0)
       || (greenBurst && !greenBurst.done) || (yellowAura && yellowAura.timer > 0));
     _battleStats.lastOverload = {
       color: color,
@@ -1824,156 +1824,290 @@ function fireOverloadRed(count, ox, oy)   {
   }
 }
 function fireOverloadWhite(count, ox, oy) {
+  // Overload-white follows the same self-cast vs drag-far split as the
+  // tap path (doWhiteHeal), just at tier `count` instead of T1:
+  //   - Self-cast (no drag, OR drag ≤30px): burst to player + follow-field
+  //   - Drag-far: stationary field, full pool, no burst
+  if (!player) return;
   var _isDrag = ox !== undefined;
-  var isOnPlayer = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) < player.r + 30;
-  if (isOnPlayer || !_isDrag) {
-    // Tap or drop-on-player: direct overload heal (canonical formula in characters.js)
-    var ownedW = (player.brickMax && player.brickMax.white) || 0;
-    var healAmt = window.computeHeal(player.cls, 'white', ownedW, count);
-    var prev = player.hp;
-    var cap2 = Math.max(player.hpMax, player.hp);
-    player.hp = Math.min(cap2, player.hp + healAmt);
-    var healed = Math.round(player.hp - prev);
-    if (healed > 0) applyBleedRescue(healed);
-    // v4: track total + biggest-single-heal for victory screen
-    if (_battleStats && healed > 0) {
-      _battleStats.totalHealed = (_battleStats.totalHealed || 0) + healed;
-      if (healed > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = healed;
+  var dropX = _isDrag ? ox : player.x;
+  var dropY = _isDrag ? oy : player.y;
+  var distFromPlayer = Math.hypot(dropX - player.x, dropY - player.y);
+  var isSelfCast = distFromPlayer <= 30;
+  if (isSelfCast) {
+    var fx = _fx('white', count);
+    if (fx) {
+      var burstAmt = (fx.burst || 0) * (_currentCrit ? 2 : 1);
+      var prev = player.hp;
+      var cap = Math.max(player.hpMax, player.hp);
+      player.hp = Math.min(cap, player.hp + burstAmt);
+      var actualBurst = player.hp - prev;
+      if (actualBurst > 0) {
+        applyBleedRescue(actualBurst);
+        if (_battleStats) {
+          _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actualBurst;
+          if (actualBurst > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actualBurst;
+        }
+        showFloatingText(player.x, player.y - 50, actualBurst + ' ✚', '#EFEFEF', player);
+      }
     }
-    // Only surface the floater when actual HP was restored. Healing at
-    // full HP produces a 0 that was rendering as "0 ✚ x3" on the player.
-    if (healed > 0) {
-      showFloatingText(player.x, player.y-50, healed + ' ✚', '#EFEFEF', player);
-    }
-    spawnHealSparkles(count);
-    var sparkCount = Math.max(1, Math.round(count * 3 * vScale(count)));
-    var sizeBase = 2 + count * 0.4;
-    var speedBase = 0.15 + count * 0.04;
-    var spreadR = 6 + count * 4;
-    var colors2 = ['#ffffff','#ffccee','#ff99cc','#ffe0f0'];
-    if (count >= 4) colors2.push('#ffaaff','#cc88ff');
-    for (var i = 0; i < sparkCount; i++) {
-      var angle = Math.random() * Math.PI * 2;
-      var speed = speedBase + Math.random() * speedBase;
-      var size = sizeBase + Math.random() * sizeBase * 0.8;
-      playerSparkles.push({
-        ox: Math.cos(angle)*(spreadR * Math.random()),
-        oy: Math.sin(angle)*(spreadR * Math.random()),
-        vox: Math.cos(angle)*speed, voy: Math.sin(angle)*speed-0.3*(count*0.5),
-        text: i%3===0?'✦':'✧',
-        color: colors2[Math.floor(Math.random()*colors2.length)],
-        size: size, alpha: 1, life: 1
-      });
-    }
-    return;
+    startWhiteField(player.x, player.y, count, player);
+  } else {
+    startWhiteField(dropX, dropY, count, null);
   }
-  // Drop on empty space or entity: create static healing field.
-  // Heals allies (including player if they enter) per tick, soft-slows
-  // enemies inside to discourage staying in it.
-  startWhiteField(ox, oy, count);
+  if (_currentCrit) {
+    spawnCritShockwave(dropX, dropY, '#FFFFFF', { r0: 6, maxR: scaleDist(160), thickness: 3, growth: 240 });
+    spawnCritFlourish(dropX, dropY, '#FFEEFF', 16);
+    spawnCritFlourish(dropX, dropY, '#FFAACC', 10);
+  }
+  spawnHealSparkles(count);
+  var sparkCount = Math.max(1, Math.round(count * 3 * vScale(count)));
+  var sizeBase = 2 + count * 0.4;
+  var speedBase = 0.15 + count * 0.04;
+  var spreadR = 6 + count * 4;
+  var colors2 = ['#ffffff','#ffccee','#ff99cc','#ffe0f0'];
+  if (count >= 4) colors2.push('#ffaaff','#cc88ff');
+  for (var i = 0; i < sparkCount; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var speed = speedBase + Math.random() * speedBase;
+    var size = sizeBase + Math.random() * sizeBase * 0.8;
+    playerSparkles.push({
+      ox: Math.cos(angle)*(spreadR * Math.random()),
+      oy: Math.sin(angle)*(spreadR * Math.random()),
+      vox: Math.cos(angle)*speed, voy: Math.sin(angle)*speed-0.3*(count*0.5),
+      text: i%3===0?'✦':'✧',
+      color: colors2[Math.floor(Math.random()*colors2.length)],
+      size: size, alpha: 1, life: 1
+    });
+  }
+}
+
+// ── WHITE CLEANSE HELPERS ────────────────────────────
+// Crit-only. Tap cleanses 1 status; overload tier N cleanses N statuses.
+// Player priority (most-disruptive first): poison → slow → weaken → daze
+//   → confuse. Returns count actually removed.
+// Entity positives (anti-player buffs): _enraged → attackBoost → speedBoost.
+//   _recoverVulnerable is pro-player (NOT stripped). swingState NOT touched.
+function cleansePlayerStatuses(n) {
+  if (!player || !player.status || n <= 0) return 0;
+  var s = player.status;
+  var removed = 0;
+  if (n > removed && s.poison.timer > 0 && s.poison.stacks > 0) {
+    s.poison.stacks = 0; s.poison.timer = 0; s.poison.tickTimer = 0;
+    removed++;
+  }
+  if (n > removed && s.slow.timer > 0 && s.slow.factor > 0) {
+    s.slow.factor = 0; s.slow.timer = 0;
+    removed++;
+  }
+  if (n > removed && s.weaken.timer > 0) { s.weaken.timer = 0; removed++; }
+  if (n > removed && s.daze.timer > 0) { s.daze.timer = 0; removed++; }
+  if (n > removed && s.confuse.timer > 0) { s.confuse.timer = 0; removed++; }
+  return removed;
+}
+
+function cleanseEntityPositives(g, n) {
+  if (!g || n <= 0) return 0;
+  var removed = 0;
+  if (n > removed && g._enraged) { g._enraged = false; removed++; }
+  if (n > removed && (g.attackBoost || 0) > 0) { g.attackBoost = 0; removed++; }
+  if (n > removed && (g.speedBoost || 0) > 0) { g.speedBoost = 0; removed++; }
+  return removed;
+}
+
+// Apply white-cleanse at cast time. Crit-only. Player cleanse fires only
+// if player is in the field's radius. Entity strips fire on each entity
+// in radius. Counts are tier-scaled.
+function applyWhiteCleanse(ox, oy, radius, tier) {
+  if (!_currentCrit) return;
+  var playerInside = player && Math.hypot(player.x - ox, player.y - oy) <= radius;
+  var playerRemoved = playerInside ? cleansePlayerStatuses(tier) : 0;
+  if (playerRemoved > 0) {
+    var label = playerRemoved > 1 ? ('CLEANSED ×' + playerRemoved) : 'CLEANSED';
+    showFloatingText(player.x, player.y - 68, label, '#FFFFFF', player);
+  }
+  entities.forEach(function(g) {
+    if (g.hp <= 0) return;
+    if (Math.hypot(g.x - ox, g.y - oy) <= radius) {
+      cleanseEntityPositives(g, tier);
+    }
+  });
 }
 
 // ── WHITE HEALING FIELD ─────────────────────────────
-// Overload white cast on empty space/entity creates a persistent zone.
-// Allies inside heal per tick. Entities inside have their movement
-// gently slowed (soft repel).
-var whiteField = null; // { timer, duration, ox, oy, radius, healPerTick, tickTimer, pulse, sparkleTimer }
+// Each white cast spawns an independent field instance. Multiple fields
+// can coexist in different locations (no stacking — fusion territory).
+// Field heals over time: ticks subtract from healRemaining until exhausted,
+// then field expires. This lets total HP per cast be exactly what
+// effectiveAt('white', tier).totalHeal returns, with strict integer growth.
+//
+// Per-instance shape:
+//   ox, oy           — center (canvas px)
+//   radius           — clamped to arena
+//   healPerTick      — fx.heal (per-tick value)
+//   healRemaining    — counts down; field expires at 0
+//   tickInterval     — derived from fx.duration / fx.ticks (typically 0.5s)
+//   tickTimer        — accumulator
+//   pulse, sparkleTimer  — visual
+//   firstTickDouble  — crit flag
+//   maxHealForViz    — fx.totalHeal at cast time, used for pct in draw
+var whiteFields = [];
 
-function startWhiteField(ox, oy, count) {
+// Spawn a white healing field. Two flavors:
+//   followTarget != null  →  field follows that entity (player or ally),
+//                            uses fieldPool (already-burst-deducted),
+//                            target itself does NOT receive ticks (burst was
+//                            their share). Other allies in radius get HoT.
+//                            If a field already follows this target, refresh
+//                            its pool/timers in place instead of stacking.
+//   followTarget == null  →  stationary field at (ox, oy), uses totalHeal
+//                            (full pool — no burst was given to anyone).
+//                            Anyone in radius gets HoT, including caster.
+function startWhiteField(ox, oy, count, followTarget) {
   var fx = _fx('white', count);
   if (!fx) return;
-  whiteField = {
-    timer: fx.duration,
-    duration: fx.duration,
-    ox: ox, oy: oy,
-    radius: clampRadiusToArena(fx.radiusPx),
-    healPerTick: fx.heal,
-    tickTimer: 0,
-    pulse: 0,
-    sparkleTimer: 0,
-    firstTickDouble: !!_currentCrit,  // WHITE BLESSING: first heal tick doubles on crit
-  };
-}
-
-function updateWhiteField(dt) {
-  if (!whiteField) return;
-  whiteField.timer -= dt;
-  whiteField.pulse = (whiteField.pulse + dt * 2) % (Math.PI * 2);
-  if (whiteField.timer <= 0) { whiteField = null; return; }
-  var cx = whiteField.ox, cy = whiteField.oy, r = whiteField.radius;
-  // Heal the player if inside the field (allies: player only for now)
-  if (player && Math.hypot(player.x - cx, player.y - cy) <= r) {
-    whiteField.tickTimer += dt;
-    if (whiteField.tickTimer >= 0.5) {
-      whiteField.tickTimer -= 0.5;
-      var prev = player.hp;
-      // WHITE BLESSING: first tick doubles if the field was cast on crit.
-      var tickHeal = whiteField.healPerTick;
-      if (whiteField.firstTickDouble) {
-        tickHeal *= 2;
-        whiteField.firstTickDouble = false; // one-shot
-        spawnCritShockwave(whiteField.ox, whiteField.oy, '#FFFFFF', { r0: 10, maxR: whiteField.radius, thickness: 3, growth: 300 });
-        spawnCritFlourish(player.x, player.y, '#FFEEFF', 12);
-      }
-      player.hp = Math.min(player.hpMax, player.hp + tickHeal);
-      if (player.hp > prev) {
-        var tickHealed = player.hp - prev;
-        applyBleedRescue(tickHealed);
-        if (_battleStats) {
-          _battleStats.totalHealed = (_battleStats.totalHealed || 0) + tickHealed;
-          if (tickHealed > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = tickHealed;
-        }
-        showFloatingText(player.x, player.y - 40, tickHealed + ' ✚', '#EFEFEF', player);
+  var radius = clampRadiusToArena(fx.radiusPx);
+  var poolForField = followTarget ? fx.fieldPool : fx.totalHeal;
+  // Refresh-in-place for the same target — don't stack two follow-fields
+  // on the same player.
+  if (followTarget) {
+    for (var i = 0; i < whiteFields.length; i++) {
+      var ex = whiteFields[i];
+      if (ex.followTarget === followTarget) {
+        ex.healRemaining = poolForField;
+        ex.maxHealForViz = poolForField;
+        ex.tickTimer = 0;
+        ex.firstTickDouble = !!_currentCrit;
+        applyWhiteCleanse(ox, oy, radius, count || 1);
+        return;
       }
     }
   }
-  // Soft-slow any entity inside the field (gentle repel effect)
-  entities.forEach(function(e) {
-    if (Math.hypot(e.x - cx, e.y - cy) <= r) {
-      e.whiteFieldSlowed = true;
-      e.whiteFieldSlowTimer = 0.25; // refreshed each frame while inside
-    }
+  whiteFields.push({
+    ox: ox, oy: oy,
+    radius: radius,
+    healPerTick: fx.heal,
+    healRemaining: poolForField,
+    maxHealForViz: poolForField,
+    tickInterval: fx.ticks > 0 ? (fx.duration / fx.ticks) : 0.5,
+    tickTimer: 0,
+    pulse: 0,
+    sparkleTimer: 0,
+    firstTickDouble: !!_currentCrit,
+    followTarget: followTarget || null, // null = stationary at (ox, oy)
   });
-  // Occasional sparkle shimmer in the field for visual life
-  whiteField.sparkleTimer += dt;
-  if (whiteField.sparkleTimer >= 0.08) {
-    whiteField.sparkleTimer = 0;
-    var angle = Math.random() * Math.PI * 2;
-    var dist = Math.random() * r * 0.9;
-    spawnHealSparkleAt(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
+  applyWhiteCleanse(ox, oy, radius, count || 1);
+}
+
+function updateWhiteField(dt) {
+  if (!whiteFields.length || !player) return;
+  // Iterate backward so we can splice expired fields without index churn.
+  for (var i = whiteFields.length - 1; i >= 0; i--) {
+    var wf = whiteFields[i];
+    wf.pulse = (wf.pulse + dt * 2) % (Math.PI * 2);
+
+    // Field-follows-target: snap center to the target's current position
+    // each frame. If the target died (hp<=0 or removed), expire the field
+    // immediately — they faded out of existence.
+    if (wf.followTarget) {
+      if (wf.followTarget.hp == null || wf.followTarget.hp <= 0) {
+        whiteFields.splice(i, 1);
+        continue;
+      }
+      wf.ox = wf.followTarget.x;
+      wf.oy = wf.followTarget.y;
+    }
+
+    var cx = wf.ox, cy = wf.oy, r = wf.radius;
+    // Heal the player if inside, but skip if the player IS the followed
+    // target — they got their share via the burst at cast time.
+    var playerIsTarget = (wf.followTarget === player);
+    if (!playerIsTarget && Math.hypot(player.x - cx, player.y - cy) <= r && wf.healRemaining > 0) {
+      wf.tickTimer += dt;
+      if (wf.tickTimer >= wf.tickInterval) {
+        wf.tickTimer -= wf.tickInterval;
+        var prev = player.hp;
+        var tickHeal = Math.min(wf.healPerTick, wf.healRemaining);
+        if (wf.firstTickDouble) {
+          tickHeal = Math.min(tickHeal * 2, wf.healRemaining);
+          wf.firstTickDouble = false;
+          spawnCritShockwave(cx, cy, '#FFFFFF', { r0: 10, maxR: r, thickness: 3, growth: 300 });
+          spawnCritFlourish(player.x, player.y, '#FFEEFF', 12);
+        }
+        var cap = Math.max(player.hpMax, player.hp);
+        player.hp = Math.min(cap, player.hp + tickHeal);
+        var actual = player.hp - prev;
+        wf.healRemaining -= tickHeal;
+        if (actual > 0) {
+          applyBleedRescue(actual);
+          if (_battleStats) {
+            _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actual;
+            if (actual > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actual;
+          }
+          showFloatingText(player.x, player.y - 40, actual + ' ✚', '#EFEFEF', player);
+        }
+      }
+    }
+    // Soft-slow any entity inside this field
+    entities.forEach(function(e) {
+      if (Math.hypot(e.x - cx, e.y - cy) <= r) {
+        e.whiteFieldSlowed = true;
+        e.whiteFieldSlowTimer = 0.25;
+      }
+    });
+    // Sparkle shimmer
+    wf.sparkleTimer += dt;
+    if (wf.sparkleTimer >= 0.08) {
+      wf.sparkleTimer = 0;
+      var angle = Math.random() * Math.PI * 2;
+      var dist = Math.random() * r * 0.9;
+      spawnHealSparkleAt(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
+    }
+    // Expire when healRemaining exhausted (only for fields that have any
+    // tickable consumer; follow-self fields are never consumed, so they
+    // expire instead via duration. Track via tickTimer accumulation)
+    if (wf.healRemaining <= 0) {
+      whiteFields.splice(i, 1);
+      continue;
+    }
+    // Follow-self fields with no other consumer: expire after duration.
+    // Without this, a self-cast field with no allies would persist forever.
+    if (playerIsTarget) {
+      wf.lifetimeTimer = (wf.lifetimeTimer || 0) + dt;
+      if (wf.lifetimeTimer >= (wf.tickInterval * (wf.maxHealForViz / wf.healPerTick + 1))) {
+        whiteFields.splice(i, 1);
+      }
+    }
   }
 }
 
 function drawWhiteField() {
-  if (!whiteField || !ctx) return;
-  var cx = whiteField.ox, cy = whiteField.oy, r = whiteField.radius;
-  var pct = whiteField.timer / whiteField.duration;
-  var a = Math.max(0, Math.min(1, pct)) * 0.55;
-  ctx.save();
-  // Soft white radial glow
-  var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-  grad.addColorStop(0, 'rgba(255, 255, 255, ' + (a * 0.28) + ')');
-  grad.addColorStop(0.6, 'rgba(255, 240, 245, ' + (a * 0.18) + ')');
-  grad.addColorStop(1.0, 'rgba(255, 200, 220, 0)');
-  ctx.fillStyle = grad;
-  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
-  // Pulsing edge ring that doubles as duration indicator.
-  // Arc shrinks clockwise from full circle to zero as field time runs out.
-  var pulseScale = 1 + Math.sin(whiteField.pulse) * 0.04;
-  ctx.strokeStyle = 'rgba(255, 255, 255, ' + a + ')';
-  ctx.lineWidth = 2;
-  ctx.setLineDash([]);
-  // Full dim ring (background)
-  ctx.save();
-  ctx.globalAlpha = a * 0.25;
-  ctx.beginPath(); ctx.arc(cx, cy, r * pulseScale, 0, Math.PI * 2); ctx.stroke();
-  ctx.restore();
-  // Timer arc (foreground, bright)
-  ctx.beginPath();
-  ctx.arc(cx, cy, r * pulseScale, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * pct);
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.restore();
+  if (!whiteFields.length || !ctx) return;
+  whiteFields.forEach(function(wf) {
+    var cx = wf.ox, cy = wf.oy, r = wf.radius;
+    var pct = wf.healRemaining / wf.maxHealForViz;
+    var a = Math.max(0, Math.min(1, pct)) * 0.55;
+    ctx.save();
+    var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    grad.addColorStop(0, 'rgba(255, 255, 255, ' + (a * 0.28) + ')');
+    grad.addColorStop(0.6, 'rgba(255, 240, 245, ' + (a * 0.18) + ')');
+    grad.addColorStop(1.0, 'rgba(255, 200, 220, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    var pulseScale = 1 + Math.sin(wf.pulse) * 0.04;
+    ctx.strokeStyle = 'rgba(255, 255, 255, ' + a + ')';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.save();
+    ctx.globalAlpha = a * 0.25;
+    ctx.beginPath(); ctx.arc(cx, cy, r * pulseScale, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * pulseScale, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * pct);
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+  });
 }
 
 // Helper used by updateWhiteField for shimmer particles. We reuse the
@@ -2784,11 +2918,16 @@ function _playerEffects() {
     fx.push({ icon:'🛡', color:'#88aaff', timer: player.iframes });
   if (dashCooldown > 0)
     fx.push({ icon:'💨', color:'#F5D000', timer: dashCooldown });
-  // Sanctuary (white field) presence — timerless while inside the zone.
-  if (whiteField) {
-    var wDist = Math.hypot(player.x - (whiteField.ox||0), player.y - (whiteField.oy||0));
-    if (wDist < (whiteField.radius || whiteField.r || 0)) {
-      fx.push({ icon:'✦', color:'#EFEFEF', timer: null });
+  // Sanctuary (white field) presence — timerless while inside any field.
+  // Multiple fields can exist (each cast is its own instance); player
+  // shows the sanctuary icon if standing in at least one.
+  if (whiteFields && whiteFields.length) {
+    for (var wfi = 0; wfi < whiteFields.length; wfi++) {
+      var _wf = whiteFields[wfi];
+      if (Math.hypot(player.x - _wf.ox, player.y - _wf.oy) <= _wf.radius) {
+        fx.push({ icon:'✦', color:'#EFEFEF', timer: null });
+        break; // one icon regardless of how many fields you're in
+      }
     }
   }
   // Overheal — player.hp is above hpMax (only source currently: purple
@@ -6373,39 +6512,49 @@ function spawnHealSparkles(tier) {
 }
 
 function doWhiteHeal(targetX, targetY) {
-  // Tap heal — canonical formula in characters.js (count=1 for tap, no overload stack)
-  var ownedW = (player.brickMax && player.brickMax.white) || 0;
-  var healAmt = window.computeHeal(player.cls, 'white', ownedW, 1);
-  var prev = player.hp;
-  var cap = Math.max(player.hpMax, player.hp);
-  player.hp = Math.min(cap, player.hp + healAmt);
-  var actual = player.hp - prev;
-  if (actual > 0) applyBleedRescue(actual);
-  if (_battleStats && actual > 0) {
-    _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actual;
-    if (actual > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actual;
-  }
-  var fx = targetX !== undefined ? targetX : player.x;
-  var fy = targetY !== undefined ? targetY : player.y;
-  showFloatingText(fx, fy - 50, actual + ' ✚', '#EFEFEF', player);
-  spawnHealSparkles(1);
-  // WHITE BLESSING: on crit, purge player debuffs IF any are active.
-  // Without the active-check the CLEANSED floater spammed on every
-  // crit tap-white regardless of whether anything was actually cleansed.
-  if (_currentCrit) {
-    var hasAny = hasStatus('poison') || hasStatus('slow')
-      || hasStatus('daze') || hasStatus('confuse') || hasStatus('weaken');
-    if (hasAny) {
-      clearStatuses();
-      showFloatingText(fx, fy - 68, 'CLEANSED', '#FFFFFF', player);
+  // White v0.15.0:
+  //   - Self-cast (tap on bar OR drag near player, ≤30px): instant burst
+  //     to player + follow-field around player (heals other allies in
+  //     radius, target itself doesn't tick — got the burst).
+  //   - Drag-far (>30px from player): no burst, stationary field at drop,
+  //     heals anyone (incl. caster) who enters.
+  // Cleanse fires inside startWhiteField, gated on crit + tier statuses.
+  if (!player) return;
+  var dropX = targetX !== undefined ? targetX : player.x;
+  var dropY = targetY !== undefined ? targetY : player.y;
+  var distFromPlayer = Math.hypot(dropX - player.x, dropY - player.y);
+  var isSelfCast = distFromPlayer <= 30; // 30px is the "tap zone" around player
+  if (isSelfCast) {
+    // Burst to player. Crit doubles burst (matches red/blue/gray convention).
+    var fx = _fx('white', 1);
+    if (fx) {
+      var burstAmt = (fx.burst || 0) * (_currentCrit ? 2 : 1);
+      var prev = player.hp;
+      var cap = Math.max(player.hpMax, player.hp);
+      player.hp = Math.min(cap, player.hp + burstAmt);
+      var actualBurst = player.hp - prev;
+      if (actualBurst > 0) {
+        applyBleedRescue(actualBurst);
+        if (_battleStats) {
+          _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actualBurst;
+          if (actualBurst > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actualBurst;
+        }
+        showFloatingText(player.x, player.y - 50, actualBurst + ' ✚', '#EFEFEF', player);
+      }
     }
-    // WHITE flourish: white radiant halo + pink-tinted sparkle burst.
-    // Always plays on crit (the visual flourish is the crit signature
-    // payoff for white, independent of whether cleanse triggered).
-    spawnCritShockwave(fx, fy, '#FFFFFF', { r0: 6, maxR: scaleDist(160), thickness: 3, growth: 240 });
-    spawnCritFlourish(fx, fy, '#FFEEFF', 16);
-    spawnCritFlourish(fx, fy, '#FFAACC', 10);
+    // Spawn follow-field around player. Burst already given; field uses fieldPool.
+    startWhiteField(player.x, player.y, 1, player);
+  } else {
+    // Drag-far: stationary field, no burst. Field uses full totalHeal pool.
+    startWhiteField(dropX, dropY, 1, null);
   }
+  // Crit flourish — always plays on crit, independent of cleanse outcome.
+  if (_currentCrit) {
+    spawnCritShockwave(dropX, dropY, '#FFFFFF', { r0: 6, maxR: scaleDist(160), thickness: 3, growth: 240 });
+    spawnCritFlourish(dropX, dropY, '#FFEEFF', 16);
+    spawnCritFlourish(dropX, dropY, '#FFAACC', 10);
+  }
+  spawnHealSparkles(1);
 }
 
 // ── YELLOW — Confuse ──────────────────────────────
@@ -8412,7 +8561,7 @@ function _internalStart(config) {
   blueBolts = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = [];
   greenBurst = null; greenDragActive = false; greenDragPos = null; purpleBursts = []; purpleParticles = []; greenSlowAuras = []; greenBubbles = []; _greenBubbleAccum = 0;
   blackEffect = null; playerSparkles = []; entityRespawnPending = false; playerRegen = null;
-  yellowAura = null; whiteField = null;
+  yellowAura = null; whiteFields = [];
   brickAction = null; dashCooldown = 0; dragTarget = null; dashEntity = null; overloadState = null;
   // Carry-over hazards: bodies, floating damage numbers, in-flight bolts.
   deadEntities = [];
