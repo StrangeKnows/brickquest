@@ -1427,7 +1427,7 @@ function _renderHoldOverlay() {
     // Same side as fan: fan opens left (π) → number on left; opens right (0) → number on right
     // Offset clears the arc (radius ~140) plus a small gap. Tight enough to fit on mobile.
     const fanOpensLeft = (s.fanCenterAngle === Math.PI);
-    let previewX = fanOpensLeft ? (s.chipCx - 220) : (s.chipCx + 150);
+    let previewX = fanOpensLeft ? (s.chipCx - 190) : (s.chipCx + 120);
     // Clamp to viewport so the number never clips on narrow screens
     const ESTIMATED_TEXT_W = 90;
     previewX = Math.max(8, Math.min(window.innerWidth - ESTIMATED_TEXT_W - 8, previewX));
@@ -1505,7 +1505,7 @@ function _renderAllyRadialFan(s) {
   });
   if (allies.length === 0) return '';
 
-  const RADIUS = 110;
+  const RADIUS = 80;
   const ICON_SIZE = 44;
   const ARC_RADIUS = RADIUS + 30;     // 30px beyond icon centers
   const FAN_ARC_RAD = Math.PI * 5 / 6; // 150° total arc — gives icons breathing room on mobile
