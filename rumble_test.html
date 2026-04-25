@@ -495,7 +495,7 @@ var BRICK_COLORS_ORDER = ['red','orange','gray','blue','purple','white','yellow'
 var BRICK_HEX = {
   red:'#E24B4A', orange:'#F57C00', gray:'#888888',
   blue:'#4db8ff', purple:'#7B2FBE', white:'#eeeeee',
-  yellow:'#F5D000', green:'#1D9E75', black:'#4a4250',
+  yellow:'#F5D000', green:'#1D9E75', black:'#6a5870',
 };
 var currentResistances = {};
 BRICK_COLORS_ORDER.forEach(function(c) { currentResistances[c] = 1; });
@@ -558,7 +558,7 @@ var CLASS_THEME = {
 var BRICK_COLOR_HEX = {
   red:'#E24B4A', orange:'#F57C00', gray:'#888888',
   blue:'#4db8ff', purple:'#7B2FBE', white:'#eeeeee',
-  yellow:'#F5D000', green:'#1D9E75', black:'#4a4250',
+  yellow:'#F5D000', green:'#1D9E75', black:'#6a5870',
 };
 
 // Render the class card grid. Cards are richer than the old buttons:
@@ -819,6 +819,9 @@ function startTestRumble(cls) {
     // Waves mode bypasses the sandbox auto-respawn — the test page manages
     // wave-to-wave spawns externally via Rumble.spawnEntity.
     suppressRespawn: isWaves,
+    // Waves mode also disables the revive-stacks-loot-penalty so we can
+    // observe true drop rates uncorrupted by death history.
+    suppressLootPenalty: isWaves,
   };
   Rumble.start(startConfig);
 

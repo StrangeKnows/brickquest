@@ -184,7 +184,7 @@ function scaleDist(px) {
 const BRICK_COLORS = {
   red:'#E24B4A', blue:'#006DB7', green:'#1D9E75', white:'#EFEFEF',
   gray:'#AAAAAA', purple:'#7B2FBE', yellow:'#F5D000', orange:'#F57C00',
-  black:'#4a4250'  // tinted dark — readable against #0a0a0f background; faint purple cast hints at its curse/wither role
+  black:'#6a5870'  // dark slate-purple — readable against #0a0a0f, retains "darkest brick" identity, purple cast hints at curse role
 };
 
 // ═══════════════════════════════════════════════════
@@ -603,8 +603,11 @@ function playerInputInvert() {
 // ═══════════════════════════════════════════════════
 function getRumbleBounds() {
   var pad = 12;
-  // Brick buttons are 48px wide; add small breathing room (no dark card anymore).
-  var panelWidth = 54;
+  // Reservation for brick bar + comfortable thumb gutter.
+  // Layout: page edge → 12px → 48px button → 24px gutter → arena.
+  // The previous 54px reservation crammed thumbs against the arena edge;
+  // mistapped player drags were common when reaching for chips.
+  var panelWidth = 84;
   var topHUD = 50;
   return {
     x: panelWidth + pad,
@@ -3692,8 +3695,10 @@ function rollLoot(entity) {
   // S013.3: revive loot penalty. Each heart-revive this run cuts drop chance
   // by 10% (multiplicative), floored at 10% of normal. reviveCount carries
   // across rumbles on player state; cheese-revives reset it to 0.
+  // cfg.suppressLootPenalty (waves mode) bypasses this — the test tool
+  // needs clean drop-rate observation, the live penalty is still in place.
   var reviveMult = 1.0;
-  if (player && player.reviveCount > 0) {
+  if (player && player.reviveCount > 0 && !(cfg && cfg.suppressLootPenalty)) {
     reviveMult = Math.max(0.1, 1.0 - 0.1 * player.reviveCount);
   }
   entity.loot.forEach(function(entry) {

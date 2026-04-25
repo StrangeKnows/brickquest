@@ -53,8 +53,8 @@
   pointer-events: none; /* container is transparent; buttons opt back in */
 }
 .rumble-brick-bar > * { pointer-events: auto; }
-#rumble-brick-bar-left  { left: 0; }
-#rumble-brick-bar-right { right: 0; }
+#rumble-brick-bar-left  { left: 12px; }
+#rumble-brick-bar-right { right: 12px; }
 .rumble-brick-btn {
   width: 48px;
   height: 56px;
