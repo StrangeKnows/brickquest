@@ -906,6 +906,16 @@ function updateLiveDebug() {
     d.innerHTML = '<span class="warn">no debug info</span>';
     return;
   }
+
+  // Fallback wave-clear detector — if waves are active, entities=0, and
+  // we're not already advancing, fire onWaveCleared. The primary detector
+  // hangs off the enemyKilled event, but if for any reason that event
+  // misses the last kill (timing race, sub-entity death not firing it,
+  // etc.), this poll-based check catches it within 250ms.
+  if (_waveState.active && !_waveState.advancing && info.entityCount === 0) {
+    onWaveCleared();
+  }
+
   var entityList = '';
   if (info.entitiesDetail && info.entitiesDetail.length) {
     entityList = info.entitiesDetail.map(function(e) {

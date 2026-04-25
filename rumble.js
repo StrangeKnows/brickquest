@@ -691,6 +691,16 @@ function onPointerMove(e) {
   if (!running || !dragActive) return;
   e.preventDefault();
   var pos = getEventPos(e);
+  // Clamp to arena bounds so finger drift onto brick bars / page edges
+  // doesn't direct the player off the play surface. Player would stop at
+  // the wall anyway, but the clamped target makes positioning feel right
+  // (player parks near the visible finger, not crammed in the corner).
+  if (player) {
+    var b = getRumbleBounds();
+    var pr = player.r || 12;
+    pos.x = Math.max(b.x + pr, Math.min(b.x + b.w - pr, pos.x));
+    pos.y = Math.max(b.y + pr, Math.min(b.y + b.h - pr, pos.y));
+  }
   dragTarget = { x:pos.x, y:pos.y };
 }
 
