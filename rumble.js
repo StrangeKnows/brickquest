@@ -1666,6 +1666,8 @@ function updateHUD() {
   var hpPct = Math.min(100, (player.hp / player.hpMax * 100));
   var isOverheal = player.hp > player.hpMax;
   var isBleeding = !!player.bleedOut;
+  // Drive the screen-tint overlay — fades in during bleed, out on recovery
+  updateBleedOverlay(isBleeding);
   var hpBar = document.getElementById('hp-bar');
   if (hpBar) {
     hpBar.style.width = hpPct + '%';
@@ -5993,9 +5995,9 @@ var BLEED_OVERFLOW_PENALTY_MS = 100; // ms shaved off duration per point of over
 function applyDamageToPlayer(dmg) {
   if (!player || dmg <= 0) return;
   var newHp = player.hp - dmg;
-  // Non-killing blow — instant apply, no bleed
+  // Non-killing blow — instant apply, no bleed. Round so HP stays integer.
   if (newHp > 0) {
-    player.hp = newHp;
+    player.hp = Math.max(0, Math.round(newHp));
     return;
   }
   // Killing blow path
@@ -6024,7 +6026,7 @@ function applyHealToPlayer(amount) {
   if (!player || amount <= 0) return 0;
   var prev = player.hp;
   var cap = Math.max(player.hpMax, player.hp);
-  player.hp = Math.min(cap, player.hp + amount);
+  player.hp = Math.min(cap, Math.round(player.hp + amount));
   var actual = player.hp - prev;
   if (actual > 0) applyBleedRescue(actual);
   return actual;
@@ -6055,17 +6057,66 @@ function applyBleedRescue(healAmount) {
   }
 }
 
+// ── BLEED SCREEN TINT ───────────────────────────────────────────────
+// Faint red overlay during bleed-out. Lazy-created so it works in any
+// host page (test harness, players.html) without needing HTML markup.
+// Pulses subtly while bleeding; fades in/out cleanly on enter/exit.
+function _ensureBleedOverlay() {
+  var el = document.getElementById('rumble-bleed-overlay');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'rumble-bleed-overlay';
+  el.style.cssText = [
+    'position:fixed', 'inset:0',
+    'pointer-events:none',
+    'z-index:150',                      // below HUD/picker, above canvas
+    'opacity:0',
+    'transition:opacity 600ms ease-out',
+    // Radial gradient — vignette-style. Deeper red at edges, light center.
+    // Layered with subtle inner pulse via animation.
+    'background:radial-gradient(ellipse at center, rgba(176,0,40,0) 30%, rgba(176,0,40,0.18) 75%, rgba(120,0,30,0.32) 100%)',
+    'animation:bleedPulse 1.4s ease-in-out infinite',
+  ].join(';');
+  // Inject keyframes once — no-op if already present
+  if (!document.getElementById('rumble-bleed-keyframes')) {
+    var style = document.createElement('style');
+    style.id = 'rumble-bleed-keyframes';
+    style.textContent =
+      '@keyframes bleedPulse {'
+      + '  0%, 100% { filter:brightness(1.0); }'
+      + '  50%      { filter:brightness(1.25); }'
+      + '}';
+    document.head.appendChild(style);
+  }
+  document.body.appendChild(el);
+  return el;
+}
+
+function updateBleedOverlay(isBleeding) {
+  var el = _ensureBleedOverlay();
+  if (isBleeding) {
+    // Faster fade IN (urgency) than fade OUT (relief)
+    el.style.transition = 'opacity 300ms ease-out';
+    el.style.opacity = '1';
+  } else {
+    el.style.transition = 'opacity 600ms ease-out';
+    el.style.opacity = '0';
+  }
+}
+
 function updateBleedOut(dt) {
   if (!player || !player.bleedOut) return;
   var b = player.bleedOut;
   var elapsed = performance.now() - b.startTime;
   var t = b.duration > 0 ? Math.min(1, elapsed / b.duration) : 1;
   // Linear interpolation from fromHp to toHp over duration. Clamp visual to 0.
+  // Round to whole int — internal interp is float for smooth math but the
+  // displayed HP should always be a whole number.
   var interp = b.fromHp + (b.toHp - b.fromHp) * t;
-  player.hp = Math.max(0, interp);
+  player.hp = Math.max(0, Math.round(interp));
   if (t >= 1) {
-    // Bleed complete. Lock in toHp (clamped to 0) and clear state.
-    player.hp = Math.max(0, b.toHp);
+    // Bleed complete. Lock in toHp (clamped to 0, rounded) and clear state.
+    player.hp = Math.max(0, Math.round(b.toHp));
     player.bleedOut = null;
     if (player.hp <= 0) {
       // Death — route through normal respawn/revive flow
@@ -8615,9 +8666,14 @@ function _showReviveOverlay() {
   root.appendChild(node);
 
   var overlay = document.getElementById('revive-overlay');
-  if (overlay) {
-    // Whole overlay is the tap target — player can't miss.
-    overlay.addEventListener('pointerdown', _reviveTapHandler);
+  var heartStack = document.getElementById('revive-heart-stack');
+  if (overlay && heartStack) {
+    // Tap target is constrained to the heart stack — focuses input on the
+    // visual focal point, no longer counts taps on subtitle/empty space.
+    // Overlay still catches stray clicks so they don't leak to the canvas.
+    heartStack.style.cursor = 'pointer';
+    heartStack.style.touchAction = 'manipulation';
+    heartStack.addEventListener('pointerdown', _reviveTapHandler);
     overlay.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); });
   }
 }
@@ -9356,6 +9412,12 @@ function _internalEnd(reason) {
   if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
   _reviveState = null;
   _revivePaused = false;
+  // Clear bleed-out screen tint if still showing
+  var bleedOverlay = document.getElementById('rumble-bleed-overlay');
+  if (bleedOverlay) {
+    bleedOverlay.style.transition = 'opacity 600ms ease-out';
+    bleedOverlay.style.opacity = '0';
+  }
   var reviveOverlay = document.getElementById('revive-overlay');
   if (reviveOverlay && reviveOverlay.parentNode) reviveOverlay.parentNode.removeChild(reviveOverlay);
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
