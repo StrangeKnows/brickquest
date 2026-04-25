@@ -346,8 +346,8 @@
      bottom-left; tap to expand the panel upward. Pulses red when
      a stuck-state is detected so the user knows to tap in.       */
   #waves-debug-icon {
-    /* Position set dynamically (anchored to arena) — see updateLiveDebug. */
-    position:fixed; z-index:199;
+    /* Lives in viewport gutter at bottom-left, outside the arena. */
+    position:fixed; bottom:6px; left:6px; z-index:199;
     /* 44x44 hit target (Apple HIG min). Inner glyph keeps small look. */
     width:44px; height:44px; border-radius:50%;
     background:rgba(8,8,12,0.92);
@@ -402,25 +402,15 @@
   #waves-live-debug .val { color:#eee; }
   #waves-live-debug .hi  { color:#F5D000; }
   #waves-live-debug .warn { color:#ff6680; }
-  /* ── OVERLOAD AUDIT (sub-section) ────────────────────────
+  /* ── OVERLOAD AUDIT (always rendered when panel open) ────
      Read-only diagnostic showing the current overload pipeline
      output per (color, tier) for the active class + inventory.
      Drives off window.effectiveAt — the same function the engine
      uses, so audit numbers match payload exactly. */
-  #waves-live-debug .audit-toggle {
-    margin-top:6px; padding:4px 6px;
-    background:#15151f; border:1px solid #2a2a35; border-radius:4px;
-    color:#888; font-size:9px; letter-spacing:.08em;
-    text-align:center; cursor:pointer;
-    touch-action:manipulation;
-  }
-  #waves-live-debug .audit-toggle:hover { color:#ccc; border-color:#444; }
   #waves-live-debug .audit-section {
     margin-top:6px; padding-top:6px;
     border-top:1px dashed #2a2a35;
-    display:none;
   }
-  #waves-live-debug .audit-section.open { display:block; }
   #waves-live-debug .audit-section h4 {
     margin:0 0 4px 0; font-size:9px; color:#F5D000;
     letter-spacing:.1em; font-family:'Cinzel',serif; font-weight:600;
@@ -1239,16 +1229,6 @@ function toggleLiveDebug() {
 var _lastEntityChangeAt = 0;
 var _lastEntityCount = -1;
 
-// Audit panel open/closed state. Persists across panel re-renders so the
-// section stays open between updateLiveDebug ticks.
-var _auditOpen = false;
-function toggleAuditSection() {
-  _auditOpen = !_auditOpen;
-  // Force an immediate re-render rather than waiting for the next tick so
-  // the section pops open/closed without lag.
-  updateLiveDebug();
-}
-
 // Per-color row order in audit tables. Same order as the brick bar so
 // the table reads visually like the bar (red on bottom, black on top).
 var AUDIT_COLORS = ['red','white','yellow','orange','gray','green','blue','purple','black'];
@@ -1363,37 +1343,25 @@ function buildOverloadAuditMarkup(info) {
 function updateLiveDebug() {
   var d = document.getElementById('waves-live-debug');
   if (!d) return;
-  // ── Anchor icon + panel to the playable arena (NOT the full canvas) ──
-  // The canvas spans the entire viewport; the brick bars and HUD overlay
-  // it at z-index, so canvas.getBoundingClientRect() includes the gutters
-  // we want to avoid. The actual arena rect is getRumbleBounds() — given
-  // in canvas-internal pixels — which we map into viewport pixels via the
-  // canvas rect and its width/height ratio. Re-measured each tick so the
-  // panel tracks resize/orientation/scale changes.
+  // ── Anchor panel to the playable arena (NOT the full canvas) ──
+  // Panel is sized/placed to match the arena rect exactly when open.
+  // Icon position is static (CSS bottom-left); only the panel is dynamic.
+  // Re-measured each tick so the panel tracks resize/orientation/scale.
   var canvas = document.getElementById('rumble-canvas');
-  var icon = document.getElementById('waves-debug-icon');
   var arena = (Rumble.getArenaInfo && Rumble.getArenaInfo()) || null;
   if (canvas && arena) {
     var crect = canvas.getBoundingClientRect();
-    // Scale factors: canvas-internal px → viewport px.
-    var sx = crect.width / (canvas.width || 1);
+    var sx = crect.width  / (canvas.width  || 1);
     var sy = crect.height / (canvas.height || 1);
-    // Arena rect in canvas-internal coords comes straight from
-    // getArenaInfo (x,y,w,h). No constant-duplication in this file.
     var vLeft   = crect.left + arena.x * sx;
     var vTop    = crect.top  + arena.y * sy;
     var vWidth  = arena.w * sx;
     var vHeight = arena.h * sy;
-    var vBottom = vTop + vHeight;
-    if (icon) {
-      icon.style.left = Math.round(vLeft + 6) + 'px';
-      icon.style.top  = Math.round(vBottom - 50) + 'px';
-    }
-    d.style.left  = Math.round(vLeft) + 'px';
-    d.style.width = Math.round(vWidth) + 'px';
-    var maxH = Math.max(120, Math.min(Math.round(vHeight * 0.6), Math.round(vHeight) - 60));
-    d.style.maxHeight = maxH + 'px';
-    d.style.top = Math.round(vBottom - 56 - maxH) + 'px';
+    d.style.left      = Math.round(vLeft)   + 'px';
+    d.style.top       = Math.round(vTop)    + 'px';
+    d.style.width     = Math.round(vWidth)  + 'px';
+    d.style.height    = Math.round(vHeight) + 'px';
+    d.style.maxHeight = Math.round(vHeight) + 'px';
   }
 
   var info = Rumble.getDebugInfo && Rumble.getDebugInfo();
@@ -1449,10 +1417,11 @@ function updateLiveDebug() {
   // Overload-audit toggle + section. Available in every mode (waves,
   // sandbox, spec) so screenshots can capture canonical vs current
   // kit behavior anywhere.
-  var auditToggle = '<div class="audit-toggle" onclick="toggleAuditSection()">'
-    + (_auditOpen ? '▼' : '▸') + ' OVERLOAD AUDIT (WIP)</div>';
-  var auditSection = '<div class="audit-section' + (_auditOpen ? ' open' : '') + '">'
-    + (_auditOpen ? buildOverloadAuditMarkup(info) : '')
+  // Overload audit renders directly (no toggle). Available in every mode
+  // (waves, sandbox, spec) so screenshots can capture canonical vs current
+  // kit behavior anywhere.
+  var auditMarkup = '<div class="audit-section open">'
+    + buildOverloadAuditMarkup(info)
     + '</div>';
   d.innerHTML =
       '<div><span class="lbl">wave</span> <span class="hi">' + _waveState.currentWave + '</span>'
@@ -1460,8 +1429,7 @@ function updateLiveDebug() {
     + '<div><span class="lbl">entities</span> <span class="val">' + info.entityCount + '</span></div>'
     + entityList
     + stuckBtn
-    + auditToggle
-    + auditSection;
+    + auditMarkup;
   // Pulse the collapsed icon red when stuck — draws the eye toward the
   // affordance even when the panel itself is closed.
   var icon = document.getElementById('waves-debug-icon');
