@@ -3810,16 +3810,30 @@ function updateDroppedBricks(dt) {
           // v4: Cheese loot goes into player's cheese inventory (+1 per pickup).
           // Previously cheese gave permanent +1 max HP + +1 HP — replaced so cheese
           // is a tradeable consumable, eaten via the out-of-battle menu for +1 Max HP.
-          player.cheese = (player.cheese || 0) + 1;
-          if (_battleStats) _battleStats.cheeseEaten++;
-          if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
-          _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
-          showFloatingText(player.x, player.y, '+1 🧀', '#FFD96A', player);
-          // S013.3: occasional flavor line for cheese pickups — every 3rd to avoid spam
-          if (player.cheese % 3 === 1) {
-            // Spawn ABOVE the player (not parented) so it floats independently
-            // and doesn't stack on top of the pickup number.
-            showFloatingText(player.x, player.y - (player.r + 48), _pickCheeseEventFlavor(), '#FFD96A');
+          //
+          // EXCEPTION: cfg.cheeseAutoApply (waves mode test tool) restores the
+          // old behavior — pickups apply immediately for visible feedback during
+          // stress testing. Live game keeps the inventory model.
+          if (cfg && cfg.cheeseAutoApply) {
+            player.hpMax += 1;
+            player.hp = Math.min(player.hpMax, player.hp + 1);
+            if (_battleStats) {
+              if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+              _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+            }
+            showFloatingText(player.x, player.y, '🧀 +1 HP MAX', '#FFD96A', player);
+          } else {
+            player.cheese = (player.cheese || 0) + 1;
+            if (_battleStats) _battleStats.cheeseEaten++;
+            if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+            _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+            showFloatingText(player.x, player.y, '+1 🧀', '#FFD96A', player);
+            // S013.3: occasional flavor line for cheese pickups — every 3rd to avoid spam
+            if (player.cheese % 3 === 1) {
+              // Spawn ABOVE the player (not parented) so it floats independently
+              // and doesn't stack on top of the pickup number.
+              showFloatingText(player.x, player.y - (player.r + 48), _pickCheeseEventFlavor(), '#FFD96A');
+            }
           }
         } else if (p.kind === 'gold') {
           // Coins accumulate on player.gold; battleTick surfaces to server.

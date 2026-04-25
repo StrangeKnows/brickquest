@@ -358,131 +358,308 @@
   #waves-live-debug .hi  { color:#F5D000; }
   #waves-live-debug .warn { color:#ff6680; }
 
+  /* ── RUN-SUMMARY OVERLAY ──────────────────────────────────
+     Cumulative view of the entire run. Aggregates all _waveHistory
+     entries plus shows per-wave timeline. Same visual language as
+     wave-victory but bigger and with progression details.            */
+  @keyframes rsFadeIn  { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes rsFadeOut { from { opacity: 1; } to { opacity: 0; } }
+  #run-summary {
+    position:fixed; inset:0; z-index:260;
+    display:none;
+    flex-direction:column; align-items:center; justify-content:center;
+    background:rgba(8,8,14,0.97);
+    box-sizing:border-box;
+    font-family:'Cinzel',serif;
+    overflow:hidden;
+    padding:clamp(14px, 3vmin, 28px);
+  }
+  #run-summary.visible { display:flex; opacity:0; animation:rsFadeIn .6s ease-out forwards; }
+  #run-summary.fading-out { animation:rsFadeOut .3s ease-in forwards; }
+  #run-summary .rs-card {
+    width:min(94vw, 760px);
+    max-height:96%;
+    display:flex; flex-direction:column; align-items:center;
+    padding:clamp(14px, 3vmin, 28px) clamp(16px, 3.5vmin, 32px);
+    gap:clamp(10px, 2.2vmin, 18px);
+    box-sizing:border-box;
+    overflow-y:auto;
+  }
+  #run-summary .rs-tag {
+    font-size:clamp(10px, 2.2vmin, 14px);
+    letter-spacing:.25em; color:#F5D000;
+  }
+  #run-summary .rs-title {
+    font-size:clamp(22px, 6vmin, 44px);
+    font-weight:700; color:#F5D000;
+    letter-spacing:.06em;
+    text-shadow:0 0 22px #F5D000;
+    text-align:center; line-height:1.1;
+  }
+  #run-summary .rs-subtitle {
+    font-family:'Crimson Pro',serif;
+    font-style:italic;
+    font-size:clamp(12px, 2.5vmin, 17px);
+    color:#aaa; text-align:center;
+    max-width:94%;
+  }
+  #run-summary .rs-cols {
+    display:flex; gap:clamp(10px, 2vmin, 18px);
+    width:100%; flex-wrap:wrap;
+    justify-content:center;
+  }
+  #run-summary .rs-zone-wrap {
+    display:flex; flex-direction:column; align-items:center;
+    gap:clamp(4px, 1vmin, 8px);
+    text-align:center;
+    flex:1 1 240px;
+    min-width:200px;
+  }
+  #run-summary .rs-zone-label {
+    font-size:clamp(9px, 1.7vmin, 11px);
+    letter-spacing:.2em; color:#888;
+    font-family:ui-sans-serif,system-ui;
+    font-weight:500;
+  }
+  #run-summary .rs-zone-body {
+    background:#15151e; border:1px solid #2a2a3e; border-radius:12px;
+    padding:clamp(10px, 2.2vmin, 18px) clamp(12px, 2.6vmin, 22px);
+    font-family:ui-sans-serif,system-ui;
+    box-sizing:border-box;
+    width:100%;
+  }
+  #run-summary .rs-stat-grid {
+    display:grid; grid-template-columns:auto auto;
+    gap:clamp(5px, 1.4vmin, 10px) clamp(14px, 3vmin, 24px);
+    justify-content:center;
+  }
+  #run-summary .rs-stat-grid .lbl {
+    font-size:clamp(8px, 1.5vmin, 9px);
+    letter-spacing:.12em; color:#888;
+    margin-bottom:1px;
+  }
+  #run-summary .rs-stat-grid .val {
+    font-size:clamp(11px, 2.6vmin, 16px);
+    color:#eee;
+  }
+  #run-summary .rs-stat-grid .val.mono { font-family:ui-monospace,monospace; }
+  #run-summary .rs-timeline {
+    width:100%;
+    max-height:30vh;
+    overflow-y:auto;
+    font-family:ui-monospace,monospace;
+    font-size:clamp(9px, 1.8vmin, 11px);
+    line-height:1.7;
+  }
+  #run-summary .rs-timeline-row {
+    display:grid;
+    grid-template-columns: 36px 1fr 60px 60px 60px;
+    gap:8px;
+    padding:2px 0;
+    border-bottom:1px solid #1f1f29;
+    color:#aaa;
+  }
+  #run-summary .rs-timeline-row.head {
+    color:#666;
+    font-size:clamp(8px, 1.4vmin, 9px);
+    letter-spacing:.1em;
+    border-bottom:1px solid #333;
+    padding-bottom:4px;
+  }
+  #run-summary .rs-timeline-row .w { color:#F5D000; }
+  #run-summary .rs-timeline-row .theme { color:#888; font-style:italic; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #run-summary .rs-timeline-row .num { text-align:right; color:#eee; }
+  #run-summary .rs-timeline-row .num.dim { color:#555; }
+  #run-summary .rs-felled-line {
+    font-size:clamp(10px, 2vmin, 12px);
+    color:#aaa; line-height:1.6;
+    text-align:center;
+  }
+  #run-summary .rs-felled-line .ftype { display:inline-block; margin:0 6px; }
+  #run-summary .rs-felled-line .fnum { color:#eee; font-weight:600; }
+  #run-summary .rs-buttons {
+    display:flex; gap:12px;
+    margin-top:clamp(2px, 1vmin, 8px);
+    flex-wrap:wrap; justify-content:center;
+  }
+  #run-summary .rs-btn {
+    padding:clamp(10px, 2.2vmin, 14px) clamp(20px, 5vmin, 36px);
+    font-size:clamp(11px, 2.2vmin, 14px);
+    font-family:'Cinzel',serif;
+    letter-spacing:.14em;
+    font-weight:700;
+    border-radius:10px; cursor:pointer;
+    border:2px solid;
+    min-width:clamp(120px, 22vmin, 160px);
+    transition:transform .15s, box-shadow .15s;
+  }
+  #run-summary .rs-btn:hover { transform:translateY(-1px); }
+  #run-summary .rs-btn.primary {
+    color:#000;
+    background:linear-gradient(180deg, #F5D000 0%, #F5D000cc 100%);
+    border-color:#F5D000;
+    box-shadow:0 4px 20px #F5D00066;
+  }
+  #run-summary .rs-btn.primary:hover { box-shadow:0 6px 28px #F5D00088; }
+  #run-summary .rs-btn.secondary {
+    color:#aaa;
+    background:#15151e;
+    border-color:#444;
+  }
+  #run-summary .rs-btn.secondary:hover { color:#fff; border-color:#666; }
+
   /* ── WAVE-VICTORY OVERLAY ─────────────────────────────────
-     Inter-wave beat: shows what happened in the wave just cleared.
-     Stats from getState().battleStats (delta from previous snapshot).
-     Continue button advances to next wave.                            */
+     Matches rumble.js end-of-rumble victory screen aesthetic:
+     bqVictoryFadeIn animation, dark backdrop, clamp-sized card,
+     vic-zone-wrap/body structure, landscape grid layout.        */
+  @keyframes wvFadeIn  { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes wvFadeOut { from { opacity: 1; } to { opacity: 0; } }
   #wave-victory {
     position:fixed; inset:0; z-index:250;
     display:none;
-    flex-direction:column; align-items:center; justify-content:flex-start;
-    background:radial-gradient(ellipse at center top, #15151f 0%, #06060a 80%);
-    padding:18px 12px 24px;
-    overflow-y:auto;
+    flex-direction:column; align-items:center; justify-content:center;
+    background:rgba(8,8,14,0.97);
+    box-sizing:border-box;
+    font-family:'Cinzel',serif;
+    overflow:hidden;
+    padding:clamp(14px, 3vmin, 28px);
   }
-  #wave-victory.visible { display:flex; }
-  #wave-victory .wv-banner {
-    text-align:center; margin-bottom:14px;
+  #wave-victory.visible { display:flex; opacity:0; animation:wvFadeIn .6s ease-out forwards; }
+  #wave-victory.fading-out { animation:wvFadeOut .3s ease-in forwards; }
+  #wave-victory .wv-card {
+    width:min(94vw, 720px);
+    max-height:96%;
+    display:flex; flex-direction:column; align-items:center;
+    padding:clamp(14px, 3vmin, 28px) clamp(16px, 3.5vmin, 32px);
+    gap:clamp(10px, 2.2vmin, 20px);
+    box-sizing:border-box;
+    overflow:hidden;
   }
-  #wave-victory .wv-cleared {
-    font-size:11px; letter-spacing:.32em; color:#666;
-    margin-bottom:6px; font-weight:600;
+  #wave-victory .wv-tag {
+    font-size:clamp(10px, 2.2vmin, 14px);
+    letter-spacing:.25em; color:#F5D000;
   }
-  #wave-victory .wv-num {
-    font-size:30px; font-weight:700; letter-spacing:.16em;
-    color:#F5D000;
-    text-shadow:0 0 24px rgba(245,208,0,0.3), 0 0 6px rgba(245,208,0,0.5);
+  #wave-victory .wv-title {
+    font-size:clamp(26px, 7vmin, 56px);
+    font-weight:700; color:#F5D000;
+    letter-spacing:.06em;
+    text-shadow:0 0 22px #F5D000;
+    text-align:center; line-height:1.1;
   }
-  #wave-victory .wv-theme {
-    font-size:11px; letter-spacing:.16em; color:#888;
-    margin-top:4px; font-weight:600;
+  #wave-victory .wv-flavor {
+    font-family:'Crimson Pro',serif;
+    font-style:italic;
+    font-size:clamp(13px, 2.8vmin, 19px);
+    color:#d8d8d8; text-align:center;
+    max-width:94%; line-height:1.5;
   }
-  #wave-victory .wv-duration {
-    font-size:10px; color:#555;
-    margin-top:8px; font-family:ui-monospace,monospace;
-  }
-  #wave-victory .wv-stats {
-    display:grid;
-    grid-template-columns:repeat(3, 1fr);
-    gap:10px;
-    width:100%; max-width:560px;
-    margin:0 auto 14px;
-  }
-  #wave-victory .wv-col {
-    background:linear-gradient(180deg, #14141c, #0d0d14);
-    border:1px solid #2a2a35;
-    border-radius:8px;
-    padding:10px 10px 12px;
-  }
-  #wave-victory .wv-col-head {
-    font-size:9.5px; letter-spacing:.18em;
-    color:#888; font-weight:700;
-    margin-bottom:8px; text-align:center;
-    padding-bottom:6px;
-    border-bottom:1px solid #1f1f29;
-  }
-  #wave-victory .wv-col.offense .wv-col-head { color:#E24B4A; }
-  #wave-victory .wv-col.defense .wv-col-head { color:#5DA831; }
-  #wave-victory .wv-col.economy .wv-col-head { color:#F5D000; }
-  #wave-victory .wv-row {
-    display:flex; justify-content:space-between; align-items:baseline;
-    font-size:10px; line-height:1.6;
-    font-family:ui-monospace,monospace;
-  }
-  #wave-victory .wv-row .label { color:#666; }
-  #wave-victory .wv-row .val   { color:#eee; font-weight:600; }
-  #wave-victory .wv-row .val.hi { color:#F5D000; }
-  #wave-victory .wv-row .val.dim { color:#555; }
-  #wave-victory .wv-felled {
-    font-size:9.5px; color:#aaa;
-    margin-top:6px; padding-top:6px;
-    border-top:1px solid #1f1f29;
-    line-height:1.5;
-  }
-  #wave-victory .wv-bricks {
-    font-size:9.5px; color:#aaa;
-    margin-top:6px; padding-top:6px;
-    border-top:1px solid #1f1f29;
-    line-height:1.5;
-  }
-  #wave-victory .wv-bricks .b {
-    display:inline-block; margin-right:6px;
-  }
-  #wave-victory .wv-bricks .b .dot {
-    display:inline-block; width:6px; height:6px; border-radius:50%;
-    margin-right:3px; vertical-align:middle;
-    box-shadow:0 0 4px currentColor;
-  }
-  #wave-victory .wv-cheese-banner {
+  #wave-victory .wv-meta {
+    font-family:ui-sans-serif,system-ui;
+    font-size:clamp(9px, 1.7vmin, 11px);
+    color:#888; letter-spacing:.18em;
     text-align:center;
-    color:#FFD96A;
-    font-size:13px; font-weight:600;
-    letter-spacing:.08em;
-    padding:10px;
-    background:rgba(255,217,106,0.08);
-    border:1px solid #FFD96A44;
-    border-radius:8px;
-    margin:0 auto 12px;
-    max-width:340px;
+  }
+  #wave-victory .wv-zone-wrap {
+    display:flex; flex-direction:column; align-items:center;
+    gap:clamp(4px, 1vmin, 8px);
+    text-align:center;
+  }
+  #wave-victory .wv-zone-label {
+    font-size:clamp(9px, 1.7vmin, 11px);
+    letter-spacing:.2em; color:#888;
+    font-family:ui-sans-serif,system-ui;
+    font-weight:500;
+  }
+  #wave-victory .wv-zone-body {
+    background:#15151e; border:1px solid #2a2a3e; border-radius:12px;
+    padding:clamp(12px, 2.6vmin, 20px) clamp(14px, 3vmin, 24px);
+    font-family:ui-sans-serif,system-ui;
+    box-sizing:border-box;
+  }
+  #wave-victory .wv-stats-grid {
+    display:grid; grid-template-columns:auto auto;
+    gap:clamp(6px, 1.6vmin, 12px) clamp(16px, 3.6vmin, 28px);
+  }
+  #wave-victory .wv-stat-label {
+    font-size:clamp(8px, 1.6vmin, 9px);
+    letter-spacing:.12em; color:#888;
+    margin-bottom:2px;
+  }
+  #wave-victory .wv-stat-value {
+    font-size:clamp(12px, 3vmin, 18px);
+    color:#eee;
+  }
+  #wave-victory .wv-stat-value.mono { font-family:ui-monospace,monospace; }
+  #wave-victory .wv-rewards {
+    display:flex; flex-direction:column; align-items:center;
+    gap:clamp(6px, 1.8vmin, 12px);
+    min-width:clamp(180px, 32vmin, 260px);
+    text-align:center;
+  }
+  #wave-victory .wv-felled {
+    font-size:clamp(9px, 1.8vmin, 11px);
+    color:#666; font-style:italic;
+    line-height:1.5;
+  }
+  #wave-victory .wv-bricks-line {
+    font-size:clamp(11px, 2.2vmin, 14px);
+    line-height:1.7;
+  }
+  #wave-victory .wv-bricks-line .b {
+    display:inline-block; margin:0 6px;
+  }
+  #wave-victory .wv-bricks-line .b .dot {
+    display:inline-block; width:8px; height:8px; border-radius:50%;
+    margin-right:3px; vertical-align:middle;
+    box-shadow:0 0 6px currentColor;
+  }
+  #wave-victory .wv-cheese-line {
+    color:#FFD96A; font-weight:600;
+    font-size:clamp(11px, 2.2vmin, 14px);
   }
   #wave-victory .wv-continue {
-    display:block;
-    background:linear-gradient(180deg, #1a1500, #110d00);
-    border:1px solid #F5D000;
-    border-radius:10px;
-    color:#F5D000;
+    padding:clamp(10px, 2.2vmin, 14px) clamp(28px, 6.5vmin, 46px);
+    font-size:clamp(12px, 2.4vmin, 15px);
     font-family:'Cinzel',serif;
-    font-size:13px; letter-spacing:.18em; font-weight:700;
-    padding:12px 32px;
-    cursor:pointer;
-    box-shadow:0 0 0 1px rgba(245,208,0,0.3), 0 4px 20px rgba(245,208,0,0.15);
-    transition:all .15s;
-    margin:8px auto 0;
+    letter-spacing:.14em;
+    font-weight:700;
+    border-radius:10px; cursor:pointer;
+    border:2px solid #F5D000;
+    color:#000;
+    background:linear-gradient(180deg, #F5D000 0%, #F5D000cc 100%);
+    box-shadow:0 4px 20px #F5D00066;
+    min-width:clamp(150px, 28vmin, 200px);
+    margin-top:clamp(2px, 1vmin, 8px);
+    transition:transform .15s, box-shadow .15s;
   }
   #wave-victory .wv-continue:hover {
     transform:translateY(-1px);
-    box-shadow:0 0 0 1px rgba(245,208,0,0.5), 0 6px 24px rgba(245,208,0,0.25);
+    box-shadow:0 6px 28px #F5D00088;
   }
   #wave-victory .wv-diag {
-    margin-top:18px;
     font-family:ui-monospace,monospace;
     font-size:9px; color:#444;
     letter-spacing:.04em;
     text-align:center;
   }
-  @media (max-width: 540px) {
-    #wave-victory .wv-stats { grid-template-columns:1fr; }
-    #wave-victory .wv-num { font-size:24px; }
+  /* Landscape: stats and rewards side by side */
+  @media (min-aspect-ratio: 1/1) {
+    #wave-victory .wv-card {
+      width:fit-content; max-width:96vw;
+    }
+    #wave-victory .wv-cols {
+      display:grid;
+      grid-template-columns:auto auto;
+      gap:clamp(10px, 2vmin, 18px) clamp(18px, 4vmin, 32px);
+      justify-content:center; align-items:center;
+    }
+  }
+  @media (max-aspect-ratio: 1/1) {
+    #wave-victory .wv-cols {
+      display:flex; flex-direction:column;
+      gap:clamp(10px, 2vmin, 18px);
+      align-items:center;
+    }
   }
 
   /* ── RESPONSIVE ─────────────────────────────────────────── */
@@ -533,6 +710,9 @@
 
 <!-- WAVE-VICTORY OVERLAY (built dynamically by waves manager) -->
 <div id="wave-victory"></div>
+
+<!-- RUN-SUMMARY OVERLAY (built dynamically; shown via ESC during play or on run end) -->
+<div id="run-summary"></div>
 
 <!-- CLASS PICKER OVERLAY -->
 <div id="overlay">
@@ -846,6 +1026,9 @@ function spawnWave(n) {
   }
   showWaveBanner(n, def.theme);
   updateWaveBadge(n);
+  // Reset stuck-tracker on each new wave so the timer starts fresh
+  _lastEntityCount = -1;
+  _lastEntityChangeAt = performance.now();
 }
 
 // Show the WAVE N · THEME banner briefly. Fades in fast, holds, fades out.
@@ -898,6 +1081,12 @@ function stopLiveDebug() {
   var d = document.getElementById('waves-live-debug');
   if (d) d.classList.remove('visible');
 }
+// Track when entity count last changed — if count stays constant for >8s
+// while entities still present and not advancing, treat as stuck and show
+// the force-kill button. Avoids showing it during normal play.
+var _lastEntityChangeAt = 0;
+var _lastEntityCount = -1;
+
 function updateLiveDebug() {
   var d = document.getElementById('waves-live-debug');
   if (!d) return;
@@ -906,6 +1095,15 @@ function updateLiveDebug() {
     d.innerHTML = '<span class="warn">no debug info</span>';
     return;
   }
+
+  // Track count changes for stuck-detection
+  if (info.entityCount !== _lastEntityCount) {
+    _lastEntityCount = info.entityCount;
+    _lastEntityChangeAt = performance.now();
+  }
+  var stuckMs = performance.now() - _lastEntityChangeAt;
+  var isStuck = _waveState.active && info.entityCount > 0
+    && !_waveState.advancing && stuckMs > 8000;
 
   // Fallback wave-clear detector — if waves are active, entities=0, and
   // we're not already advancing, fire onWaveCleared. The primary detector
@@ -924,28 +1122,37 @@ function updateLiveDebug() {
       if (e.burrowHidden) tag += ' <span class="warn">BURR</span>';
       if (e.phaseFade) tag += ' <span class="warn">PHASE</span>';
       if (e.splitDepth) tag += ' <span class="hi">d' + e.splitDepth + '</span>';
-      if (e.aiState) tag += ' <span class="lbl">' + e.aiState + '</span>';
+      // Only show AI state if it's meaningful (not the chase-default 'idle')
+      if (e.aiState && e.aiState !== 'idle') {
+        tag += ' <span class="lbl">' + e.aiState + '</span>';
+      }
       return '<div>' + e.type + ' <span class="val">' + e.hp + '/' + e.hpMax + '</span> '
         + '<span class="lbl">@' + e.x + ',' + e.y + '</span>' + tag + '</div>';
     }).join('');
   } else {
     entityList = '<div class="lbl">no entities</div>';
   }
-  // Force-kill button only shows when stuck (entities present, not advancing)
-  var stuckBtn = (_waveState.active && info.entityCount > 0 && !_waveState.advancing)
+  // FORCE KILL only shows when actually stuck (8s+ of no progress)
+  var stuckBtn = isStuck
     ? '<div style="margin-top:6px;text-align:center;pointer-events:auto;">'
+      + '<div class="warn" style="font-size:9px;margin-bottom:3px;">STUCK ' + Math.round(stuckMs/1000) + 's</div>'
       + '<button onclick="forceKillAll()" style="background:#2a0010;border:1px solid #ff4466;color:#ff8899;'
       + 'border-radius:4px;padding:3px 8px;font-size:9px;font-family:ui-monospace,monospace;'
-      + 'letter-spacing:.08em;cursor:pointer;">FORCE KILL</button></div>'
+      + 'letter-spacing:.08em;cursor:pointer;">END RUN</button></div>'
     : '';
   d.innerHTML =
-      '<div><span class="lbl">wave</span> <span class="hi">' + _waveState.currentWave + '</span>'
-    +   ' <span class="lbl">adv</span> <span class="val">' + (_waveState.advancing ? 'Y' : 'n') + '</span></div>'
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">'
+    +   '<div><span class="lbl">wave</span> <span class="hi">' + _waveState.currentWave + '</span>'
+    +     ' <span class="lbl">adv</span> <span class="val">' + (_waveState.advancing ? 'Y' : 'n') + '</span></div>'
+    +   '<button onclick="showRunSummary()" style="background:transparent;border:1px solid #444;color:#888;'
+    +     'border-radius:3px;padding:1px 6px;font-size:9px;font-family:ui-monospace,monospace;'
+    +     'letter-spacing:.04em;cursor:pointer;pointer-events:auto;">ESC</button>'
+    + '</div>'
     + '<div><span class="lbl">entities</span> <span class="val">' + info.entityCount + '</span></div>'
     + entityList
     + stuckBtn;
-  // Re-enable pointer events on the panel only when the button is visible
-  d.style.pointerEvents = stuckBtn ? 'auto' : 'none';
+  // Always allow pointer events on the panel — ESC button needs to be tappable.
+  d.style.pointerEvents = 'auto';
 }
 
 // Manual escape hatch for stuck waves: kill all living entities by setting
@@ -972,6 +1179,11 @@ function hideWaveHud() {
 // so we have to subtract the prior snapshot to get per-wave numbers.
 var _waveSnapshot = null;
 var _waveStartTime = 0;
+// Accumulated per-wave deltas. Each cleared wave pushes a record here so
+// the run-summary screen can show progression over the entire run.
+var _waveHistory = [];
+// Run-level start time for elapsed-run-time display in the summary.
+var _runStartTime = 0;
 
 function captureWaveSnapshot() {
   var st = Rumble.getState && Rumble.getState();
@@ -1046,15 +1258,15 @@ function computeWaveDelta() {
   };
 }
 
-// Build the wave-victory screen content. Shows OFFENSE / DEFENSE / ECONOMY
-// columns with per-wave stats, plus a diagnostic footer for the dev tool.
-function showWaveVictoryScreen(waveNum, theme, delta, cheeseEaten, infoAtClear) {
+// Build the wave-victory screen content. Matches the rumble.js end-of-rumble
+// victory screen aesthetic — tier label, big title, flavor, two-column
+// stats+rewards layout, themed CTA.
+function showWaveVictoryScreen(waveNum, theme, delta, infoAtClear) {
   var v = document.getElementById('wave-victory');
   if (!v) return;
 
   // Compute active-DPS — damage rate during engagement, not corrupted by
-  // idle/travel/recharge gaps. activeMs = milliseconds during which damage
-  // was being dealt (within ACTIVE_COMBAT_WINDOW_MS rolling window).
+  // idle/travel/recharge gaps.
   var dur = delta.duration > 0.1 ? delta.duration : 0.1;
   var activeSec = (delta.activeMs || 0) / 1000;
   var activeDps = activeSec > 0.05
@@ -1062,8 +1274,13 @@ function showWaveVictoryScreen(waveNum, theme, delta, cheeseEaten, infoAtClear) 
     : '0.0';
   var uptimePct = Math.min(100, Math.round((activeSec / dur) * 100));
 
+  // Format duration string "M:SS" if over 1 minute, else just seconds
+  var timeStr = dur >= 60
+    ? Math.floor(dur / 60) + ':' + ('0' + Math.floor(dur % 60)).slice(-2)
+    : dur.toFixed(1) + 's';
+
   // Format felled list — group by type, "2× goblin · 1× skeleton"
-  var felledStr = '—';
+  var felledStr = '';
   if (delta.felled && delta.felled.length) {
     var counts = {};
     delta.felled.forEach(function(t) { counts[t] = (counts[t] || 0) + 1; });
@@ -1072,107 +1289,181 @@ function showWaveVictoryScreen(waveNum, theme, delta, cheeseEaten, infoAtClear) 
     }).join(' · ');
   }
 
-  // Format brick usage — show top entries with color dots
+  // Pick a flavor line — varies by performance. Nothing too cute, just
+  // something that adds character between waves.
+  var flavor = pickWaveFlavor(delta, waveNum);
+
+  // Format brick gain row with color dots
   var BRICK_DOT_HEX = {
     red:'#E24B4A', orange:'#F57C00', gray:'#888888',
     blue:'#4db8ff', purple:'#7B2FBE', white:'#eeeeee',
     yellow:'#F5D000', green:'#1D9E75', black:'#6a5870',
   };
-  function brickRow(map) {
-    var entries = Object.keys(map).map(function(c) { return [c, map[c]]; });
+  function brickGainLine(map) {
+    var entries = Object.keys(map).filter(function(k) {
+      return k !== 'cheese' && map[k] > 0;
+    }).map(function(c) { return [c, map[c]]; });
     entries.sort(function(a, b) { return b[1] - a[1]; });
-    if (entries.length === 0) return '<span style="color:#444;">none</span>';
-    return entries.slice(0, 5).map(function(kv) {
+    if (entries.length === 0) return '';
+    return entries.slice(0, 6).map(function(kv) {
       var c = kv[0], n = kv[1];
       var color = BRICK_DOT_HEX[c] || '#888';
       return '<span class="b" style="color:' + color + ';">'
         +    '<span class="dot" style="background:' + color + ';"></span>'
-        +    n + ' ' + c.substr(0,3)
+        +    '+' + n
         +  '</span>';
     }).join('');
   }
+  var bricksGainedLine = brickGainLine(delta.bricksGained);
+  var cheeseGained = (delta.bricksGained && delta.bricksGained.cheese) || 0;
 
-  // Cheese banner — only show if cheese was eaten this turn
-  var cheeseBanner = (cheeseEaten > 0)
-    ? '<div class="wv-cheese-banner">🧀 +' + cheeseEaten + ' MAX HP — total now ' + delta.hpMax + '</div>'
-    : '';
+  // Build COMBAT stat cells — same pattern as rumble victory's COMBAT grid.
+  // Skip stats with 0 values to avoid clutter.
+  var statCells = [];
+  statCells.push({ label:'TIME', value: timeStr, mono:true });
+  statCells.push({ label:'ACTIVE', value: activeSec.toFixed(1) + 's (' + uptimePct + '%)', mono:true });
+  if (delta.damageDealt > 0) {
+    statCells.push({ label:'DMG DEALT', value: delta.damageDealt, color:'#E24B4A' });
+    statCells.push({ label:'ACTIVE DPS', value: activeDps, color:'#F5D000' });
+  }
+  if (delta.biggestDamageDealt > 0) {
+    statCells.push({ label:'BIGGEST HIT', value: delta.biggestDamageDealt, color:'#F57C00' });
+  }
+  if (delta.critsLanded > 0) statCells.push({ label:'CRITS', value: delta.critsLanded, color:'#F57C00' });
+  if (delta.overloadsFired > 0) statCells.push({ label:'OVERLOADS', value: delta.overloadsFired, color:'#7B2FBE' });
+  if (delta.damageTaken > 0) statCells.push({ label:'DMG TAKEN', value: delta.damageTaken, color:'#D4537E' });
+  if (delta.armorAbsorbed > 0) statCells.push({ label:'ARMOR ABS', value: delta.armorAbsorbed, color:'#AAA' });
+  if (delta.totalHealed > 0) statCells.push({ label:'HEALED', value: Math.round(delta.totalHealed), color:'#9adb9a' });
+  statCells.push({ label:'HP END', value: delta.hpNow + '/' + delta.hpMax, color: delta.hpLow < delta.hpMax * 0.3 ? '#F5D000' : '#eee' });
+
+  var statRows = statCells.map(function(c) {
+    var monoStyle = c.mono ? ' mono' : '';
+    return '<div>'
+      +    '<div class="wv-stat-label">' + c.label + '</div>'
+      +    '<div class="wv-stat-value' + monoStyle + '" style="' + (c.color ? 'color:' + c.color + ';' : '') + '">' + c.value + '</div>'
+      + '</div>';
+  }).join('');
+
+  // Rewards body — gold, cheese, bricks, felled list
+  var rewardsRows = [];
+  if (delta.goldGained > 0) {
+    rewardsRows.push('<div class="wv-bricks-line"><span style="color:#F5D000;">+' + delta.goldGained + ' 🪙</span></div>');
+  }
+  if (cheeseGained > 0) {
+    rewardsRows.push('<div class="wv-cheese-line">🧀 +' + cheeseGained + ' MAX HP — total ' + delta.hpMax + '</div>');
+  }
+  if (bricksGainedLine) {
+    rewardsRows.push('<div class="wv-bricks-line">' + bricksGainedLine + '</div>');
+  }
+  if (felledStr) {
+    rewardsRows.push('<div class="wv-felled">Felled: ' + felledStr + '</div>');
+  }
+  if (rewardsRows.length === 0) {
+    rewardsRows.push('<div class="wv-felled" style="color:#444;">no spoils</div>');
+  }
 
   v.innerHTML =
-      '<div class="wv-banner">'
-    +   '<div class="wv-cleared">WAVE CLEARED</div>'
-    +   '<div class="wv-num">WAVE ' + waveNum + '</div>'
-    +   '<div class="wv-theme">' + (theme || '') + '</div>'
-    +   '<div class="wv-duration">DURATION: ' + dur.toFixed(1) + 's · ACTIVE: ' + activeSec.toFixed(1) + 's (' + uptimePct + '%)</div>'
-    + '</div>'
-    + cheeseBanner
-    + '<div class="wv-stats">'
-
-    +   '<div class="wv-col offense">'
-    +     '<div class="wv-col-head">OFFENSE</div>'
-    +     '<div class="wv-row"><span class="label">active DPS</span><span class="val hi">' + activeDps + '</span></div>'
-    +     '<div class="wv-row"><span class="label">total dmg</span><span class="val">' + delta.damageDealt + '</span></div>'
-    +     '<div class="wv-row"><span class="label">biggest hit</span><span class="val">' + delta.biggestDamageDealt + '</span></div>'
-    +     '<div class="wv-row"><span class="label">crits</span><span class="val">' + delta.critsLanded + '</span></div>'
-    +     '<div class="wv-row"><span class="label">overloads</span><span class="val">' + delta.overloadsFired + '</span></div>'
-    +     '<div class="wv-felled"><span style="color:#666;">FELLED</span><br/>' + felledStr + '</div>'
+    '<div class="wv-card">'
+    +   '<div class="wv-tag">⚔ WAVE CLEARED ⚔</div>'
+    +   '<div class="wv-title">WAVE ' + waveNum + '</div>'
+    +   (theme ? '<div class="wv-meta">' + theme + '</div>' : '')
+    +   '<div class="wv-flavor">"' + flavor + '"</div>'
+    +   '<div class="wv-cols">'
+    +     '<div class="wv-zone-wrap">'
+    +       '<div class="wv-zone-label">COMBAT</div>'
+    +       '<div class="wv-zone-body">'
+    +         '<div class="wv-stats-grid">' + statRows + '</div>'
+    +       '</div>'
+    +     '</div>'
+    +     '<div class="wv-zone-wrap">'
+    +       '<div class="wv-zone-label">REWARDS</div>'
+    +       '<div class="wv-zone-body">'
+    +         '<div class="wv-rewards">' + rewardsRows.join('') + '</div>'
+    +       '</div>'
+    +     '</div>'
     +   '</div>'
-
-    +   '<div class="wv-col defense">'
-    +     '<div class="wv-col-head">DEFENSE</div>'
-    +     '<div class="wv-row"><span class="label">dmg taken</span><span class="val">' + delta.damageTaken + '</span></div>'
-    +     '<div class="wv-row"><span class="label">biggest hit</span><span class="val">' + delta.biggestDamageTaken + '</span></div>'
-    +     '<div class="wv-row"><span class="label">armor abs</span><span class="val">' + delta.armorAbsorbed + '</span></div>'
-    +     '<div class="wv-row"><span class="label">healed</span><span class="val">' + Math.round(delta.totalHealed) + '</span></div>'
-    +     '<div class="wv-row"><span class="label">hp low</span><span class="val ' + (delta.hpLow < delta.hpMax * 0.3 ? 'hi' : '') + '">' + delta.hpLow + '/' + delta.hpMax + '</span></div>'
-    +     '<div class="wv-row"><span class="label">hp end</span><span class="val">' + delta.hpNow + '/' + delta.hpMax + '</span></div>'
+    +   '<button class="wv-continue" onclick="continueToNextWave()">CONTINUE →</button>'
+    +   '<div class="wv-diag">'
+    +     'wave=' + _waveState.currentWave + ' · entityCount=' + (infoAtClear && infoAtClear.entityCount) + ' · advancing=' + _waveState.advancing
     +   '</div>'
-
-    +   '<div class="wv-col economy">'
-    +     '<div class="wv-col-head">ECONOMY</div>'
-    +     '<div class="wv-row"><span class="label">gold</span><span class="val">+' + delta.goldGained + '</span></div>'
-    +     '<div class="wv-row"><span class="label">cheese held</span><span class="val">' + delta.cheeseInInventory + '</span></div>'
-    +     '<div class="wv-bricks"><span style="color:#666;">SPENT</span><br/>' + brickRow(delta.bricksUsed) + '</div>'
-    +     '<div class="wv-bricks"><span style="color:#666;">GAINED</span><br/>' + brickRow(delta.bricksGained) + '</div>'
-    +   '</div>'
-
-    + '</div>'
-    + '<button class="wv-continue" onclick="continueToNextWave()">CONTINUE ▸</button>'
-    + '<div class="wv-diag">'
-    +   'wave=' + _waveState.currentWave + ' · entityCount=' + (infoAtClear && infoAtClear.entityCount) + ' · advancing=' + _waveState.advancing
     + '</div>';
+  v.classList.remove('fading-out');
   v.classList.add('visible');
+}
+
+// Pool of flavor lines varied by wave performance. Nothing precious — adds
+// character between rounds. Picks vary by hpLow ratio + damage taken.
+function pickWaveFlavor(delta, n) {
+  var flawless = (delta.damageTaken === 0);
+  var critical = (delta.hpLow < delta.hpMax * 0.25);
+  var pool;
+  if (flawless) {
+    pool = [
+      'Untouched. Unhurried. Inevitable.',
+      'They never laid a hand on you.',
+      'Their attacks found only empty air.',
+      'A masterclass in distance.',
+    ];
+  } else if (critical) {
+    pool = [
+      'Closer than you would like.',
+      'Bones held. Barely.',
+      'A thread between you and the dark.',
+      'Tomorrow, you breathe. Today, that is enough.',
+    ];
+  } else if (n >= 10) {
+    pool = [
+      'The arena tires of you.',
+      'Each wave answers the last.',
+      'You learn the rhythm. They learn fear.',
+      'The pile of fallen grows behind you.',
+    ];
+  } else {
+    pool = [
+      'The dust settles. You stand.',
+      'Onward.',
+      'Another cleared. Another ahead.',
+      'You catch your breath. Briefly.',
+    ];
+  }
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function hideWaveVictoryScreen() {
   var v = document.getElementById('wave-victory');
-  if (v) v.classList.remove('visible');
+  if (!v) return;
+  // Trigger fade-out animation, then actually hide once it completes
+  v.classList.add('fading-out');
+  setTimeout(function() {
+    v.classList.remove('visible');
+    v.classList.remove('fading-out');
+  }, 300);
 }
 
-// Called when the last entity in the active wave dies. Auto-consumes any
-// cheese picked up, refills bricks instantly, captures wave-stats delta,
-// shows the wave-victory screen. Player taps CONTINUE to advance.
+// Called when the last entity in the active wave dies. Refills bricks
+// instantly, captures wave-stats delta, fades in the wave-victory screen.
+// Player taps CONTINUE to advance.
 function onWaveCleared() {
   if (!_waveState.active || _waveState.advancing) return;
   _waveState.advancing = true;
   _waveState.highestReached = Math.max(_waveState.highestReached, _waveState.currentWave);
 
-  // Compute stats delta BEFORE auto-eating cheese (cheese-eat changes hp/hpMax,
-  // would skew the "hp end" reading; we want to show the cheese effect separately
-  // via the cheese banner and updated hpMax in defense column).
+  // Capture stats delta — cheese is auto-applied on pickup in waves mode,
+  // so its effects are already baked into hpMax/hp by this point.
   var delta = computeWaveDelta();
+  // Look up wave def for theme (used by both history and victory screen).
+  var def = (_waveState.currentWave <= WAVE_DEFS.length)
+    ? WAVE_DEFS[_waveState.currentWave - 1]
+    : generateRandomWave(_waveState.currentWave);
 
-  // Auto-eat any cheese picked up this wave (+1 max HP per wheel)
-  var cheeseEaten = 0;
-  if (Rumble.eatAllCheese) cheeseEaten = Rumble.eatAllCheese();
-
-  // Refresh delta values that the cheese-eat affected
+  // Push to history for the run-summary screen. Record the wave number
+  // and theme along with the stats so we can display "WAVE 5 — TANK + RANGED".
   if (delta) {
-    var st = Rumble.getState && Rumble.getState();
-    if (st) {
-      delta.hpMax = st.playerHpMax;
-      delta.hpNow = st.playerHp;
-      delta.cheeseInInventory = 0;  // just ate them all
-    }
+    _waveHistory.push({
+      waveNum: _waveState.currentWave,
+      theme: def.theme,
+      delta: delta,
+    });
   }
 
   // Instant brick refill — full pips going into the next wave
@@ -1181,13 +1472,8 @@ function onWaveCleared() {
   // Snapshot raw debug info AT clear-time so the diagnostic footer is honest
   var infoAtClear = Rumble.getDebugInfo && Rumble.getDebugInfo();
 
-  // Look up wave def for theme
-  var def = (_waveState.currentWave <= WAVE_DEFS.length)
-    ? WAVE_DEFS[_waveState.currentWave - 1]
-    : generateRandomWave(_waveState.currentWave);
-
   if (delta) {
-    showWaveVictoryScreen(_waveState.currentWave, def.theme, delta, cheeseEaten, infoAtClear);
+    showWaveVictoryScreen(_waveState.currentWave, def.theme, delta, infoAtClear);
   }
 }
 
@@ -1200,6 +1486,258 @@ function continueToNextWave() {
   _waveState.advancing = false;
   captureWaveSnapshot();
   spawnWave(_waveState.currentWave);
+}
+
+// ── RUN-SUMMARY SCREEN ──────────────────────────────────────────────
+// Aggregates _waveHistory into a cumulative view + per-wave timeline.
+// Triggered by ESC button on the live debug panel during play, OR
+// automatically when the player dies / quits a waves run.
+
+function aggregateRun() {
+  // Sum stats across all completed waves PLUS any in-progress wave delta.
+  // The in-progress delta covers the case where the user hits ESC mid-wave —
+  // numbers should reflect everything that happened, not just cleared waves.
+  var totals = {
+    waves: _waveHistory.length,
+    duration: 0,
+    activeMs: 0,
+    damageDealt: 0,
+    damageTaken: 0,
+    armorAbsorbed: 0,
+    totalHealed: 0,
+    biggestDamageDealt: 0,
+    biggestDamageTaken: 0,
+    critsLanded: 0,
+    overloadsFired: 0,
+    goldGained: 0,
+    bricksGained: {},
+    felled: [],
+  };
+  _waveHistory.forEach(function(rec) {
+    var d = rec.delta;
+    totals.duration       += d.duration       || 0;
+    totals.activeMs       += d.activeMs       || 0;
+    totals.damageDealt    += d.damageDealt    || 0;
+    totals.damageTaken    += d.damageTaken    || 0;
+    totals.armorAbsorbed  += d.armorAbsorbed  || 0;
+    totals.totalHealed    += d.totalHealed    || 0;
+    totals.critsLanded    += d.critsLanded    || 0;
+    totals.overloadsFired += d.overloadsFired || 0;
+    totals.goldGained     += d.goldGained     || 0;
+    totals.biggestDamageDealt = Math.max(totals.biggestDamageDealt, d.biggestDamageDealt || 0);
+    totals.biggestDamageTaken = Math.max(totals.biggestDamageTaken, d.biggestDamageTaken || 0);
+    Object.keys(d.bricksGained || {}).forEach(function(c) {
+      totals.bricksGained[c] = (totals.bricksGained[c] || 0) + d.bricksGained[c];
+    });
+    if (d.felled && d.felled.length) totals.felled = totals.felled.concat(d.felled);
+  });
+  // Add in-progress wave if applicable
+  if (_waveState.active && _waveSnapshot) {
+    var partial = computeWaveDelta();
+    if (partial) {
+      totals.duration       += partial.duration       || 0;
+      totals.activeMs       += partial.activeMs       || 0;
+      totals.damageDealt    += partial.damageDealt    || 0;
+      totals.damageTaken    += partial.damageTaken    || 0;
+      totals.armorAbsorbed  += partial.armorAbsorbed  || 0;
+      totals.totalHealed    += partial.totalHealed    || 0;
+      totals.critsLanded    += partial.critsLanded    || 0;
+      totals.overloadsFired += partial.overloadsFired || 0;
+      totals.goldGained     += partial.goldGained     || 0;
+      totals.biggestDamageDealt = Math.max(totals.biggestDamageDealt, partial.biggestDamageDealt || 0);
+      totals.biggestDamageTaken = Math.max(totals.biggestDamageTaken, partial.biggestDamageTaken || 0);
+      Object.keys(partial.bricksGained || {}).forEach(function(c) {
+        totals.bricksGained[c] = (totals.bricksGained[c] || 0) + partial.bricksGained[c];
+      });
+      if (partial.felled && partial.felled.length) totals.felled = totals.felled.concat(partial.felled);
+    }
+  }
+  return totals;
+}
+
+// Format seconds as M:SS (or just s for short durations)
+function _fmtTime(secs) {
+  if (secs < 60) return secs.toFixed(1) + 's';
+  var m = Math.floor(secs / 60);
+  var s = Math.floor(secs % 60);
+  return m + ':' + ('0' + s).slice(-2);
+}
+
+function showRunSummary() {
+  var rs = document.getElementById('run-summary');
+  if (!rs) return;
+  var totals = aggregateRun();
+  var st = Rumble.getState && Rumble.getState();
+  var clsName = (st && st.playerClass) ? st.playerClass.toUpperCase() : '';
+  var hpEnd  = st ? (st.playerHp + '/' + st.playerHpMax) : '?/?';
+  var runTimeSecs = (performance.now() - _runStartTime) / 1000;
+
+  // Aggregate active DPS
+  var activeSec = totals.activeMs / 1000;
+  var avgActiveDps = activeSec > 0.05
+    ? (totals.damageDealt / activeSec).toFixed(1)
+    : '0.0';
+  var uptimePct = totals.duration > 0
+    ? Math.round((activeSec / totals.duration) * 100)
+    : 0;
+
+  // Felled aggregate by type
+  var felledCounts = {};
+  totals.felled.forEach(function(t) { felledCounts[t] = (felledCounts[t] || 0) + 1; });
+  var felledKeys = Object.keys(felledCounts).sort(function(a, b) {
+    return felledCounts[b] - felledCounts[a];
+  });
+  var felledLine = felledKeys.length === 0
+    ? '<div style="color:#444;font-style:italic;">no enemies felled</div>'
+    : felledKeys.map(function(t) {
+        return '<span class="ftype"><span class="fnum">' + felledCounts[t] + '×</span> ' + t.replace(/_/g, ' ') + '</span>';
+      }).join('');
+
+  // Per-wave timeline
+  var timelineRows = '<div class="rs-timeline-row head">'
+    + '<div>WAVE</div>'
+    + '<div>THEME</div>'
+    + '<div class="num">TIME</div>'
+    + '<div class="num">A.DPS</div>'
+    + '<div class="num">HP END</div>'
+    + '</div>';
+  if (_waveHistory.length === 0) {
+    timelineRows += '<div style="text-align:center;color:#444;padding:8px;font-style:italic;">no waves cleared</div>';
+  } else {
+    _waveHistory.forEach(function(rec) {
+      var d = rec.delta;
+      var aMs = d.activeMs || 0;
+      var aDps = (aMs > 50) ? (d.damageDealt / (aMs/1000)).toFixed(1) : '—';
+      var hpClass = (d.hpLow < d.hpMax * 0.3) ? '' : 'dim';
+      timelineRows += '<div class="rs-timeline-row">'
+        + '<div class="w">W' + rec.waveNum + '</div>'
+        + '<div class="theme">' + (rec.theme || '') + '</div>'
+        + '<div class="num">' + d.duration.toFixed(1) + 's</div>'
+        + '<div class="num">' + aDps + '</div>'
+        + '<div class="num ' + hpClass + '">' + d.hpNow + '/' + d.hpMax + '</div>'
+        + '</div>';
+    });
+  }
+
+  // Brick gain summary
+  var BRICK_DOT_HEX = {
+    red:'#E24B4A', orange:'#F57C00', gray:'#888888',
+    blue:'#4db8ff', purple:'#7B2FBE', white:'#eeeeee',
+    yellow:'#F5D000', green:'#1D9E75', black:'#6a5870',
+  };
+  var brickEntries = Object.keys(totals.bricksGained).filter(function(k) {
+    return k !== 'cheese' && totals.bricksGained[k] > 0;
+  }).sort(function(a, b) {
+    return totals.bricksGained[b] - totals.bricksGained[a];
+  });
+  var brickLine = brickEntries.length === 0
+    ? '<span style="color:#444;font-style:italic;">no bricks looted</span>'
+    : brickEntries.map(function(c) {
+        var color = BRICK_DOT_HEX[c] || '#888';
+        return '<span style="display:inline-block;margin:0 6px;color:' + color + ';">'
+          + '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:3px;vertical-align:middle;box-shadow:0 0 6px ' + color + ';"></span>'
+          + '+' + totals.bricksGained[c]
+          + '</span>';
+      }).join('');
+  var cheeseGained = totals.bricksGained.cheese || 0;
+
+  // Stat cells for the COMBAT zone
+  var statCells = [
+    { label: 'RUN TIME', value: _fmtTime(runTimeSecs), mono: true },
+    { label: 'COMBAT', value: _fmtTime(activeSec) + ' (' + uptimePct + '%)', mono: true },
+    { label: 'WAVES', value: totals.waves, color: '#F5D000' },
+    { label: 'DMG DEALT', value: totals.damageDealt, color: '#E24B4A' },
+    { label: 'AVG DPS', value: avgActiveDps, color: '#F5D000' },
+    { label: 'BIGGEST HIT', value: totals.biggestDamageDealt, color: '#F57C00' },
+    { label: 'CRITS', value: totals.critsLanded, color: '#F57C00' },
+    { label: 'OVERLOADS', value: totals.overloadsFired, color: '#7B2FBE' },
+    { label: 'DMG TAKEN', value: totals.damageTaken, color: '#D4537E' },
+    { label: 'BIGGEST TAKEN', value: totals.biggestDamageTaken, color: '#D4537E' },
+    { label: 'HEALED', value: Math.round(totals.totalHealed), color: '#9adb9a' },
+    { label: 'HP END', value: hpEnd, color: '#eee' },
+  ];
+  var statHtml = statCells.map(function(c) {
+    var monoClass = c.mono ? ' mono' : '';
+    var colorStyle = c.color ? 'color:' + c.color + ';' : '';
+    return '<div>'
+      + '<div class="lbl">' + c.label + '</div>'
+      + '<div class="val' + monoClass + '" style="' + colorStyle + '">' + c.value + '</div>'
+      + '</div>';
+  }).join('');
+
+  // Build the screen
+  var subtitleParts = [];
+  if (clsName) subtitleParts.push(clsName);
+  if (totals.waves > 0) subtitleParts.push('reached wave ' + _waveState.highestReached);
+  var subtitle = subtitleParts.join(' · ');
+
+  var resumeBtn = _waveState.active
+    ? '<button class="rs-btn secondary" onclick="resumeFromSummary()">RESUME</button>'
+    : '';
+
+  rs.innerHTML =
+    '<div class="rs-card">'
+    +   '<div class="rs-tag">⚔ RUN SUMMARY ⚔</div>'
+    +   '<div class="rs-title">' + (totals.waves > 0 ? totals.waves + ' WAVE' + (totals.waves === 1 ? '' : 'S') : 'NO WAVES') + ' CLEARED</div>'
+    +   (subtitle ? '<div class="rs-subtitle">' + subtitle + '</div>' : '')
+    +   '<div class="rs-cols">'
+    +     '<div class="rs-zone-wrap">'
+    +       '<div class="rs-zone-label">COMBAT TOTALS</div>'
+    +       '<div class="rs-zone-body">'
+    +         '<div class="rs-stat-grid">' + statHtml + '</div>'
+    +       '</div>'
+    +     '</div>'
+    +     '<div class="rs-zone-wrap">'
+    +       '<div class="rs-zone-label">SPOILS</div>'
+    +       '<div class="rs-zone-body">'
+    +         (totals.goldGained > 0 ? '<div style="text-align:center;color:#F5D000;font-size:clamp(13px,2.6vmin,16px);font-family:ui-sans-serif,system-ui;">+' + totals.goldGained + ' 🪙</div>' : '')
+    +         (cheeseGained > 0 ? '<div style="text-align:center;color:#FFD96A;font-size:clamp(11px,2.2vmin,14px);margin-top:4px;font-family:ui-sans-serif,system-ui;">🧀 +' + cheeseGained + ' MAX HP</div>' : '')
+    +         '<div style="text-align:center;margin-top:6px;font-family:ui-sans-serif,system-ui;">' + brickLine + '</div>'
+    +       '</div>'
+    +     '</div>'
+    +   '</div>'
+    +   '<div class="rs-zone-wrap" style="width:100%;">'
+    +     '<div class="rs-zone-label">FELLED</div>'
+    +     '<div class="rs-zone-body">'
+    +       '<div class="rs-felled-line">' + felledLine + '</div>'
+    +     '</div>'
+    +   '</div>'
+    +   '<div class="rs-zone-wrap" style="width:100%;">'
+    +     '<div class="rs-zone-label">PER-WAVE TIMELINE</div>'
+    +     '<div class="rs-zone-body" style="padding:clamp(8px,1.6vmin,12px);">'
+    +       '<div class="rs-timeline">' + timelineRows + '</div>'
+    +     '</div>'
+    +   '</div>'
+    +   '<div class="rs-buttons">'
+    +     resumeBtn
+    +     '<button class="rs-btn primary" onclick="endRunFromSummary()">END RUN</button>'
+    +   '</div>'
+    + '</div>';
+  rs.classList.remove('fading-out');
+  rs.classList.add('visible');
+}
+
+function hideRunSummary() {
+  var rs = document.getElementById('run-summary');
+  if (!rs) return;
+  rs.classList.add('fading-out');
+  setTimeout(function() {
+    rs.classList.remove('visible');
+    rs.classList.remove('fading-out');
+  }, 300);
+}
+
+// RESUME button — back to playing
+function resumeFromSummary() { hideRunSummary(); }
+
+// END RUN button — quit the run, return to picker.
+// If waves is still active (user accessed via ESC mid-run), end the rumble
+// cleanly first; the 'end' event will re-show the summary which we then
+// override by reloading. Simpler than threading a no-recurse flag.
+function endRunFromSummary() {
+  hideRunSummary();
+  // Brief delay so the fade-out animation completes before page reload
+  setTimeout(function() { location.reload(); }, 320);
 }
 
 // Hook called from Rumble's onEvent — checks if a kill was the last in the wave.
@@ -1228,6 +1766,7 @@ Rumble.init({
       // Record current wave as highest reached if player was IN a wave
       // when defeated. "Reached wave 5" reads as "got to wave 5" — being
       // in it counts even if you didn't clear it.
+      var wasWaves = _waveState.active;
       if (_waveState.active) {
         _waveState.highestReached = Math.max(_waveState.highestReached, _waveState.currentWave);
       }
@@ -1235,7 +1774,13 @@ Rumble.init({
       hideWaveHud();
       hideWaveVictoryScreen();
       stopLiveDebug();
-      showEndOverlay(data && data.reason);
+      // Waves runs go to the run-summary screen (cumulative stats).
+      // Other modes still use the basic end overlay.
+      if (wasWaves) {
+        showRunSummary();
+      } else {
+        showEndOverlay(data && data.reason);
+      }
     }
   }
 });
@@ -1274,6 +1819,9 @@ function startTestRumble(cls) {
     // Waves mode also disables the revive-stacks-loot-penalty so we can
     // observe true drop rates uncorrupted by death history.
     suppressLootPenalty: isWaves,
+    // Cheese applied on pickup (+1 hp max immediately) for waves stress test —
+    // visible feedback per pickup, no inventory bookkeeping between waves.
+    cheeseAutoApply: isWaves,
   };
   Rumble.start(startConfig);
 
@@ -1286,6 +1834,8 @@ function startTestRumble(cls) {
     _waveState.active = true;
     _waveState.currentWave = 1;
     _waveState.advancing = false;
+    _waveHistory = [];                  // fresh per-run history
+    _runStartTime = performance.now();  // for elapsed-run-time display
     captureWaveSnapshot();
     spawnWave(1);
     startLiveDebug();
