@@ -1346,7 +1346,11 @@ function toggleAuditSection() {
 // All math runs client-side off characters.js global helpers
 // (window.affinityMult, window.tapScaleMult, window.overloadStackMult).
 // No rumble.js edits needed.
-var AUDIT_COLORS = ['red','white','yellow','orange','gray','green','purple','black'];
+// All 9 overload-capable brick colors. Blue is a homing single-target
+// bolt with small impact burst — different shape from the AoE colors,
+// but its damage chain (count × stack × tap × aff × crit) is identical
+// to the others, so it belongs in the audit. Order: lighter to darker.
+var AUDIT_COLORS = ['red','white','yellow','orange','gray','green','blue','purple','black'];
 
 function buildOverloadAuditMarkup() {
   var st = (Rumble.getState && Rumble.getState()) || null;
@@ -1463,32 +1467,128 @@ function buildOverloadAuditMarkup() {
     ? buildTable('CURRENT KIT — this run', ownedCurrent, sandMaxN, 'sandbox')
     : '';
 
-  // Radius growth — kept compact, hardcoded from rumble.js fire formulas.
-  // Independent of inventory; pure formula shape per color.
-  var radiusFormulas = [
-    { color: 'red',    desc: 'projectile, no AoE',        t1: 0,   t4: 0   },
-    { color: 'white',  desc: '60 + tier×20',              t1: 80,  t4: 140 },
-    { color: 'yellow', desc: '120 + (n-1)×40',            t1: 120, t4: 240 },
-    { color: 'orange', desc: '25 + n×15',                 t1: 40,  t4: 85  },
-    { color: 'gray',   desc: '30 + tier×22',              t1: 52,  t4: 118 },
-    { color: 'green',  desc: '113 (constant)',            t1: 113, t4: 113 },
-    { color: 'purple', desc: 'baseR (varies)',            t1: 1,   t4: 1   },
-    { color: 'black',  desc: '50 + (n-1)×100  ⚠ outlier', t1: 50,  t4: 350 },
-  ];
-  var rows2 = '';
-  radiusFormulas.forEach(function(r) {
-    if (r.t1 === 0 && r.t4 === 0) {
-      rows2 += '<tr><td class="color-cell">' + r.color + '</td>'
-             + '<td colspan="3" class="lbl" style="text-align:left;">' + r.desc + '</td></tr>';
-    } else {
-      var ratio = r.t1 > 0 ? (r.t4 / r.t1) : 0;
-      var ratioClass = ratio >= 5 ? 't4' : (ratio >= 2.5 ? 't3' : 't2');
-      rows2 += '<tr><td class="color-cell">' + r.color + '</td>'
-             + '<td class="t1">' + r.t1 + 'px</td>'
-             + '<td class="t4">' + r.t4 + 'px</td>'
-             + '<td class="' + ratioClass + '">' + ratio.toFixed(1) + '×</td></tr>';
+  // ── RADIUS — live computed, mirrors the DAMAGE format ──
+  // Each color's radius formula sourced from rumble.js fire functions.
+  // baseR(n) → raw px before tap/affR/stack. internalCap → optional
+  // per-color hard cap inside the engine BEFORE arena clamp. Arena
+  // clamp applied last via Rumble.getArenaInfo().halfMin.
+  //
+  // SOURCE: rumble.js fire site comments (lines 1029, 1075-89, 1115,
+  // 1158, 1191-1205, 1233-37, 1284, 2038).
+  //   red    — projectile, no AoE radius
+  //   white  — 60 + tier×20         (no internal cap)
+  //   yellow — 120 + (n-1)×40       (capped at scaleDist(500))
+  //   orange — 25 + n×15            (no internal cap)
+  //   gray   — 30 + tier×22         (no internal cap)
+  //   green  — 113                  (constant, no scaling at all)
+  //   blue   — 30 + count×15        (no internal cap, impact burst)
+  //   purple — 237/400/600/900      (TIER-FIXED ceiling per count band)
+  //   black  — 50 + (n-1)×100       (capped at 900×mult — itself scales)
+  //
+  // For each, applies `tap × affR × stack` on top of baseR (per the
+  // engine), then internal cap, then arena clamp.
+  var RADIUS_FORMULAS = {
+    red:    { kind: 'projectile' },
+    white:  { kind: 'aoe', baseR: function(n) { return 60 + n*20; } },
+    yellow: { kind: 'aoe', baseR: function(n) { return 120 + (n-1)*40; }, internalCap: 500 },
+    orange: { kind: 'aoe', baseR: function(n) { return 25 + n*15; } },
+    gray:   { kind: 'aoe', baseR: function(n) { return 30 + n*22; } },
+    green:  { kind: 'aoe', baseR: function(n) { return 113; } },
+    blue:   { kind: 'aoe', baseR: function(n) { return 30 + n*15; } },
+    purple: { kind: 'aoe', baseR: function(n) {
+                if (n >= 4) return 900;
+                if (n >= 3) return 600;
+                if (n >= 2) return 400;
+                return 237;
+              }, tierFixedCeiling: true },
+    black:  { kind: 'aoe', baseR: function(n) { return 50 + (n-1)*100; },
+              // black's internal cap is 900×mult (itself scales) — modeled
+              // by passing a scaling cap callback; see compute below.
+              internalCapScales: true },
+  };
+
+  var arena = (Rumble.getArenaInfo && Rumble.getArenaInfo()) || null;
+  var arenaR = arena ? arena.halfMin : Infinity; // px
+
+  function computeRadius(color, n, tap, affR, stack) {
+    var f = RADIUS_FORMULAS[color];
+    if (!f || f.kind === 'projectile') return null;
+    var base = f.baseR(n);
+    var cap = null;
+    if (f.tierFixedCeiling) {
+      // Purple: tier baseline IS the ceiling. tap/affR/stack scale
+      // within tier but cannot exceed it.
+      cap = base; // pre-multiplier ceiling
+      var raw = base * tap * affR * stack;
+      var capped = Math.min(cap, raw);
+      return { px: Math.min(capped, arenaR), internalCapped: raw > cap, arenaCapped: capped > arenaR };
     }
-  });
+    var raw = base * tap * affR * stack;
+    if (f.internalCap) {
+      var beforeArena = Math.min(f.internalCap, raw);
+      return { px: Math.min(beforeArena, arenaR), internalCapped: raw > f.internalCap, arenaCapped: beforeArena > arenaR };
+    }
+    if (f.internalCapScales) {
+      // black: cap is 900 × (tap × aff × stack). Model uses affinityMult
+      // for damage-side mult (matches engine line 1284 `bMult` = tap*aff*stack
+      // — note: damage aff, not affR, in source).
+      var blackMult = tap * affR * stack;  // approximation for diagnostic
+      var capped2 = Math.min(900 * blackMult, raw);
+      return { px: Math.min(capped2, arenaR), internalCapped: raw > 900*blackMult, arenaCapped: capped2 > arenaR };
+    }
+    return { px: Math.min(raw, arenaR), internalCapped: false, arenaCapped: raw > arenaR };
+  }
+
+  function buildRadiusTable(label, owned, maxN) {
+    var headerCells = '';
+    for (var th = 1; th <= maxN; th++) headerCells += '<th>T' + th + '</th>';
+    var rows = '';
+    var anyArenaCap = false, anyInternalCap = false;
+    AUDIT_COLORS.forEach(function(color) {
+      var ownedN = owned[color] || 0;
+      var tap = (window.tapScaleMult && window.tapScaleMult(cls, color, ownedN)) || 1;
+      var affR = (window.affinityRadiusMult && window.affinityRadiusMult(cls, color)) || 1;
+      var f = RADIUS_FORMULAS[color];
+      var cells = '';
+      if (!f || f.kind === 'projectile') {
+        cells = '<td colspan="' + maxN + '" class="lbl" style="text-align:left;">projectile (no AoE)</td>';
+      } else {
+        for (var t = 1; t <= maxN; t++) {
+          if (t > ownedN) {
+            cells += '<td class="t-na">—</td>';
+          } else {
+            var stack = (window.overloadStackMult && window.overloadStackMult(t)) || 1;
+            var r = computeRadius(color, t, tap, affR, stack);
+            if (!r) { cells += '<td class="t-na">—</td>'; continue; }
+            var marker = '';
+            if (r.arenaCapped)    { marker += '†'; anyArenaCap = true; }
+            if (r.internalCapped) { marker += '*'; anyInternalCap = true; }
+            // Tier color escalation matches damage table.
+            var tCls = 't' + Math.min(t, 4);
+            cells += '<td class="' + tCls + '">' + Math.round(r.px) + 'px' + marker + '</td>';
+          }
+        }
+      }
+      rows += '<tr><td class="color-cell">' + color + '</td>' + cells + '</tr>';
+    });
+    var legend = '';
+    if (anyInternalCap || anyArenaCap) {
+      legend = '<div class="audit-meta" style="margin-top:2px;">'
+             + (anyInternalCap ? '<span class="hi">*</span> internal cap · ' : '')
+             + (anyArenaCap ? '<span class="warn">†</span> arena clamp ('
+                  + (arena ? Math.round(arenaR) : '?') + 'px)' : '')
+             + '</div>';
+    }
+    return '<h4>' + label + '</h4>'
+         + '<table class="audit-table"><tr><th>color</th>' + headerCells + '</tr>'
+         + rows + '</table>'
+         + legend;
+  }
+
+  var canonRadiusTable = buildRadiusTable('RADIUS — canonical', startingKit, canonMaxN);
+  var sandRadiusTable = differsFromCanon
+    ? buildRadiusTable('RADIUS — current kit', ownedCurrent, sandMaxN)
+    : '';
 
   return '<h4 style="margin-top:0;">' + clsName.toUpperCase() + '</h4>'
        + '<div class="audit-meta">final = count × stack × tap × aff'
@@ -1496,12 +1596,11 @@ function buildOverloadAuditMarkup() {
        + lastFiredHtml
        + canonTable
        + sandTable
-       + '<h4>RADIUS GROWTH (T1 → T4)</h4>'
-       + '<div class="audit-meta">raw px formula, pre-affinity</div>'
-       + '<table class="audit-table"><tr><th>color</th><th>T1</th><th>T4</th><th>ratio</th></tr>'
-       + rows2 + '</table>'
+       + canonRadiusTable
+       + sandRadiusTable
        + '<div class="audit-note">target: T4 ≈ 2.0× T1 across the board after nerf. '
-       + 'reserves headroom for fusion. black radius needs the heaviest compression.</div>';
+       + 'reserves headroom for fusion. black radius needs the heaviest compression. '
+       + 'fusion may push beyond arena bounds (deferred).</div>';
 }
 
 // Manual escape hatch for stuck waves: kill all living entities by setting

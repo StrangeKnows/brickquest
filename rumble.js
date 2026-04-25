@@ -9919,6 +9919,23 @@ window.Rumble = {
     if (typeof updateHUD === 'function') updateHUD();
     return n;
   },
+  // Arena geometry, exposed for the rumble_test overload-audit panel
+  // so it can compute how many tiers of an effect would exceed the
+  // arena bounds. halfDiag is the worst-case "cast at center, effect
+  // reaches corner" reference; halfMin is the conservative reference
+  // most effects clamp against in practice. Cheap to call.
+  getArenaInfo: function() {
+    if (typeof getRumbleBounds !== 'function') return null;
+    var b = getRumbleBounds();
+    var scale = (typeof getDisplayScale === 'function') ? getDisplayScale() : 1;
+    return {
+      w: b.w,
+      h: b.h,
+      scale: scale,
+      halfMin: Math.min(b.w, b.h) / 2,
+      halfDiag: Math.sqrt(b.w*b.w + b.h*b.h) / 2,
+    };
+  },
 };
 
 })(); // end IIFE
