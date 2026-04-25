@@ -7194,6 +7194,42 @@ function startGrayWall(cx, cy, tier) {
   var _arenaMin = Math.min(_bounds.w, _bounds.h);
   var _maxAllowed = Math.max(40, Math.round(_arenaMin * 0.40));
   if (maxR > _maxAllowed) maxR = _maxAllowed;
+
+  // RULE 1 — wall spawns from player position outward when it would contain
+  // the player. Shifts the wall center AWAY from the player along the
+  // tap-direction so the player ends up at the wall's edge, not inside it.
+  if (player) {
+    var pdx = cx - player.x, pdy = cy - player.y;
+    var pdist = Math.sqrt(pdx*pdx + pdy*pdy);
+    var insideThreshold = maxR + player.r;
+    if (pdist < insideThreshold) {
+      // Direction the wall should be pushed away from the player.
+      // If tap was exactly on the player (pdist=0), default to tapping
+      // toward the arena center so the wall lands inside the arena.
+      var dirX, dirY;
+      if (pdist > 0.5) {
+        dirX = pdx / pdist;
+        dirY = pdy / pdist;
+      } else {
+        var arenaCx = _bounds.x + _bounds.w / 2;
+        var arenaCy = _bounds.y + _bounds.h / 2;
+        var ax = arenaCx - player.x, ay = arenaCy - player.y;
+        var amag = Math.sqrt(ax*ax + ay*ay) || 1;
+        dirX = ax / amag;
+        dirY = ay / amag;
+      }
+      // Place wall center such that its near edge is just past the player
+      cx = player.x + dirX * insideThreshold;
+      cy = player.y + dirY * insideThreshold;
+    }
+  }
+
+  // RULE 2 — clamp wall center to arena bounds so the full circle stays
+  // inside the arena. Without this, walls placed near edges extend past
+  // playable space and are unreachable / ungainly.
+  cx = Math.max(_bounds.x + maxR, Math.min(_bounds.x + _bounds.w - maxR, cx));
+  cy = Math.max(_bounds.y + maxR, Math.min(_bounds.y + _bounds.h - maxR, cy));
+
   var hp = Math.max(1, Math.ceil(4 * tier * tap * aff * stack * wcritMult));
   // Mark which entities start inside — only they get contained
   var containedIds = [];
@@ -7245,12 +7281,12 @@ function updateGrayWalls(dt) {
       var pdist = Math.sqrt(pdx*pdx+pdy*pdy) || 1;
       var pEdge = w.r + player.r;
       if (pdist < pEdge) {
+        // Push player to wall edge along the wall→player vector
         player.x = w.x + (pdx/pdist) * pEdge;
         player.y = w.y + (pdy/pdist) * pEdge;
-        // Re-clamp to arena bounds — if the wall push would place player
-        // outside the arena (because the wall is large and positioned near
-        // the arena edge), the arena clamp wins. Without this the player
-        // ends up outside the arena, unable to move back in.
+        // Safety net: clamp to arena. Spawn-time rules should make this
+        // a no-op, but keep the clamp as a backstop in case of edge
+        // cases (multiple overlapping walls, etc.).
         var _wb = getRumbleBounds();
         player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
         player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
