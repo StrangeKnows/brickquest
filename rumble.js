@@ -1029,262 +1029,21 @@ function draw() {
   drawGreenBubbles();
   // ── Purple burst ──
   drawPurpleBursts();
-  // ── Drag indicators ──
-  drawBlueDrag();
-  drawDragIndicator(greenDragPos, '#1D9E75', 'PUSH');
-  // Green — show burst radius any time green is held (faint pulsing ring at
-  // player) or being dragged (solid ring at drag target).
-  if (player && (greenDragPos || (overloadState && overloadState.color === 'green'))) {
-    var rectGR = canvas.getBoundingClientRect();
-    var greenOverRumble = greenDragPos &&
-      greenDragPos.x >= rectGR.left && greenDragPos.x <= rectGR.right &&
-      greenDragPos.y >= rectGR.top  && greenDragPos.y <= rectGR.bottom;
-    var gcx2, gcy2, isActiveDrag;
-    if (greenOverRumble) {
-      gcx2 = (greenDragPos.x - rectGR.left) * (canvas.width / rectGR.width);
-      gcy2 = (greenDragPos.y - rectGR.top)  * (canvas.height / rectGR.height);
-      isActiveDrag = true;
-    } else {
-      // Held but not yet dragged over rumble area — show faint preview at player
-      gcx2 = player.x; gcy2 = player.y;
-      isActiveDrag = false;
-    }
-    var gnTier = (overloadState && overloadState.color === 'green') ?
-      Math.max(1, Math.min(player.brickMax?player.brickMax['green']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-    var gnFx = _fx('green', gnTier);
-    var gnRadius = clampRadiusToArena(gnFx ? gnFx.radiusPx : 0);
-    ctx.save();
-    // Pulsing alpha between barely-visible (0.08) and visible (0.35)
-    var gPulse = isActiveDrag ? 0.35 : (0.08 + 0.15 * (0.5 + 0.5 * Math.sin(performance.now() * 0.003)));
-    ctx.globalAlpha = gPulse;
-    ctx.strokeStyle = '#1D9E75';
-    ctx.shadowColor = '#1D9E75'; ctx.shadowBlur = 10;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([6, 8]);
-    ctx.beginPath(); ctx.arc(gcx2, gcy2, gnRadius, 0, Math.PI*2); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
-  }
-  // Yellow — show AoE ring (around player by default, around drag target when over rumble area)
-  if (player) {
-    var rect2 = canvas.getBoundingClientRect();
-    var yellowOverRumble = yellowDragPos &&
-      yellowDragPos.x >= rect2.left && yellowDragPos.x <= rect2.right &&
-      yellowDragPos.y >= rect2.top  && yellowDragPos.y <= rect2.bottom;
-    var ycx, ycy;
-    if (yellowOverRumble) {
-      ycx = (yellowDragPos.x - rect2.left) * (canvas.width / rect2.width);
-      ycy = (yellowDragPos.y - rect2.top)  * (canvas.height / rect2.height);
-    } else {
-      ycx = player.x; ycy = player.y;
-    }
-    // Show ring whenever yellow is held (overloadState color=yellow) or dragging
-    var showYellowRing = (overloadState && overloadState.color === 'yellow') || yellowDragPos;
-    if (showYellowRing) {
-      ctx.save();
-      var now4 = performance.now();
-      var yPulse = 0.3 + 0.15 * Math.sin(now4 * 0.004);
-      // Line from player to drag target if over rumble area
-      if (yellowOverRumble) {
-        ctx.setLineDash([4,6]);
-        ctx.strokeStyle = '#F5D000aa'; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(ycx, ycy); ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      // Radius ring — match the ACTUAL effect radius used at cast time.
-      // fireOverloadYellow uses: scaleDist((120 + (count-1)*40) * tap * affR * stack)
-      // Tap yellow uses: scaleDist(120 * tap * affR)
-      ctx.globalAlpha = 0.4;
-      ctx.strokeStyle = '#F5D000';
-      ctx.shadowColor = '#F5D000'; ctx.shadowBlur = 10;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([6, 8]);
-      var yTier = (overloadState && overloadState.color==='yellow') ? Math.max(1, Math.floor(overloadState.timer / OVERLOAD_TIER) + 1) : 1;
-      var yFx = _fx('yellow', yTier);
-      var yRadius = clampRadiusToArena(yFx ? yFx.radiusPx : 0);
-      ctx.beginPath(); ctx.arc(ycx, ycy, yRadius, 0, Math.PI*2); ctx.stroke();
-      ctx.setLineDash([]);
-      // Center dot
-      ctx.globalAlpha = yPulse * 2;
-      ctx.fillStyle = '#F5D000';
-      ctx.shadowBlur = 0;
-      ctx.beginPath(); ctx.arc(ycx, ycy, 4, 0, Math.PI*2); ctx.fill();
-      ctx.restore();
-    }
-  }
-  // Orange — growing spike trap radius reticle on drag
-  if (player && orangeDragPos) {
-    var rectO = canvas.getBoundingClientRect();
-    var oOverRumble = orangeDragPos.x >= rectO.left && orangeDragPos.x <= rectO.right &&
-                     orangeDragPos.y >= rectO.top  && orangeDragPos.y <= rectO.bottom;
-    if (oOverRumble) {
-      var ocx = (orangeDragPos.x - rectO.left) * (canvas.width / rectO.width);
-      var ocy = (orangeDragPos.y - rectO.top)  * (canvas.height / rectO.height);
-      var oTier = overloadState && overloadState.color==='orange' ?
-        Math.max(1, Math.min(player.brickMax?player.brickMax['orange']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-      var oFx = _fx('orange', oTier);
-      var oRadius = clampRadiusToArena(oFx ? oFx.radiusPx : 0);
-      ctx.save();
-      // Dashed line from player
-      ctx.setLineDash([4,6]); ctx.strokeStyle='#F57C00aa'; ctx.lineWidth=1.5;
-      ctx.beginPath(); ctx.moveTo(player.x,player.y); ctx.lineTo(ocx,ocy); ctx.stroke();
-      ctx.setLineDash([]);
-      // Radius ring
-      ctx.globalAlpha = 0.4;
-      ctx.strokeStyle='#F57C00'; ctx.shadowColor='#F57C00'; ctx.shadowBlur=10; ctx.lineWidth=2;
-      ctx.setLineDash([5,5]);
-      ctx.beginPath(); ctx.arc(ocx,ocy,oRadius,0,Math.PI*2); ctx.stroke();
-      ctx.setLineDash([]);
-      // Spike hints around ring
-      var nSpikes = 6;
-      ctx.fillStyle='#F57C00'; ctx.globalAlpha=0.5; ctx.shadowBlur=4;
-      for (var si=0;si<nSpikes;si++){
-        var sa=(si/nSpikes)*Math.PI*2;
-        ctx.beginPath();
-        ctx.moveTo(ocx+Math.cos(sa)*oRadius, ocy+Math.sin(sa)*oRadius);
-        ctx.lineTo(ocx+Math.cos(sa+0.15)*(oRadius-8), ocy+Math.sin(sa+0.15)*(oRadius-8));
-        ctx.lineTo(ocx+Math.cos(sa-0.15)*(oRadius-8), ocy+Math.sin(sa-0.15)*(oRadius-8));
-        ctx.closePath(); ctx.fill();
-      }
-      ctx.restore();
-    }
-  }
-  drawDragIndicator(redDragPos, '#E24B4A', 'CHARGE');
-  // Gray — show wall radius on hold, move to drag target when over rumble area
-  if (player) {
-    var rectG = canvas.getBoundingClientRect();
-    var grayOverRumble = grayDragPos &&
-      grayDragPos.x >= rectG.left && grayDragPos.x <= rectG.right &&
-      grayDragPos.y >= rectG.top  && grayDragPos.y <= rectG.bottom;
-    var gcx = grayOverRumble ? (grayDragPos.x - rectG.left) * (canvas.width / rectG.width) : player.x;
-    var gcy = grayOverRumble ? (grayDragPos.y - rectG.top)  * (canvas.height / rectG.height) : player.y;
-    var showGrayRing = grayOverRumble;
-    if (showGrayRing) {
-      var gTier = overloadState && overloadState.color === 'gray' ?
-        Math.min(Math.floor(overloadState.timer / OVERLOAD_TIER) + 1, player.brickMax ? (player.brickMax['gray']||1) : 1) : 1;
-      var gFx = _fx('gray', gTier);
-      var gWallR = clampRadiusToArena(gFx ? gFx.radiusPx : 0);
-      ctx.save();
-      var gPulse = 0.3 + 0.15 * Math.sin(performance.now() * 0.004);
-      if (grayOverRumble) {
-        ctx.setLineDash([4,6]); ctx.strokeStyle = '#AAAAAA88'; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(gcx, gcy); ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      ctx.globalAlpha = 0.4;
-      ctx.strokeStyle = '#AAAAAA'; ctx.shadowColor = '#AAAAAA'; ctx.shadowBlur = 10;
-      ctx.lineWidth = 2; ctx.setLineDash([6,6]);
-      ctx.beginPath(); ctx.arc(gcx, gcy, gWallR, 0, Math.PI*2); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.restore();
-    }
-  }
-  drawDragIndicator(purpleDragPos, '#9B6FD4', 'BURST');
-  // Purple — show burst radius any time purple is held.
-  if (player && (purpleDragPos || (overloadState && overloadState.color === 'purple'))) {
-    var rectPR = canvas.getBoundingClientRect();
-    var purpleOverRumble = purpleDragPos &&
-      purpleDragPos.x >= rectPR.left && purpleDragPos.x <= rectPR.right &&
-      purpleDragPos.y >= rectPR.top  && purpleDragPos.y <= rectPR.bottom;
-    var pcx2, pcy2, isActiveDragP;
-    if (purpleOverRumble) {
-      pcx2 = (purpleDragPos.x - rectPR.left) * (canvas.width / rectPR.width);
-      pcy2 = (purpleDragPos.y - rectPR.top)  * (canvas.height / rectPR.height);
-      isActiveDragP = true;
-    } else {
-      pcx2 = player.x; pcy2 = player.y;
-      isActiveDragP = false;
-    }
-    var puTier = (overloadState && overloadState.color === 'purple') ?
-      Math.max(1, Math.min(player.brickMax?player.brickMax['purple']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-    var puFx = _fx('purple', puTier);
-    var puRadius = clampRadiusToArena(puFx ? puFx.radiusPx : 0);
-    ctx.save();
-    var pPulse = isActiveDragP ? 0.35 : (0.08 + 0.15 * (0.5 + 0.5 * Math.sin(performance.now() * 0.003)));
-    ctx.globalAlpha = pPulse;
-    ctx.strokeStyle = '#9B6FD4';
-    ctx.shadowColor = '#7B2FBE'; ctx.shadowBlur = 10;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([6, 8]);
-    ctx.beginPath(); ctx.arc(pcx2, pcy2, puRadius, 0, Math.PI*2); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
-  }
-  // White — show heal target position + radius on hold/drag
-  if (player) {
-    var rectW = canvas.getBoundingClientRect();
-    var whiteOverRumble = whiteDragPos &&
-      whiteDragPos.x >= rectW.left && whiteDragPos.x <= rectW.right &&
-      whiteDragPos.y >= rectW.top  && whiteDragPos.y <= rectW.bottom;
-    var wcx = whiteOverRumble ? (whiteDragPos.x - rectW.left) * (canvas.width / rectW.width) : player.x;
-    var wcy = whiteOverRumble ? (whiteDragPos.y - rectW.top)  * (canvas.height / rectW.height) : player.y;
-    var showWhiteRing = (overloadState && overloadState.color === 'white') || whiteDragPos;
-    if (showWhiteRing) {
-      var wTier = (overloadState && overloadState.color === 'white') ?
-        Math.max(1, Math.min(player.brickMax?player.brickMax['white']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-      var wFx = _fx('white', wTier);
-      var wRadius = clampRadiusToArena(wFx ? wFx.radiusPx : 0);
-      ctx.save();
-      // Line from player to drop zone when dragging over rumble area
-      if (whiteOverRumble) {
-        ctx.setLineDash([4, 6]);
-        ctx.strokeStyle = '#FFFFFFaa';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(wcx, wcy); ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      // Drop-zone ring
-      ctx.globalAlpha = 0.4;
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.shadowColor = '#FFEEEE'; ctx.shadowBlur = 10;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 7]);
-      ctx.beginPath(); ctx.arc(wcx, wcy, wRadius, 0, Math.PI*2); ctx.stroke();
-      ctx.setLineDash([]);
-      // Center cross mark for heal target
-      ctx.globalAlpha = 0.6;
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(wcx - 6, wcy); ctx.lineTo(wcx + 6, wcy);
-      ctx.moveTo(wcx, wcy - 6); ctx.lineTo(wcx, wcy + 6);
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-  // Black — show darkness radius on hold/drag
-  if (player) {
-    var rectB = canvas.getBoundingClientRect();
-    var blackOverRumble = blackDragPos &&
-      blackDragPos.x >= rectB.left && blackDragPos.x <= rectB.right &&
-      blackDragPos.y >= rectB.top  && blackDragPos.y <= rectB.bottom;
-    var bcx = blackOverRumble ? (blackDragPos.x - rectB.left) * (canvas.width / rectB.width) : player.x;
-    var bcy = blackOverRumble ? (blackDragPos.y - rectB.top)  * (canvas.height / rectB.height) : player.y;
-    var showBlackRing = (overloadState && overloadState.color === 'black') || blackDragPos;
-    if (showBlackRing) {
-      var bTierR = (overloadState && overloadState.color === 'black') ?
-        Math.max(1, Math.min(player.brickMax?player.brickMax['black']:1, Math.floor(overloadState.timer/OVERLOAD_TIER)+1)) : 1;
-      var bFx = _fx('black', bTierR);
-      var bRadius = clampRadiusToArena(bFx ? bFx.radiusPx : 0);
-      ctx.save();
-      if (blackOverRumble) {
-        ctx.setLineDash([4,6]); ctx.strokeStyle = '#55555588'; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(bcx, bcy); ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      ctx.globalAlpha = 0.35;
-      ctx.strokeStyle = '#888888'; ctx.shadowColor = '#444444'; ctx.shadowBlur = 12;
-      ctx.lineWidth = 1.5; ctx.setLineDash([4, 8]);
-      ctx.beginPath(); ctx.arc(bcx, bcy, bRadius, 0, Math.PI*2); ctx.stroke();
-      ctx.setLineDash([]);
-      // Faint swirling inner fill
-      ctx.globalAlpha = 0.05;
-      ctx.fillStyle = '#000000';
-      ctx.beginPath(); ctx.arc(bcx, bcy, bRadius, 0, Math.PI*2); ctx.fill();
-      ctx.restore();
-    }
-  }
+  // ── Drag indicators (unified) ──
+  // All 9 colors use drawCastIndicator with their canonical hex. Targeting
+  // shows ONLY the area of effect — no inner circles, labels, or per-color
+  // flourishes. Persistent-effect decoration (orange spike trap, white
+  // field, yellow aura, etc.) lives on each effect's own renderer, drawn
+  // separately when the effect actually exists.
+  drawCastIndicator('red',    '#E24B4A', (typeof redDragPos    !== 'undefined') ? redDragPos    : null);
+  drawCastIndicator('blue',   '#4db8ff', (typeof blueDragPos   !== 'undefined') ? blueDragPos   : null);
+  drawCastIndicator('green',  '#1D9E75', (typeof greenDragPos  !== 'undefined') ? greenDragPos  : null);
+  drawCastIndicator('yellow', '#F5D000', (typeof yellowDragPos !== 'undefined') ? yellowDragPos : null);
+  drawCastIndicator('orange', '#F57C00', (typeof orangeDragPos !== 'undefined') ? orangeDragPos : null);
+  drawCastIndicator('purple', '#9B6FD4', (typeof purpleDragPos !== 'undefined') ? purpleDragPos : null);
+  drawCastIndicator('white',  '#FFFFFF', (typeof whiteDragPos  !== 'undefined') ? whiteDragPos  : null);
+  drawCastIndicator('black',  '#888888', (typeof blackDragPos  !== 'undefined') ? blackDragPos  : null);
+  drawCastIndicator('gray',   '#AAAAAA', (typeof grayDragPos   !== 'undefined') ? grayDragPos   : null);
   // ── Blue bolts ──
   drawBlueBolts();
   drawWitherbolts();
@@ -7098,46 +6857,93 @@ function drawBlueBolts() {
   });
 }
 
-function drawDragIndicator(dragPos, color, label) {
-  if (!dragPos || !player) return;
+// ── UNIFIED CAST INDICATOR ──────────────────────────────────
+// One function for every color's drag-targeting reticle. Renders:
+//   1. Dashed line from player to cursor (when cursor is over arena)
+//   2. Outer ring at cursor showing exact AoE radius (tier + class scaled
+//      via _fx so the preview matches what the cast will actually deliver)
+//   3. Faint preview ring at player position when held but not yet dragged
+//
+// No inner circles, labels, spikes, cross-marks, or other decorations —
+// those belong on persistent fields/effects (drawn by the effect's own
+// renderer), not on the cursor preview. Targeting is "where" and "how big",
+// nothing else.
+//
+// Trigger: shows whenever color is being held (overloadState.color === c)
+// OR is being dragged (dragPos set). Universal "show while held" — every
+// color previews at the player position before drag begins, then snaps to
+// cursor with brighter alpha when drag goes over the arena.
+//
+// color: canonical color key (used for _fx lookup AND overload tier resolution)
+// hex:   stroke color (without alpha — alpha handled internally)
+// dragPos: {x, y} screen-space drag position or null
+function drawCastIndicator(color, hex, dragPos) {
+  if (!player) return;
+  var isHeld = overloadState && overloadState.color === color;
+  if (!dragPos && !isHeld) return; // nothing to show
   var rect = canvas.getBoundingClientRect();
-  // Only draw if pointer is actually over the canvas
-  if (dragPos.x < rect.left || dragPos.x > rect.right || dragPos.y < rect.top || dragPos.y > rect.bottom) return;
-  var cx = (dragPos.x - rect.left) * (canvas.width / rect.width);
-  var cy = (dragPos.y - rect.top) * (canvas.height / rect.height);
+  var overArena = dragPos &&
+    dragPos.x >= rect.left && dragPos.x <= rect.right &&
+    dragPos.y >= rect.top  && dragPos.y <= rect.bottom;
+  // Resolve canvas-space center: cursor when over arena, else player position
+  var cx, cy, isActiveDrag;
+  if (overArena) {
+    cx = (dragPos.x - rect.left) * (canvas.width / rect.width);
+    cy = (dragPos.y - rect.top)  * (canvas.height / rect.height);
+    isActiveDrag = true;
+  } else {
+    cx = player.x; cy = player.y;
+    isActiveDrag = false;
+  }
+  // Tier from overload state (held) or tap (1)
+  var brickMax = (player.brickMax && player.brickMax[color]) || 1;
+  var tier = isHeld
+    ? Math.max(1, Math.min(brickMax, Math.floor(overloadState.timer / OVERLOAD_TIER) + 1))
+    : 1;
+  var fx = _fx(color, tier);
+  if (!fx) return;
+  var radius = clampRadiusToArena(fx.radiusPx);
   ctx.save();
-  ctx.setLineDash([5,5]); ctx.strokeStyle = color+'88'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
+  // Dashed line from player to drop point — only when cursor is over the
+  // arena (otherwise we'd be drawing a line into the brick bar).
+  if (isActiveDrag) {
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = hex + '88';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Outer AoE ring. Brighter and solid-bordered when actively dragged;
+  // faint pulsing preview when only held.
+  if (isActiveDrag) {
+    ctx.globalAlpha = 0.5;
+  } else {
+    // Pulse 0.10 → 0.30 over ~0.5s for a gentle "ready" indicator at player
+    var t = performance.now() * 0.003;
+    ctx.globalAlpha = 0.10 + 0.20 * (0.5 + 0.5 * Math.sin(t));
+  }
+  ctx.strokeStyle = hex;
+  ctx.shadowColor = hex;
+  ctx.shadowBlur = 10;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 8]);
+  ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.strokeStyle = color; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(cx, cy, 20, 0, Math.PI*2); ctx.stroke();
-  ctx.fillStyle = color; ctx.font = 'bold 10px monospace';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(label, cx, cy);
   ctx.restore();
 }
 
+// Legacy aliases retained for any external callers that may have the old
+// names. Internal call sites should use drawCastIndicator(color, hex, pos).
+function drawDragIndicator(dragPos, color, label) {
+  // legacy 3-arg signature (dragPos, hex, label) — we ignore label.
+  // Need to map hex back to a color key — this is fragile; prefer the new API.
+  // Best-effort lookup via reverse map of BRICK_COLORS:
+  var key = null;
+  for (var k in BRICK_COLORS) if (BRICK_COLORS[k] === color) { key = k; break; }
+  if (key) drawCastIndicator(key, color, dragPos);
+}
 function drawBlueDrag() {
-  if (!blueDragActive || !blueDragPos || !player) return;
-  var rect = canvas.getBoundingClientRect();
-  var cx = (blueDragPos.x - rect.left) * (canvas.width / rect.width);
-  var cy = (blueDragPos.y - rect.top) * (canvas.height / rect.height);
-  ctx.save();
-  ctx.setLineDash([5,5]); ctx.strokeStyle = '#4db8ff88'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
-  ctx.setLineDash([]);
-  // Indicator radius reflects the actual fx.radiusPx for the current
-  // cast tier — overload-aware. If overload is queued (held), tier =
-  // current overload count; otherwise tier = 1 (tap-drag).
-  var bTier = (overloadState && overloadState.color === 'blue') ?
-    Math.max(1, Math.min(player.brickMax ? (player.brickMax['blue']||1) : 1,
-      Math.floor(overloadState.timer / OVERLOAD_TIER) + 1)) : 1;
-  var bFx = _fx('blue', bTier);
-  var impactR = bFx ? clampRadiusToArena(bFx.radiusPx) : scaleDist(42);
-  var onTarget = entities.some(function(g){return Math.hypot(cx-g.x,cy-g.y)<g.r+impactR;});
-  ctx.strokeStyle = onTarget ? '#4db8ff' : '#4db8ff66'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(cx, cy, impactR, 0, Math.PI*2); ctx.stroke();
-  ctx.restore();
+  drawCastIndicator('blue', '#4db8ff', (typeof blueDragPos !== 'undefined') ? blueDragPos : null);
 }
 
 // ═══════════════════════════════════════════════════
