@@ -346,16 +346,23 @@
      bottom-left; tap to expand the panel upward. Pulses red when
      a stuck-state is detected so the user knows to tap in.       */
   #waves-debug-icon {
-    position:fixed; bottom:10px; left:10px; z-index:199;
-    width:32px; height:32px; border-radius:50%;
+    position:fixed; bottom:6px; left:6px; z-index:199;
+    /* Hit target 44x44 (Apple HIG min). Inner glyph keeps the
+       small look via padding; outer box absorbs the tap. */
+    width:44px; height:44px; border-radius:50%;
     background:rgba(8,8,12,0.92);
     border:1px solid #2a2a35;
     color:#666;
-    font-family:ui-monospace,monospace; font-size:14px;
+    font-family:ui-monospace,monospace; font-size:18px;
     display:none;
     align-items:center; justify-content:center;
     cursor:pointer;
     user-select:none;
+    /* Override body{touch-action:none}. Without this, iOS suppresses
+       synthetic clicks on this element and tap requires two fingers.
+       'manipulation' tells iOS this is a tap target, not a drag/scroll. */
+    touch-action:manipulation;
+    -webkit-touch-callout:none;
     transition:color 200ms, border-color 200ms;
   }
   #waves-debug-icon.visible { display:flex; }
@@ -369,15 +376,18 @@
     50%     { box-shadow:0 0 0 6px rgba(255,68,102,0.25); }
   }
   #waves-live-debug {
-    position:fixed; bottom:50px; left:10px; z-index:198;
+    position:fixed; bottom:54px; left:6px; z-index:198;
     background:rgba(8,8,12,0.95);
     border:1px solid #2a2a35;
     border-radius:6px;
     padding:6px 10px;
     font-family:ui-monospace,monospace; font-size:10px;
     color:#aaa; line-height:1.5;
-    max-width:240px; max-height:60vh; overflow-y:auto;
+    max-width:260px; max-height:70vh; overflow-y:auto;
     pointer-events:auto;
+    /* Override body{touch-action:none} so taps inside the panel
+       reach the buttons (END RUN, audit toggle) reliably on iOS. */
+    touch-action:manipulation;
     opacity:0; transform:translateY(8px);
     transition:opacity 180ms ease-out, transform 180ms ease-out;
     display:none;
@@ -387,6 +397,85 @@
   #waves-live-debug .val { color:#eee; }
   #waves-live-debug .hi  { color:#F5D000; }
   #waves-live-debug .warn { color:#ff6680; }
+
+  /* ── OVERLOAD AUDIT (sub-section inside debug panel) ─────────
+     Toggleable WIP table showing the current overload scaling
+     curve per color. Read-only diagnostic for the v0.15 nerf
+     pass: surfaces final damage multiplier per (color, tier)
+     given the player's current class + owned brick counts. */
+  #waves-live-debug .audit-toggle {
+    margin-top:6px; padding:4px 6px;
+    background:#15151f; border:1px solid #2a2a35; border-radius:4px;
+    color:#888; font-size:9px; letter-spacing:.08em;
+    text-align:center; cursor:pointer;
+    touch-action:manipulation;
+  }
+  #waves-live-debug .audit-toggle:hover { color:#ccc; border-color:#444; }
+  #waves-live-debug .audit-section {
+    margin-top:6px; padding-top:6px;
+    border-top:1px dashed #2a2a35;
+    display:none;
+  }
+  #waves-live-debug .audit-section.open { display:block; }
+  #waves-live-debug .audit-section h4 {
+    margin:0 0 4px 0; font-size:9px; color:#F5D000;
+    letter-spacing:.1em; font-family:'Cinzel',serif; font-weight:600;
+  }
+  #waves-live-debug .audit-section .audit-meta {
+    color:#666; font-size:9px; margin-bottom:4px;
+  }
+  #waves-live-debug table.audit-table {
+    border-collapse:collapse; font-size:9px; width:100%;
+    margin-bottom:4px;
+  }
+  #waves-live-debug table.audit-table th,
+  #waves-live-debug table.audit-table td {
+    padding:2px 4px; text-align:right;
+    border-bottom:1px solid #1a1a22;
+  }
+  #waves-live-debug table.audit-table th {
+    color:#888; font-weight:400; letter-spacing:.06em;
+  }
+  #waves-live-debug table.audit-table td.color-cell {
+    text-align:left; color:#bbb;
+  }
+  #waves-live-debug table.audit-table td.t1 { color:#888; }
+  #waves-live-debug table.audit-table td.t2 { color:#bbb; }
+  #waves-live-debug table.audit-table td.t3 { color:#F5D000; }
+  #waves-live-debug table.audit-table td.t4 { color:#ff8866; }
+  /* Cell highlight when LAST FIRED matches (color, tier). Pulses for
+     ~600ms via the audit-section's poll cycle — the cell carries the
+     hl class while lastOverload.frozen is false. */
+  #waves-live-debug table.audit-table td.hl {
+    background:rgba(245,208,0,0.15);
+    box-shadow:inset 0 0 0 1px rgba(245,208,0,0.55);
+    color:#fff;
+    animation:auditCellPulse 600ms ease-out;
+  }
+  @keyframes auditCellPulse {
+    0%   { background:rgba(245,208,0,0.45); }
+    100% { background:rgba(245,208,0,0.15); }
+  }
+  #waves-live-debug .audit-last {
+    margin:6px 0 4px 0;
+    padding:4px 6px;
+    background:#15151f; border-left:2px solid #F5D000;
+    border-radius:3px;
+    font-size:9px;
+    line-height:1.5;
+  }
+  #waves-live-debug .audit-last.frozen { border-left-color:#444; opacity:0.75; }
+  #waves-live-debug .audit-last.idle   { border-left-color:#222; color:#666; opacity:0.6; }
+  #waves-live-debug .audit-last .lf-color { color:#F5D000; font-weight:600; }
+  #waves-live-debug .audit-last .lf-tier  { color:#ff8866; }
+  #waves-live-debug .audit-last .lf-crit  { color:#ff4466; font-weight:700; }
+  #waves-live-debug .audit-last .lf-ratio-good { color:#9adb9a; }
+  #waves-live-debug .audit-last .lf-ratio-warn { color:#ff8866; }
+  #waves-live-debug .audit-last .lf-ratio-bad  { color:#ff4466; }
+  #waves-live-debug .audit-section .audit-note {
+    color:#666; font-size:9px; font-style:italic;
+    margin-top:4px; line-height:1.4;
+  }
 
   /* ── RUN-SUMMARY OVERLAY ──────────────────────────────────
      Cumulative view of the entire run. Aggregates all _waveHistory
@@ -1105,6 +1194,18 @@ function startLiveDebug() {
     icon.id = 'waves-debug-icon';
     icon.textContent = '⛁';
     icon.title = 'Wave debug';
+    // iOS Safari: with body{touch-action:none} (set for the canvas
+    // gesture pipeline), synthetic clicks on small icons fire
+    // unreliably — taps often require two fingers. Bind touchend
+    // explicitly so a single-finger tap toggles the panel without
+    // waiting for the click synthesis. preventDefault stops the
+    // doubled (touchend + click) firing.
+    var _toggleFromTouch = function(ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleLiveDebug();
+    };
+    icon.addEventListener('touchend', _toggleFromTouch, { passive: false });
     icon.addEventListener('click', toggleLiveDebug);
     document.body.appendChild(icon);
   }
@@ -1187,19 +1288,172 @@ function updateLiveDebug() {
     ? '<div style="margin-top:6px;text-align:center;pointer-events:auto;">'
       + '<div class="warn" style="font-size:9px;margin-bottom:3px;">STUCK ' + Math.round(stuckMs/1000) + 's</div>'
       + '<button onclick="forceKillAll()" style="background:#2a0010;border:1px solid #ff4466;color:#ff8899;'
-      + 'border-radius:4px;padding:3px 8px;font-size:9px;font-family:ui-monospace,monospace;'
-      + 'letter-spacing:.08em;cursor:pointer;">END RUN</button></div>'
+      + 'border-radius:4px;padding:6px 12px;font-size:10px;font-family:ui-monospace,monospace;'
+      + 'letter-spacing:.08em;cursor:pointer;touch-action:manipulation;">END RUN</button></div>'
     : '';
+  // ── OVERLOAD AUDIT (sub-section, WIP diagnostic) ──
+  // Remember open-state across the 250ms innerHTML rebuilds. The flag
+  // lives on the panel element itself so the toggle persists.
+  var auditOpen = !!(d._auditOpen);
+  var auditMarkup = buildOverloadAuditMarkup();
+  var auditBlock =
+      '<div class="audit-toggle" onclick="toggleAuditSection()">'
+    +   (auditOpen ? '▼' : '▸') + ' OVERLOAD AUDIT (WIP)'
+    + '</div>'
+    + '<div class="audit-section' + (auditOpen ? ' open' : '') + '" id="audit-section">'
+    +   auditMarkup
+    + '</div>';
+
   d.innerHTML =
       '<div><span class="lbl">wave</span> <span class="hi">' + _waveState.currentWave + '</span>'
     +   ' <span class="lbl">adv</span> <span class="val">' + (_waveState.advancing ? 'Y' : 'n') + '</span></div>'
     + '<div><span class="lbl">entities</span> <span class="val">' + info.entityCount + '</span></div>'
     + entityList
-    + stuckBtn;
+    + stuckBtn
+    + auditBlock;
   // Pulse the collapsed icon red when stuck — draws the eye toward the
   // affordance even when the panel itself is closed.
   var icon = document.getElementById('waves-debug-icon');
   if (icon) icon.classList.toggle('stuck', isStuck);
+}
+
+// Toggle the audit section open/closed. State is stored on the panel
+// element so it survives the 250ms innerHTML refresh in updateLiveDebug.
+function toggleAuditSection() {
+  var d = document.getElementById('waves-live-debug');
+  if (!d) return;
+  d._auditOpen = !d._auditOpen;
+  // Force an immediate redraw so the chevron flips without a 250ms wait.
+  updateLiveDebug();
+}
+
+// ── OVERLOAD AUDIT TABLES ───────────────────────────────────
+// Read-only diagnostic. Computes the effective per-tier overload
+// scaling for the current class + current owned-brick counts.
+//
+// Two tables:
+//   1. Output multiplier per (color, tier).  count × stack × tap × aff.
+//      This is the lever the v0.15 nerf is targeting. Tier-1 baseline
+//      stays; tier-4 is what we're compressing.
+//   2. Radius growth per color.  Hardcoded from rumble.js fire formulas
+//      (see rumble.js:1029-1284 comments). Highlights black as the
+//      outlier flagged by the handoff.
+//
+// All math runs client-side off characters.js global helpers
+// (window.affinityMult, window.tapScaleMult, window.overloadStackMult).
+// No rumble.js edits needed.
+var AUDIT_COLORS = ['red','white','yellow','orange','gray','green','purple','black'];
+
+function buildOverloadAuditMarkup() {
+  var st = (Rumble.getState && Rumble.getState()) || null;
+  if (!st || !st.playerCls) {
+    return '<div class="audit-meta">no active rumble — start a run to see numbers</div>';
+  }
+  var cls = st.playerCls;
+  var owned = st.playerBrickMax || {};
+  var clsName = (window.getCharName && window.getCharName(cls)) || cls;
+
+  // LAST FIRED block — pulled from getDebugInfo().lastOverload.
+  // Compares model-expected multiplier against actual damage delta
+  // captured in the 600ms after the fire. Big mismatches surface
+  // hidden multipliers we missed in the model (crit, signature
+  // radius, witherBoost, etc.). The ratio is the headline number.
+  var info = (Rumble.getDebugInfo && Rumble.getDebugInfo()) || {};
+  var lo = info.lastOverload;
+  var lastFiredHtml = '';
+  var hlColor = null, hlTier = null;
+  if (lo) {
+    hlColor = lo.color; hlTier = lo.tier;
+    var stateClass = lo.frozen ? 'frozen' : '';
+    var critTag = lo.isCrit ? ' <span class="lf-crit">CRIT</span>' : '';
+    // Damage ratio diagnostic. expectedMult is unitless; we multiply
+    // by an assumed base of 4 (red bolt base) just to scale the
+    // expected number into the same range as actualDamage. The RATIO
+    // is what matters — actualDamage / (expectedMult × baseRef).
+    // baseRef varies per color (red 4, white heal not damage, etc.)
+    // so we surface raw expected multiplier and raw actual damage,
+    // and let the human read the proportion.
+    var ratioStr = '';
+    if (lo.actualDamage > 0) {
+      var perMultDamage = lo.actualDamage / lo.expectedMult;
+      var ratioCls = perMultDamage > 6 ? 'lf-ratio-bad'
+                    : perMultDamage > 4 ? 'lf-ratio-warn'
+                    : 'lf-ratio-good';
+      ratioStr = ' → <span class="' + ratioCls + '">'
+               + perMultDamage.toFixed(1) + ' dmg/mult</span>';
+    }
+    lastFiredHtml =
+        '<div class="audit-last ' + stateClass + '">'
+      +   'LAST: <span class="lf-color">' + lo.color + '</span> '
+      +   '<span class="lf-tier">T' + lo.tier + '</span>' + critTag
+      +   ' · expect <span class="hi">' + lo.expectedMult.toFixed(2) + '×</span>'
+      +   ' · actual <span class="val">' + Math.round(lo.actualDamage) + ' dmg</span>'
+      +   ratioStr
+      + '</div>';
+  } else {
+    lastFiredHtml = '<div class="audit-last idle">LAST: (no overload fired yet)</div>';
+  }
+
+  // Table 1: damage output multiplier per (color, tier)
+  // final = count × stack × tap × aff
+  var rows1 = '';
+  AUDIT_COLORS.forEach(function(color) {
+    var tap = (window.tapScaleMult && window.tapScaleMult(cls, color, owned[color] || 0)) || 1;
+    var aff = (window.affinityMult && window.affinityMult(cls, color)) || 1;
+    var cells = '';
+    for (var t = 1; t <= 4; t++) {
+      var stack = (window.overloadStackMult && window.overloadStackMult(t)) || 1;
+      var mult = t * stack * tap * aff;
+      // Highlight if LAST FIRED matches and not yet frozen.
+      var isHl = !lo || lo.frozen ? false : (color === hlColor && t === hlTier);
+      cells += '<td class="t' + t + (isHl ? ' hl' : '') + '">' + mult.toFixed(2) + '×</td>';
+    }
+    // Mini affinity tag so per-color asymmetry is visible at a glance
+    var affTag = aff === 1.25 ? 'sig' : (aff === 0.8 ? 'base' : 'sec');
+    rows1 += '<tr><td class="color-cell">' + color
+           + ' <span class="lbl">(' + affTag + ')</span></td>'
+           + cells + '</tr>';
+  });
+
+  // Table 2: radius growth tier-1 → tier-4 per color (hardcoded from rumble.js)
+  // Showing raw px ratios, no class/affinity applied — purely formula shape.
+  // Source: rumble.js comments at lines 1029, 1075, 1115, 1155, 1191, 1233, 1284.
+  var radiusFormulas = [
+    { color: 'red',    desc: 'projectile, no AoE',        t1: 0,   t4: 0   },
+    { color: 'white',  desc: '60 + tier×20',              t1: 80,  t4: 140 },
+    { color: 'yellow', desc: '120 + (n-1)×40',            t1: 120, t4: 240 },
+    { color: 'orange', desc: '25 + n×15',                 t1: 40,  t4: 85  },
+    { color: 'gray',   desc: '30 + tier×22',              t1: 52,  t4: 118 },
+    { color: 'green',  desc: '113 (constant)',            t1: 113, t4: 113 },
+    { color: 'purple', desc: 'baseR (varies)',            t1: 1,   t4: 1   },
+    { color: 'black',  desc: '50 + (n-1)×100  ⚠ outlier', t1: 50,  t4: 350 },
+  ];
+  var rows2 = '';
+  radiusFormulas.forEach(function(r) {
+    if (r.t1 === 0 && r.t4 === 0) {
+      rows2 += '<tr><td class="color-cell">' + r.color + '</td>'
+             + '<td colspan="3" class="lbl" style="text-align:left;">' + r.desc + '</td></tr>';
+    } else {
+      var ratio = r.t1 > 0 ? (r.t4 / r.t1) : 0;
+      var ratioClass = ratio >= 5 ? 't4' : (ratio >= 2.5 ? 't3' : 't2');
+      rows2 += '<tr><td class="color-cell">' + r.color + '</td>'
+             + '<td class="t1">' + r.t1 + 'px</td>'
+             + '<td class="t4">' + r.t4 + 'px</td>'
+             + '<td class="' + ratioClass + '">' + ratio.toFixed(1) + '×</td></tr>';
+    }
+  });
+
+  return '<h4>DAMAGE MULT — ' + clsName + '</h4>'
+       + '<div class="audit-meta">final = count × stack × tap × aff</div>'
+       + lastFiredHtml
+       + '<table class="audit-table"><tr><th>color</th><th>T1</th><th>T2</th><th>T3</th><th>T4</th></tr>'
+       + rows1 + '</table>'
+       + '<h4>RADIUS GROWTH (T1 → T4)</h4>'
+       + '<div class="audit-meta">raw px formula, pre-affinity</div>'
+       + '<table class="audit-table"><tr><th>color</th><th>T1</th><th>T4</th><th>ratio</th></tr>'
+       + rows2 + '</table>'
+       + '<div class="audit-note">target: T4 ≈ 2.0× T1 across the board after nerf. '
+       + 'reserves headroom for fusion. black radius needs the heaviest compression.</div>';
 }
 
 // Manual escape hatch for stuck waves: kill all living entities by setting

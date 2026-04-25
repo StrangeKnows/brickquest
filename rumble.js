@@ -1780,6 +1780,33 @@ function fireOverload(dragX, dragY, bricksUsed) {
     triggerCritSignature(color, player.x, player.y - 80);
   }
 
+  // Audit-diagnostic snapshot. Captures the model's expected damage
+  // multiplier (count × stack × tap × aff × critX) and the current
+  // damageByColor[color] value at fire-time. The audit panel diffs
+  // damageByColor against this snapshot for ~600ms to produce the
+  // "actual damage" half of the comparison. Used to validate the
+  // tier-curve before the v0.15 overload nerf. No gameplay effect.
+  if (_battleStats) {
+    var _auditTap   = tapScaleMult(color);
+    var _auditAff   = affinityMult(color);
+    var _auditStack = overloadStackMult(count);
+    var _auditCrit  = _currentCrit ? 2.0 : 1.0;
+    var _auditMult  = count * _auditStack * _auditTap * _auditAff * _auditCrit;
+    _battleStats.lastOverload = {
+      color: color,
+      tier: count,
+      expectedMult: _auditMult,
+      isCrit: !!_currentCrit,
+      tapMult: _auditTap,
+      affMult: _auditAff,
+      stackMult: _auditStack,
+      ts: performance.now(),
+      dmgSnapshot: (_battleStats.damageByColor && _battleStats.damageByColor[color]) || 0,
+      actualDamage: 0,
+      frozen: false,
+    };
+  }
+
   // Origin — for most bricks collapse to player if tap, but pass raw coords so individual handlers can decide
   var _dist = dragX !== undefined ? Math.hypot(dragX - player.x, dragY - player.y) : -1;
   // dropped on player = regen signal (pass player coords), tap or drag elsewhere = instant heal (undefined/far coords)
@@ -8212,6 +8239,11 @@ function _internalStart(config) {
     // Damage attribution
     damageByColor: {},
     damageByTarget: {},
+    // Audit diagnostic: snapshot of the most recent overload fire.
+    // Set by fireOverload(); read by Rumble.getDebugInfo() so the
+    // rumble_test overload-audit panel can compare expected vs actual
+    // damage per (color, tier). 600ms window after fire, then frozen.
+    lastOverload: null,
   };
 
   timerLeft = RUMBLE_DURATION;
@@ -9752,6 +9784,18 @@ window.Rumble = {
   getState: function() { return _computeState(); },
   getConfig: function() { return cfg ? JSON.parse(JSON.stringify(cfg)) : null; },
   getDebugInfo: function() {
+    // Audit-diagnostic: resolve actualDamage lazily for the most
+    // recent overload. While in the 600ms window, accumulate the
+    // damageByColor delta. After 600ms, freeze the value so the
+    // panel keeps showing the last result until the next overload.
+    var _lo = _battleStats && _battleStats.lastOverload;
+    if (_lo && !_lo.frozen) {
+      var dmgNow = (_battleStats.damageByColor && _battleStats.damageByColor[_lo.color]) || 0;
+      _lo.actualDamage = Math.max(0, dmgNow - _lo.dmgSnapshot);
+      if (performance.now() - _lo.ts > 600) {
+        _lo.frozen = true;
+      }
+    }
     return {
       running: running,
       hasPlayer: !!player,
@@ -9760,6 +9804,21 @@ window.Rumble = {
       trapCount: (traps||[]).length,
       wallCount: (grayWalls||[]).length,
       floatingTexts: (floatingTexts||[]).length,
+      // Most recent overload snapshot. null until first cast. After
+      // each cast, contains expected vs actual damage for ~600ms,
+      // then frozen until the next cast overwrites it.
+      lastOverload: _lo ? {
+        color: _lo.color,
+        tier: _lo.tier,
+        expectedMult: _lo.expectedMult,
+        isCrit: _lo.isCrit,
+        tapMult: _lo.tapMult,
+        affMult: _lo.affMult,
+        stackMult: _lo.stackMult,
+        actualDamage: _lo.actualDamage,
+        ageMs: performance.now() - _lo.ts,
+        frozen: _lo.frozen,
+      } : null,
       // Per-entity details — shown by waves-live-debug to identify what's
       // hanging around when a wave doesn't advance. Keep it cheap; this gets
       // polled every frame.
