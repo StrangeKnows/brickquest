@@ -2663,12 +2663,13 @@ function _entityEffects(g) {
               stack: g.witherStacks });
   }
   // Mind
-  // ? = dazed (yellow-base): wandering AI
-  // ‼ = confused (yellow-crit): retargeting attacks at nearest entity
+  // Mind effects — unified icon language across player and entity sides:
+  //   ‼ (yellow) = daze    — wandering / refresh-slowed
+  //   ? (gold)   = confuse — retarget / movement-inverted
   if (g.dazed && (g.dazeTimer||0) > 0)
-    fx.push({ icon:'?', color:'#F5D000', timer: g.dazeTimer });
+    fx.push({ icon:'‼', color:'#F5D000', timer: g.dazeTimer });
   if (g.confused && (g.confuseTimer||0) > 0)
-    fx.push({ icon:'‼', color:'#FFEE44', timer: g.confuseTimer });
+    fx.push({ icon:'?', color:'#FFEE44', timer: g.confuseTimer });
   // Vulnerabilities / casting
   if ((g.markedTimer||0) > 0)
     fx.push({ icon:'◎', color:'#4db8ff', timer: g.markedTimer });
@@ -2766,10 +2767,10 @@ function _playerEffects() {
       fx.push({ icon:'⧖', color:'#7FE0FF', timer: s.slow.timer, label: mTxt });
     }
     if (s.daze.timer > 0) {
-      fx.push({ icon:'✦', color:'#F5D000', timer: s.daze.timer });
+      fx.push({ icon:'‼', color:'#F5D000', timer: s.daze.timer });
     }
     if (s.confuse.timer > 0) {
-      fx.push({ icon:'?', color:'#E08CF0', timer: s.confuse.timer });
+      fx.push({ icon:'?', color:'#FFEE44', timer: s.confuse.timer });
     }
     if (s.weaken.timer > 0) {
       fx.push({ icon:'▼', color:'#553366', timer: s.weaken.timer });
@@ -5317,7 +5318,7 @@ function updateEntity(g, dt, bounds) {
       // confused and just struck a wrong target.
       g._confuseFlashTimer = 0.25;
       // Floating "wrong-target" indicator above the attacker.
-      showFloatingText(g.x, g.y - (g.r + 28), dmgAmt + ' ‼', '#F5D000', g);
+      showFloatingText(g.x, g.y - (g.r + 28), dmgAmt + ' ?', '#FFEE44', g);
       // Standard attack cooldown applies so confused entities don't
       // chain-hit. Slow modifiers respected the same as normal attacks.
       var _cIsSlowed = g.attackSlowed || g.attackDebuff > 0
@@ -5756,24 +5757,38 @@ var WITHER_BOLT_SPEED = 260;     // slow compared to blue (500) — "slow applic
 // Accelerating: 1x, 1.5x, 2.25x, 3.375x, 5.06x, 7.59x...
 // This is what makes back-to-back witherbolts snowball.
 function witherSelfScale(stacks) {
-  return Math.pow(1.5, Math.max(0, stacks));
+  // v0.15.0 nerf: linear scaling, +10% per stack (capped naturally by
+  // MAX_WITHER_STACKS at the apply site). Old exponential 1.5^stacks
+  // produced 7.59× at 5 stacks and 57× at 10, which broke balance even
+  // with cap. Linear keeps wither rewarding without runaway.
+  return 1.0 + 0.10 * Math.max(0, stacks);
 }
 
 // Amplifier applied to damage from NON-witherbolt sources (red, blue, etc.)
 // against a withered target. Soft cap, approaches +60%.
 // stacks=0 → 1.0, 1 → 1.15, 2 → 1.26, 3 → 1.34, 5 → 1.46, 10 → 1.57
 function witherOtherAmp(stacks) {
+  // v0.15.0 nerf: gentler asymptote (1.4× max vs 1.6×) and slower
+  // approach (0.85^s vs 0.75^s). At cap (5 stacks) = 1.22×; was 1.46×.
   if (stacks <= 0) return 1.0;
-  return 1.0 + 0.6 * (1 - Math.pow(0.75, stacks));
+  return 1.0 + 0.4 * (1 - Math.pow(0.85, stacks));
 }
+
+// Hard cap on wither stacks per entity. Apply site enforces this; new
+// stacks past the cap just refresh the duration timer. Without this,
+// stacks could accumulate indefinitely and witherSelfScale would still
+// keep boosting damage even with a softened curve.
+var MAX_WITHER_STACKS = 5;
 
 function startWitherbolt(ox, oy) {
   if (!player) return;
-  var tap = tapScaleMult('black');
-  var aff = affinityMult('black');
   var crit = !!_currentCrit;
-  // Target: if dragged to coords, target nearest entity to those coords.
-  // Otherwise, nearest entity to player.
+  // Tier=1 for tap-witherbolt. Overload-black goes through fireOverloadBlack
+  // (the persistent zone), not this path. Future: if we want overload-tier
+  // witherbolts (tier>1) we can pass count here.
+  var fx = _fx('black', 1);
+  if (!fx) return;
+  // Target: drag-coords if provided, else nearest-to-player.
   var targetX = (ox !== undefined) ? ox : player.x;
   var targetY = (oy !== undefined) ? oy : player.y;
   var target = null;
@@ -5784,12 +5799,14 @@ function startWitherbolt(ox, oy) {
     if (d < best) { best = d; target = g; }
   });
   if (!target) {
-    // No enemies to hit — consume nothing silently. Let caller return brick.
     showFloatingText(player.x, player.y - 50, 'NO TARGET', '#555', player);
     return false;
   }
-  // Base direct damage: 2 * scale. Crit DEEP WITHER applies +1 stack bonus.
-  var baseDmg = 2 * tap * aff;
+  // Base damage from unified pipeline. Crit doubles base damage (matches
+  // red/blue/gray/purple convention).
+  var baseDmg = (fx.witherDmg || 2) * (crit ? 2.0 : 1.0);
+  // Stacks per cast: pipeline value + 1 on crit (was ×2 — too steep).
+  var stacksApplied = (fx.witherStacks || 1) + (crit ? 1 : 0);
   witherBolts.push({
     x: player.x, y: player.y,
     target: target,
@@ -5801,7 +5818,7 @@ function startWitherbolt(ox, oy) {
     wobbleAmp: 12,
     trailTimer: 0,
     dead: false,
-    stacksApplied: crit ? 2 : 1, // DEEP WITHER crit stacks double
+    stacksApplied: stacksApplied,
     isCrit: crit,
   });
   return true;
@@ -5844,10 +5861,13 @@ function updateWitherbolts(dt) {
       showDamageNumber(b.target.x, b.target.y - 30, res.applied, '#552288', res.tier, b.target.x, b.target.y, undefined, res.witherBoost, b.target);
       // Apply wither stacks + refresh shared timer. Stack readout lives in
       // the unified buff bar above the entity now — no impact floater.
-      b.target.witherStacks = (b.target.witherStacks || 0) + b.stacksApplied;
+      // Apply stacks, capped at MAX_WITHER_STACKS. Casts beyond cap still
+      // refresh the timer (so wither doesn't fall off mid-fight) but don't
+      // accumulate, which keeps the linear witherSelfScale bounded at 1.5×.
+      b.target.witherStacks = Math.min(MAX_WITHER_STACKS, (b.target.witherStacks || 0) + b.stacksApplied);
       b.target.witherTimer = WITHER_DURATION;
       // WITHERED threshold banner only when it crits and reaches the cap.
-      if (b.target.witherStacks >= 5 && b.isCrit) {
+      if (b.target.witherStacks >= MAX_WITHER_STACKS && b.isCrit) {
         showFloatingText(b.target.x, b.target.y - 70, 'WITHERED!', '#9B6FD4', b.target);
       }
       // Crit visuals

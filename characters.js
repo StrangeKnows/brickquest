@@ -236,7 +236,7 @@ var COLOR = {
   red:    { dmg: 0.60 },
   blue:   { dmg: 0.80, burstDmg: 0.40 },
   purple: { dmg: 0.60 },
-  black:  { dmg: 0.20, dur: 0.60 },
+  black:  { dmg: 0.20, dur: 0.60, witherDmg: 0.40, witherStacks: 0.20 },
   green:  { stackDmg: 0.20, stacks: 0.40 },
   white:  { heal: 0.40, dur: 0.60 },
   yellow: { dur: 0.60, yellowSeed: 0.40 },
@@ -272,11 +272,13 @@ function effectiveAt(color, tier, cls, owned) {
   if (c.heal        != null) out.heal        = Math.max(1, Math.ceil(BASE * c.heal        * m));
   if (c.stackDmg    != null) out.stackDmg    = Math.max(1, Math.ceil(BASE * c.stackDmg    * m));
   if (c.hp          != null) out.hp          = Math.max(1, Math.ceil(BASE * c.hp          * m));
+  if (c.witherDmg   != null) out.witherDmg   = Math.max(1, Math.ceil(BASE * c.witherDmg   * m));
   if (c.dur         != null) out.duration    = BASE * c.dur         * m;
   if (c.bleedDur    != null) out.bleedDur    = BASE * c.bleedDur    * m;
   if (c.yellowSeed != null) out.yellowSeed = BASE * c.yellowSeed * m;
   if (c.charges     != null) out.charges     = Math.max(1, Math.round(BASE * c.charges    * m));
   if (c.stacks      != null) out.stacks      = Math.max(1, Math.round(BASE * c.stacks     * m));
+  if (c.witherStacks!= null) out.witherStacks= Math.max(1, Math.round(BASE * c.witherStacks* m));
   return out;
 }
 
