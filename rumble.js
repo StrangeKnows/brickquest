@@ -139,6 +139,11 @@ var _battleStats = {
   critsLanded: 0,
   overloadsFired: 0,
   hpLow: 9999,          // lowest hp reached during battle (for 'flawless' tier)
+  // Active-combat tracking — accumulated time during which the player has
+  // dealt damage in the last ACTIVE_COMBAT_WINDOW_MS. Used for "active DPS"
+  // (damage rate during engagement, not corrupted by idle gaps).
+  activeCombatMs: 0,
+  _lastDamageAt: 0,
 };
 
 function _addBrickStat(bucket, color, amount) {
@@ -700,6 +705,16 @@ function onPointerUp(e) {
 function update(dt) {
   if (!player) return;
   var bounds = getRumbleBounds();
+
+  // Active-combat accumulator. Counts this frame as "engaged" if the player
+  // has dealt damage in the last ACTIVE_COMBAT_WINDOW_MS. Used for time-on-
+  // target DPS calculation; excludes idle/travel/dodge gaps.
+  if (_battleStats && _battleStats._lastDamageAt > 0) {
+    var sinceDmg = performance.now() - _battleStats._lastDamageAt;
+    if (sinceDmg < 1500) {
+      _battleStats.activeCombatMs += dt * 1000;
+    }
+  }
 
   // Dash cooldown tick
   if (dashCooldown > 0) dashCooldown = Math.max(0, dashCooldown - dt);
@@ -4549,6 +4564,9 @@ function damageEntity(g, dmg, aggro, source) {
     if (finalDmg > (_battleStats.biggestDamageDealt || 0)) {
       _battleStats.biggestDamageDealt = finalDmg;
     }
+    // Mark this moment as "actively dealing damage" — used by the
+    // active-combat accumulator to compute time-on-target DPS.
+    if (finalDmg > 0) _battleStats._lastDamageAt = performance.now();
   }
   if (aggro !== false) {
     g.aggroed = true;
@@ -7932,6 +7950,9 @@ function _internalStart(config) {
     biggestHealEntity: 0,
     totalHealed: 0,
     totalEntityHeal: 0,
+    // Active-combat accumulator (see top-of-file definition)
+    activeCombatMs: 0,
+    _lastDamageAt: 0,
   };
 
   timerLeft = RUMBLE_DURATION;
@@ -9340,6 +9361,7 @@ function _computeState() {
       overloadsFired: _battleStats.overloadsFired || 0,
       hpLow:          _battleStats.hpLow === 9999 ? (player.hpMax||0) : _battleStats.hpLow,
       enemiesKilled:  (_battleStats.enemiesKilled || []).slice(),
+      activeCombatMs: _battleStats.activeCombatMs || 0,
       // v4 single-hit highlights
       biggestDamageDealt: _battleStats.biggestDamageDealt || 0,
       biggestDamageTaken: _battleStats.biggestDamageTaken || 0,

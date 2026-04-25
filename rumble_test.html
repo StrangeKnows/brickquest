@@ -945,7 +945,8 @@ function captureWaveSnapshot() {
     _waveSnapshot = { damageDealt:0, damageTaken:0, armorAbsorbed:0,
       goldGained:0, cheeseEaten:0, critsLanded:0, overloadsFired:0,
       totalHealed:0, biggestDamageDealt:0, biggestDamageTaken:0,
-      enemiesKilled:[], bricksUsed:{}, bricksGained:{}, hpLow: 0 };
+      enemiesKilled:[], bricksUsed:{}, bricksGained:{}, hpLow: 0,
+      activeCombatMs: 0 };
     return;
   }
   _waveSnapshot = {
@@ -963,6 +964,7 @@ function captureWaveSnapshot() {
     bricksUsed:    Object.assign({}, st.battleStats.bricksUsed || {}),
     bricksGained:  Object.assign({}, st.battleStats.bricksGained || {}),
     hpLow:         st.playerHpMax || 0,  // start of wave is full HP after refill
+    activeCombatMs: st.battleStats.activeCombatMs || 0,
   };
   _waveStartTime = performance.now();
 }
@@ -995,6 +997,8 @@ function computeWaveDelta() {
     critsLanded:    (bs.critsLanded    || 0) - _waveSnapshot.critsLanded,
     overloadsFired: (bs.overloadsFired || 0) - _waveSnapshot.overloadsFired,
     totalHealed:    (bs.totalHealed    || 0) - _waveSnapshot.totalHealed,
+    // Active-combat: time-on-target measurement, excludes idle/dodge/recharge gaps
+    activeMs:       (bs.activeCombatMs || 0) - _waveSnapshot.activeCombatMs,
     // For "biggest" we want the wave's max, not delta — show the higher of the two
     biggestDamageDealt: Math.max(_waveSnapshot.biggestDamageDealt, bs.biggestDamageDealt || 0),
     biggestDamageTaken: Math.max(_waveSnapshot.biggestDamageTaken, bs.biggestDamageTaken || 0),
@@ -1014,9 +1018,15 @@ function showWaveVictoryScreen(waveNum, theme, delta, cheeseEaten, infoAtClear) 
   var v = document.getElementById('wave-victory');
   if (!v) return;
 
-  // Compute DPS — protect against zero-duration waves
+  // Compute active-DPS — damage rate during engagement, not corrupted by
+  // idle/travel/recharge gaps. activeMs = milliseconds during which damage
+  // was being dealt (within ACTIVE_COMBAT_WINDOW_MS rolling window).
   var dur = delta.duration > 0.1 ? delta.duration : 0.1;
-  var dps = (delta.damageDealt / dur).toFixed(1);
+  var activeSec = (delta.activeMs || 0) / 1000;
+  var activeDps = activeSec > 0.05
+    ? (delta.damageDealt / activeSec).toFixed(1)
+    : '0.0';
+  var uptimePct = Math.min(100, Math.round((activeSec / dur) * 100));
 
   // Format felled list — group by type, "2× goblin · 1× skeleton"
   var felledStr = '—';
@@ -1058,14 +1068,14 @@ function showWaveVictoryScreen(waveNum, theme, delta, cheeseEaten, infoAtClear) 
     +   '<div class="wv-cleared">WAVE CLEARED</div>'
     +   '<div class="wv-num">WAVE ' + waveNum + '</div>'
     +   '<div class="wv-theme">' + (theme || '') + '</div>'
-    +   '<div class="wv-duration">DURATION: ' + dur.toFixed(1) + 's · DPS: ' + dps + '</div>'
+    +   '<div class="wv-duration">DURATION: ' + dur.toFixed(1) + 's · ACTIVE: ' + activeSec.toFixed(1) + 's (' + uptimePct + '%)</div>'
     + '</div>'
     + cheeseBanner
     + '<div class="wv-stats">'
 
     +   '<div class="wv-col offense">'
     +     '<div class="wv-col-head">OFFENSE</div>'
-    +     '<div class="wv-row"><span class="label">DPS</span><span class="val hi">' + dps + '</span></div>'
+    +     '<div class="wv-row"><span class="label">active DPS</span><span class="val hi">' + activeDps + '</span></div>'
     +     '<div class="wv-row"><span class="label">total dmg</span><span class="val">' + delta.damageDealt + '</span></div>'
     +     '<div class="wv-row"><span class="label">biggest hit</span><span class="val">' + delta.biggestDamageDealt + '</span></div>'
     +     '<div class="wv-row"><span class="label">crits</span><span class="val">' + delta.critsLanded + '</span></div>'
