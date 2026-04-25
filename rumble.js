@@ -7113,7 +7113,13 @@ function updateGrayWalls(dt) {
     // skip over in a single frame. Now any frame where the player ends up
     // inside the wall circle gets pushed to the outer edge. Walls cage
     // entities only (containedIds); player is always blocked from outside.
-    if (player) {
+    // Player ALSO damages walls on sustained contact — same cooldown model
+    // as entity-bump so leaning is deliberate, not accidental. Player tick
+    // is faster (0.6s vs entity 2.0s outer-bump) because the player is the
+    // active agent: deliberately crashing into a wall is destructive intent,
+    // and this gives players a way to escape a containment wall in waves
+    // mode without needing an explicit demolish action.
+    if (player && w.hp > 0) {
       var pdx = player.x - w.x, pdy = player.y - w.y;
       var pdist = Math.sqrt(pdx*pdx+pdy*pdy) || 1;
       var pEdge = w.r + player.r;
@@ -7127,6 +7133,16 @@ function updateGrayWalls(dt) {
         var _wb = getRumbleBounds();
         player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
         player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
+        // Tick wall hp on sustained contact
+        w._playerCooldown = (w._playerCooldown || 0) - dt;
+        if (w._playerCooldown <= 0) {
+          w._playerCooldown = 0.6;
+          w.hp = Math.max(0, w.hp - 1);
+          w.flashTimer = 0.15;
+        }
+      } else {
+        // Not in contact — let cooldown decay to 0 so re-contact feels responsive
+        w._playerCooldown = 0;
       }
     }
 
