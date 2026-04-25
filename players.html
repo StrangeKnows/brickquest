@@ -1288,32 +1288,38 @@ function _holdUp(e) {
   const onAlly = releaseEl ? releaseEl.closest('[data-ally-target]') : null;
   const releasedOnOwnChip = onChip && onChip.getAttribute('data-brick-chip') === s.color;
 
-  // Capture ally icon location BEFORE _holdEnd destroys the overlay.
-  // Used to fire a caster-acknowledgment flash at the spot the ally was released.
+  // Capture ally icon location BEFORE _holdEnd destroys state.
+  // Used for caster ack flash + spotlight selector.
   let allyIconRect = null;
+  let allyTargetCls = null;
   if (onAlly) {
     allyIconRect = onAlly.getBoundingClientRect();
+    allyTargetCls = onAlly.getAttribute('data-ally-target');
   }
 
-  _holdEnd(false);
-
   if (isTap) {
-    // Plain tap — fire existing tier-1 baseline action (no change in behavior)
+    // Plain tap — fire existing tier-1 baseline action, instant overlay clear
+    _holdEnd(false);
     _fireTierAction(s.color, 1, null);
     return;
   }
 
   // Hold release routing
   if (onAlly) {
-    const targetCls = onAlly.getAttribute('data-ally-target');
-    _fireTierAction(s.color, s.tier, targetCls);
-    // Caster acknowledgment — brief white flash at the ally icon's last position.
-    // Confirms gesture succeeded; actual heal visual fires on target's own dashboard.
+    // Ally heal — keep overlay alive for spotlight, fire action + ack, then cleanup
+    _holdEnd(false, true);                              // skip immediate clear
+    _fireTierAction(s.color, s.tier, allyTargetCls);
     if (allyIconRect) _fireCasterAck(allyIconRect);
+    _spotlightCleanup('[data-ally-target="' + allyTargetCls + '"]');
   } else if (releasedOnOwnChip) {
+    // Self heal — keep overlay alive briefly, fade everything together
+    _holdEnd(false, true);                              // skip immediate clear
     _fireTierAction(s.color, s.tier, null);
+    _spotlightCleanup(null);                            // no target = full fade
+  } else {
+    // Released off-target → silent cancel, instant clear
+    _holdEnd(true);
   }
-  // Released off-target → silent cancel (no charges spent, no toast noise)
 }
 
 // Caster acknowledgment flash — brief white ring that pops at the position an
@@ -1341,7 +1347,64 @@ function _fireCasterAck(rect) {
   setTimeout(() => flash.remove(), 550);
 }
 
-function _holdEnd(cancelled) {
+// Spotlight cleanup — reusable mechanic for clean post-cast overlay tear-down.
+//
+// When a board action fires on a target (ally icon, future per-class targets),
+// we want everything EXCEPT the target to fade away first, leaving the target
+// briefly visible during the heal/effect animation, then the target fades too.
+//
+// Reads as: "this is what your action lands on" → action plays out → done.
+//
+// Args:
+//   targetSelector — CSS selector matching the spotlight element inside the
+//                    overlay (e.g. '[data-ally-target="snapstep"]'). Null
+//                    means no spotlight — all elements fade together.
+//   hangMs         — how long the target stays solo before fading (1000)
+//   fadeMs         — how long the target's own fade-out takes (400)
+//
+// Non-target fade is 250ms (snappy). Total cleanup: 250 + hangMs + fadeMs.
+function _spotlightCleanup(targetSelector, hangMs, fadeMs) {
+  const NON_TARGET_FADE = 250;
+  hangMs = hangMs == null ? 1000 : hangMs;
+  fadeMs = fadeMs == null ? 400 : fadeMs;
+
+  const overlay = document.getElementById('hold-overlay');
+  if (!overlay) return;
+
+  // Target element (if any) stays solid through the spotlight period
+  const target = targetSelector ? overlay.querySelector(targetSelector) : null;
+
+  // Fade every direct overlay child EXCEPT the target's parent chain
+  Array.from(overlay.children).forEach(child => {
+    if (target && child.contains(target)) return;  // skip target's container
+    child.style.transition = `opacity ${NON_TARGET_FADE}ms ease-out`;
+    child.style.opacity = '0';
+  });
+
+  // If we have a target, fade non-targets but keep target visible.
+  // After hangMs, fade the target. After fadeMs more, clear overlay.
+  if (target) {
+    setTimeout(() => {
+      // Fade the target's container (not just the icon — could be a wrapper SVG)
+      let toFade = target;
+      // Walk up to the direct overlay child that contains the target
+      while (toFade.parentNode && toFade.parentNode !== overlay) {
+        toFade = toFade.parentNode;
+      }
+      if (toFade && toFade !== overlay) {
+        toFade.style.transition = `opacity ${fadeMs}ms ease-out, transform ${fadeMs}ms ease-out`;
+        toFade.style.opacity = '0';
+        toFade.style.transform = 'scale(0.92)';
+      }
+      setTimeout(() => _clearHoldOverlay(), fadeMs + 50);
+    }, NON_TARGET_FADE + hangMs);
+  } else {
+    // No target — wipe overlay after non-target fade completes
+    setTimeout(() => _clearHoldOverlay(), NON_TARGET_FADE + 50);
+  }
+}
+
+function _holdEnd(cancelled, skipClearOverlay) {
   if (_holdTicker) { clearInterval(_holdTicker); _holdTicker = null; }
   if (_holdState && _holdState.rafId) { cancelAnimationFrame(_holdState.rafId); }
   document.removeEventListener('pointermove', _holdMove);
@@ -1349,7 +1412,7 @@ function _holdEnd(cancelled) {
   document.removeEventListener('pointercancel', _holdUp);
   if (_holdState) _holdState.cancelled = cancelled;
   _holdState = null;
-  _clearHoldOverlay();
+  if (!skipClearOverlay) _clearHoldOverlay();
 }
 
 // Fire an action with tier and optional target. For tier > 1, currently
