@@ -1781,7 +1781,7 @@ function _renderAllyRadialFan(s) {
   const RADIUS = 80;
   const ICON_SIZE = 44;
   const ARC_RADIUS = RADIUS + 30;     // 30px beyond icon centers
-  const FAN_ARC_RAD = Math.PI * 5 / 6; // 150° total arc — gives icons breathing room on mobile
+  const FAN_ARC_RAD = Math.PI; // 180° — full half-circle around the chip
   const center = s.fanCenterAngle;
   const tierColor = BRICK_COLORS[s.color] || '#fff';
   // arcFill is continuous time-progress (0..1) through the overload range.
