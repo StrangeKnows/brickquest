@@ -6532,7 +6532,7 @@ function updateBrickAction(dt, bounds) {
           purpleParticles = purpleParticles.filter(function(p){ return p.color !== '#ff3300' && !p.isRed; });
           // Spawn trail particles behind player (opposite to charge direction)
           // Store return trail state on brickAction — emits particles each frame during return
-          brickAction._trailRMult = rMult;
+          brickAction._trailRMult = rTier;
           brickAction.phase = 'return';
           brickAction.returnTimer = 0;
         }
