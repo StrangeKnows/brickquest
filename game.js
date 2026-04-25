@@ -481,7 +481,15 @@ class GameClient {
   rescueVillager()                  { this.send('rescueVillager'); }
 
   // ── BOARD ACTIONS (S013 §8.2 — consume bricksCharged) ──
-  healPlayer(cls)                   { this.send('healPlayer', { cls }); }
+  //
+  // healPlayer(target, source = target)
+  //   target: whose HP is healed (class id)
+  //   source: whose white charge is spent (defaults to target for self-heal)
+  //
+  // Examples:
+  //   client.healPlayer(MY_CLASS)          → self-heal (source = target = me)
+  //   client.healPlayer('snapstep', MY_CLASS) → I heal Snapstep (I pay the charge)
+  healPlayer(target, source)         { this.send('healPlayer', { target, source: source || target }); }
   addShield(cls)                    { this.send('addShield',  { cls }); }
 
   // ── LEGACY STUBS ──

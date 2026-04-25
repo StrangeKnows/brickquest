@@ -1615,11 +1615,11 @@ function _fireTierAction(color, tier, targetCls) {
   // White actions
   if (color === 'white') {
     if (targetCls === null) {
-      // Self heal — existing endpoint
+      // Self heal — single-arg call (source defaults to target)
       client.healPlayer(MY_CLASS);
     } else {
-      // Ally heal — existing endpoint, just routed to ally cls
-      client.healPlayer(targetCls);
+      // Ally heal — pass MY_CLASS as source (I pay), targetCls as target
+      client.healPlayer(targetCls, MY_CLASS);
     }
     if (tier > 1) {
       toast('Tier ' + tier + ' release — scaling lands with class abilities', 'info');

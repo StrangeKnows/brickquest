@@ -18,6 +18,11 @@ const BQ_VERSION = (() => {
 // Shared game constants
 const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDING_EVENTS, PLAYER_META, DASH_FLAVOR, ENTITY_TYPES, ENTITY_META, RUMBLE_FLAVOR } = require('./game.js');
 
+// Canonical character data + combat formulas (shared with browser-side rumble + dashboard).
+// Single source of truth — if a formula value changes in characters.js, server + client
+// + rumble all see the same new value automatically. No drift possible.
+const { computeHeal, affinityMult, baseHeal } = require('./characters.js');
+
 // Family palette per doc §2.1 Per-Color Role Matrix — 3 brick colors per
 // expression family. Called at rumble-event initiate so each encounter rolls
 // fresh; same goblin can show red one time, gray the next, orange after that.
@@ -2535,26 +2540,40 @@ wss.on('connection', (ws, req) => {
     }
 
     // ── S013 §8.2 — BOARD ACTIONS CONSUMING bricksCharged ──
-    // Heal self: spend 1 white charge → +N HP (per-class, capped at hpMax).
+    // Heal (self or ally) — spend 1 white charge from SOURCE, heal TARGET.
+    // Canonical heal formula lives in characters.js (same source client previews).
     // Per §1.1 charge model, spend dims the white pip; refresh at rumble
     // entry or zone-gate crossing relights it.
-    const SELF_HEAL_AMT = { breaker: 2, formwright: 2, snapstep: 2, blocksmith: 2, fixer: 4, wild_one: 2 };
+    //
+    // Contract: { target, source } — source pays the charge, target receives the heal.
+    // Back-compat: if only `cls` is sent, it's treated as both target AND source (self-heal).
     if (type === 'healPlayer') {
-      const p = G.players[P.cls];
-      if (!p || !p.alive) { broadcastState(); return; }
-      if (((p.bricksCharged && p.bricksCharged.white) || 0) <= 0) {
+      const targetCls = P.target || P.cls;
+      const sourceCls = P.source || P.cls;
+      const target = G.players[targetCls];
+      const source = G.players[sourceCls];
+      if (!target || !target.alive) { broadcastState(); return; }
+      if (!source || !source.alive) { broadcastState(); return; }
+      if (((source.bricksCharged && source.bricksCharged.white) || 0) <= 0) {
         ws.send(JSON.stringify({type:'error',msg:'No white charge available'}));
         broadcastState(); return;
       }
-      if (p.hp >= p.hpMax) {
-        ws.send(JSON.stringify({type:'error',msg:'Already at full HP'}));
+      if (target.hp >= target.hpMax) {
+        ws.send(JSON.stringify({type:'error',msg: sourceCls === targetCls
+          ? 'Already at full HP'
+          : target.name + ' is already at full HP'}));
         broadcastState(); return;
       }
-      spendBrickCharge(p, 'white', 1);
-      const baseHeal = SELF_HEAL_AMT[p.cls] || 2;
-      const healAmt = Math.min(baseHeal, p.hpMax - p.hp);
-      p.hp += healAmt;
-      log(`${p.name} healed +${healAmt} HP (1 white charge) → ${p.hp}/${p.hpMax}`, 'heal');
+      spendBrickCharge(source, 'white', 1);
+      const ownedWhite = (source.bricks && source.bricks.white) || 0;
+      const rawHeal = computeHeal(source.cls, 'white', ownedWhite, 1);
+      const healAmt = Math.min(rawHeal, target.hpMax - target.hp);
+      target.hp += healAmt;
+      if (sourceCls === targetCls) {
+        log(`${target.name} healed +${healAmt} HP (1 white charge) → ${target.hp}/${target.hpMax}`, 'heal');
+      } else {
+        log(`${source.name} healed ${target.name} +${healAmt} HP (1 white charge) → ${target.hp}/${target.hpMax}`, 'heal');
+      }
     }
     // Shield self (§8.2 board action, consumes bricksCharged.gray).
     // BASE for all classes: 1 gray charge → +1 armor, cap = hpMax.
