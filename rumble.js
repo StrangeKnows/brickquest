@@ -904,6 +904,7 @@ function update(dt) {
   updateConfuseParticles(dt);
   updateRegen(dt);
   updateBleedOut(dt);
+  updateDrain(dt);
   entities.forEach(function(g) {
     updateEntityPoison(g, dt);
     g.slowTimer = Math.max(0, (g.slowTimer||0) - dt);
@@ -1563,6 +1564,7 @@ function draw() {
   drawOverloadCharge();
   drawGrayWalls();
   drawRegen();
+  drawDrainAura();
   // ── Armor bursts ──
   drawArmorBursts();
 
@@ -6132,6 +6134,125 @@ function updateBleedOut(dt) {
   }
 }
 
+// ── PURPLE DRAIN ────────────────────────────────────────────────────
+// Inverse of bleed: bleed shrinks HP over a window, drain grows HP over
+// a window. Triggered by purple lifesteal. Faster than bleed because
+// feeding is eager (drain ~700ms vs bleed 2500ms).
+// Compounds: multiple lifesteal hits during an active drain extend toHp.
+// Visual: pulsing purple aura around the player, local (follows player),
+// in contrast to bleed's global red screen tint.
+
+var DRAIN_DURATION_MS = 700;        // baseline drain window
+var DRAIN_DURATION_EXTRA_MS = 80;   // ms added per HP per stacked hit
+
+function applyDrainHeal(amount) {
+  if (!player || amount <= 0) return 0;
+  // If currently bleeding, route to existing rescue path — drain animation
+  // doesn't apply here because bleed is the dominant state and its rescue
+  // arc is the visual that already plays. The two systems share the same
+  // intent (HP rising over time) so doubling them up would clash.
+  if (player.bleedOut) {
+    var prev = player.hp;
+    var cap = player.hpMax * 2;
+    player.hp = Math.min(cap, Math.round(player.hp + amount));
+    var actual = player.hp - prev;
+    if (actual > 0) applyBleedRescue(actual);
+    return actual;
+  }
+  var cap = player.hpMax * 2;
+  if (player.draining) {
+    // Compound — extend toHp toward new target, refresh duration so the
+    // newly-added heal has time to play out (don't truncate mid-arc)
+    var d = player.draining;
+    var newTo = Math.min(cap, d.toHp + amount);
+    var added = newTo - d.toHp;
+    if (added > 0) {
+      d.toHp = newTo;
+      d.duration += DRAIN_DURATION_EXTRA_MS * added;
+    }
+    return added;
+  }
+  // Initiate fresh drain
+  var fromHp = player.hp;
+  var toHp = Math.min(cap, fromHp + amount);
+  if (toHp <= fromHp) return 0;
+  player.draining = {
+    fromHp: fromHp,
+    toHp: toHp,
+    startTime: performance.now(),
+    duration: DRAIN_DURATION_MS + DRAIN_DURATION_EXTRA_MS * (toHp - fromHp),
+  };
+  return toHp - fromHp;
+}
+
+function updateDrain(dt) {
+  if (!player || !player.draining) return;
+  var d = player.draining;
+  var elapsed = performance.now() - d.startTime;
+  var t = d.duration > 0 ? Math.min(1, elapsed / d.duration) : 1;
+  // Linear interp from fromHp to toHp. Round so displayed HP stays integer.
+  var interp = d.fromHp + (d.toHp - d.fromHp) * t;
+  player.hp = Math.round(interp);
+  if (t >= 1) {
+    // Drain complete. Lock in toHp, account stats, clear state.
+    var totalGained = Math.round(d.toHp) - Math.round(d.fromHp);
+    player.hp = Math.round(d.toHp);
+    if (_battleStats && totalGained > 0) {
+      _battleStats.totalHealed = (_battleStats.totalHealed || 0) + totalGained;
+      if (totalGained > (_battleStats.biggestHealPlayer || 0)) {
+        _battleStats.biggestHealPlayer = totalGained;
+      }
+    }
+    // Overheal floater on completion if we ended above hpMax
+    if (player.hp > player.hpMax) {
+      var oh = player.hp - Math.max(player.hpMax, Math.round(d.fromHp));
+      if (oh > 0) showFloatingText(player.x, player.y - 50, oh + ' ♥', '#9B6FD4', player);
+    }
+    player.draining = null;
+  }
+}
+
+// Pulsing purple aura — drawn each frame while draining. The pulse syncs
+// with the int-HP increments so the player sees the aura flare each time
+// HP visibly rises. Fades in over 100ms (eager onset), stays bright while
+// active, fades out via no-render once player.draining clears.
+function drawDrainAura() {
+  if (!player || !player.draining) return;
+  var d = player.draining;
+  var elapsed = performance.now() - d.startTime;
+  var t = d.duration > 0 ? Math.min(1, elapsed / d.duration) : 1;
+  // Fade-in ramp during first 100ms, full intensity through middle,
+  // taper off slightly toward end (subtle release).
+  var fadeIn = Math.min(1, elapsed / 100);
+  var fadeOut = (t > 0.85) ? (1 - (t - 0.85) / 0.15) : 1;
+  var intensity = fadeIn * Math.max(0.4, fadeOut);
+  // Pulse — frequency matches the visual HP-tick cadence (one beat per HP
+  // gained, roughly). The sin wave makes the aura "breathe" with the heal.
+  var hpGained = Math.max(1, Math.round(d.toHp - d.fromHp));
+  var pulseFreq = (hpGained * Math.PI) / Math.max(0.05, d.duration / 1000);
+  var pulse = 0.5 + 0.5 * Math.sin(elapsed / 1000 * pulseFreq);
+  ctx.save();
+  // Outer ring — soft purple glow at player.r + 14, throbs with pulse
+  var outerR = player.r + 12 + pulse * 8;
+  var grad = ctx.createRadialGradient(player.x, player.y, player.r, player.x, player.y, outerR);
+  grad.addColorStop(0, 'rgba(155,111,212,0)');
+  grad.addColorStop(0.5, 'rgba(155,111,212,' + (0.35 * intensity) + ')');
+  grad.addColorStop(1, 'rgba(123,47,190,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, outerR, 0, Math.PI * 2);
+  ctx.fill();
+  // Inner ring — sharper edge, brighter purple, slightly smaller
+  ctx.strokeStyle = 'rgba(204, 153, 255,' + (0.7 * intensity * (0.5 + 0.5 * pulse)) + ')';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#9B6FD4';
+  ctx.shadowBlur = 14 * intensity;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r + 8, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawRegen() {
   if (!playerRegen || !player) return;
   var pct = playerRegen.timer / playerRegen.duration;
@@ -7700,28 +7821,13 @@ function updatePurpleBursts(dt) {
       }
       purpleBurst._hitIds.push(gId);
       // Purple lifesteal: heal player for 1/3 of damage dealt (rounded up).
-      // Overheal allowed up to 2× hpMax. The overheal floater (♥) only
-      // surfaces when the hit actually pushes HP past hpMax — regular
-      // top-up back to full shouldn't flag overheal. If the hit spans
-      // the max boundary (e.g. 8/10 HP + 5 lifesteal → 13/10), show only
-      // the overheal portion (3) on the floater so the number matches
-      // what's actually going into overheal storage.
+      // Routes through applyDrainHeal so HP fills in over a window with the
+      // pulsing purple aura — the inverse of bleed. Multiple hits during a
+      // burst compound into a single drain (toHp extended). Overheal cap,
+      // bleed-rescue routing, stats accounting, and the overheal floater
+      // are all handled inside applyDrainHeal / updateDrain.
       var healAmt = Math.ceil(actualDmg / 3);
-      var overhealCap = player.hpMax * 2;
-      if (healAmt > 0 && player.hp < overhealCap) {
-        var preHp = player.hp;
-        player.hp = Math.min(overhealCap, player.hp + healAmt);
-        var totalGained = player.hp - preHp;
-        if (totalGained > 0) applyBleedRescue(totalGained);
-        if (_battleStats && totalGained > 0) {
-          _battleStats.totalHealed = (_battleStats.totalHealed || 0) + totalGained;
-          if (totalGained > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = totalGained;
-        }
-        var overhealGained = Math.max(0, player.hp - Math.max(player.hpMax, preHp));
-        if (overhealGained > 0) {
-          showFloatingText(player.x, player.y-50, overhealGained + ' ♥', '#9B6FD4', player);
-        }
-      }
+      if (healAmt > 0) applyDrainHeal(healAmt);
       triggerVictory();
     }
   });
