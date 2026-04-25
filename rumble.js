@@ -144,6 +144,9 @@ var _battleStats = {
   // (damage rate during engagement, not corrupted by idle gaps).
   activeCombatMs: 0,
   _lastDamageAt: 0,
+  // Damage source/target attribution for run-summary tuning analysis
+  damageByColor: {},    // { red: 247, purple: 102, ... }
+  damageByTarget: {},   // { goblin: 96, stone_troll: 240, ... }
 };
 
 function _addBrickStat(bucket, color, amount) {
@@ -4591,6 +4594,17 @@ function damageEntity(g, dmg, aggro, source) {
     // Mark this moment as "actively dealing damage" — used by the
     // active-combat accumulator to compute time-on-target DPS.
     if (finalDmg > 0) _battleStats._lastDamageAt = performance.now();
+    // Damage-by-color (which kit colors carry your output) and
+    // damage-by-target (which enemy types absorb your damage).
+    // Both are critical for tuning analysis on the run summary.
+    if (finalDmg > 0) {
+      if (!_battleStats.damageByColor) _battleStats.damageByColor = {};
+      var srcKey = source || 'untyped';
+      _battleStats.damageByColor[srcKey] = (_battleStats.damageByColor[srcKey] || 0) + finalDmg;
+      if (!_battleStats.damageByTarget) _battleStats.damageByTarget = {};
+      var tgtKey = g.type || 'unknown';
+      _battleStats.damageByTarget[tgtKey] = (_battleStats.damageByTarget[tgtKey] || 0) + finalDmg;
+    }
   }
   if (aggro !== false) {
     g.aggroed = true;
@@ -7979,6 +7993,9 @@ function _internalStart(config) {
     // Active-combat accumulator (see top-of-file definition)
     activeCombatMs: 0,
     _lastDamageAt: 0,
+    // Damage attribution
+    damageByColor: {},
+    damageByTarget: {},
   };
 
   timerLeft = RUMBLE_DURATION;
@@ -9388,6 +9405,8 @@ function _computeState() {
       hpLow:          _battleStats.hpLow === 9999 ? (player.hpMax||0) : _battleStats.hpLow,
       enemiesKilled:  (_battleStats.enemiesKilled || []).slice(),
       activeCombatMs: _battleStats.activeCombatMs || 0,
+      damageByColor:  Object.assign({}, _battleStats.damageByColor || {}),
+      damageByTarget: Object.assign({}, _battleStats.damageByTarget || {}),
       // v4 single-hit highlights
       biggestDamageDealt: _battleStats.biggestDamageDealt || 0,
       biggestDamageTaken: _battleStats.biggestDamageTaken || 0,
