@@ -6912,18 +6912,23 @@ function startBlueBolt(lockedTarget) {
 // area-denial casts instead of always homing on the nearest entity.
 function startBlueBoltAtPoint(tx, ty) {
   if (!player) return;
-  // BLUE CRUSHING STRIKE: crit doubles damage.
-  var bcritAP = _currentCrit ? 2.0 : 1.0;
+  // Unified pipeline: tap-drag uses _fx('blue', 1) for damage, radius, and
+  // burst-dmg. All entities in impact radius take fx.burstDmg (no primary
+  // distinction — drag-drop is pure AoE bomb). Crit doubles burst.
+  var fx = _fx('blue', 1);
+  if (!fx) return;
+  var bcrit = _currentCrit ? 2.0 : 1.0;
   blueBolts.push({
     x: player.x, y: player.y,
     target: null, fixedPoint: true,
     targetX: tx, targetY: ty,
     speed: 500,
-    dmg: Math.ceil(4 * tapScaleMult('blue') * affinityMult('blue') * bcritAP),
-    // Impact radius for drag-drop fire: modest AoE so dropping near a goblin
-    // still connects. Scales with display (scaleDist). Snapstep-tight enough
-    // that you have to aim, wide enough to be useful.
-    impactR: scaleDist(42),
+    // No primary "homing" target — bolt is just a moving bomb. dmg field
+    // unused on impact; burstDmg applies to all in radius.
+    dmg: 0,
+    burstDmg: Math.ceil(fx.burstDmg * bcrit),
+    burstRadius: clampRadiusToArena(fx.radiusPx),
+    impactR: clampRadiusToArena(fx.radiusPx), // legacy field name kept for hit detection
     r: 7, dead: false, travelled: 0, tier: 1, glow: 0, delayTimer: 0,
     isCrit: _currentCrit,
   });
@@ -6968,16 +6973,19 @@ function updateBlueBolts(dt, bounds) {
       });
     }
     // Fixed-point bolt arrival: reached the drop location. AoE damage any
-    // entity within impact radius; always leaves a visible burst even on
-    // empty ground.
+    // entity within impact radius using burstDmg (all-burst, no primary
+    // distinction). Always leaves a visible burst even on empty ground.
     if (b.fixedPoint && b.travelled > 30 && dist < b.r + 6) {
       var impactR = b.impactR || scaleDist(42);
       var ix = b.targetX, iy = b.targetY;
       var primaryHit = null;
+      // β model: every entity in radius takes burstDmg (or fall back to dmg
+      // for legacy bolts that didn't set burstDmg).
+      var hitDmg = b.burstDmg || b.dmg || 0;
       entities.forEach(function(ent) {
         if (ent.hp <= 0) return;
         if (Math.hypot(ent.x - ix, ent.y - iy) <= impactR + ent.r) {
-          var fpRes = damageEntity(ent, b.dmg, undefined, 'blue');
+          var fpRes = damageEntity(ent, hitDmg, undefined, 'blue');
           ent.flashTimer = 0.2;
           showDamageNumber(ent.x, ent.y - 30, fpRes.applied, '#4db8ff', fpRes.tier, ent.x, ent.y, undefined, fpRes.witherBoost, ent);
           if (b.isCrit && !primaryHit) {
@@ -7118,9 +7126,14 @@ function drawBlueDrag() {
   ctx.setLineDash([5,5]); ctx.strokeStyle = '#4db8ff88'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
   ctx.setLineDash([]);
-  // Indicator radius matches startBlueBoltAtPoint's impactR (scaleDist(42))
-  // so players can see the actual AoE they're dropping into.
-  var impactR = scaleDist(42);
+  // Indicator radius reflects the actual fx.radiusPx for the current
+  // cast tier — overload-aware. If overload is queued (held), tier =
+  // current overload count; otherwise tier = 1 (tap-drag).
+  var bTier = (overloadState && overloadState.color === 'blue') ?
+    Math.max(1, Math.min(player.brickMax ? (player.brickMax['blue']||1) : 1,
+      Math.floor(overloadState.timer / OVERLOAD_TIER) + 1)) : 1;
+  var bFx = _fx('blue', bTier);
+  var impactR = bFx ? clampRadiusToArena(bFx.radiusPx) : scaleDist(42);
   var onTarget = entities.some(function(g){return Math.hypot(cx-g.x,cy-g.y)<g.r+impactR;});
   ctx.strokeStyle = onTarget ? '#4db8ff' : '#4db8ff66'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(cx, cy, impactR, 0, Math.PI*2); ctx.stroke();
