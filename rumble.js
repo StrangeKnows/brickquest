@@ -1567,13 +1567,46 @@ function roundRect(ctx, x, y, w, h, r) {
 // GAME LOOP
 // ═══════════════════════════════════════════════════
 function loop(ts) {
-  var dt = Math.min((ts - lastTs) / 1000, 0.05);
-  lastTs = ts;
-  if (!_revivePaused) update(dt);
-  draw();
-  updateHUD();
-  renderBrickBar();
-  if (running) rafId = requestAnimationFrame(loop);
+  try {
+    var dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (!_revivePaused) update(dt);
+    draw();
+    updateHUD();
+    renderBrickBar();
+    if (running) rafId = requestAnimationFrame(loop);
+  } catch (err) {
+    // DIAGNOSTIC — surface render-loop failures to an on-screen panel.
+    // Without this, an exception silently halts the loop and the canvas
+    // shows whatever was last cleared (black). Remove this try/catch
+    // once the underlying bug is identified and fixed.
+    running = false;
+    var d = document.getElementById('rumble-loop-error');
+    if (!d) {
+      d = document.createElement('div');
+      d.id = 'rumble-loop-error';
+      d.style.cssText = 'position:fixed;top:50px;left:8px;right:8px;z-index:9999;'
+        + 'background:#2a0010;border:2px solid #ff4466;border-radius:8px;'
+        + 'padding:12px;color:#ffaabb;font-family:ui-monospace,monospace;'
+        + 'font-size:11px;line-height:1.5;max-height:60vh;overflow:auto;'
+        + 'pointer-events:auto;';
+      document.body.appendChild(d);
+    }
+    var stack = (err && err.stack) ? err.stack : String(err);
+    var playerInfo = player
+      ? ('cls=' + player.cls + ' hp=' + player.hp + '/' + player.hpMax
+        + ' x=' + Math.round(player.x) + ' y=' + Math.round(player.y)
+        + ' bleed=' + (player.bleedOut ? 'YES' : 'no'))
+      : 'NULL';
+    d.innerHTML = '<div style="color:#ff4466;font-weight:bold;font-size:13px;margin-bottom:6px;">RUMBLE LOOP ERROR</div>'
+      + '<div><b>player:</b> ' + playerInfo + '</div>'
+      + '<div><b>entities:</b> ' + (entities ? entities.length : 'null') + '</div>'
+      + '<div><b>error:</b> ' + (err && err.message ? err.message : String(err)) + '</div>'
+      + '<pre style="white-space:pre-wrap;margin-top:8px;color:#ff8899;font-size:10px;">'
+      + stack.replace(/[<>&]/g, function(c){ return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c]; })
+      + '</pre>';
+    console.error('[Rumble loop error]', err);
+  }
 }
 
 function updateHUD() {
@@ -7917,7 +7950,7 @@ function _internalStart(config) {
   entities = [];
   enemyProjectiles = [];
   droppedBricks = [];
-  var count = Math.max(1, Math.min(10, cfg.entityCount || 1));
+  var count = Math.max(0, Math.min(10, cfg.entityCount != null ? cfg.entityCount : 1));
   for (var si = 0; si < count; si++) {
     // Spread entities around a circle so they don't all spawn stacked.
     var angleOffset = count > 1 ? (si / count) * Math.PI * 2 : 0;

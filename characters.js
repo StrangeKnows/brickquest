@@ -257,6 +257,32 @@ function computeHeal(cls, color, owned, overload) {
   );
 }
 
+// ── BROWSER GLOBAL EXPORTS ──────────────────────────────────────────────
+// Rumble.js runs inside an IIFE and reaches for these via window.X. In a
+// classic script tag, top-level `function foo` declarations are global
+// (callable as `foo()`) but do NOT auto-attach to window.foo. We attach
+// them explicitly here so the IIFE can reach them.
+if (typeof window !== 'undefined') {
+  window.CHARACTERS = CHARACTERS;
+  window.PLAYER_META = PLAYER_META;
+  window.STARTING_KIT_COUNTS = STARTING_KIT_COUNTS;
+  window.CLASS_AFFINITY = CLASS_AFFINITY;
+  window.getChar = getChar;
+  window.getCharName = getCharName;
+  window.getCharIcon = getCharIcon;
+  window.getCharColor = getCharColor;
+  window.getCharUiStyle = getCharUiStyle;
+  window.getSignature = getSignature;
+  window.getSecondary = getSecondary;
+  window.baseHeal = baseHeal;
+  window.affinityMult = affinityMult;
+  window.affinityRadiusMult = affinityRadiusMult;
+  window.brickTier = brickTier;
+  window.tapScaleMult = tapScaleMult;
+  window.overloadStackMult = overloadStackMult;
+  window.computeHeal = computeHeal;
+}
+
 // ── CommonJS export for server-side reuse ───────────────────────────────
 // Browser ignores this. Node require('./characters.js') grabs the same
 // values the browser uses via globals.
