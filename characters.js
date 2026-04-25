@@ -239,7 +239,7 @@ var COLOR = {
   black:  { dmg: 0.20, dur: 0.60 },
   green:  { stackDmg: 0.20, stacks: 0.40 },
   white:  { heal: 0.40, dur: 0.60 },
-  yellow: { dur: 0.60, confuseSeed: 0.40 },
+  yellow: { dur: 0.60, yellowSeed: 0.40 },
   orange: { dmg: 0.40, bleedDur: 0.60, charges: 0.40 },
   gray:   { hp: 0.80 },
 };
@@ -274,7 +274,7 @@ function effectiveAt(color, tier, cls, owned) {
   if (c.hp          != null) out.hp          = Math.max(1, Math.ceil(BASE * c.hp          * m));
   if (c.dur         != null) out.duration    = BASE * c.dur         * m;
   if (c.bleedDur    != null) out.bleedDur    = BASE * c.bleedDur    * m;
-  if (c.confuseSeed != null) out.confuseSeed = BASE * c.confuseSeed * m;
+  if (c.yellowSeed != null) out.yellowSeed = BASE * c.yellowSeed * m;
   if (c.charges     != null) out.charges     = Math.max(1, Math.round(BASE * c.charges    * m));
   if (c.stacks      != null) out.stacks      = Math.max(1, Math.round(BASE * c.stacks     * m));
   return out;

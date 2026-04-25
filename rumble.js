@@ -2005,7 +2005,7 @@ function fireOverloadYellow(count, ox, oy) {
     oy: dragOrigin ? oy : player.y,
     radius: clampRadiusToArena(fx.radiusPx),
     duration: fx.duration,
-    confuseSeed: fx.confuseSeed,
+    yellowSeed: fx.yellowSeed,
     label: 'MIND SHATTER x' + count + '!',
     isCrit: _currentCrit,
   });
@@ -2450,7 +2450,7 @@ function onBrickDown(e, color) {
         // tap-drag is sharper-targeted than the broader aura.
         startYellowConfuse(cx, cy, clampRadiusToArena(yfx.radiusPx * 0.5));
       } else {
-        startYellowAura({ follow: true, radius: clampRadiusToArena(yfx.radiusPx), duration: yfx.duration, confuseSeed: yfx.confuseSeed, label: 'DAZE FIELD', isCrit: _currentCrit });
+        startYellowAura({ follow: true, radius: clampRadiusToArena(yfx.radiusPx), duration: yfx.duration, yellowSeed: yfx.yellowSeed, label: 'DAZE FIELD', isCrit: _currentCrit });
       }
     },
     red:    function(cx,cy,isDrag){
@@ -2663,9 +2663,11 @@ function _entityEffects(g) {
               stack: g.witherStacks });
   }
   // Mind
+  // ? = dazed (yellow-base): wandering AI
+  // ‼ = confused (yellow-crit): retargeting attacks at nearest entity
+  if (g.dazed && (g.dazeTimer||0) > 0)
+    fx.push({ icon:'?', color:'#F5D000', timer: g.dazeTimer });
   if (g.confused && (g.confuseTimer||0) > 0)
-    fx.push({ icon:'?', color:'#F5D000', timer: g.confuseTimer });
-  if (g.dazed && (g.confuseTimer||0) > 0)
     fx.push({ icon:'‼', color:'#FFEE44', timer: g.confuseTimer });
   // Vulnerabilities / casting
   if ((g.markedTimer||0) > 0)
@@ -4518,10 +4520,10 @@ function damageEntity(g, dmg, aggro, source) {
     finalDmg = Math.ceil(finalDmg * 1.5);
     showFloatingText(g.x, g.y - (g.r + 44), 'CRIT WINDOW', '#ffee55', g);
   }
-  // YELLOW DAZE: confused entities take 2x damage from all sources.
-  if (g.dazed && (g.confuseTimer || 0) > 0) {
-    finalDmg = Math.ceil(finalDmg * 2.0);
-  }
+  // (The old yellow-daze +2× damage rider was removed in v0.15.0-pre.
+  // Yellow crit now applies CONFUSE — entities target nearest entity
+  // and damage that entity instead of the player. See touch-attack
+  // block where g.confused is consumed for retargeting.)
   // WITHER: damage from non-witherbolt sources is amplified by diminishing
   // returns curve based on current stacks. Witherbolt itself is excluded.
   // The witherBoost return field lets callers size the damage number up when
@@ -4911,11 +4913,36 @@ function updateEntity(g, dt, bounds) {
   }
 
   if (g.state === 'chase') {
-    if (g.confused && g.confuseDirX !== undefined) {
-      // Move randomly when confused — overrides all AI patterns.
+    if (g.confused) {
+      // CONFUSE: move toward nearest other entity (or sit still if alone).
+      // Target picked here per-frame for simplicity; a stable cached target
+      // would be marginally smoother but adds bookkeeping. Speed parity
+      // with chase (no wander-penalty) so confused entities can actually
+      // reach their target in a reasonable time.
+      var cTarget = null, cTd = Infinity;
+      for (var cei = 0; cei < entities.length; cei++) {
+        var co = entities[cei];
+        if (co === g || co.hp <= 0 || co.dead) continue;
+        var cod = Math.hypot(co.x - g.x, co.y - g.y);
+        if (cod < cTd) { cTarget = co; cTd = cod; }
+      }
+      if (cTarget) {
+        var cMoveSpeed = g.speed * (g.slowed ? 0.1 : 1) * zoneSlowMult;
+        var cdx = cTarget.x - g.x, cdy = cTarget.y - g.y;
+        var cdd = Math.hypot(cdx, cdy) || 1;
+        // Stop just shy of contact so we don't tunnel through the target.
+        if (cdd > g.r + cTarget.r) {
+          g.x += (cdx/cdd) * cMoveSpeed * dt;
+          g.y += (cdy/cdd) * cMoveSpeed * dt;
+        }
+      }
+      // (No movement if alone — target=self, sit and self-attack via the
+      // confuse-attack block in updateEntity.)
+    } else if (g.dazed && g.dazeDirX !== undefined) {
+      // DAZE: wander randomly. Half-speed.
       var confusedSpeed = g.speed * 0.5 * (g.slowed ? 0.1 : 1) * zoneSlowMult;
-      g.x += g.confuseDirX * confusedSpeed * dt;
-      g.y += g.confuseDirY * confusedSpeed * dt;
+      g.x += g.dazeDirX * confusedSpeed * dt;
+      g.y += g.dazeDirY * confusedSpeed * dt;
     } else {
       // PHASE A — if an active reaction is commandeering movement this
       // frame, let it do its thing and skip the default AI locomotion.
@@ -5260,7 +5287,45 @@ function updateEntity(g, dt, bounds) {
   // have their damage handled by the AI dispatcher above, not contact.
   var pat = g.attackPattern || 'touch';
   var contact = g.r + player.r;
-  if (pat === 'touch' && !g.confused && (g.silencedTimer||0) <= 0 && distToPlayer < contact && g.attackCooldown <= 0 && !player.iframes) {
+  // ── CONFUSE: retarget attack at nearest entity (or self if alone) ──
+  // Yellow-crit applies g.confused. Confused entities deal real damage to
+  // their new target — friendly fire on other entities, self-damage if
+  // alone. Yellow flash on the attacker telegraphs the wrong-target hit.
+  // Runs BEFORE the player-touch path; player-touch is gated to skip when
+  // confused so a single entity doesn't attack twice in one frame.
+  if (pat === 'touch' && g.confused && (g.silencedTimer||0) <= 0 && g.attackCooldown <= 0) {
+    // Find nearest other living entity, excluding self.
+    var nearest = null;
+    var nearestDist = Infinity;
+    for (var ci = 0; ci < entities.length; ci++) {
+      var other = entities[ci];
+      if (other === g) continue;
+      if (other.hp <= 0 || other.dead) continue;
+      var od = Math.hypot(other.x - g.x, other.y - g.y);
+      if (od < nearestDist) { nearest = other; nearestDist = od; }
+    }
+    var target = nearest || g; // fall back to self if alone
+    var dmgAmt = Math.max(1, g.dmg || 1);
+    var inRange = (target === g) ? true : (nearestDist < g.r + target.r + 4);
+    if (inRange) {
+      // Real damage to the target. Source 'yellow' so resist/wither
+      // attribution hooks treat it like a yellow-induced hit, which is
+      // accurate — the confuse came from yellow.
+      damageEntity(target, dmgAmt, false, 'yellow');
+      target.flashTimer = Math.max(target.flashTimer || 0, 0.2);
+      // Yellow flash on the ATTACKER — visual cue that this entity is
+      // confused and just struck a wrong target.
+      g._confuseFlashTimer = 0.25;
+      // Floating "wrong-target" indicator above the attacker.
+      showFloatingText(g.x, g.y - (g.r + 28), dmgAmt + ' ‼', '#F5D000', g);
+      // Standard attack cooldown applies so confused entities don't
+      // chain-hit. Slow modifiers respected the same as normal attacks.
+      var _cIsSlowed = g.attackSlowed || g.attackDebuff > 0
+        || g.slowed || g.greenSlowed || g.whiteFieldSlowed;
+      g.attackCooldown = _cIsSlowed ? 2.4 : 1.2;
+    }
+  }
+  if (pat === 'touch' && !g.dazed && !g.confused && (g.silencedTimer||0) <= 0 && distToPlayer < contact && g.attackCooldown <= 0 && !player.iframes) {
     // Physical attack — absorbed by armor pips first.
     // PHASE B — weaken amplifies incoming damage.
     var dmgLeft = Math.ceil((g.dmg || 1) * playerDamageTakenMult());
@@ -5521,8 +5586,14 @@ function drawEntity(g) {
     ctx.shadowBlur = 24 * pfPct;
   }
 
-  // Flash white on attack
+  // Flash on attack. White = took damage (flashTimer). Yellow = confused
+  // entity just LANDED an attack on its wrong target. Yellow takes
+  // priority so the wrong-target signal is unambiguous.
   var flashing = g.flashTimer > 0;
+  var confuseFlashing = (g._confuseFlashTimer || 0) > 0;
+  var flashBody  = confuseFlashing ? '#FFEE44' : '#ffffff';
+  var flashInner = confuseFlashing ? '#FFD700' : '#eeeeee';
+  var anyFlash = flashing || confuseFlashing;
 
   // Template-provided visual identity (falls back to legacy goblin colors
   // if absent — keeps the file tolerant of any rogue manual spawns).
@@ -5571,14 +5642,14 @@ function drawEntity(g) {
   }
 
   // Body
-  ctx.fillStyle = flashing ? '#ffffff' : bodyColor;
+  ctx.fillStyle = anyFlash ? flashBody : bodyColor;
   ctx.beginPath();
   ctx.arc(g.x, g.y, g.r, 0, Math.PI*2);
   ctx.fill();
 
   // Inner
   ctx.shadowBlur = 0;
-  ctx.fillStyle = flashing ? '#eeeeee' : innerColor;
+  ctx.fillStyle = anyFlash ? flashInner : innerColor;
   ctx.beginPath();
   ctx.arc(g.x, g.y, g.r - 4, 0, Math.PI*2);
   ctx.fill();
@@ -5864,7 +5935,7 @@ function useBrickAction(color) {
   if (color === 'yellow') {
     var yTapFx = _fx('yellow', 1);
     if (yTapFx) {
-      startYellowAura({ follow: true, radius: clampRadiusToArena(yTapFx.radiusPx), duration: yTapFx.duration, confuseSeed: yTapFx.confuseSeed, label: 'DAZE FIELD', isCrit: _currentCrit });
+      startYellowAura({ follow: true, radius: clampRadiusToArena(yTapFx.radiusPx), duration: yTapFx.duration, yellowSeed: yTapFx.yellowSeed, label: 'DAZE FIELD', isCrit: _currentCrit });
     }
   }
   if (color === 'blue')   startBlueBolt(null);
@@ -6319,7 +6390,7 @@ function doWhiteHeal(targetX, targetY) {
 var yellowAura = null; // { timer, baseRadius, followPlayer, ox, oy, label }
 
 function startYellowAura(opts) {
-  // opts = { radius, duration, follow, ox, oy, label, isCrit, confuseSeed }
+  // opts = { radius, duration, follow, ox, oy, label, isCrit, yellowSeed }
   yellowAura = {
     timer: opts.duration || 3.0,
     duration: opts.duration || 3.0,
@@ -6333,7 +6404,7 @@ function startYellowAura(opts) {
     // Tier-scaled confuse-seed duration. Set by callers who pass tier
     // through the unified pipeline. Falls back to 2.0s legacy default
     // for any callers that don't supply it.
-    confuseSeed: opts.confuseSeed || 2.0,
+    yellowSeed: opts.yellowSeed || 2.0,
   };
   if (opts.isCrit) {
     spawnCritShockwave(yellowAura.ox, yellowAura.oy, '#F5D000', { r0: 10, maxR: yellowAura.baseRadius, thickness: 3, growth: 300 });
@@ -6351,26 +6422,40 @@ function updateYellowAura(dt) {
   var cx = yellowAura.followPlayer ? player.x : yellowAura.ox;
   var cy = yellowAura.followPlayer ? player.y : yellowAura.oy;
   var r = yellowAura.baseRadius;
-  // Confuse seed comes from the unified pipeline (set at aura creation,
-  // tier-scaled). Top-up duration is half the seed, mimicking the old
-  // 2.0/1.0 ratio.
-  var seed = yellowAura.confuseSeed || 2.0;
+  // Yellow seed comes from the unified pipeline (set at aura creation,
+  // tier-scaled). Drives both daze and confuse durations equally —
+  // crit just routes which flag fires. Top-up duration is half the seed.
+  var seed = yellowAura.yellowSeed || 2.0;
   var topUp = seed * 0.5;
   var isCrit = !!yellowAura.isCrit;
   entities.forEach(function(g) {
     if (Math.hypot(g.x - cx, g.y - cy) <= r) {
-      if (!g.confused) {
-        g.confused = true;
-        g.confuseTimer = Math.max(g.confuseTimer || 0, seed);
+      if (isCrit) {
+        // CONFUSE (crit): entity retargets to nearest other entity (or self
+        // if alone) and damages that target instead of player. Mutually
+        // exclusive with daze — confuse replaces daze on the same entity.
+        if (!g.confused) {
+          g.confused = true;
+          g.confuseTimer = Math.max(g.confuseTimer || 0, seed);
+          g.dazed = false; g.dazeTimer = 0; // confuse stomps daze
+        } else {
+          g.confuseTimer = Math.max(g.confuseTimer || 0, topUp);
+        }
       } else {
-        g.confuseTimer = Math.max(g.confuseTimer || 0, topUp);
+        // DAZE (base): wandering AI. No-op if entity is already confused —
+        // base-yellow doesn't downgrade your own crit-yellow.
+        if (g.confused && (g.confuseTimer || 0) > 0) return;
+        if (!g.dazed) {
+          g.dazed = true;
+          g.dazeTimer = Math.max(g.dazeTimer || 0, seed);
+        } else {
+          g.dazeTimer = Math.max(g.dazeTimer || 0, topUp);
+        }
       }
-      // YELLOW DAZE: entities caught by crit aura take 2x damage while confused.
-      if (isCrit) g.dazed = true;
     }
   });
   // Occasional "?" particle shimmer while active — tuned sparse so the field
-  // reads as "confusion" without visual noise. Prior: 40% × 2-3. Now: ~13% × 1.
+  // reads without visual noise.
   if (Math.random() < 0.13) {
     spawnConfuseParticles(cx, cy, r, 1);
   }
@@ -6412,7 +6497,7 @@ function drawYellowAura() {
 function startYellowConfuse(ox, oy, radius) {
   // Drag-to-point instant burst. Aura behavior lives in startYellowAura.
   var fx = _fx('yellow', 1);
-  var seed = fx ? fx.confuseSeed : 2.0;
+  var seed = fx ? fx.yellowSeed : 2.0;
   var cx = ox !== undefined ? ox : player.x;
   var cy = oy !== undefined ? oy : player.y;
   var r = radius || (fx ? clampRadiusToArena(fx.radiusPx) : scaleDist(50));
@@ -6420,9 +6505,16 @@ function startYellowConfuse(ox, oy, radius) {
   var isCrit = _currentCrit;
   entities.forEach(function(g) {
     if (Math.hypot(g.x-cx, g.y-cy) <= r) {
-      g.confused = true;
-      g.confuseTimer = (g.confuseTimer||0) + seed;
-      if (isCrit) g.dazed = true;
+      if (isCrit) {
+        // CONFUSE replaces any existing daze on the entity.
+        g.confused = true;
+        g.confuseTimer = (g.confuseTimer || 0) + seed;
+        g.dazed = false; g.dazeTimer = 0;
+      } else if (!g.confused || (g.confuseTimer || 0) <= 0) {
+        // DAZE — but only if entity isn't already confused (don't downgrade).
+        g.dazed = true;
+        g.dazeTimer = (g.dazeTimer || 0) + seed;
+      }
       hit++;
     }
   });
@@ -6583,24 +6675,45 @@ function updateBrickAction(dt, bounds) {
 }
 
 
-// ── UPDATE ENTITY CONFUSION ───────────────────────
+// ── UPDATE ENTITY MIND-EFFECT TICK ───────────────────
+// Drives both yellow-base (daze, wandering) and yellow-crit (confuse,
+// retarget-and-attack). Both timers decay independently; an entity can
+// only have one active at a time because the apply path makes them
+// mutually exclusive (confuse replaces daze, daze no-ops on confused).
 function updateEntityConfusion(g, dt) {
-  if (!g.confused) return;
-  g.confuseTimer -= dt;
-  if (g.confuseTimer <= 0) {
-    g.confused = false;
-    g.confuseTimer = 0;
-    g.dazed = false; // YELLOW DAZE ends with confuse
-    return;
+  // Daze decay + wander vector
+  if (g.dazed) {
+    g.dazeTimer -= dt;
+    if (g.dazeTimer <= 0) {
+      g.dazed = false;
+      g.dazeTimer = 0;
+    } else {
+      // Pick a new wander direction every 0.3-0.6s while dazed.
+      if (!g.confuseDashTimer || g.confuseDashTimer <= 0) {
+        var da = Math.random() * Math.PI * 2;
+        g.dazeDirX = Math.cos(da);
+        g.dazeDirY = Math.sin(da);
+        g.confuseDashTimer = 0.3 + Math.random() * 0.3;
+      }
+    }
   }
-  // Move randomly while confused
-  if (!g.confuseDashTimer || g.confuseDashTimer <= 0) {
-    var ca = Math.random() * Math.PI * 2;
-    g.confuseDirX = Math.cos(ca);
-    g.confuseDirY = Math.sin(ca);
-    g.confuseDashTimer = 0.3 + Math.random() * 0.3;
+  // Confuse decay (target lookup happens at attack site, not here)
+  if (g.confused) {
+    g.confuseTimer -= dt;
+    if (g.confuseTimer <= 0) {
+      g.confused = false;
+      g.confuseTimer = 0;
+      g._confuseTargetId = null;
+    }
   }
-  g.confuseDashTimer -= dt;
+  // Yellow-flash decay (set by attack site when confused entity lands a hit)
+  if (g._confuseFlashTimer && g._confuseFlashTimer > 0) {
+    g._confuseFlashTimer -= dt;
+    if (g._confuseFlashTimer < 0) g._confuseFlashTimer = 0;
+  }
+  // Tick down the wander-direction refresh timer regardless (cheap; clamps
+  // negative naturally in the next dazed pass when dazeDirX gets reseeded).
+  if (g.confuseDashTimer) g.confuseDashTimer -= dt;
 }
 
 // ═══════════════════════════════════════════════════
