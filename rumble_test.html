@@ -383,7 +383,7 @@
     padding:6px 10px;
     font-family:ui-monospace,monospace; font-size:10px;
     color:#aaa; line-height:1.5;
-    max-width:260px; max-height:70vh; overflow-y:auto;
+    max-width:340px; max-height:80vh; overflow-y:auto;
     pointer-events:auto;
     /* Override body{touch-action:none} so taps inside the panel
        reach the buttons (END RUN, audit toggle) reliably on iOS. */
@@ -443,6 +443,7 @@
   #waves-live-debug table.audit-table td.t2 { color:#bbb; }
   #waves-live-debug table.audit-table td.t3 { color:#F5D000; }
   #waves-live-debug table.audit-table td.t4 { color:#ff8866; }
+  #waves-live-debug table.audit-table td.t-na { color:#333; }
   /* Cell highlight when LAST FIRED matches (color, tier). Pulses for
      ~600ms via the audit-section's poll cycle — the cell carries the
      hl class while lastOverload.frozen is false. */
@@ -1353,8 +1354,9 @@ function buildOverloadAuditMarkup() {
     return '<div class="audit-meta">no active rumble — start a run to see numbers</div>';
   }
   var cls = st.playerCls;
-  var owned = st.playerBrickMax || {};
+  var ownedCurrent = st.playerBrickMax || {};
   var clsName = (window.getCharName && window.getCharName(cls)) || cls;
+  var startingKit = (window.STARTING_KIT_COUNTS && window.STARTING_KIT_COUNTS[cls]) || {};
 
   // LAST FIRED block — pulled from getDebugInfo().lastOverload.
   // Compares model-expected multiplier against actual damage delta
@@ -1369,13 +1371,10 @@ function buildOverloadAuditMarkup() {
     hlColor = lo.color; hlTier = lo.tier;
     var stateClass = lo.frozen ? 'frozen' : '';
     var critTag = lo.isCrit ? ' <span class="lf-crit">CRIT</span>' : '';
-    // Damage ratio diagnostic. expectedMult is unitless; we multiply
-    // by an assumed base of 4 (red bolt base) just to scale the
-    // expected number into the same range as actualDamage. The RATIO
-    // is what matters — actualDamage / (expectedMult × baseRef).
-    // baseRef varies per color (red 4, white heal not damage, etc.)
-    // so we surface raw expected multiplier and raw actual damage,
-    // and let the human read the proportion.
+    // Damage ratio diagnostic. expectedMult is unitless; actualDamage
+    // is real damage dealt in the 600ms window. Ratio = dmg per unit
+    // of multiplier — should be roughly constant across tiers if the
+    // model is accurate. Divergence means a hidden multiplier exists.
     var ratioStr = '';
     if (lo.actualDamage > 0) {
       var perMultDamage = lo.actualDamage / lo.expectedMult;
@@ -1397,30 +1396,75 @@ function buildOverloadAuditMarkup() {
     lastFiredHtml = '<div class="audit-last idle">LAST: (no overload fired yet)</div>';
   }
 
-  // Table 1: damage output multiplier per (color, tier)
-  // final = count × stack × tap × aff
-  var rows1 = '';
-  AUDIT_COLORS.forEach(function(color) {
-    var tap = (window.tapScaleMult && window.tapScaleMult(cls, color, owned[color] || 0)) || 1;
-    var aff = (window.affinityMult && window.affinityMult(cls, color)) || 1;
-    var cells = '';
-    for (var t = 1; t <= 4; t++) {
-      var stack = (window.overloadStackMult && window.overloadStackMult(t)) || 1;
-      var mult = t * stack * tap * aff;
-      // Highlight if LAST FIRED matches and not yet frozen.
-      var isHl = !lo || lo.frozen ? false : (color === hlColor && t === hlTier);
-      cells += '<td class="t' + t + (isHl ? ' hl' : '') + '">' + mult.toFixed(2) + '×</td>';
-    }
-    // Mini affinity tag so per-color asymmetry is visible at a glance
-    var affTag = aff === 1.25 ? 'sig' : (aff === 0.8 ? 'base' : 'sec');
-    rows1 += '<tr><td class="color-cell">' + color
-           + ' <span class="lbl">(' + affTag + ')</span></td>'
-           + cells + '</tr>';
-  });
+  // ── CANONICAL TABLE ─────────────────────────────────────
+  // What the curve actually looks like at level-1 starting inventory.
+  // tap=1.0 across the board, brickMax = startingKit. Most colors
+  // can't even reach T2 here; that's the truth — the typical fight
+  // uses T1-T2 casts on sig colors. Tuning to this is what matters.
+  // Cells past brickMax for that color show "—".
+  var canonMaxN = 0;
+  AUDIT_COLORS.forEach(function(c) { canonMaxN = Math.max(canonMaxN, startingKit[c] || 0); });
+  canonMaxN = Math.max(canonMaxN, 2); // always show at least T1-T2 columns
 
-  // Table 2: radius growth tier-1 → tier-4 per color (hardcoded from rumble.js)
-  // Showing raw px ratios, no class/affinity applied — purely formula shape.
-  // Source: rumble.js comments at lines 1029, 1075, 1115, 1155, 1191, 1233, 1284.
+  // ── SANDBOX TABLE ───────────────────────────────────────
+  // Current playthrough inventory. Inflated in sandbox by random
+  // 1-10 rolls per color, so sig-color casts here can climb to T8+.
+  // This is where fusion-headroom lives — what does the high end
+  // look like at carry-everything inventory?
+  var sandMaxN = 0;
+  AUDIT_COLORS.forEach(function(c) { sandMaxN = Math.max(sandMaxN, ownedCurrent[c] || 0); });
+  sandMaxN = Math.max(sandMaxN, 2);
+
+  function buildTable(label, owned, maxN, kindClass) {
+    var headerCells = '';
+    for (var th = 1; th <= maxN; th++) {
+      headerCells += '<th>T' + th + '</th>';
+    }
+    var rows = '';
+    AUDIT_COLORS.forEach(function(color) {
+      var ownedN = owned[color] || 0;
+      var tap = (window.tapScaleMult && window.tapScaleMult(cls, color, ownedN)) || 1;
+      var aff = (window.affinityMult && window.affinityMult(cls, color)) || 1;
+      var cells = '';
+      for (var t = 1; t <= maxN; t++) {
+        if (t > ownedN) {
+          // Beyond this color's ceiling for this kit.
+          cells += '<td class="t-na">—</td>';
+        } else {
+          var stack = (window.overloadStackMult && window.overloadStackMult(t)) || 1;
+          var mult = t * stack * tap * aff;
+          // Tier color escalation: 1=dim, 2=mid, 3=warn, 4+=hot.
+          // Caps display class at t4 for ≥4 so colors don't run out.
+          var tCls = 't' + Math.min(t, 4);
+          var isHl = !lo || lo.frozen ? false
+                   : (color === hlColor && t === hlTier && kindClass === 'sandbox');
+          cells += '<td class="' + tCls + (isHl ? ' hl' : '') + '">' + mult.toFixed(2) + '×</td>';
+        }
+      }
+      var affTag = aff === 1.25 ? 'sig' : (aff === 0.8 ? 'base' : 'sec');
+      rows += '<tr><td class="color-cell">' + color
+            + ' <span class="lbl">(' + affTag + ' · ' + ownedN + ')</span></td>'
+            + cells + '</tr>';
+    });
+    return '<h4>' + label + '</h4>'
+         + '<table class="audit-table"><tr><th>color</th>' + headerCells + '</tr>'
+         + rows + '</table>';
+  }
+
+  var canonTable = buildTable('CANONICAL — level-1 kit', startingKit, canonMaxN, 'canon');
+  // Only show sandbox table if it differs meaningfully from canonical
+  // (i.e., player has more than starting kit somewhere). In waves/spec
+  // modes the kit IS the starting kit, so the second table would be
+  // redundant.
+  var differsFromCanon = AUDIT_COLORS.some(function(c) {
+    return (ownedCurrent[c] || 0) !== (startingKit[c] || 0);
+  });
+  var sandTable = differsFromCanon
+    ? buildTable('CURRENT KIT — this run', ownedCurrent, sandMaxN, 'sandbox')
+    : '';
+
+  // Radius growth — kept compact, hardcoded from rumble.js fire formulas.
+  // Independent of inventory; pure formula shape per color.
   var radiusFormulas = [
     { color: 'red',    desc: 'projectile, no AoE',        t1: 0,   t4: 0   },
     { color: 'white',  desc: '60 + tier×20',              t1: 80,  t4: 140 },
@@ -1446,11 +1490,12 @@ function buildOverloadAuditMarkup() {
     }
   });
 
-  return '<h4>DAMAGE MULT — ' + clsName + '</h4>'
-       + '<div class="audit-meta">final = count × stack × tap × aff</div>'
+  return '<h4 style="margin-top:0;">' + clsName.toUpperCase() + '</h4>'
+       + '<div class="audit-meta">final = count × stack × tap × aff'
+       + ' · row label (affinity · ownedN)</div>'
        + lastFiredHtml
-       + '<table class="audit-table"><tr><th>color</th><th>T1</th><th>T2</th><th>T3</th><th>T4</th></tr>'
-       + rows1 + '</table>'
+       + canonTable
+       + sandTable
        + '<h4>RADIUS GROWTH (T1 → T4)</h4>'
        + '<div class="audit-meta">raw px formula, pre-affinity</div>'
        + '<table class="audit-table"><tr><th>color</th><th>T1</th><th>T4</th><th>ratio</th></tr>'
