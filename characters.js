@@ -234,7 +234,16 @@ var BASE_R = 50;
 // T1 numerics at canonical (level-1) inventory and aff=1.0.
 var COLOR = {
   red:    { dmg: 0.60 },
-  blue:   { dmg: 0.80, burstDmg: 0.40 },
+  // Blue gets a per-color radius profile: smaller T1 anchor + steeper
+  // tier slope. Tap-drag impact at T1 used to feel oversized (63px); this
+  // brings it down to ~46px and grows more visibly per overload tier.
+  // Other knobs (dmg, burstDmg) remain in the universal pipeline.
+  blue: {
+    dmg: 0.80,
+    burstDmg: 0.40,
+    radiusBase: 37,    // overrides global BASE_R (50)
+    radiusSlope: 0.30, // overrides global tierCurve slope (0.15) for radius only
+  },
   purple: { dmg: 0.60 },
   black:  { dmg: 0.20, dur: 0.60, witherDmg: 0.40, witherStacks: 0.20 },
   green:  { stackDmg: 0.20, stacks: 0.40 },
@@ -301,7 +310,22 @@ function effectiveAt(color, tier, cls, owned) {
   var m     = tap * aff * curve;
   var c     = COLOR[color] || {};
 
-  var out = { mult: m, radiusPx: BASE_R * m, tap: tap, aff: aff, curve: curve };
+  // Per-color radius profile. If a color sets its own radiusBase and/or
+  // radiusSlope, those override the universal BASE_R and tierCurve for
+  // RADIUS ONLY (damage and other outputs still use the universal m).
+  // Class affinity and tap-scale still multiply on top.
+  //
+  // Use case: blue's tap-drag impact felt oversized at T1 with the
+  // universal pipeline (63px). Custom profile (37/0.30) lands at 46px T1
+  // and grows ~14px/tier, hitting 171px at T10 — clearly perceptible
+  // tier-up while keeping the unified architecture (color profile is the
+  // single source of truth).
+  var rBase  = (c.radiusBase  != null) ? c.radiusBase  : BASE_R;
+  var rSlope = (c.radiusSlope != null) ? c.radiusSlope : 0.15;
+  var radiusCurve = 1 + (Math.max(1, tier) - 1) * rSlope;
+  var radiusMult = tap * aff * radiusCurve;
+
+  var out = { mult: m, radiusPx: rBase * radiusMult, tap: tap, aff: aff, curve: curve };
 
   // Custom per-color tier scaling (currently white). Heal-over-time needs
   // integer total HP with strict monotonic growth, which universal m-based
