@@ -1585,11 +1585,12 @@ function loop(ts) {
     if (!d) {
       d = document.createElement('div');
       d.id = 'rumble-loop-error';
-      d.style.cssText = 'position:fixed;top:50px;left:8px;right:8px;z-index:9999;'
-        + 'background:#2a0010;border:2px solid #ff4466;border-radius:8px;'
-        + 'padding:12px;color:#ffaabb;font-family:ui-monospace,monospace;'
-        + 'font-size:11px;line-height:1.5;max-height:60vh;overflow:auto;'
-        + 'pointer-events:auto;';
+      d.style.cssText = 'position:fixed;top:8px;left:8px;right:8px;z-index:9999;'
+        + 'background:#0c0c10;border:1px solid #ff4466;border-radius:8px;'
+        + 'box-shadow:0 8px 32px rgba(0,0,0,0.6),0 0 0 1px rgba(255,68,102,0.2);'
+        + 'padding:0;color:#eeeeee;font-family:ui-monospace,monospace;'
+        + 'font-size:12px;line-height:1.5;max-height:70vh;overflow:hidden;'
+        + 'pointer-events:auto;display:flex;flex-direction:column;';
       document.body.appendChild(d);
     }
     var stack = (err && err.stack) ? err.stack : String(err);
@@ -1598,13 +1599,27 @@ function loop(ts) {
         + ' x=' + Math.round(player.x) + ' y=' + Math.round(player.y)
         + ' bleed=' + (player.bleedOut ? 'YES' : 'no'))
       : 'NULL';
-    d.innerHTML = '<div style="color:#ff4466;font-weight:bold;font-size:13px;margin-bottom:6px;">RUMBLE LOOP ERROR</div>'
-      + '<div><b>player:</b> ' + playerInfo + '</div>'
-      + '<div><b>entities:</b> ' + (entities ? entities.length : 'null') + '</div>'
-      + '<div><b>error:</b> ' + (err && err.message ? err.message : String(err)) + '</div>'
-      + '<pre style="white-space:pre-wrap;margin-top:8px;color:#ff8899;font-size:10px;">'
-      + stack.replace(/[<>&]/g, function(c){ return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c]; })
-      + '</pre>';
+    var safeStack = stack.replace(/[<>&]/g, function(c){ return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c]; });
+    var errMsg = (err && err.message ? err.message : String(err));
+    var safeErr = errMsg.replace(/[<>&]/g, function(c){ return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c]; });
+    d.innerHTML =
+      '<div style="background:#1a0008;border-bottom:1px solid #ff446644;padding:8px 12px;'
+      + 'display:flex;align-items:center;justify-content:space-between;">'
+      +   '<div style="color:#ff6680;font-weight:700;font-size:12px;letter-spacing:.12em;">RUMBLE LOOP ERROR</div>'
+      +   '<button onclick="this.parentNode.parentNode.remove()" '
+      +     'style="background:transparent;border:1px solid #444;color:#888;'
+      +     'border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;'
+      +     'font-family:ui-monospace,monospace;">DISMISS</button>'
+      + '</div>'
+      + '<div style="padding:10px 12px;overflow-y:auto;">'
+      +   '<div style="margin-bottom:4px;"><span style="color:#888;">player </span><span style="color:#eee;">' + playerInfo + '</span></div>'
+      +   '<div style="margin-bottom:4px;"><span style="color:#888;">entities </span><span style="color:#eee;">' + (entities ? entities.length : 'null') + '</span></div>'
+      +   '<div style="margin-bottom:8px;"><span style="color:#888;">error </span><span style="color:#ff8899;">' + safeErr + '</span></div>'
+      +   '<pre style="white-space:pre-wrap;margin:0;color:#aaa;font-size:11px;'
+      +     'background:#000;padding:8px;border-radius:4px;border:1px solid #222;">'
+      +     safeStack
+      +   '</pre>'
+      + '</div>';
     console.error('[Rumble loop error]', err);
   }
 }
