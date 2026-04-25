@@ -1458,13 +1458,19 @@ function _renderHoldOverlay() {
     overlay = document.createElement('div');
     overlay.id = 'hold-overlay';
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;'
-      + 'pointer-events:none;z-index:1000;';
+      + 'pointer-events:none;z-index:1000;'
+      + 'opacity:0;transition:opacity 250ms ease-out;';
     document.body.appendChild(overlay);
   }
 
   const s = _holdState;
   const elapsed = performance.now() - s.startTime;
   const inHoldMode = elapsed >= HOLD_TAP_THRESHOLD_MS;
+
+  // Fade in once hold-mode confirms; stay invisible during tap-threshold window.
+  // Spotlight cleanup on exit manages its own opacity (and resets to 0 isn't
+  // needed since each new _holdState fires this branch fresh).
+  overlay.style.opacity = inHoldMode ? '1' : '0';
 
   // Diagnostic panel — always visible during hold so we can see what's
   // happening in the gesture state machine. REMOVE this block once the
@@ -1573,7 +1579,7 @@ function _renderHoldOverlay() {
 
 function _clearHoldOverlay() {
   const overlay = document.getElementById('hold-overlay');
-  if (overlay) overlay.innerHTML = '';
+  if (overlay) overlay.remove();
 }
 
 function _renderAllyRadialFan(s) {
