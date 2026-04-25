@@ -1,58 +1,164 @@
 // ═══════════════════════════════════════════════════════════════════════
-// characters.js — canonical character data + combat formulas
+// characters.js — CANONICAL character data + combat formulas
 // ═══════════════════════════════════════════════════════════════════════
 //
-// SINGLE SOURCE OF TRUTH for class-driven combat math.
+// SINGLE SOURCE OF TRUTH for everything class-specific. Rumble, server,
+// dashboard, test harness — all read from the CHARACTERS table below.
 //
-// Loaded BEFORE rumble.js in players.html and test_players.html. Both the
-// dashboard (where actions PREVIEW) and rumble (where actions FIRE) read
-// from this file — same inputs always produce the same answer.
+// Loaded BEFORE rumble.js in the HTML files. Required by server.js via Node.
+// Preview and fire always agree because both derive from the same source.
 //
-// Adding a new formula or per-class number:
-//   1. Define here.
-//   2. Use everywhere via the helper functions.
+// Adding a new class field (e.g. a new per-class stat):
+//   1. Add it to CHARACTERS.
+//   2. Access it everywhere via a getter (or direct read).
 //   3. NEVER inline a copy elsewhere — that's the failure mode this file exists to prevent.
-//
-// Phase 1 scope (current): heal-related formulas + the data they need.
-// Phase 2 (queued): consolidate PLAYER_META / CLASS_META / CLASS_SIGNATURE
-// duplicates into this file, replace hardcoded class checks throughout.
-// Phase 3 (queued): server-side reuse via Node require().
 // ═══════════════════════════════════════════════════════════════════════
 
-// ── STARTING KIT COUNTS ─────────────────────────────────────────────────
-// Number of bricks per color a class begins the game with. Used by
-// tapScaleMult to compute how many extras the player has earned (which
-// permanently scales their output). When a class's starting kit changes,
-// this table is the one place to update.
-var STARTING_KIT_COUNTS = {
-  breaker:     { red: 2, gray: 1 },
-  formwright:  { blue: 2, purple: 1 },
-  snapstep:    { orange: 2, red: 1 },
-  blocksmith:  { gray: 2, orange: 1 },
-  fixer:       { white: 2, black: 1 },
-  wild_one:    { green: 2, yellow: 1 },
+// ── CHARACTERS ──────────────────────────────────────────────────────────
+// The master class table. Every piece of class-specific data lives here.
+//
+// Fields:
+//   Identity
+//     name          — display name                    ('Breaker')
+//     icon          — emoji icon                      ('⚔️')
+//
+//   Visual
+//     color         — brand color, dark, for rumble   ('#993C1D')
+//                     class identification + in-combat HP bar
+//     uiColor       — UI accent color, brighter, for  ('#993C1D' for Breaker)
+//                     dashboard badges / selector chips / borders
+//     uiBg          — translucent UI background       ('rgba(153,60,29,0.15)')
+//     uiBorder      — translucent UI border           ('rgba(153,60,29,0.4)')
+//
+//   Combat
+//     hp            — starting + max HP               (14)
+//     die           — hit die for rolls               ('d8')
+//     speed         — rumble movement speed px/s      (150)
+//
+//   Affinity (per design doc §2.2 — the canonical spec)
+//     signature     — array of high-output colors     (['red', 'gray'])
+//     secondary     — array of neutral colors         (['orange'])
+//     (anything not listed is baseline — reduced output)
+//
+//   Board
+//     startingKit   — brick counts at game start      ({ red: 2, gray: 1 })
+//     weight        — gate-break class                ('heavy', 'mid', 'light')
+//     dashBreakChance — 0..1 chance to break a gate   (1.00)
+//     dashBreakDmg    — [min, max] damage range       ([0, 3])
+//     dashDmgAlwaysRolls — true = always rolls,       (false)
+//                         false = only on actual break
+// ═══════════════════════════════════════════════════════════════════════
+var CHARACTERS = {
+  breaker: {
+    name: 'Breaker', icon: '⚔️',
+    color: '#993C1D', uiColor: '#993C1D',
+    uiBg: 'rgba(153,60,29,0.15)', uiBorder: 'rgba(153,60,29,0.4)',
+    hp: 14, die: 'd8', speed: 150,
+    signature: ['red', 'gray'],
+    secondary: ['orange'],
+    startingKit: { red: 2, gray: 1 },
+    weight: 'heavy', dashBreakChance: 1.00, dashBreakDmg: [0, 3], dashDmgAlwaysRolls: false,
+  },
+  formwright: {
+    name: 'Formwright', icon: '🔮',
+    color: '#3C3489', uiColor: '#534AB7',
+    uiBg: 'rgba(83,74,183,0.15)', uiBorder: 'rgba(83,74,183,0.4)',
+    hp: 6, die: 'd6', speed: 180,
+    signature: ['blue', 'purple', 'black'],
+    secondary: ['white'],
+    startingKit: { blue: 2, purple: 1 },
+    weight: 'light', dashBreakChance: 0.15, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+  },
+  snapstep: {
+    name: 'Snapstep', icon: '🏃',
+    color: '#085041', uiColor: '#1D9E75',
+    uiBg: 'rgba(29,158,117,0.15)', uiBorder: 'rgba(29,158,117,0.4)',
+    hp: 9, die: 'd6', speed: 260,
+    signature: ['orange', 'red'],
+    secondary: ['yellow'],
+    startingKit: { orange: 2, red: 1 },
+    weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+  },
+  blocksmith: {
+    name: 'Blocksmith', icon: '🔧',
+    color: '#C87800', uiColor: '#EF9F27',
+    uiBg: 'rgba(239,159,39,0.15)', uiBorder: 'rgba(239,159,39,0.4)',
+    hp: 12, die: 'd6', speed: 150,
+    signature: ['gray', 'yellow'],
+    secondary: ['orange'],
+    startingKit: { gray: 2, orange: 1 },
+    weight: 'heavy', dashBreakChance: 1.00, dashBreakDmg: [0, 3], dashDmgAlwaysRolls: false,
+  },
+  fixer: {
+    name: 'Fixer', icon: '💊',
+    color: '#72243E', uiColor: '#D4537E',
+    uiBg: 'rgba(212,83,126,0.15)', uiBorder: 'rgba(212,83,126,0.4)',
+    hp: 8, die: 'd4', speed: 160,
+    signature: ['white', 'black'],
+    secondary: ['purple'],
+    startingKit: { white: 2, black: 1 },
+    weight: 'mid', dashBreakChance: 0.50, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+  },
+  wild_one: {
+    name: 'Wild One', icon: '🐾',
+    color: '#27500A', uiColor: '#5DA831',
+    uiBg: 'rgba(93,168,49,0.15)', uiBorder: 'rgba(93,168,49,0.4)',
+    hp: 10, die: 'd6', speed: 220,
+    signature: ['green', 'yellow'],
+    secondary: ['black'],
+    startingKit: { green: 2, yellow: 1 },
+    weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+  },
 };
 
-// ── CLASS AFFINITY (signature / secondary / baseline) ───────────────────
-// Each class has SIGNATURE colors (highest output, fastest refresh) and
-// SECONDARY colors (neutral output, medium refresh). Everything else is
-// baseline (reduced output, slow refresh).
-//
-// Source of truth: DESIGN_S012_PROPOSAL_V2.txt §2.2.
-// Per-class signature counts vary (Formwright has 3, others have 2) —
-// reflects the design's per-class identity, not a bug.
-//
-// Phase 2 will fold this into a unified CHARACTERS table alongside name,
-// icon, HP, die, speed. For Phase 1, isolated here so combat formulas
-// are self-contained.
-var CLASS_AFFINITY = {
-  breaker:     { signature: ['red',    'gray'],            secondary: ['orange'] },
-  formwright:  { signature: ['blue',   'purple', 'black'], secondary: ['white']  },
-  snapstep:    { signature: ['orange', 'red'],             secondary: ['yellow'] },
-  blocksmith:  { signature: ['gray',   'yellow'],          secondary: ['orange'] },
-  fixer:       { signature: ['white',  'black'],           secondary: ['purple'] },
-  wild_one:    { signature: ['green',  'yellow'],          secondary: ['black']  },
-};
+// ── DERIVED TABLES ──────────────────────────────────────────────────────
+// Built from CHARACTERS above. Provide the shape existing call sites expect.
+// Changing CHARACTERS auto-updates all derived tables since they're generated
+// at load time. NEVER edit derived tables directly.
+
+// PLAYER_META — consumed by server.js + game.js. Fields match legacy shape
+// minus the old single-string signature/secondary (which was incomplete —
+// now full arrays matching design doc §2.2).
+var PLAYER_META = {};
+Object.keys(CHARACTERS).forEach(function(cls) {
+  var c = CHARACTERS[cls];
+  PLAYER_META[cls] = {
+    name: c.name, icon: c.icon, color: c.color,
+    hp: c.hp, speed: c.speed, die: c.die,
+    signature: c.signature, secondary: c.secondary,
+    weight: c.weight, dashBreakChance: c.dashBreakChance,
+    dashBreakDmg: c.dashBreakDmg, dashDmgAlwaysRolls: c.dashDmgAlwaysRolls,
+  };
+});
+
+// STARTING_KIT_COUNTS — used by tapScaleMult below.
+var STARTING_KIT_COUNTS = {};
+Object.keys(CHARACTERS).forEach(function(cls) {
+  STARTING_KIT_COUNTS[cls] = CHARACTERS[cls].startingKit;
+});
+
+// CLASS_AFFINITY — used by affinityMult / affinityRadiusMult / brickTier.
+var CLASS_AFFINITY = {};
+Object.keys(CHARACTERS).forEach(function(cls) {
+  CLASS_AFFINITY[cls] = {
+    signature: CHARACTERS[cls].signature,
+    secondary: CHARACTERS[cls].secondary,
+  };
+});
+
+// ── HELPER GETTERS ──────────────────────────────────────────────────────
+// Terse accessors for the common cases. Unknown class → safe fallbacks.
+function getChar(cls) { return CHARACTERS[cls] || null; }
+function getCharName(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].name) || cls; }
+function getCharIcon(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].icon) || '◆'; }
+function getCharColor(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].color) || '#888'; }
+function getCharUiStyle(cls) {
+  var c = CHARACTERS[cls];
+  if (!c) return { color: '#888', bg: 'rgba(136,136,136,0.15)', border: 'rgba(136,136,136,0.4)' };
+  return { color: c.uiColor, bg: c.uiBg, border: c.uiBorder };
+}
+function getSignature(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].signature) || []; }
+function getSecondary(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].secondary) || []; }
 
 // ── BASE HEAL AMOUNT ────────────────────────────────────────────────────
 // The raw white-tap heal value before any multipliers are applied.
@@ -93,6 +199,19 @@ function affinityRadiusMult(cls, color) {
   return 0.8;
 }
 
+// ── BRICK TIER ──────────────────────────────────────────────────────────
+// Returns the affinity tier name for a class+color combination. Unlike the
+// multiplier helpers above which return numbers, this returns strings that
+// legacy callers switch on.
+//   Returns: 'signature' | 'secondary' | 'baseline'
+function brickTier(cls, color) {
+  var aff = CLASS_AFFINITY[cls];
+  if (!aff) return 'baseline';
+  if (aff.signature.indexOf(color) >= 0) return 'signature';
+  if (aff.secondary.indexOf(color) >= 0) return 'secondary';
+  return 'baseline';
+}
+
 // ── TAP SCALING ─────────────────────────────────────────────────────────
 // Owning more bricks of a color than your starting kit permanently boosts
 // output for that color. +10% per extra brick beyond starting count.
@@ -119,7 +238,7 @@ function overloadStackMult(count) {
 // Canonical heal-amount calculation. Used by:
 //   - Rumble:    when a white tap or overload heal fires.
 //   - Dashboard: when the hold-gesture overlay previews a heal amount.
-//   - Server:    (Phase 3) when board white actions resolve.
+//   - Server:    when board white actions resolve.
 //
 // Inputs:
 //   cls          — class id ('fixer', 'breaker', etc.)
@@ -138,16 +257,20 @@ function computeHeal(cls, color, owned, overload) {
   );
 }
 
-// ── CommonJS export (server-side reuse, future) ─────────────────────────
-// Browser ignores this. Node can require('./characters.js') and access
-// the same functions. Phase 3 work will wire this up server-side.
+// ── CommonJS export for server-side reuse ───────────────────────────────
+// Browser ignores this. Node require('./characters.js') grabs the same
+// values the browser uses via globals.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    CHARACTERS,
+    PLAYER_META,
     STARTING_KIT_COUNTS,
     CLASS_AFFINITY,
+    getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
+    getSignature, getSecondary,
     baseHeal,
-    affinityMult,
-    affinityRadiusMult,
+    affinityMult, affinityRadiusMult,
+    brickTier,
     tapScaleMult,
     overloadStackMult,
     computeHeal,

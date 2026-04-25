@@ -60,29 +60,15 @@
 // ═══════════════════════════════════════════════════
 const RUMBLE_DURATION = 30; // seconds (30 for real game, 5 placeholder)
 
-// CLASS_META — rumble stats. These track the Combat & Economy v1 spec.
-// For structured playtest of class kits, see server-seeded values in server.js
-// (rumble_test still uses randomized brick counts for flexibility).
-const CLASS_META = {
-  breaker:     { color:'#993C1D', icon:'⚔️', hp:14, die:'d8', speed:150, signature:'red',    secondary:'gray'    },
-  formwright:  { color:'#3C3489', icon:'🔮', hp:6,  die:'d6', speed:180, signature:'blue',   secondary:'purple'  },
-  snapstep:    { color:'#085041', icon:'🏃', hp:9,  die:'d6', speed:260, signature:'orange', secondary:'red'     },
-  blocksmith:  { color:'#C87800', icon:'🔧', hp:12, die:'d6', speed:150, signature:'gray',   secondary:'orange'  },
-  fixer:       { color:'#72243E', icon:'💊', hp:8,  die:'d4', speed:160, signature:'white',  secondary:'black'   },
-  wild_one:    { color:'#27500A', icon:'🐾', hp:10, die:'d6', speed:220, signature:'green',  secondary:'yellow'  },
-};
-
 // Combat & Economy v1 spec. See NOTES.md for full design doc.
 const BRICK_ECONOMY = {
   refreshRates: { signature: 3.0, secondary: 5.0, baseline: 10.0 },
 };
 
+// Class-color affinity tier. Returns 'signature' | 'secondary' | 'baseline'.
+// Canonical data lives in characters.js (CLASS_AFFINITY table).
 function brickTier(cls, color) {
-  var meta = CLASS_META[cls];
-  if (!meta) return 'baseline';
-  if (color === meta.signature) return 'signature';
-  if (color === meta.secondary) return 'secondary';
-  return 'baseline';
+  return window.brickTier ? window.brickTier(cls, color) : 'baseline';
 }
 
 // ── COMBAT FORMULA WRAPPERS ─────────────────────────────────────────────
@@ -433,7 +419,8 @@ var DOUBLE_TAP_DIST = 60; // max px between taps to count as double-tap
 // PLAYER OBJECT
 // ═══════════════════════════════════════════════════
 function makePlayer(cls) {
-  var meta = CLASS_META[cls];
+  var meta = window.CHARACTERS ? window.CHARACTERS[cls] : null;
+  if (!meta) { console.warn('[BQ-RUMBLE] makePlayer: unknown class', cls); meta = {}; }
   var COLORS = ['red','white','yellow','blue','orange','gray','green','purple','black'];
   var brickMax = {}; var brickRecharge = {}; var bricks = {};
   COLORS.forEach(function(c) {

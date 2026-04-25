@@ -9,30 +9,14 @@ const BRICK_COLORS = {
 };
 const BRICK_NAMES = Object.keys(BRICK_COLORS);
 
-// PLAYER_META — class definitions. Rumble combat values (hp, speed, signature/secondary bricks)
-// come from the Combat & Economy v1 spec (see NOTES.md).
-// Dash fields (weight, dashBreakChance, dashBreakDmg, dashDmgAlwaysRolls) power board-side
-// gate-break mechanics in the red dash flow.
-const PLAYER_META = {
-  breaker:     { name:'Breaker',     icon:'⚔️', color:'#993C1D', hp:14, speed:150, die:'d8',
-                 signature:'red', secondary:'gray',
-                 weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
-  formwright:  { name:'Formwright',  icon:'🔮', color:'#3C3489', hp:6,  speed:180, die:'d6',
-                 signature:'blue', secondary:'purple',
-                 weight:'light', dashBreakChance:0.15, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  snapstep:    { name:'Snapstep',    icon:'🏃', color:'#085041', hp:9,  speed:260, die:'d6',
-                 signature:'orange', secondary:'red',
-                 weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  blocksmith:  { name:'Blocksmith',  icon:'🔧', color:'#C87800', hp:12, speed:150, die:'d6',
-                 signature:'gray', secondary:'orange',
-                 weight:'heavy', dashBreakChance:1.00, dashBreakDmg:[0,3], dashDmgAlwaysRolls:false },
-  fixer:       { name:'Fixer',       icon:'💊', color:'#72243E', hp:8,  speed:160, die:'d4',
-                 signature:'white', secondary:'black',
-                 weight:'mid',   dashBreakChance:0.50, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-  wild_one:    { name:'Wild One',    icon:'🐾', color:'#27500A', hp:10, speed:220, die:'d6',
-                 signature:'green', secondary:'yellow',
-                 weight:'light', dashBreakChance:0.35, dashBreakDmg:[1,2], dashDmgAlwaysRolls:true  },
-};
+// PLAYER_META lives in characters.js now (Phase 2 consolidation). In Node,
+// we require it so server.js's existing import pattern keeps working. In the
+// browser, PLAYER_META is set as a global when characters.js loads (which
+// happens AFTER game.js loads, but before any code references PLAYER_META).
+var PLAYER_META;
+if (typeof require !== 'undefined') {
+  PLAYER_META = require('./characters.js').PLAYER_META;
+}
 
 // Flavor text per class for dash gate-break outcomes
 const DASH_FLAVOR = {

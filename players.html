@@ -489,21 +489,14 @@ var _burstFiredFor = null; // tracks which activeEvent got the burst — cls+rol
 var _statusOpen = {}; // tracks open/closed state of collapsible status cards // inline result card shown in action pane until dismissed
 let lastRoll = null;
 
-// ── CLASS COLORS / STYLES ──
-const CLS_STYLES = {
-  breaker:     { color:'#993C1D', bg:'rgba(153,60,29,0.15)', border:'rgba(153,60,29,0.4)' },
-  formwright:  { color:'#534AB7', bg:'rgba(83,74,183,0.15)', border:'rgba(83,74,183,0.4)' },
-  snapstep:    { color:'#1D9E75', bg:'rgba(29,158,117,0.15)',border:'rgba(29,158,117,0.4)' },
-  blocksmith:  { color:'#EF9F27', bg:'rgba(239,159,39,0.15)',border:'rgba(239,159,39,0.4)' },
-  fixer:       { color:'#D4537E', bg:'rgba(212,83,126,0.15)',border:'rgba(212,83,126,0.4)' },
-  wild_one:    { color:'#5DA831', bg:'rgba(93,168,49,0.15)', border:'rgba(93,168,49,0.4)' },
-};
+// Class UI styles live in characters.js (Phase 2 consolidation).
+// Access via getCharUiStyle(cls) helper.
 
 // ── BUILD CLASS SELECTOR ──
 (function buildSelector(){
   const grid = document.getElementById('cls-grid');
   Object.entries(PLAYER_META).forEach(([cls,m])=>{
-    const s = CLS_STYLES[cls];
+    const s = getCharUiStyle(cls);
     const btn = document.createElement('button');
     btn.className = 'cls-btn';
     btn.style.borderColor = s.border;
@@ -515,7 +508,7 @@ const CLS_STYLES = {
 
 function selectClass(cls) {
   MY_CLASS = cls;
-  const s = CLS_STYLES[cls];
+  const s = getCharUiStyle(cls);
   const m = PLAYER_META[cls];
   // Apply CSS vars
   document.documentElement.style.setProperty('--cls-color', s.color);
@@ -1053,23 +1046,8 @@ function collapsibleCard(id, titleHtml, bodyHtml, startOpen) {
 // tap-only (tier-1 action). The UI scaffolding here is designed so each action
 // button can be upgraded to tap+hold without restructuring.
 //
-// Class signatures from DESIGN_S012_PROPOSAL_V2.txt §2.2.
-const CLASS_SIGNATURE = {
-  breaker:    ['red', 'gray'],
-  formwright: ['blue', 'purple', 'black'],
-  snapstep:   ['orange', 'red'],
-  blocksmith: ['gray', 'yellow'],
-  fixer:      ['white', 'black'],
-  wild_one:   ['green', 'yellow'],
-};
-const CLASS_SECONDARY = {
-  breaker:    ['orange'],
-  formwright: ['white'],
-  snapstep:   ['yellow'],
-  blocksmith: ['orange'],
-  fixer:      ['purple'],
-  wild_one:   ['black'],
-};
+// Class signature/secondary tables live in characters.js (Phase 2 consolidation).
+// Access via getSignature(cls) / getSecondary(cls) helpers.
 
 // ── HEADER ── class + HP + armor + gold/cheese chips + status
 function _dashHeader(me) {
@@ -1604,7 +1582,7 @@ function _renderAllyRadialFan(s) {
     const ax = s.chipCx + Math.cos(angle) * RADIUS - ICON_SIZE / 2;
     const ay = s.chipCy + Math.sin(angle) * RADIUS - ICON_SIZE / 2;
     const meta = (typeof PLAYER_META !== 'undefined' ? PLAYER_META[ally.cls] : null) || {};
-    const clsColor = (CLS_STYLES[ally.cls] || {}).color || '#888';
+    const clsColor = getCharUiStyle(ally.cls).color;
     const isTarget = s.dragTarget === ally.cls;
     const hpPct = Math.max(0, Math.min(1, (ally.hp || 0) / Math.max(1, ally.hpMax || 10)));
     const hpBarColor = hpPct < 0.3 ? '#e44' : (hpPct < 0.6 ? '#fa3' : '#5d5');
@@ -1779,7 +1757,7 @@ function _fireHealFeedback(delta) {
 // Mirrors rumble's _brickBtnHTML so dashboard and rumble share one visual
 // language for bricks.
 function _dashBrickBar(me) {
-  const sigs = CLASS_SIGNATURE[MY_CLASS] || [];
+  const sigs = getSignature(MY_CLASS);
   const bricks = me.bricks || {};
   const charged = me.bricksCharged || {};
   const ld = me.lastDropped || {};
