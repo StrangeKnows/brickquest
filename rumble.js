@@ -528,20 +528,19 @@ function updateStatusEffects(dt) {
     while (s.poison.tickTimer >= 1.0 && s.poison.timer > 0) {
       s.poison.tickTimer -= 1.0;
       var dmg = (s.poison.dmgPerTick || 1) * s.poison.stacks;
-      // Bypass armor for DoT (armor is for physical absorption)
-      player.hp = Math.max(0, player.hp - dmg);
+      // Bypass armor for DoT (armor is for physical absorption).
+      // Routes through applyDamageToPlayer — non-killing ticks instant-apply,
+      // a killing tick triggers bleed (with overflow-scaled duration).
       if (_battleStats) {
         _battleStats.damageTaken += dmg;
-        if (player.hp < _battleStats.hpLow) _battleStats.hpLow = player.hp;
+        if ((player.hp - dmg) < _battleStats.hpLow) _battleStats.hpLow = Math.max(0, player.hp - dmg);
         if (dmg > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmg;
       }
       showFloatingText(player.x, player.y - 40, '☠ ' + dmg, '#1D9E75', player);
-      if (player.hp <= 0) {
-        // v4: Poison DoT killed the player — trigger defeat/revive minigame.
-        // Without this, HP sits at 0 until another enemy hit routes through
-        // the normal death path. Short-circuit the poison damage loop here
-        // and let respawnPlayer handle the state transition.
-        if (typeof respawnPlayer === 'function') respawnPlayer();
+      applyDamageToPlayer(dmg);
+      // Stop ticking once dying or dead — bleed will resolve to death on its
+      // own timer, and we don't want repeated ticks compounding during bleed.
+      if (player.hp <= 0 || player.bleedOut) {
         break;
       }
     }
@@ -873,6 +872,7 @@ function update(dt) {
   updateCritShockwaves(dt);
   updateConfuseParticles(dt);
   updateRegen(dt);
+  updateBleedOut(dt);
   entities.forEach(function(g) {
     updateEntityPoison(g, dt);
     g.slowTimer = Math.max(0, (g.slowTimer||0) - dt);
@@ -1586,12 +1586,21 @@ function updateHUD() {
   if (el = document.getElementById('hud-class'))  el.textContent = player.cls.toUpperCase();
   var hpPct = Math.min(100, (player.hp / player.hpMax * 100));
   var isOverheal = player.hp > player.hpMax;
+  var isBleeding = !!player.bleedOut;
   var hpBar = document.getElementById('hp-bar');
   if (hpBar) {
     hpBar.style.width = hpPct + '%';
-    hpBar.style.background = isOverheal
-      ? 'linear-gradient(90deg,#7B2FBE,#b06fef)'
-      : 'linear-gradient(90deg,#E24B4A,#ff6b6b)';
+    if (isBleeding) {
+      // Red-purple gradient + glow during bleed, signals critical state
+      hpBar.style.background = 'linear-gradient(90deg,#7B0033,#b06fef)';
+      hpBar.style.boxShadow = '0 0 12px #b06fef, 0 0 24px #7B0033';
+    } else if (isOverheal) {
+      hpBar.style.background = 'linear-gradient(90deg,#7B2FBE,#b06fef)';
+      hpBar.style.boxShadow = '';
+    } else {
+      hpBar.style.background = 'linear-gradient(90deg,#E24B4A,#ff6b6b)';
+      hpBar.style.boxShadow = '';
+    }
   }
   if (el = document.getElementById('hud-hp'))     el.style.color = isOverheal ? '#b06fef' : '#E24B4A';
   // Armor pips — show filled and empty up to max
@@ -1722,6 +1731,7 @@ function fireOverloadWhite(count, ox, oy) {
     var cap2 = Math.max(player.hpMax, player.hp);
     player.hp = Math.min(cap2, player.hp + healAmt);
     var healed = Math.round(player.hp - prev);
+    if (healed > 0) applyBleedRescue(healed);
     // v4: track total + biggest-single-heal for victory screen
     if (_battleStats && healed > 0) {
       _battleStats.totalHealed = (_battleStats.totalHealed || 0) + healed;
@@ -1809,6 +1819,7 @@ function updateWhiteField(dt) {
       player.hp = Math.min(player.hpMax, player.hp + tickHeal);
       if (player.hp > prev) {
         var tickHealed = player.hp - prev;
+        applyBleedRescue(tickHealed);
         if (_battleStats) {
           _battleStats.totalHealed = (_battleStats.totalHealed || 0) + tickHealed;
           if (tickHealed > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = tickHealed;
@@ -3591,18 +3602,18 @@ function _applyEnemyMeleeDamage(g, dmg, dx, dy, dist) {
     showFloatingText(player.x, player.y - 55, absorbed + ' 🛡', '#AAAAAA', player);
   }
   if (dmgLeft > 0) {
-    player.hp = Math.max(0, player.hp - dmgLeft);
     if (_battleStats) {
       _battleStats.damageTaken += dmgLeft;
-      if (player.hp < _battleStats.hpLow) _battleStats.hpLow = player.hp;
+      if ((player.hp - dmgLeft) < _battleStats.hpLow) _battleStats.hpLow = Math.max(0, player.hp - dmgLeft);
       if (dmgLeft > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmgLeft;
     }
     showFloatingText(player.x, player.y - 40, dmgLeft + ' HP', '#E24B4A', player);
+    applyDamageToPlayer(dmgLeft);
   }
   player.iframes = 0.9;
   // PHASE C — arsenal triggers on every successful enemy hit on player.
   applyArsenalOnTouch(g, dx, dy, dist);
-  if (player.hp <= 0 && typeof respawnPlayer === 'function') respawnPlayer();
+  if (player.hp <= 0 && !player.bleedOut && typeof respawnPlayer === 'function') respawnPlayer();
 }
 
 // ═══════════════════════════════════════════════════
@@ -5152,13 +5163,13 @@ function updateEntity(g, dt, bounds) {
       showFloatingText(player.x, player.y - 55, absorbed + ' 🛡', '#AAAAAA', player);
     }
     if (dmgLeft > 0) {
-      player.hp = Math.max(0, player.hp - dmgLeft);
       if (_battleStats) {
         _battleStats.damageTaken += dmgLeft;
-        if (player.hp < _battleStats.hpLow) _battleStats.hpLow = player.hp;
+        if ((player.hp - dmgLeft) < _battleStats.hpLow) _battleStats.hpLow = Math.max(0, player.hp - dmgLeft);
         if (dmgLeft > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmgLeft;
       }
       showFloatingText(player.x, player.y - 40, dmgLeft + ' HP', '#E24B4A', player);
+      applyDamageToPlayer(dmgLeft);
     }
     player.iframes = 0.9;
     // PHASE C — fire arsenal effects for entities with affinityColors.
@@ -5179,7 +5190,7 @@ function updateEntity(g, dt, bounds) {
     g.attackCooldown = _isSlowed ? 2.4 : 1.2;
     g.flashTimer = 0.2;
 
-    if (player.hp <= 0) respawnPlayer();
+    if (player.hp <= 0 && !player.bleedOut) respawnPlayer();
   }
 
   // Player iframes
@@ -5842,9 +5853,116 @@ function updateRegen(dt) {
       }
       showFloatingText(player.x, player.y-40, healed + ' ✨', '#EFEFEF', player);
       spawnHealSparkles(1);
+      // Regen counts as a heal — could rescue from bleed.
+      applyBleedRescue(healed);
     }
   }
   if (playerRegen.timer <= 0) playerRegen = null;
+}
+
+// ── BLEED-OUT (per design doc §1.4, refined) ───────────────────────────
+// Every killing blow initiates a bleed window — no damage threshold.
+// The window's length scales with how much overflow damage was dealt:
+//   overflow=1  (barely fatal)  → 2400ms
+//   overflow=5                  → 2000ms
+//   overflow=15                 → 1000ms
+//   overflow=25+ (catastrophic) → 500ms (floor)
+//
+// Heals during the window can push toHp positive (rescue trajectory).
+// Additional damage during bleed compounds toHp lower without extending duration.
+//
+// Three central helpers route HP changes through bleed-aware paths:
+//   applyDamageToPlayer(dmg) — replaces direct `player.hp -= dmg`. Triggers
+//     bleed on any killing blow, else applies instantly.
+//   applyHealToPlayer(amount) — caps + heals, also rescues from bleed if active.
+//   applyBleedRescue(healed) — called by any heal path to interrupt bleed.
+
+var BLEED_DURATION_MAX_MS = 2500;
+var BLEED_DURATION_MIN_MS = 500;
+var BLEED_OVERFLOW_PENALTY_MS = 100; // ms shaved off duration per point of overflow
+
+function applyDamageToPlayer(dmg) {
+  if (!player || dmg <= 0) return;
+  var newHp = player.hp - dmg;
+  // Non-killing blow — instant apply, no bleed
+  if (newHp > 0) {
+    player.hp = newHp;
+    return;
+  }
+  // Killing blow path
+  if (player.bleedOut) {
+    // Already bleeding — stack overflow into existing toHp (drives rescue
+    // target deeper). Don't extend duration; existing window plays out.
+    player.bleedOut.toHp -= dmg;
+    return;
+  }
+  // Initiate fresh bleed
+  var overflow = Math.max(1, dmg - player.hp);
+  var duration = Math.max(
+    BLEED_DURATION_MIN_MS,
+    Math.min(BLEED_DURATION_MAX_MS, BLEED_DURATION_MAX_MS - overflow * BLEED_OVERFLOW_PENALTY_MS)
+  );
+  player.bleedOut = {
+    fromHp: player.hp,
+    toHp: -overflow,    // negative; we visually clamp to 0 in the renderer
+    startTime: performance.now(),
+    duration: duration,
+  };
+  showFloatingText(player.x, player.y - 60, '⚠ BLEED', '#b06fef', player);
+}
+
+function applyHealToPlayer(amount) {
+  if (!player || amount <= 0) return 0;
+  var prev = player.hp;
+  var cap = Math.max(player.hpMax, player.hp);
+  player.hp = Math.min(cap, player.hp + amount);
+  var actual = player.hp - prev;
+  if (actual > 0) applyBleedRescue(actual);
+  return actual;
+}
+
+// Called by any heal path to interrupt bleed-out. Raises the bleed's toHp
+// toward rescue. If the new toHp is positive, the trajectory becomes a
+// rescue arc — bleed will resolve to a saved state when its window ends.
+function applyBleedRescue(healAmount) {
+  if (!player || !player.bleedOut || healAmount <= 0) return;
+  var b = player.bleedOut;
+  // Compute current visual HP based on bleed progress (mirrors update logic)
+  var elapsed = performance.now() - b.startTime;
+  var t = Math.min(1, elapsed / b.duration);
+  var currentVisualHp = b.fromHp + (b.toHp - b.fromHp) * t;
+  // New target = current visual HP + heal amount, capped at hpMax
+  var newToHp = Math.min(player.hpMax, currentVisualHp + healAmount);
+  // Restart math from current visual position toward new target.
+  // Remaining duration stays the same — heal just bends the trajectory.
+  var remaining = Math.max(0, b.duration - elapsed);
+  b.fromHp = currentVisualHp;
+  b.toHp = newToHp;
+  b.startTime = performance.now();
+  b.duration = remaining;
+  // If toHp positive, this is a rescue trajectory — show the rescued floater
+  if (newToHp > 0) {
+    showFloatingText(player.x, player.y - 70, '✓ RESCUED', '#5dd055', player);
+  }
+}
+
+function updateBleedOut(dt) {
+  if (!player || !player.bleedOut) return;
+  var b = player.bleedOut;
+  var elapsed = performance.now() - b.startTime;
+  var t = b.duration > 0 ? Math.min(1, elapsed / b.duration) : 1;
+  // Linear interpolation from fromHp to toHp over duration. Clamp visual to 0.
+  var interp = b.fromHp + (b.toHp - b.fromHp) * t;
+  player.hp = Math.max(0, interp);
+  if (t >= 1) {
+    // Bleed complete. Lock in toHp (clamped to 0) and clear state.
+    player.hp = Math.max(0, b.toHp);
+    player.bleedOut = null;
+    if (player.hp <= 0) {
+      // Death — route through normal respawn/revive flow
+      if (typeof respawnPlayer === 'function') respawnPlayer();
+    }
+  }
 }
 
 function drawRegen() {
@@ -5889,6 +6007,7 @@ function doWhiteHeal(targetX, targetY) {
   var cap = Math.max(player.hpMax, player.hp);
   player.hp = Math.min(cap, player.hp + healAmt);
   var actual = player.hp - prev;
+  if (actual > 0) applyBleedRescue(actual);
   if (_battleStats && actual > 0) {
     _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actual;
     if (actual > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actual;
@@ -7408,6 +7527,7 @@ function updatePurpleBursts(dt) {
         var preHp = player.hp;
         player.hp = Math.min(overhealCap, player.hp + healAmt);
         var totalGained = player.hp - preHp;
+        if (totalGained > 0) applyBleedRescue(totalGained);
         if (_battleStats && totalGained > 0) {
           _battleStats.totalHealed = (_battleStats.totalHealed || 0) + totalGained;
           if (totalGained > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = totalGained;
