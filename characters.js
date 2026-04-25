@@ -238,7 +238,30 @@ var COLOR = {
   purple: { dmg: 0.60 },
   black:  { dmg: 0.20, dur: 0.60, witherDmg: 0.40, witherStacks: 0.20 },
   green:  { stackDmg: 0.20, stacks: 0.40 },
-  white:  { heal: 0.40, dur: 0.60 },
+  // White uses a custom linear tier function instead of universal m-based
+  // scaling. Heal-over-time accumulates discretely, so we need integer
+  // total HP that grows strictly monotonic per tier — universal m can't
+  // deliver that without plateau collisions. Same effectiveAt interface,
+  // different per-tier shape. Class affinity and inventory still multiply
+  // on top of the linear total.
+  //
+  // Linear total = 4 + (tier - 1) × 2  →  T1=4, T2=6, T3=8 ... T10=22
+  // Tick value scales smoothly: 1 + tier × 0.4, ceil → 2,3,3,3,3,4,4,5,5,5
+  // Tick interval = 0.5s constant.
+  white: {
+    customTierFn: function(tier) {
+      var n = Math.max(1, tier || 1);
+      var tickHeal = Math.max(1, Math.ceil(1 + n * 0.4));
+      var totalHeal = 4 + (n - 1) * 2;
+      var ticks = Math.max(1, Math.ceil(totalHeal / tickHeal));
+      return {
+        heal: tickHeal,        // per-tick heal value (pre-affinity)
+        totalHeal: totalHeal,  // total HP delivered over field lifetime (pre-affinity)
+        ticks: ticks,
+        duration: ticks * 0.5, // implicit from tick count × 0.5s interval
+      };
+    }
+  },
   yellow: { dur: 0.60, yellowSeed: 0.40 },
   orange: { dmg: 0.40, bleedDur: 0.60, charges: 0.40 },
   gray:   { hp: 0.80 },
@@ -267,6 +290,22 @@ function effectiveAt(color, tier, cls, owned) {
   var c     = COLOR[color] || {};
 
   var out = { mult: m, radiusPx: BASE_R * m, tap: tap, aff: aff, curve: curve };
+
+  // Custom per-color tier scaling (currently white). Heal-over-time needs
+  // integer total HP with strict monotonic growth, which universal m-based
+  // math can't provide due to ceil-collision plateaus. Custom function
+  // returns the relevant integer outputs directly; affinity × tap still
+  // multiply on top so class identity and inventory progression are honored.
+  if (c.customTierFn) {
+    var custom = c.customTierFn(tier);
+    var classMult = aff * tap; // skip tierCurve since custom owns the curve
+    if (custom.heal      != null) out.heal       = Math.max(1, Math.ceil(custom.heal      * classMult));
+    if (custom.totalHeal != null) out.totalHeal  = Math.max(1, Math.ceil(custom.totalHeal * classMult));
+    if (custom.ticks     != null) out.ticks      = custom.ticks; // tick count is structural, not class-scaled
+    if (custom.duration  != null) out.duration   = custom.duration;
+    return out;
+  }
+
   if (c.dmg         != null) out.dmg         = Math.max(1, Math.ceil(BASE * c.dmg         * m));
   if (c.burstDmg    != null) out.burstDmg    = Math.max(1, Math.ceil(BASE * c.burstDmg    * m));
   if (c.heal        != null) out.heal        = Math.max(1, Math.ceil(BASE * c.heal        * m));
@@ -284,11 +323,13 @@ function effectiveAt(color, tier, cls, owned) {
 
 // ── COMPUTE HEAL (compatibility wrapper) ────────────────────────────────
 // Stable interface for board / server / preview callers that don't yet
-// use effectiveAt directly. Returns the integer heal amount, same shape
-// as before. Internally just reads effectiveAt(...).heal.
+// use effectiveAt directly. For white (heal-over-time field), returns
+// totalHeal — the full HP delivered over the field's lifetime, which is
+// the closest analog to "the heal amount of one cast." For any other
+// healing color (none today), falls back to .heal.
 function computeHeal(cls, color, owned, overload) {
   var fx = effectiveAt(color, overload || 1, cls, owned);
-  return fx.heal || 0;
+  return fx.totalHeal || fx.heal || 0;
 }
 
 // ── BROWSER GLOBAL EXPORTS ──────────────────────────────────────────────
