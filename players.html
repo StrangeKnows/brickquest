@@ -1145,9 +1145,25 @@ const HOLD_TAP_THRESHOLD_MS = 250;     // < this = tap, ≥ this = hold
 const HOLD_TIER_INTERVAL_MS = 1000;    // ms per overload step (one full second per tier-up)
 const HOLD_DRAG_THRESHOLD_PX = 15;     // px movement before drag mode
 
-// White is currently the only color with tier-2+ radial targets.
-// Other colors fall through to tap-only behavior on hold-release.
-const HOLD_RADIAL_COLORS = ['white'];
+// All colors support hold-radial as of 0.14.0 framework. White uses the
+// ally-target radial (shipped earlier); other colors use the generic
+// option-radial whose content fills in with class actions in v0.15/0.16.
+const HOLD_RADIAL_COLORS = ['red','gray','green','blue','purple','white','yellow','orange','black'];
+
+// Per-color placeholder options for the generic option-radial. These are
+// labels only — real actions wire in with v0.15/0.16 class identity.
+// Two options per color is enough to validate layout + routing without
+// committing to specific class behaviors.
+const _GENERIC_RADIAL_OPTIONS = {
+  red:    [{ label:'Strike', icon:'⚔' }, { label:'Cleave', icon:'⚒' }],
+  gray:   [{ label:'Brace',  icon:'◆' }, { label:'Wall',   icon:'▣' }],
+  blue:   [{ label:'Bolt',   icon:'◊' }, { label:'Pierce', icon:'⟢' }],
+  purple: [{ label:'Burst',  icon:'✦' }, { label:'Drain',  icon:'⌬' }],
+  green:  [{ label:'Bloom',  icon:'❀' }, { label:'Wilt',   icon:'☘' }],
+  orange: [{ label:'Trap',   icon:'⌖' }, { label:'Snare',  icon:'⟆' }],
+  yellow: [{ label:'Daze',   icon:'★' }, { label:'Mark',   icon:'※' }],
+  black:  [{ label:'Curse',  icon:'☓' }, { label:'Hex',    icon:'⛧' }],
+};
 
 let _holdState = null;
 let _holdTicker = null;
@@ -1268,10 +1284,15 @@ function _holdMove(e) {
   if (moved > HOLD_DRAG_THRESHOLD_PX) {
     _holdState.isDrag = true;
   }
-  // Drag-target detection — find ally icon under cursor, if any
+  // Drag-target detection — find ally icon OR option icon under cursor.
+  // White uses ally targets; other colors use option targets. dragTarget
+  // holds the matched id; _holdUp routes by which kind was hit.
   const el = document.elementFromPoint(e.clientX, e.clientY);
   const allyIcon = el ? el.closest('[data-ally-target]') : null;
-  _holdState.dragTarget = allyIcon ? allyIcon.getAttribute('data-ally-target') : null;
+  const optIcon  = el ? el.closest('[data-option-target]') : null;
+  _holdState.dragTarget = allyIcon
+    ? allyIcon.getAttribute('data-ally-target')
+    : (optIcon ? optIcon.getAttribute('data-option-target') : null);
   _renderHoldOverlay();
 }
 
@@ -1282,19 +1303,25 @@ function _holdUp(e) {
   const heldMs = performance.now() - s.startTime;
   const isTap = heldMs < HOLD_TAP_THRESHOLD_MS && !s.isDrag;
 
-  // Determine release target: chip itself, ally icon, or off-target
+  // Determine release target: chip itself, ally icon, option icon, or off-target
   const releaseEl = document.elementFromPoint(e.clientX, e.clientY);
   const onChip = releaseEl ? releaseEl.closest('[data-brick-chip]') : null;
   const onAlly = releaseEl ? releaseEl.closest('[data-ally-target]') : null;
+  const onOption = releaseEl ? releaseEl.closest('[data-option-target]') : null;
   const releasedOnOwnChip = onChip && onChip.getAttribute('data-brick-chip') === s.color;
 
-  // Capture ally icon location BEFORE _holdEnd destroys state.
-  // Used for caster ack flash + spotlight selector.
+  // Capture target locations BEFORE _holdEnd destroys state.
   let allyIconRect = null;
   let allyTargetCls = null;
   if (onAlly) {
     allyIconRect = onAlly.getBoundingClientRect();
     allyTargetCls = onAlly.getAttribute('data-ally-target');
+  }
+  let optionIconRect = null;
+  let optionLabel = null;
+  if (onOption) {
+    optionIconRect = onOption.getBoundingClientRect();
+    optionLabel = onOption.getAttribute('data-option-target');
   }
 
   if (isTap) {
@@ -1311,6 +1338,14 @@ function _holdUp(e) {
     _fireTierAction(s.color, s.tier, allyTargetCls);
     if (allyIconRect) _fireCasterAck(allyIconRect);
     _spotlightCleanup('[data-ally-target="' + allyTargetCls + '"]');
+  } else if (onOption) {
+    // Option fired — symmetric with ally path. Spotlight on the option, fire
+    // tiered action with the option label as a routing key. Real per-class
+    // behaviors land in v0.15/0.16; for now this toasts via _fireTierAction.
+    _holdEnd(false, true);
+    _fireTierAction(s.color, s.tier, optionLabel);
+    if (optionIconRect) _fireCasterAck(optionIconRect);
+    _spotlightCleanup('[data-option-target="' + optionLabel + '"]');
   } else if (releasedOnOwnChip) {
     // Self heal — keep overlay alive briefly, fade everything together
     _holdEnd(false, true);                              // skip immediate clear
@@ -1420,15 +1455,15 @@ function _holdEnd(cancelled, skipClearOverlay) {
 // burn, scaled output, multi-target effects) lands when per-ability
 // content is designed in 0.16+. The gesture mechanic ships now; the
 // payoff math waits for real ability design.
-function _fireTierAction(color, tier, targetCls) {
-  // White actions
+function _fireTierAction(color, tier, target) {
+  // White actions — target is an ally class id (or null for self)
   if (color === 'white') {
-    if (targetCls === null) {
+    if (target === null) {
       // Self heal — single-arg call (source defaults to target)
       client.healPlayer(MY_CLASS);
     } else {
-      // Ally heal — pass MY_CLASS as source (I pay), targetCls as target
-      client.healPlayer(targetCls, MY_CLASS);
+      // Ally heal — pass MY_CLASS as source (I pay), target as target class
+      client.healPlayer(target, MY_CLASS);
     }
     if (tier > 1) {
       toast('Tier ' + tier + ' release — scaling lands with class abilities', 'info');
@@ -1436,11 +1471,17 @@ function _fireTierAction(color, tier, targetCls) {
     return;
   }
   // Gray = brace (existing tier-1 only)
-  if (color === 'gray' && tier === 1) {
+  if (color === 'gray' && tier === 1 && !target) {
     client.addShield(MY_CLASS);
     return;
   }
-  // Other colors: tap-only baseline for now (defer to 0.16 abilities)
+  // Other colors with option-radial release. target is an option label
+  // (e.g. "Strike", "Cleave") — actual class behavior wires in v0.15/0.16.
+  if (target) {
+    toast(target + ' (' + color + ' tier ' + tier + ') — class behavior in v0.15/0.16', 'info');
+    return;
+  }
+  // Fallback — tap-only baseline for now
   if (tier === 1) {
     toast('Tap action for ' + color + ' — coming with class abilities', 'info');
   } else {
@@ -1527,11 +1568,16 @@ function _renderHoldOverlay() {
       letter-spacing:.02em;pointer-events:none;line-height:1;">+${previewAmt}</div>`;
   }
 
-  // Radial fan of ally icons — visible whenever in hold mode for radial-enabled colors.
-  // Allies available from tier 1 (drag immediately to ally for tier-1 ally heal).
-  // The arc OUTSIDE the icons is the tier indicator — drawn by _renderAllyRadialFan.
+  // Radial fan — visible whenever in hold mode for radial-enabled colors.
+  // White uses the ally-target radial (allies are heal targets). Other
+  // colors use the generic option-radial (action options per color).
+  // Both render the power arc + selection icons in the same layout space.
   if (inHoldMode && HOLD_RADIAL_COLORS.indexOf(s.color) >= 0) {
-    html += _renderAllyRadialFan(s);
+    if (s.color === 'white') {
+      html += _renderAllyRadialFan(s);
+    } else {
+      html += _renderOptionRadialFan(s);
+    }
   }
 
   // Drag line from chip to current pointer (visual feedback)
@@ -1580,6 +1626,110 @@ function _renderHoldOverlay() {
 function _clearHoldOverlay() {
   const overlay = document.getElementById('hold-overlay');
   if (overlay) overlay.remove();
+}
+
+// ── GENERIC OPTION RADIAL ──────────────────────────────────────────
+// For colors other than white. Surfaces a list of action options. Layout
+// grows from horizontal-direct → upward stack → full radial arc as N
+// climbs. Drag-release on an option fires that tier with the option label.
+//
+// White uses _renderAllyRadialFan instead — different semantics (allies
+// as targets, not options as actions).
+function _renderOptionRadialFan(s) {
+  const opts = _GENERIC_RADIAL_OPTIONS[s.color] || [];
+  if (opts.length === 0) return '';
+
+  const RADIUS = 80;
+  const ICON_SIZE = 44;
+  const ARC_RADIUS = RADIUS + 40;
+  const tierColor = BRICK_COLORS[s.color] || '#fff';
+  const arcFill = Math.max(0, Math.min(1, s.arcFill || 0));
+
+  let html = '';
+
+  // ── POWER ARC ─────────────────────────────────────────────
+  // Same crown-arc pattern as ally radial, scaled to the same span so the
+  // tier indicator reads identically across both radial flavors.
+  const FAN_ARC_RAD = Math.PI;
+  const center = s.fanCenterAngle;
+  const svgSize = (ARC_RADIUS + 30) * 2;
+  const svgX = s.chipCx - svgSize / 2;
+  const svgY = s.chipCy - svgSize / 2;
+  const arcStart = center - FAN_ARC_RAD / 2;
+  const arcEnd   = center + FAN_ARC_RAD / 2;
+  const arcFillEnd = arcStart + FAN_ARC_RAD * arcFill;
+  const cx = svgSize / 2;
+  const cy = svgSize / 2;
+  function polar(r, a) { return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
+  const [bgx1, bgy1] = polar(ARC_RADIUS, arcStart);
+  const [bgx2, bgy2] = polar(ARC_RADIUS, arcEnd);
+  const [fillx1, filly1] = polar(ARC_RADIUS, arcStart);
+  const [fillx2, filly2] = polar(ARC_RADIUS, arcFillEnd);
+  const fillArcLargeFlag = (FAN_ARC_RAD * arcFill) > Math.PI ? 1 : 0;
+  const bgPath = `M ${bgx1.toFixed(2)} ${bgy1.toFixed(2)} A ${ARC_RADIUS} ${ARC_RADIUS} 0 0 1 ${bgx2.toFixed(2)} ${bgy2.toFixed(2)}`;
+  const fillPath = `M ${fillx1.toFixed(2)} ${filly1.toFixed(2)} A ${ARC_RADIUS} ${ARC_RADIUS} 0 ${fillArcLargeFlag} 1 ${fillx2.toFixed(2)} ${filly2.toFixed(2)}`;
+  const haloIntensity = 4 + 12 * arcFill;
+  html += `<svg style="position:absolute;left:${svgX}px;top:${svgY}px;width:${svgSize}px;height:${svgSize}px;pointer-events:none;overflow:visible;">
+    <path d="${bgPath}" stroke="${tierColor}33" stroke-width="6" fill="none" stroke-linecap="round"/>
+    <path d="${fillPath}" stroke="${tierColor}" stroke-width="6" fill="none" stroke-linecap="round"
+      style="filter:drop-shadow(0 0 ${haloIntensity.toFixed(1)}px ${tierColor});"/>
+  </svg>`;
+
+  // ── OPTION ICONS ──────────────────────────────────────────
+  // Layout angles per spec:
+  //   N=1: [0]                     direct toward fanCenterAngle (horizontal)
+  //   N=2: [0, -π/4]               first horizontal, second 45° up from it
+  //   N=3: [0, -π/4, -π/2]         stacked upward by 45° steps
+  //   N≥4: evenly distributed from 0 to -π (full upper half arc)
+  // Negative angle offset = visually above on screen (canvas y inverted).
+  const N = opts.length;
+  function angleOffsetFor(idx) {
+    if (N === 1) return 0;
+    if (N === 2) return idx === 0 ? 0 : -Math.PI / 4;
+    if (N === 3) return -idx * (Math.PI / 4);   // 0, -π/4, -π/2
+    // N ≥ 4: even spread upward from 0 to -π
+    return -idx * (Math.PI / (N - 1));
+  }
+
+  // The fan's "natural direction" — chip on left → fan opens right (angle 0);
+  // chip on right → fan opens left (angle π). When mirrored to the right side,
+  // the upward stack should also visually grow upward, which means flipping
+  // the angle-offset's vertical component. The simple way: when mirrored,
+  // angle = π + offset (which puts +offset BELOW on right side). Negate the
+  // offset to keep "upward" consistent on both sides.
+  const mirrored = (s.fanCenterAngle === Math.PI);
+  opts.forEach((opt, i) => {
+    let offset = angleOffsetFor(i);
+    // Vertical flip on mirrored side keeps the stack growing UP on screen
+    if (mirrored) offset = -offset;
+    const angle = s.fanCenterAngle + offset;
+    const ax = s.chipCx + Math.cos(angle) * RADIUS - ICON_SIZE / 2;
+    const ay = s.chipCy + Math.sin(angle) * RADIUS - ICON_SIZE / 2;
+    const isTarget = s.dragTarget === opt.label;
+    const scale = isTarget ? 1.2 : 1.0;
+    const ringGlow = isTarget
+      ? `0 0 16px ${tierColor},0 0 24px #fff`
+      : `0 2px 8px rgba(0,0,0,.5)`;
+    html += `<div data-option-target="${opt.label}" style="position:absolute;left:${ax}px;top:${ay}px;
+      width:${ICON_SIZE}px;height:${ICON_SIZE}px;pointer-events:auto;cursor:pointer;
+      transform:scale(${scale});transition:transform .12s;">
+      <div style="width:${ICON_SIZE}px;height:${ICON_SIZE}px;border-radius:50%;
+        background:${tierColor};border:2px solid ${isTarget?'#fff':tierColor+'cc'};
+        box-shadow:${ringGlow};
+        display:flex;align-items:center;justify-content:center;
+        font-size:20px;color:#000;text-shadow:0 1px 1px rgba(255,255,255,.4);">
+        ${opt.icon}
+      </div>
+      <div style="position:absolute;top:-14px;left:50%;transform:translateX(-50%);
+        font-family:Cinzel,serif;font-size:9px;color:#fff;
+        background:rgba(0,0,0,.7);padding:1px 6px;border-radius:3px;white-space:nowrap;
+        letter-spacing:.06em;">
+        ${opt.label}
+      </div>
+    </div>`;
+  });
+
+  return html;
 }
 
 function _renderAllyRadialFan(s) {
@@ -2000,7 +2150,7 @@ function _dashActionsAlly(me) {
       💊 Mass Repair <span style="font-size:10px;color:#888;margin-left:4px;">2 ⬜ · all allies${whiteC < 2 ? ' — needs 2' : ''}</span>
     </button>`;
   } else {
-    buttons += `<div style="font-size:11px;color:var(--text-dim);padding:4px 6px;">Heal Ally is Fixer's signature. Other classes gain zone-heal via multi-color costs (item 5).</div>`;
+    buttons += `<div style="font-size:11px;color:var(--text-dim);padding:4px 6px;">Heal Ally is Fixer's signature. Other classes gain zone-heal via class abilities (v0.15/0.16).</div>`;
   }
   return `<div style="margin-top:10px;">
     <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.1em;color:var(--text-dim);margin-bottom:4px;">ALLY <span style="color:#666;font-weight:400;">· same zone · for gifts/trades use Party tab</span></div>
@@ -2044,7 +2194,7 @@ function _dashActionsClass(me) {
   }
   if (!buttons && !abText) return '';
   return `<div style="margin-top:10px;">
-    <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.1em;color:var(--text-dim);margin-bottom:4px;">CLASS <span style="color:#666;font-weight:400;">· hold brick for tier menu (item 6)</span></div>
+    <div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.1em;color:var(--text-dim);margin-bottom:4px;">CLASS <span style="color:#666;font-weight:400;">· hold any brick chip for tier menu</span></div>
     ${buttons ? `<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;">${buttons}</div>` : ''}
     ${abText ? `<div>${abText}</div>` : ''}
   </div>`;
