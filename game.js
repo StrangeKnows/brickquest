@@ -5,7 +5,7 @@
 const BRICK_COLORS = {
   red:'#D01012', blue:'#006DB7', green:'#237841', white:'#EFEFEF',
   gray:'#AAAAAA', purple:'#7B2FBE', yellow:'#F5D000',
-  orange:'#F57C00', black:'#333333'
+  orange:'#F57C00', black:'#4a4250'
 };
 const BRICK_NAMES = Object.keys(BRICK_COLORS);
 

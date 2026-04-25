@@ -184,7 +184,7 @@ function scaleDist(px) {
 const BRICK_COLORS = {
   red:'#E24B4A', blue:'#006DB7', green:'#1D9E75', white:'#EFEFEF',
   gray:'#AAAAAA', purple:'#7B2FBE', yellow:'#F5D000', orange:'#F57C00',
-  black:'#333333'
+  black:'#4a4250'  // tinted dark — readable against #0a0a0f background; faint purple cast hints at its curse/wither role
 };
 
 // ═══════════════════════════════════════════════════
