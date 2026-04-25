@@ -8673,6 +8673,26 @@ function _updateVictoryPips() {
       }, 700);
     }
   });
+  // If no groups are still refilling, fade out the entire REFILLING wrapper
+  // (label + container together). Counts only refilling groups; "filled" groups
+  // are mid-fade and don't count. Once wrapper is fully faded, removed from DOM
+  // so empty grid rows don't leave layout gaps.
+  var refillingCount = container.querySelectorAll('.vic-pip-group:not([data-state="filled"])').length;
+  if (refillingCount === 0) {
+    var wrapper = document.getElementById('rumble-victory-refill');
+    if (wrapper && wrapper.getAttribute('data-state') !== 'done') {
+      wrapper.setAttribute('data-state', 'done');
+      // Wait until the last pip group's fade animation finishes (700ms),
+      // then start the wrapper fade. Total: pip-fade (700) + wrapper-fade (600) = ~1.3s
+      setTimeout(function() {
+        if (!wrapper.parentNode) return;
+        wrapper.style.opacity = '0';
+        setTimeout(function() {
+          if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+        }, 650);
+      }, 700);
+    }
+  }
 }
 
 function _startVictoryRefillLoop() {
@@ -8822,7 +8842,7 @@ function _showVictoryScreen() {
   function buildCardMoment() {
     var refillHtml = _renderVictoryPipsInitial();
     var refillBlock = refillHtml
-      ? ('<div style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:clamp(4px,1.5vmin,10px);">'
+      ? ('<div id="rumble-victory-refill" style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:clamp(4px,1.5vmin,10px);transition:opacity 600ms ease-out;">'
          + '<span style="font-size:clamp(9px,1.7vmin,11px);color:#666;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">REFILLING</span>'
          + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;">' + refillHtml + '</div>'
          + '</div>')
@@ -8878,7 +8898,7 @@ function _showVictoryScreen() {
 
     var refillHtml = _renderVictoryPipsInitial();
     var refillBlock = refillHtml
-      ? ('<div class="vic-zone-wrap vic-refill-wrap" style="display:flex;flex-direction:column;align-items:center;gap:6px;">'
+      ? ('<div id="rumble-victory-refill" class="vic-zone-wrap vic-refill-wrap" style="display:flex;flex-direction:column;align-items:center;gap:6px;transition:opacity 600ms ease-out;">'
          + '<span style="font-size:clamp(9px,1.7vmin,11px);color:#666;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">REFILLING</span>'
          + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;">' + refillHtml + '</div>'
          + '</div>')
