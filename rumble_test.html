@@ -340,19 +340,49 @@
   /* Live diagnostic panel — top-right, always visible during waves runs.
      Shows entityCount and per-entity HP so we can see exactly what's left
      alive when a wave doesn't advance. */
-  #waves-live-debug {
-    position:fixed; top:8px; right:8px; z-index:198;
+  /* ── DEBUG ICON (collapsed) + PANEL (expanded) ──────────────
+     The panel used to live always-visible at top-right where it
+     overlapped the brick bar. Now collapsed to a tiny icon at
+     bottom-left; tap to expand the panel upward. Pulses red when
+     a stuck-state is detected so the user knows to tap in.       */
+  #waves-debug-icon {
+    position:fixed; bottom:10px; left:10px; z-index:199;
+    width:32px; height:32px; border-radius:50%;
     background:rgba(8,8,12,0.92);
+    border:1px solid #2a2a35;
+    color:#666;
+    font-family:ui-monospace,monospace; font-size:14px;
+    display:none;
+    align-items:center; justify-content:center;
+    cursor:pointer;
+    user-select:none;
+    transition:color 200ms, border-color 200ms;
+  }
+  #waves-debug-icon.visible { display:flex; }
+  #waves-debug-icon:hover { color:#aaa; border-color:#555; }
+  #waves-debug-icon.stuck {
+    color:#ff8899; border-color:#ff4466;
+    animation:debugStuckPulse 1s ease-in-out infinite;
+  }
+  @keyframes debugStuckPulse {
+    0%,100% { box-shadow:0 0 0 0 rgba(255,68,102,0.0); }
+    50%     { box-shadow:0 0 0 6px rgba(255,68,102,0.25); }
+  }
+  #waves-live-debug {
+    position:fixed; bottom:50px; left:10px; z-index:198;
+    background:rgba(8,8,12,0.95);
     border:1px solid #2a2a35;
     border-radius:6px;
     padding:6px 10px;
     font-family:ui-monospace,monospace; font-size:10px;
     color:#aaa; line-height:1.5;
-    max-width:200px;
-    pointer-events:none;
-    opacity:0; transition:opacity 200ms;
+    max-width:240px; max-height:60vh; overflow-y:auto;
+    pointer-events:auto;
+    opacity:0; transform:translateY(8px);
+    transition:opacity 180ms ease-out, transform 180ms ease-out;
+    display:none;
   }
-  #waves-live-debug.visible { opacity:0.85; }
+  #waves-live-debug.expanded { display:block; opacity:1; transform:translateY(0); }
   #waves-live-debug .lbl { color:#666; }
   #waves-live-debug .val { color:#eee; }
   #waves-live-debug .hi  { color:#F5D000; }
@@ -1068,20 +1098,38 @@ function updateWaveBadge(n) {
 var _liveDebugTimer = null;
 function startLiveDebug() {
   stopLiveDebug();
+  // Icon (collapsed default)
+  var icon = document.getElementById('waves-debug-icon');
+  if (!icon) {
+    icon = document.createElement('div');
+    icon.id = 'waves-debug-icon';
+    icon.textContent = '⛁';
+    icon.title = 'Wave debug';
+    icon.addEventListener('click', toggleLiveDebug);
+    document.body.appendChild(icon);
+  }
+  icon.classList.add('visible');
+  // Panel (created but starts collapsed — only shows when icon tapped)
   var d = document.getElementById('waves-live-debug');
   if (!d) {
     d = document.createElement('div');
     d.id = 'waves-live-debug';
     document.body.appendChild(d);
   }
-  d.classList.add('visible');
   _liveDebugTimer = setInterval(updateLiveDebug, 250);
   updateLiveDebug();
 }
 function stopLiveDebug() {
   if (_liveDebugTimer) { clearInterval(_liveDebugTimer); _liveDebugTimer = null; }
+  var icon = document.getElementById('waves-debug-icon');
+  if (icon) { icon.classList.remove('visible', 'stuck'); }
   var d = document.getElementById('waves-live-debug');
-  if (d) d.classList.remove('visible');
+  if (d) d.classList.remove('expanded');
+}
+function toggleLiveDebug() {
+  var d = document.getElementById('waves-live-debug');
+  if (!d) return;
+  d.classList.toggle('expanded');
 }
 // Track when entity count last changed — if count stays constant for >8s
 // while entities still present and not advancing, treat as stuck and show
@@ -1148,8 +1196,10 @@ function updateLiveDebug() {
     + '<div><span class="lbl">entities</span> <span class="val">' + info.entityCount + '</span></div>'
     + entityList
     + stuckBtn;
-  // Pointer events only when stuck (END RUN button needs to be tappable)
-  d.style.pointerEvents = stuckBtn ? 'auto' : 'none';
+  // Pulse the collapsed icon red when stuck — draws the eye toward the
+  // affordance even when the panel itself is closed.
+  var icon = document.getElementById('waves-debug-icon');
+  if (icon) icon.classList.toggle('stuck', isStuck);
 }
 
 // Manual escape hatch for stuck waves: kill all living entities by setting
