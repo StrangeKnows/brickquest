@@ -34,20 +34,24 @@ var STARTING_KIT_COUNTS = {
 };
 
 // ── CLASS AFFINITY (signature / secondary / baseline) ───────────────────
-// Each class has TWO signature colors (highest output, fastest refresh)
-// and TWO secondary colors (neutral output, medium refresh). Everything
-// else is baseline (reduced output, slow refresh).
+// Each class has SIGNATURE colors (highest output, fastest refresh) and
+// SECONDARY colors (neutral output, medium refresh). Everything else is
+// baseline (reduced output, slow refresh).
+//
+// Source of truth: DESIGN_S012_PROPOSAL_V2.txt §2.2.
+// Per-class signature counts vary (Formwright has 3, others have 2) —
+// reflects the design's per-class identity, not a bug.
 //
 // Phase 2 will fold this into a unified CHARACTERS table alongside name,
 // icon, HP, die, speed. For Phase 1, isolated here so combat formulas
 // are self-contained.
 var CLASS_AFFINITY = {
-  breaker:     { signature: ['red',    'gray'],   secondary: ['orange', 'yellow'] },
-  formwright:  { signature: ['blue',   'purple'], secondary: ['black',  'white']  },
-  snapstep:    { signature: ['orange', 'red'],    secondary: ['yellow', 'green']  },
-  blocksmith:  { signature: ['gray',   'orange'], secondary: ['red',    'yellow'] },
-  fixer:       { signature: ['white',  'black'],  secondary: ['purple', 'green']  },
-  wild_one:    { signature: ['green',  'yellow'], secondary: ['orange', 'blue']   },
+  breaker:     { signature: ['red',    'gray'],            secondary: ['orange'] },
+  formwright:  { signature: ['blue',   'purple', 'black'], secondary: ['white']  },
+  snapstep:    { signature: ['orange', 'red'],             secondary: ['yellow'] },
+  blocksmith:  { signature: ['gray',   'yellow'],          secondary: ['orange'] },
+  fixer:       { signature: ['white',  'black'],           secondary: ['purple'] },
+  wild_one:    { signature: ['green',  'yellow'],          secondary: ['black']  },
 };
 
 // ── BASE HEAL AMOUNT ────────────────────────────────────────────────────
