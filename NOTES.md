@@ -2733,3 +2733,823 @@ next audit.
   v0.13.1 patch — all three are post-ship polish on the v0.13.0
   foundation, not new feature scope.
 
+
+## Session 014 — Wave Harness, Bleed/Drain Mechanics, 0.14 Framework Close (April 24-25, 2026)
+
+This session covers a long arc from v0.13.1 through v0.14.67. Several
+context compactions happened along the way, so the notes below are
+reconstructed from the handoff doc and the in-context state at session
+close. Some intermediate v0.14.x work pre-dates this session's start
+but is included here because there was no Session 014 boundary in the
+notes prior — this entry catches the project diary up to current code.
+
+### Part A — Build 0.14.0 "Action Hub" closeout
+
+Build 0.14.0 was the design doc's "biggest UX win" milestone. Status
+tab was redesigned as a Character Dashboard with four explicit
+sections: SELF, ALLY, CLASS, BOARD. Action functions
+`_dashActionsSelf`, `_dashActionsAlly`, `_dashActionsClass`,
+`_dashActionsBoard` render each section. Enhanced Movement was
+stripped (no references remain).
+
+Zone-scoped ally actions landed for Fixer (Heal Ally, Mass Repair).
+Other classes get the "Heal Ally is Fixer's signature" stub message
+in the ALLY section — this is intentional scaffolding, not a missing
+feature; class-specific zone actions land in v0.15/0.16.
+
+Outstanding from 0.14.0 scope: multi-color charge cost framework.
+`spendBrickCharge(p, color, n)` is single-color only. No current
+action requires multi-color cost so the framework hasn't been
+forced. Will pull in naturally with v0.15/0.16 class actions.
+
+6 of 7 scope items shipped. v0.14.0 framework declared closed
+at the hold-tier radial completion (Part F below).
+
+### Part B — Bleed-out mechanic (initial integration + S014 polish)
+
+Killing blows now trigger a bleed window instead of instant death.
+The player's HP visibly drains over a window during which heals
+trigger a rescue arc back toward positive HP.
+
+Constants (rumble.js around line 5989):
+  - BLEED_DURATION_MAX_MS = 2500ms baseline
+  - BLEED_DURATION_MIN_MS = 500ms (minimum window after overflow)
+  - BLEED_OVERFLOW_PENALTY_MS = 100ms per HP of overflow damage
+
+Functions:
+  - applyDamageToPlayer(dmg) — entry for damage. Routes non-killing
+    blows to instant apply, killing blows to bleed initiation
+  - applyHealToPlayer(amount) — entry for heals. Routes any heal
+    through bleed-rescue when player.bleedOut is set
+  - applyBleedRescue(healAmount) — bends bleed trajectory upward
+    when heals land. Preserves remaining duration so timing-based
+    rescue gameplay is honored
+  - updateBleedOut(dt) — per-frame interp from fromHp to toHp
+
+Damage routing through bleed:
+  - Poison DoT (line ~540)
+  - Catch-all damage (line ~3611)
+  - Entity contact (line ~5172)
+
+Heal routing through bleed-rescue:
+  - Overload white (line ~1734)
+  - White field tick (line ~1822)
+  - Regen tick inside updateRegen (line ~5858)
+  - doWhiteHeal (line ~6010)
+  - Purple vampiric (now in applyDrainHeal — see Part C)
+
+S014 polish:
+  - Whole-number HP guarantee. Internal interp values stay float
+    for clean math but player.hp is rounded every update tick.
+    Three entry points enforce this: updateBleedOut, applyHealToPlayer,
+    applyDamageToPlayer non-killing path.
+  - Faint red screen-tint overlay during bleed (`#rumble-bleed-overlay`).
+    Lazy-injected to body via _ensureBleedOverlay() so it works in
+    any host page (test harness, players.html) without HTML changes.
+    Radial gradient (vignette style), pulses with `bleedPulse`
+    keyframes (1.4s ease-in-out infinite). Fades in 300ms (urgency)
+    on bleed start, out 600ms (relief) on bleed end. Cleared on
+    `_internalEnd` so it doesn't persist into picker/end overlays.
+  - Revive minigame tap target constrained to `#revive-heart-stack`
+    (260×260 / 60vmin square) instead of whole overlay. Tighter
+    interaction model; heart is the focal point both visually AND
+    interactively. Overlay still catches stray clicks so they don't
+    leak to canvas/HUD.
+
+### Part C — Purple drain mechanic (NEW PATTERN, paired with bleed)
+
+Designed as the inverse of bleed. Bleed shrinks HP over time on
+killing blows; drain GROWS HP over time on lifesteal. Both share
+the smooth-interpolation pattern, but with opposite emotional
+weight — bleed is dire/urgent, drain is empowered/vampiric.
+
+Constants:
+  - DRAIN_DURATION_MS = 700ms baseline (faster than bleed; feeding
+    is eager, not labored)
+  - DRAIN_DURATION_EXTRA_MS = 80ms per HP added (so multi-hit
+    bursts compound into a longer arc, not a faster one)
+
+Functions:
+  - applyDrainHeal(amount) — replaces instant `player.hp += amt`
+    at purple lifesteal site (~line 7820 area). Compounds when
+    drain already active (extends toHp + duration). Bypasses
+    cleanly to applyBleedRescue when player is bleeding (rescue
+    takes precedence; no competing animations)
+  - updateDrain(dt) — per-frame interp, accounts to battleStats
+    on completion, surfaces overheal floater if final > hpMax
+  - drawDrainAura() — pulsing purple aura on canvas at player
+    position. Two layered rings: soft outer radial gradient
+    throbs +12+pulse*8 px, sharper inner stroke at r+8. Pulse
+    frequency scales with HP gained — one beat per int-HP
+    increment, so the aura visibly flares each tick.
+
+Wired in update loop at line ~907 (next to updateBleedOut) and
+in draw at line ~1567 (next to drawRegen).
+
+### Part D — Wave mode test harness (rumble_test.html)
+
+Built as a serious dev tool, not a toy. Used to validate class
+identity work in v0.15.0 by giving real per-class data.
+
+Features:
+  - 10 hand-tuned waves (BASELINE goblin → BOSS+ADDS stone_colossus
+    + goblins). generateRandomWave for waves >10.
+  - _waveState (active, currentWave, highestReached, advancing)
+  - spawnWave / showWaveBanner / wave HUD / wave badge
+  - Wave-clear detection: enemyKilled event + 250ms poll fallback
+    in updateLiveDebug for missed-event cases
+  - isWaves config: entityCount=0, suppressRespawn=true,
+    suppressLootPenalty=true, cheeseAutoApply=true
+  - Brick refill between waves (Rumble.refillBricks)
+
+Wave-victory screen (post-wave):
+  - Three columns: OFFENSE / DEFENSE / ECONOMY
+  - Per-column stats with FELLED list, brick spend, brick gain
+  - Cheese banner if cheese was eaten
+  - CONTINUE primary button + ESC secondary (triggers run summary)
+  - Diagnostic footer for the dev tool
+
+Run-summary screen (ESC from wave-victory OR auto on run end):
+  - COMBAT TOTALS, SPOILS, DAMAGE BY COLOR (bar chart with %),
+    DAMAGE BY TARGET (bar chart family-colored), BRICKS USED,
+    BESTS (best DPS wave, longest, biggest hit, avg time/wave,
+    avg dmg/wave), FELLED, PER-WAVE TIMELINE
+  - RESUME button restores wave-victory if that was underneath
+  - END RUN reloads page (clean reset)
+  - _waveHistory[] accumulates per-wave deltas for aggregation
+  - In-progress wave's partial delta is included in totals on
+    mid-wave ESC
+
+Active-DPS measurement:
+  - _battleStats.activeCombatMs accumulator
+  - _battleStats._lastDamageAt timestamp
+  - 1500ms window connects bursts/recharges, excludes long pauses
+  - Wave-victory shows "active DPS" not wave-DPS, plus uptime %
+
+Damage attribution (NEW battleStats fields):
+  - damageByColor: { red: 247, purple: 102, ... }
+  - damageByTarget: { goblin: 96, stone_troll: 240, ... }
+  - Both accumulate at the single damage point in damageEntity
+    (rumble.js line ~4587)
+  - Critical for tuning v0.15.0 class identity work — tells you
+    whether classes ACTUALLY play differently when given the
+    same kit
+
+Live debug panel (originally always-visible, refactored to icon):
+  - Initial design: top-right always-visible panel showing
+    entity state every 250ms
+  - Problem: panel position overlapped brick bar's top buttons,
+    blocking taps even with pointer-events:none
+  - Fix: collapsed to a 32×32 ⛁ icon at bottom-left. Tap to
+    toggle panel above. Icon pulses red when stuck>8s so the
+    affordance is still discoverable when needed.
+
+### Part E — Wall fixes (recurring bug, solved at source)
+
+Two wall bugs were addressed:
+
+1. Walls take damage from player contact. Previously walls only
+   broke when entities damaged them; player just got blocked.
+   In waves mode this meant being trapped if caught in your own
+   wall. Now player contact ticks wall HP via `_playerCooldown`
+   gate at 0.6s intervals (vs entity 2.0s outer-bump). Small
+   walls (4 HP) break in ~2.4s of contact; bigger walls scale.
+
+2. Walls causing player to leak outside arena bounds. Earlier
+   fix added re-clamp logic which oscillated and could still
+   leak. Real fix at SPAWN TIME instead of runtime push:
+
+   Rule 1: If wall would contain the player, shift wall center
+   AWAY from the player so the player ends up at the wall's near
+   edge. "Wall spawns from player position out."
+
+   Rule 2: Clamp wall center to arena bounds so (cx ± maxR,
+   cy ± maxR) is fully inside arena.
+
+   With these spawn-time guarantees, the wedge condition can no
+   longer arise. Reverted runtime push complexity to simple
+   push-out + clamp safety net.
+
+### Part F — Hold-tier radial menu framework (closes 0.14.0)
+
+White overload had a working radial fan for ally targets. Other
+colors had a "(item 6)" placeholder in the CLASS section of the
+Action Hub. This session shipped the generic option-radial framework
+so all colors support hold-radial menus.
+
+Architecture:
+  - HOLD_RADIAL_COLORS extended from ['white'] to all 9 colors
+  - _GENERIC_RADIAL_OPTIONS map: per-color placeholder option list
+    (red: Strike/Cleave, gray: Brace/Wall, etc.). Two options each
+    for now — enough to validate layout and routing without
+    committing to specific class behaviors. v0.15/0.16 fills with
+    real class actions.
+  - _renderOptionRadialFan(s) — generic option list renderer.
+    Mirrors _renderAllyRadialFan structure but with generic
+    icons/labels.
+  - _holdMove detects both ally targets AND option targets under
+    pointer; dragTarget holds the matched id
+  - _holdUp routes by which kind hit: ally branch, option branch,
+    or self/chip
+  - _fireTierAction signature changed from targetCls to generic
+    target; option-label routing branch toasts the action label
+
+Layout rule per Ross's spec ("first option direct to right, each
+additional adds below, pushes up first filling radial menu"):
+  - N=1: option at angle 0 (direct horizontal toward chip's
+    natural direction)
+  - N=2: option 0 at angle 0, option 1 at -π/4 (45° up)
+  - N=3: 0, -π/4, -π/2 (vertical-ish stack growing up)
+  - N≥4: full upper-half arc evenly distributed from 0 to -π
+  - Mirrors correctly when chip is on right side of screen
+    (offset negated so "upward" stays upward visually)
+
+Ported to test_players.html for parity. Memory rule strengthened
+to enforce paired delivery: "When delivering players.html for
+Brick Quest, ALWAYS also deliver test_players.html in the same
+batch."
+
+Placeholder texts dropped from CLASS section ("(item 6)") and
+ALLY section ("item 5"). Captions now read as intentional ("hold
+any brick chip for tier menu", "class abilities in v0.15/0.16")
+rather than dev cruft.
+
+### Part G — External pause API
+
+Symptom Ross caught: dying on the wave-victory screen. Player
+kept taking damage from poison DoTs and entity contact while
+the screen was up.
+
+Root cause: the rumble loop only paused on `_revivePaused` (CPR
+minigame). Wave-victory and run-summary screens showed visually
+but didn't pause `update(dt)`. So entities ticked AI, DoTs fired,
+auras triggered, anything that damaged the player kept hitting.
+
+Fix: new `_externalPause` flag in rumble.js, gated alongside
+`_revivePaused` in the loop. Public API `Rumble.setExternalPause(bool)`
+exposed for host pages. Test page calls true on showWaveVictoryScreen
+and showRunSummary, false on continueToNextWave and resumeFromSummary
+when no wave-victory underneath. draw() and updateHUD() keep running
+so the visual state stays accurate; only sim freezes.
+
+Active-DPS hygiene bonus: setExternalPause(false) clears
+`_battleStats._lastDamageAt = 0` on unpause so the active-combat
+tracker doesn't count the paused window as engagement time.
+
+### Part H — Misc polish
+
+  - Black brick visibility. #333333 was unreadable on the dark
+    background. Changed BRICK_HEX/BRICK_COLOR_HEX to #6a5870
+    (slate-purple) in rumble.js, game.js, rumble_test.html.
+  - Brick bar gutters widened. panelWidth 54→84px, bars inset
+    12px from page edges, 24px gutter to arena. Drag-target
+    arena clamp prevents player drift onto bars.
+  - Arena drag-target clamp — pointer drift onto brick bars no
+    longer pulls player position outside arena.
+
+### Part I — Handoff doc + memory rule updates
+
+End of S014 produced HANDOFF_S014_to_S015.txt at the repo root.
+Top-priority block at the top covers three things:
+
+  A. File access reality. Repo URL fetching often blocked; the
+     working pattern is "pull the repo at github.com/StrangeKnows/
+     brickquest (public) and scan the current file structure" —
+     phrased as repo-pull rather than raw-URL-fetch.
+  B. Three reference docs and their distinct roles: master design
+     doc (DESIGN_S012_PROPOSAL_V2.txt), the handoff itself, and
+     the proposal audit (suggestions only, never auto-build).
+  C. First work order for S015: overload nerf BEFORE class
+     identity. Tier 1 baselines stay; tier 2/3/4 deltas compress.
+     Black overload area shrinks specifically. Reserves headroom
+     for fusion. Recommended tier curve: gentle climb, ~1.8-2.2×
+     tier 1 at tier 4. Add fusion to roadmap at slot 0.16.5.
+
+Memory rules added/updated this session:
+  - Paired delivery rule strengthened: players.html ↔
+    test_players.html ship together always
+  - Diagnostic-first debugging protocol formalized
+  - Repo-pull kickoff phrase preserved as the working incantation
+
+### Files at session close
+
+Lines (verified at S014 close):
+  rumble.js          9865
+  test_players.html  7933
+  players.html       7312
+  server.js          2880
+  rumble_test.html   2088
+  dm_screen.html     1818
+  game.js             613
+
+### Version
+
+  v0.14.67 at last commit (3654818). Bundles 0.14.0 framework
+  shipping (action hub redesign, bleed-out integration, hold-tier
+  radial framework), bleed and drain polish, wave mode test
+  harness, wall spawn fixes, external pause API, and various
+  smaller polish.
+## Session 015 — v0.15.0 Class Identity foundations + audit transparency (April 25, 2026)
+
+Build 0.15.0 ("Class Identity: Rumble") opened with this session's deliverable.
+Architectural foundations for the per-class rumble pass landed: white redesigned,
+per-color radius profile knobs added, drag indicators unified, audit panel made
+fully transparent, and pre-rumble passives shipped for all 6 classes. The
+deeper per-color class mechanics (BK red, SS orange, WO green, BS gray/yellow,
+FW purple) remain queued as 0.15.x patches inside this build.
+
+Version bump: 0.14.x → 0.15.0 (minor) on this milestone.
+
+### White redesign — burst + follow-field architecture
+
+The previous white field was a singleton placed at drop location with a single
+heal-per-tick value. v0.15.0 rebuilds it as a per-cast field instance that
+follows the targeted player, with explicit burst-vs-pool separation matching
+the design doc's white role (signature healer with positional commitment).
+
+**Cast types (locked):**
+
+* **Self-cast** (tap on bar OR drag within 30px of player) — instant burst
+  HP to player, then a follow-field that tracks the player and heals OTHER
+  allies in radius from a separate pool. Self-cast target doesn't tick from
+  the field; they got the burst.
+* **Drag-far** (drag > 30px from player) — no burst. Stationary field at
+  drop point with full pool. Anyone who enters (incl. caster) gets HoT.
+* **Tap-retap on same target** — refresh-in-place. Existing follow-field's
+  pool, timers, and crit flag reset; no field stacking. (Stacking is fusion
+  territory, not v0.15.0.)
+* **Crit** — doubles burst (matches red/blue/gray convention). Cleanse
+  fires at cast moment if target is in radius.
+
+**Custom tier scaling (`COLOR.white.customTierFn`):**
+
+The universal `BASE × m` pipeline produces `Math.ceil` plateaus that break
+"spend a brick → get more" at integer boundaries. White uses a custom tier
+function that defines total HP directly per tier; burst, pool, tick, and
+duration all derive from it. Same `effectiveAt` interface; class affinity
+and tap-scale still multiply on top.
+
+```
+total      = BASE + (tier-1) × 2          →  5, 7, 9, ..., 23  (strict +2)
+burst      = ceil(total / 2)               →  3, 4, 5, ..., 12   (strict +1)
+fieldPool  = total - burst                 →  2, 3, 4, ..., 11   (strict +1)
+tickValue  = floor(burst / 2)              →  1, 2, 2, 3, ..., 6
+ticks      = ceil(fieldPool / tickValue)   →  derived
+duration   = ticks × 0.5                   →  ~1.0s low tier, grows late
+```
+
+Pre-affinity table (T1-T10):
+
+| Tier | Total | Burst | Pool | Tick | Ticks | Dur |
+|------|-------|-------|------|------|-------|-----|
+| T1   | 5     | 3     | 2    | 1    | 2     | 1.0s |
+| T2   | 7     | 4     | 3    | 2    | 2     | 1.0s |
+| T5   | 13    | 7     | 6    | 3    | 2     | 1.0s |
+| T10  | 23    | 12    | 11   | 6    | 2     | 1.0s |
+
+Post-affinity (Fixer signature ×1.25):
+
+| Tier | Burst | Pool | Total |
+|------|-------|------|-------|
+| T1   | 4     | 3    | 7     |
+| T5   | 9     | 8    | 17    |
+| T10  | 15    | 14   | 29    |
+
+Strict-monotonic +2 per tier post-affinity. No plateaus. T1 = 4 HP burst
+(slightly above the legacy 3-HP tap heal, per design intent).
+
+**Engine state:**
+
+* `whiteField` (singleton) → `whiteFields = []` (array of instances)
+* Each instance: `ox/oy`, `radius`, `healPerTick`, `healRemaining`,
+  `tickInterval`, `tickTimer`, `pulse`, `sparkleTimer`, `firstTickDouble`,
+  `followTarget` (entity reference or null for stationary)
+* Field follows target each frame; expires immediately if `followTarget.hp ≤ 0`
+* `applyWhiteCleanse(ox, oy, radius, tier)` fires on every cast — gated on
+  `_currentCrit`, strips up to `tier` player statuses (poison → slow →
+  weaken → daze → confuse priority) and entity positives (`_enraged` →
+  `attackBoost` → `speedBoost`)
+
+**Legacy compatibility:**
+
+`computeHeal(cls, color, owned, overload)` returns `fx.totalHeal || fx.heal`
+for white (full field pool delivered). Server, board, and preview callers
+still get a single sensible number representing the cast's full heal value.
+
+### Per-color radius profile (`radiusBase` / `radiusSlope`)
+
+The universal pipeline scales every color's radius via `BASE_R × m` where
+`m = tap × aff × tierCurve(tier)`. Tap-drag blue at T1 felt oversized
+(63px) and per-tier deltas were ~9px (visually subtle on mobile).
+
+New COLOR profile knobs allow per-color override of radius math without
+touching damage/heal/duration outputs:
+
+```js
+COLOR.blue = {
+  dmg: 0.80,
+  burstDmg: 0.40,
+  radiusBase: 37,    // overrides global BASE_R (50)
+  radiusSlope: 0.30, // overrides global tierCurve slope (0.15) for radius
+};
+```
+
+`effectiveAt` checks for these knobs and uses them when present; otherwise
+falls back to universal math. Class affinity and tap-scale still multiply
+on top. Damage outputs remain on the universal pipeline.
+
+Blue progression after override (formwright canonical, 2 owned):
+
+| Tier | Radius | Δ |
+|------|--------|---|
+| T1   | 46px   | — |
+| T2   | 60px   | +14 |
+| T5   | 102px  | (per-tier ~14px) |
+| T10  | 171px  | (clearly perceptible) |
+
+T1 dropped from 63 → 46 (29% smaller, tighter tap-drag). Per-tier delta
+jumped from 9 → 14 (clearly perceptible during overload-charge). T10 grew
+from 147 → 171 (slightly bigger endgame, still arena-clamped).
+
+Blue-only override for now. Other colors keep universal pipeline. Future
+colors that want similar customization just set the same knobs.
+
+### Unified drag indicator (`drawCastIndicator`)
+
+Targeting reticles for all 9 colors collapsed into a single function.
+Targeting shows ONLY the area of effect — no inner circles, labels,
+spikes, cross-marks, or per-color flourishes. Persistent-effect decoration
+(orange spike trap, white field, yellow aura) lives on each effect's own
+renderer, drawn separately when the effect actually exists.
+
+```js
+drawCastIndicator(color, hex, dragPos)
+```
+
+* Resolves canvas pos: cursor when over arena, else player position
+* Reads tier from `overloadState` (held) or defaults to 1 (tap)
+* Calls `_fx(color, tier)` for tier-correct radius
+* Draws dashed line player→cursor when over arena
+* Draws outer AoE ring with brightness based on active-drag vs held-preview state
+
+Removed ~270 lines of inline drag-indicator code (9 separate blocks) in
+favor of 9 single-line calls. Legacy aliases `drawDragIndicator` and
+`drawBlueDrag` retained as forwards for any external callers.
+
+Universal "show while held" — every color previews when overload is held
+OR when dragging. Faint pulse alpha while held, brighter when actively
+dragged. Removes the prior split where some colors showed previews and
+others didn't.
+
+### Audit panel transparency
+
+Goal: every number shown in the audit reflects what the cast actually
+delivers. No fallbacks, no "primary only" hides, no surprise contributions.
+
+**Compact dual-cell format** — each color's table cell shows what the
+player sees floating up in arena:
+
+| Color  | Cell format    | Meaning |
+|--------|----------------|---------|
+| red    | `3`            | impact damage |
+| blue   | `5/3`          | bolt-strike / AoE-others |
+| purple | `4`            | radial damage |
+| black  | `2+3w`         | impact + wither stack damage |
+| green  | `1`            | per-tick stack damage |
+| white  | `4+3`          | instant burst + field pool |
+| yellow | `·`            | confuse aura, no headline number |
+| orange | `2`            | per-pulse spike damage |
+| gray   | `4`            | wall HP |
+
+**`expectedDmg` sums all damage paths.** Previously expected = primary only,
+which made ratios look like 3.4× for blue overloads (false alarm — pipeline
+was working, audit just wasn't summing). Now:
+
+```
+expectedDmg = primary
+            + burstDmg × (entities-in-radius - 1)
+            + witherDmg × entities-in-radius
+```
+
+Component breakdown surfaced in LAST FIRED line for transparency:
+
+```
+LAST FIRED: blue T3   expected dmg 14 [prim 5 + burst 3×3]   actual 14   ratio 1.00×
+LAST FIRED: black T2 [CRIT]   expected dmg 8 [prim 2 + wither 3×2]   actual 8   ratio 1.00×
+```
+
+**`healedByColor` tracking.** New `_battleStats.healedByColor` mirrors
+`damageByColor` for white audit ratios. Burst and field-tick paths both
+increment it. White's LAST FIRED line shows expected vs actual heal
+instead of damage:
+
+```
+LAST FIRED: white T1   expected heal 7 [burst 4 + pool 3]   actual 7   ratio 1.00×
+```
+
+Ratio color thresholds unchanged (good 0.85-1.15, warn outside that, bad
+beyond ±40%, persistent-fx warning when DoT/HoT contamination active).
+
+### Pre-rumble passives — all 6 classes (per design doc §2.5)
+
+Every class gets a passive applied at rumble start. No activation, no
+input — felt immediately. Floater on rumble entry indicates which passive
+fired.
+
+| Class       | Passive                                             | Implementation |
+|-------------|-----------------------------------------------------|----------------|
+| Breaker     | First hit deals +50% damage                          | `player.breakerFirstHit` flag, ×1.5 finalDmg in `damageEntity`, consumed on first hit |
+| Formwright  | 2× brick refresh for 10s (existing FW Charge)        | Server `refreshBoost` (preserved as canonical FW passive) |
+| Snapstep    | All enemy attacks miss for first 3 seconds           | `player.snapstepInvulnUntil = now + 3000`, short-circuit at top of `applyDamageToPlayer` with EVADED floater |
+| Blocksmith  | +1 armor pip at rumble start                         | `player.armor = min(armorMax, armor+1)` |
+| Fixer       | Start at hpMax + 1 (overheal pip pre-fight)          | `player.hp = hpMax + 1`; existing overheal renderer handles display |
+| Wild One    | First enemy in rumble starts with 1 poison stack     | Applied to `entities[0]` after spawn + pack twins; uses canonical `poisoned/poisonStack/poisonTimer/poisonTick` fields |
+
+**Insertion site:** all six branch off a single block in `_internalStart`,
+right after the existing FW `refreshBoost` block. Order is alphabetical-
+by-class for reading clarity. Each class's passive uses its character's
+UI color tone for the floater.
+
+**Surfacing to player (open):** passives currently fire silently apart
+from the rumble-start floater. There's no Character Dashboard entry
+listing class abilities. That belongs to Build 0.14.0's "Action Hub"
+scope which is partial; the design doc Part 7 spec'd the layout but
+the dashboard UI work is queued separately. Status icon while a passive
+is active (e.g. SS invuln window) is also a TODO.
+
+### Adjacent fixes shipped this session
+
+These weren't in the v0.15.0 spec but were in scope as cleanups before
+deeper class-identity work could land cleanly:
+
+* **Witherbolt nerf.** Self-scaling capped via linear `1 + 0.10 × stacks`
+  (prev `1.5^stacks`, runaway at 7.59× by stack 5). Other-source amp
+  asymptote tightened 1.6 → 1.4, slope 0.75 → 0.85. Crit doubles base
+  damage and adds +1 flat stack (was ×2 stack count, double-stacking).
+  `MAX_WITHER_STACKS = 5` constant; over-cap refreshes timer.
+
+* **Yellow daze/confuse semantics swap.** Player-facing names had drifted
+  from intent. Old `g.confused` (movement inversion) now `g.dazed`
+  (wandering AI). New `g.confused` (retarget nearest entity, real damage
+  to target/self). Old +2× damage rider on dazed removed — daze is now
+  pure timing disruption. Yellow attack flash at confuse-impact moment
+  (`g._confuseFlashTimer`) takes priority over white damage-flash.
+
+* **Blue impact flash.** Every blue cast now spawns a snappy shockwave
+  sized to actual blast radius + lingering radial glow that fades over
+  0.4s. Crit gets extra shockwave + flourish layered on top. New
+  `blueFieldFlashes` array, updater, renderer wired into main loop.
+  Resets between battles. Players see exactly where the AoE landed and
+  how big it was.
+
+* **Class name correction.** "Strategist" was stale memory from earlier
+  drafts; canonical class is "Formwright" (signature: blue/purple/black,
+  secondary: white). All session references updated.
+
+### Status against design doc Build 0.15.0 scope
+
+✅ Shipped:
+* FX white amplification (delivered as full white redesign, supersedes "1.5× + double tick" spec)
+* Pre-rumble passives all 6 classes
+* Architecture: per-color radius profile, unified drag indicator, audit transparency
+
+❌ Queued for 0.15.x patches:
+* BK red knockback + larger hitbox
+* SS orange 0.5s invuln window (per-cast, distinct from First Step passive)
+* WO green viral poison spread passive (poisoned entities auto-spread per 2s)
+* BS gray mid-fight armor regen (1 pip per 8s)
+* BS yellow true taunt mechanic
+* FW purple teleport + dual blast
+* Universal purple cone AOE (60° class-scaled)
+
+Each remaining item is independent. Recommended sequence for follow-up:
+small per-class mechanic upgrades first (SS invuln, BS gray regen), then
+medium (BK red, BS taunt, WO viral), then large redesigns (FW purple,
+universal cone).
+
+### File state
+
+Deliverables in `/mnt/user-data/outputs`:
+
+* characters.js — white customTierFn, blue radiusBase/radiusSlope, effectiveAt threading
+* rumble.js — whiteFields[], doWhiteHeal/fireOverloadWhite split, drawCastIndicator, applyWhiteCleanse, blue impact flash, pre-rumble passives, audit snapshot summing all paths, healedByColor tracker
+* rumble_test.html — audit panel dual-cell format, heal-aware LAST FIRED, breakdown components
+
+All syntax-verified.
+
+### Locked design decisions (this session)
+
+* **White is always a field.** Tap and overload share architecture. Self-
+  cast = burst + follow-field; drag-far = stationary field, no burst.
+* **Burst is half of total** (ceil), pool is the other half. Strict-monotonic
+  per tier; no plateaus. Crit doubles burst.
+* **Field stacking is fusion territory.** Same-target re-tap refreshes in
+  place; no instance stacking. Multiple fields can coexist in different
+  locations.
+* **Targeting reticles show area-of-effect only.** No decorations, no
+  inner solid circles, no labels. Persistent effects own their own visual
+  identity.
+* **Audit shows the truth.** Every cell = what the cast actually delivers.
+  expectedDmg sums all damage paths. White has its own heal-vs-actual
+  ratio.
+* **Per-color radius profile is a clean architectural extension.** New
+  knobs (`radiusBase`, `radiusSlope`) override universal math for radius
+  only. Other outputs stay universal. Affinity and tap-scale still apply.
+* **Pre-rumble passives are passive.** No activation. Felt immediately.
+  Surfaced via floater on rumble entry. Dashboard listing TODO.
+
+---
+## Session 015 — v0.15.0 Roadmap & Actionable Plan
+
+This section is the working plan for completing Build 0.15.0 ("Class Identity:
+Rumble") and the runway into 0.16.x. It locks chunks, milestones, and the
+audit-driven polish thread that runs alongside class identity work.
+
+The foundations milestone (white redesign, per-color radius profile, drag
+indicator unification, audit transparency, pre-rumble passives) shipped in
+the v0.15.0 minor bump that opens this section. Everything below builds on
+that foundation.
+
+### Status snapshot (v0.15.0 entry point)
+
+Per design doc §8.4 scope checklist:
+
+| Item | Status |
+|------|--------|
+| Pre-rumble buffs per class (all 6) | ✅ shipped |
+| FX white 1.5× + field ticks double | ✅ shipped (delivered as full white redesign — burst + follow-field, customTierFn, strict-monotonic +2/tier) |
+| Per-color rumble amplification (architecture) | 🟡 partial (radiusBase / radiusSlope knob exists, blue first user) |
+| Purple cone AOE (60° default, class-scaled) | ❌ pending |
+| FW purple teleport + dual blast | ❌ pending |
+| BK red knockback + larger hitbox | ❌ pending |
+| SS orange invuln window (0.5s on tap) | ❌ pending |
+| WO green viral poison spread passive | ❌ pending |
+| BS gray mid-fight armor regen | ❌ pending |
+| BS yellow true taunt mechanic | ❌ pending |
+
+Plus one carryover from S014→S015 handoff that needs to land before the deeper
+class work: **overload tier-curve audit + compression** to land T4 ≈ 1.8-2.2× T1
+and reserve headroom for fusion. Witherbolt got linear scaling this milestone;
+the system-wide pass is still queued.
+
+### Chunk sequence (locked)
+
+Each chunk targets a single session unless flagged otherwise. After every
+chunk: run wave mode with each affected class through the same wave sequence,
+compare damage-by-color and damage-by-target attribution. Numbers should look
+DIFFERENT per class — that is the success metric for class identity.
+
+**Chunk 0 — Tier-curve audit + compression** (session, foundational)
+
+Carries the deferred S014 work order. Use the audit panel's dual-cell + LAST
+FIRED ratios to map T1/T2/T3/T4 outputs across all 9 colors. Targets:
+
+* T4 ≈ 1.8-2.2× T1 across damage outputs
+* Black overload area shrinks significantly (currently scales too aggressively)
+* Reserve big jumps for fusion (0.16.5)
+
+Implementation: extend the `radiusBase` / `radiusSlope` per-color profile to
+accept `dmgBase` / `dmgSlope` overrides. Don't rebuild the universal pipeline;
+override per color where the audit shows it's needed.
+
+Audit thread A items that pair naturally here:
+
+* Damage curve smoothing pass (proposal: "currently too steep")
+* Magic-ignores-armor rule (clean color-family interaction)
+* Gray pip-per-tap reduction (proposal flagged as too generous at 2)
+
+**Chunk 1 — Purple cone refactor** (session, foundational)
+
+Replace 360° purple burst with 60° default cone. Class-scaled width: Formwright
+wider (signature), Fixer secondary, others narrower. This is a global geometry
+change touching every purple cast site. Lands first because every per-class
+purple mechanic stacks on it.
+
+Test: every class fires purple, cone visually correct, damage-by-target
+attribution shows the right enemy hits.
+
+**Chunk 2 — Formwright + Breaker** (session)
+
+Most distinct pair, fastest signal that "switching classes feels like switching
+games."
+
+* FW purple teleport + dual blast zones (per design doc §2.3: tap/drag target,
+  teleport creates 70%-each-end blast)
+* BK red knockback + larger hitbox (1.5× knockback distance)
+
+Audit thread A pair: red combo (+damage stack, +crit per consecutive red hit).
+Stacks naturally on BK red work.
+
+**Chunk 3 — Snapstep + Blocksmith** (session)
+
+* SS orange invuln window: per-cast 0.5s invuln on tap-orange (distinct from
+  the First Step pre-rumble passive which gives 3s on rumble entry)
+* BS gray mid-fight armor regen: 1 pip every 8s during rumble
+* BS yellow true taunt: enemy aggro redirects to BS
+
+Audit thread A pair: orange aura "many traps" expansion (currently single
+aura, proposal calls for swarm).
+
+**Chunk 4 — Wild One + remaining polish** (session)
+
+* WO green viral poison: poisoned entities auto-spread to adjacent enemies
+  every 2s (passive, not on cast)
+* WO yellow Whistle pull (deferred to achievements / 0.18.0 if needs unlock
+  infrastructure)
+
+Audit thread A pair: goblin charge-then-cooldown AI + flee-below-30%-HP
+behavior (entity polish, supports class identity tuning by giving WO viral
+poison a more interesting target than flat-chase goblins).
+
+**Milestone — v0.15.0 complete**
+
+After Chunk 4: all per-color class mechanics shipped, tier curve audited and
+compressed, audit thread A polish landed alongside. Bump to 0.15.10 or 0.16.0
+depending on patch count accumulated. Run the full wave sequence with all 6
+classes; victory criterion is the design doc's test target: **switching
+classes feels like switching games.**
+
+### Roadmap entries beyond 0.15.0
+
+Captured here so they're not lost; design doc §8 owns the spine.
+
+* **0.16.0 Class Identity: Board** (1-2 sessions) — per-class overload menus
+  on board, SS Cache placement, BK alt (Shatter / Ground Slam / Bulwark), BS
+  Keystone, WO Mire + Spread, FW Scry + Confound, FX Heal Ally tiered
+
+* **0.16.5 Fusion** (NEW slot, per S014 handoff) — fusion gates advanced class
+  actions per the proposal. Slotted between class board identity and cheese
+  variants because it needs class actions to exist FIRST so it has something
+  to gate. Replaces the "where does fusion go?" open question. The overload
+  tier-curve compression in Chunk 0 reserves headroom for fusion to feel like
+  a real step-change.
+
+* **0.17.0 Cheese System** (1-2 sessions) — 6 variants, hold-to-charge eat,
+  Throw Cheese pre-rumble, DM panel inventory, max HP scaling per rarity
+
+* **0.18.0 Achievements & Unlocks** (1-2 sessions) — kill log, per-class
+  achievements, unlock gates for Ghost Step / Architect / Scry / Whistle /
+  Mire, unlock toasts
+
+* **0.19.0 Multiplayer Proximity Join** (2-3 sessions, major architecture) —
+  proximity detection, shared arena multi-player rendering, state sync,
+  individual loot zones, kill attribution
+
+* **0.20.0 Entity Overload** (1-2 sessions) — entity color levels, per-entity
+  charge bars, overload triggers with tiered effects, white cleanse for
+  entity debuffs, drop rate linked to color levels
+
+* **0.21.0+ Rares, Polish, Ship** (ongoing) — rare drop tables, class-specific
+  rare items, multi-player perf optimization, mobile UX refinement
+
+### Audit-driven polish thread (runs alongside class chunks)
+
+These don't get their own milestone; they pair with chunks above where
+natural fit. From PROPOSAL_AUDIT.md "Thread A — Polish the rumble":
+
+* ✅ pairs with Chunk 0: damage curve smoothing, gray pip-per-tap reduction
+* ✅ pairs with Chunk 2: red combo (consecutive red +damage / +crit)
+* ✅ pairs with Chunk 3: orange "many traps" swarm aura
+* ✅ pairs with Chunk 4: goblin charge AI + flee-below-30%
+* deferred: magic-ignores-armor rule (cross-color rule, may need its own slot)
+
+### Known bugs / cleanups (audit) to fold in opportunistically
+
+Not chunked, but worth landing whenever a chunk happens to touch the area:
+
+* Mobile victory screen centering / layout rework
+* Player header vibrating when scrolling on mobile
+* Mobile starting at odd point
+* Orange block does not persist on 100% completion
+* Player death in rumble event needs proper defeat screen + revive minigame cue
+
+### Working conventions reminder (locked, do not deviate)
+
+These carry forward from S011/S014:
+
+1. Default file delivery is modified files only
+2. players.html ALWAYS pairs with test_players.html
+3. Git push only at session end or explicit request
+4. No em dashes
+5. Diagnostic-first debugging
+6. Surgical str_replace, never wholesale rewrites
+7. Verify syntax after every JS edit (`node --check`)
+8. Use `ask_user_input_v0` for choice prompts
+9. Verify before stating facts (file sizes, version numbers, session numbers)
+10. Read the entire prompt, address every point, deliver — don't fragment
+    tasks into question-and-answer rounds when instructions are clear
+
+### Definition of done (per chunk)
+
+A chunk is "done" when:
+
+1. Code shipped, syntax verified
+2. Wave mode tested with each affected class
+3. Damage-by-color attribution shows distinct numbers per class
+4. NOTES.md appended with what landed (subsection under Session 015 or new
+   session boundary if context resets)
+5. Single `./save.sh -v "..."` push (patch bump per chunk inside 0.15.x)
+
+When all chunks complete, the next push is `./save.sh -V "..."` to bump 0.16.0.
+
+---

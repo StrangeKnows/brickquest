@@ -4473,6 +4473,17 @@ function damageEntity(g, dmg, aggro, source) {
   if ((g.markedTimer || 0) > 0) {
     finalDmg = Math.ceil(dmg * 1.5);
   }
+  // BREAKER FIRST STRIKE: First entity-damage event in the rumble gets
+  // +50% damage. Flag clears once consumed. Stacks with blue mark since
+  // they're independent multipliers (blue mark is a debuff on target,
+  // first-strike is a class buff on player).
+  if (player && player.cls === 'breaker' && player.breakerFirstHit) {
+    finalDmg = Math.ceil(finalDmg * 1.5);
+    player.breakerFirstHit = false;
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(g.x, g.y - 50, 'FIRST STRIKE!', '#993C1D', g);
+    }
+  }
   // PHASE E — true_burrow recover window: worm takes 1.5× damage while
   // stunned post-emerge. Rewards catching the emerge timing.
   if (g._recoverVulnerable) {
@@ -6046,6 +6057,14 @@ var BLEED_OVERFLOW_PENALTY_MS = 100; // ms shaved off duration per point of over
 
 function applyDamageToPlayer(dmg) {
   if (!player || dmg <= 0) return;
+  // SNAPSTEP "First Step" passive: all enemy attacks miss for first 3
+  // seconds of rumble. Snapstep evades early pressure during positioning.
+  // Window timestamp is set in pre-rumble passives block.
+  if (player.cls === 'snapstep' && player.snapstepInvulnUntil &&
+      performance.now() < player.snapstepInvulnUntil) {
+    showFloatingText(player.x, player.y - 40, 'EVADED', '#1D9E75', player);
+    return;
+  }
   var newHp = player.hp - dmg;
   // Non-killing blow — instant apply, no bleed. Round so HP stays integer.
   if (newHp > 0) {
@@ -8428,6 +8447,60 @@ function _internalStart(config) {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // PRE-RUMBLE PASSIVES (per design doc §2.5)
+  // Every class gets a passive applied at rumble start. No activation,
+  // no input — just felt immediately. FW's refreshBoost (above) is the
+  // legacy version of this and stays as the FW passive.
+  // ─────────────────────────────────────────────────────────────
+
+  // BREAKER: First hit deals +50% damage. Flag clears after first
+  // entity-damage event (consumed in damageEntity).
+  if (player.cls === 'breaker') {
+    player.breakerFirstHit = true;
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(player.x, player.y - 30, '💥 FIRST STRIKE', '#993C1D');
+    }
+  }
+
+  // SNAPSTEP: All enemy attacks miss SS for first 3 seconds of rumble.
+  // Implemented as an invulnerability timestamp checked in applyDamageToPlayer.
+  if (player.cls === 'snapstep') {
+    player.snapstepInvulnUntil = performance.now() + 3000;
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(player.x, player.y - 30, '✦ FIRST STEP', '#1D9E75');
+    }
+  }
+
+  // BLOCKSMITH: +1 armor pip at rumble start. Stacks above any starting
+  // armor (capped at armorMax in setArmor or assignment site).
+  if (player.cls === 'blocksmith') {
+    var _bsArmorMax = (typeof getArmorMax === 'function') ? getArmorMax() : 99;
+    player.armor = Math.min(_bsArmorMax, (player.armor || 0) + 1);
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(player.x, player.y - 30, '🛡 BUILDER\'S GUARD', '#EF9F27');
+    }
+  }
+
+  // FIXER: Start at hpMax + 1 (overheal pip pre-fight). Player has
+  // existing overheal rendering for hp > hpMax so this just bumps once.
+  if (player.cls === 'fixer') {
+    player.hp = (player.hpMax || 1) + 1;
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(player.x, player.y - 30, '✚ MEND READY', '#D4537E');
+    }
+  }
+
+  // WILD ONE: First enemy in rumble starts with 1 poison stack.
+  // Applied right after entities spawn (later in this function).
+  // Flag set here, applied in the entity-spawn block below.
+  if (player.cls === 'wild_one') {
+    player.wildOneFirstPoison = true;
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(player.x, player.y - 30, '🐍 BLIGHT MARK', '#1D9E75');
+    }
+  }
+
   // v4: Apply queued poison from failed green/black board events.
   // Each stack adds a poison tick; the duration is 6s (standard arsenal poison).
   // Server already decremented queuedPoisonBattles for this battle.
@@ -8470,6 +8543,25 @@ function _internalStart(config) {
     _packAdds.push(twin);
   });
   for (var pi = 0; pi < _packAdds.length; pi++) entities.push(_packAdds[pi]);
+
+  // WILD ONE "Blight Mark" passive: first enemy in the rumble starts
+  // with 1 poison stack. Applied AFTER entity spawn (and pack twins) so
+  // we always have at least one entity to mark when there's combat.
+  // Picks the first entity in the list — stable and predictable. Fields
+  // match the entity poison model: poisoned/poisonStack/poisonTick/poisonTimer.
+  if (player && player.cls === 'wild_one' && player.wildOneFirstPoison && entities.length > 0) {
+    var _wOneTarget = entities[0];
+    if (_wOneTarget && _wOneTarget.hp > 0) {
+      _wOneTarget.poisoned = true;
+      _wOneTarget.poisonStack = (_wOneTarget.poisonStack || 0) + 1;
+      _wOneTarget.poisonTimer  = Math.max(_wOneTarget.poisonTimer || 0, 6.0);
+      _wOneTarget.poisonTick = 0;
+      if (typeof showFloatingText === 'function') {
+        showFloatingText(_wOneTarget.x, _wOneTarget.y - 30, 'BLIGHT MARK', '#1D9E75', _wOneTarget);
+      }
+    }
+    player.wildOneFirstPoison = false;
+  }
   // Apply resistance overrides from host (e.g. rumble_test dialer).
   // cfg.entityResistances is a flat color→multiplier map keyed by brick color
   // (red/blue/green/etc). Each entity's resistances object takes these as
