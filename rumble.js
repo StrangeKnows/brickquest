@@ -916,6 +916,8 @@ function update(dt) {
   // Blue bolts, traps, armor
   updateBlueBolts(dt, bounds);
   updateBlueFieldFlashes(dt);
+  updateWarp(dt);
+  updateWarpTrails(dt);
   updateWitherbolts(dt);
   updateTraps(dt);
   updateGrayWalls(dt);
@@ -1052,6 +1054,7 @@ function draw() {
   drawBlueFieldFlashes();
   drawBlueBolts();
   drawWitherbolts();
+  drawWarpTrails();
 
   // ── Entity ──
   deadEntities.forEach(function(g) { drawDeadEntity(g); });
@@ -1122,6 +1125,36 @@ function draw() {
       ctx.restore();
     }
 
+    // ── Warp visuals (FW purple teleport) ──
+    // Multiplies sprite alpha for fade out/in, layers radiant pulse glow
+    // for departure + arrival beats. Both feed off player.warpState read
+    // by getWarpAlpha / getWarpPulse helpers (see warp module above).
+    var warpAlpha = getWarpAlpha();
+    var warpPulse = getWarpPulse();
+    if (warpPulse > 0) {
+      // Radiant purple aura — large soft halo behind the player. Peaks at
+      // departure and arrival; absent during transit (player is gone).
+      ctx.save();
+      ctx.globalAlpha = 0.55 * warpPulse;
+      var grad = ctx.createRadialGradient(
+        player.x, player.y, player.r * 0.5,
+        player.x, player.y, player.r * (3.0 + warpPulse * 1.5)
+      );
+      grad.addColorStop(0, '#CC99FFcc');
+      grad.addColorStop(0.5, '#9B6FD488');
+      grad.addColorStop(1, '#9B6FD400');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r * (3.0 + warpPulse * 1.5), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Sprite render block — wrapped in alpha multiplier so fade-out/in
+    // cleanly fades the entire player visual without rewriting each layer.
+    ctx.save();
+    ctx.globalAlpha *= warpAlpha;
+
     // Shadow
     ctx.save();
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
@@ -1156,6 +1189,8 @@ function draw() {
     ctx.textBaseline = 'middle';
     ctx.fillText(player.icon, player.x, player.y);
     ctx.restore();
+
+    ctx.restore(); // close warp-alpha wrapper
 
     // ── Armor pips around player circle ──
     var aMaxC = getArmorMax();
@@ -6085,6 +6120,12 @@ function applyDamageToPlayer(dmg) {
     showFloatingText(player.x, player.y - 40, 'EVADED', '#1D9E75', player);
     return;
   }
+  // Warp invuln (FW purple teleport, runs during entire 1000ms warp event).
+  // Player.warpState set when warp begins, cleared when sequence completes.
+  if (player.warpState) {
+    showFloatingText(player.x, player.y - 40, 'WARP', '#9B6FD4', player);
+    return;
+  }
   var newHp = player.hp - dmg;
   // Non-killing blow — instant apply, no bleed. Round so HP stays integer.
   if (newHp > 0) {
@@ -8067,46 +8108,202 @@ function startPurpleBurst(ox, oy) {
 // regardless of class; this only fires on drag-and-drop.
 //
 // Per design doc §2.3 (FW PURPLE: teleport on tap/drag target, dual blast
-// at each end). Sequencing per locked S015 spec: target blast spawns
-// immediately at drop point, player teleports, then origin blast spawns
-// after `residualDelayMs` so the warp visually leaves a residual behind.
+// at each end). Sequencing per locked S015 spec (data lives in
+// characters.js purpleProfile):
+//   t=0      origin blast fires + departure pulse + alpha 1→0
+//   t=fadeOutMs               player invisible, particles in transit
+//   t=fadeOutMs+transitMs     teleport + alpha 0→1 + target blast + arrival pulse
+//   t=...+fadeInMs+arrivalInvulnMs   sequence ends
+// Invuln applies for the entire event (depart + transit + arrive).
 function doTeleportPurple(profile, targetX, targetY, count, isCrit) {
   if (!player || !profile) return;
   var bounds = getRumbleBounds();
   var tx = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, targetX));
   var ty = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, targetY));
-  var originX = player.x, originY = player.y;
-  var fxT = _fx('purple', count);
-  if (fxT) {
-    var maxRT = clampRadiusToArena(fxT.radiusPx * profile.targetScale);
-    var dmgT = Math.max(1, Math.round((fxT.dmg || 0) * profile.targetScale));
-    purpleBursts.push({ r:0, maxR:maxRT, alpha:1, done:false, hit:false, ox:tx, oy:ty, dmg:dmgT, isCrit:isCrit, purpleTier:count });
-    if (isCrit) {
-      spawnCritShockwave(tx, ty, '#7B2FBE', { r0: 14, maxR: maxRT, thickness: 4, growth: 380 });
-      spawnCritFlourish(tx, ty, '#9B6FD4', 26);
-      spawnCritFlourish(tx, ty, '#CC99FF', 16);
-    }
-  }
-  // Teleport player. Direct position write — same pattern as red dash
-  // landing (see updateBrickAction red-charge resolution).
-  player.x = tx;
-  player.y = ty;
-  if (typeof showFloatingText === 'function') {
-    showFloatingText(tx, ty - 40, '◆ WARP', '#9B6FD4', player);
-  }
-  // Origin blast — residual warp echo at prior position. Delayed so the
-  // player visually arrives first, then leftover energy detonates behind.
-  setTimeout(function() {
-    var fxO = _fx('purple', count);
-    if (!fxO) return;
+  // Origin blast fires immediately at t=0 — this is the "light off" beat.
+  var fxO = _fx('purple', count);
+  if (fxO) {
     var maxRO = clampRadiusToArena(fxO.radiusPx * profile.originScale);
     var dmgO = Math.max(1, Math.round((fxO.dmg || 0) * profile.originScale));
-    purpleBursts.push({ r:0, maxR:maxRO, alpha:1, done:false, hit:false, ox:originX, oy:originY, dmg:dmgO, isCrit:isCrit, purpleTier:count });
+    purpleBursts.push({ r:0, maxR:maxRO, alpha:1, done:false, hit:false, ox:player.x, oy:player.y, dmg:dmgO, isCrit:isCrit, purpleTier:count });
     if (isCrit) {
-      spawnCritShockwave(originX, originY, '#7B2FBE', { r0: 10, maxR: maxRO, thickness: 3, growth: 320 });
-      spawnCritFlourish(originX, originY, '#9B6FD4', 18);
+      spawnCritShockwave(player.x, player.y, '#7B2FBE', { r0: 10, maxR: maxRO, thickness: 3, growth: 320 });
+      spawnCritFlourish(player.x, player.y, '#9B6FD4', 18);
     }
-  }, profile.residualDelayMs);
+  }
+  // Initialize warp state. updateWarp() drives the phase machine every
+  // frame from here. Target blast fires when phase transitions to fadeIn.
+  player.warpState = {
+    profile: profile,
+    count: count,
+    isCrit: isCrit,
+    startTs: performance.now(),
+    originX: player.x,
+    originY: player.y,
+    targetX: tx,
+    targetY: ty,
+    phase: 'fadeOut',
+    targetBlastFired: false,
+  };
+  if (typeof showFloatingText === 'function') {
+    showFloatingText(player.x, player.y - 40, '◆ WARP', '#9B6FD4', player);
+  }
+}
+
+// Warp particle trail — purple sparks drifting from origin toward target
+// during the fadeOut + transit phases. Lightweight render; cleared on
+// rumble end alongside other particle systems.
+var warpTrails = [];
+
+// Phase machine for player.warpState. Called once per frame from the main
+// update loop. Drives alpha, position snap, target blast spawn, particle
+// emission. When sequence completes (arrival invuln expires), clears
+// player.warpState back to null.
+function updateWarp(dt) {
+  if (!player || !player.warpState) return;
+  var w = player.warpState;
+  var p = w.profile;
+  var elapsed = performance.now() - w.startTs;
+  var fadeOutEnd = p.fadeOutMs;
+  var transitEnd = fadeOutEnd + p.transitMs;
+  var fadeInEnd  = transitEnd + p.fadeInMs;
+  var totalEnd   = fadeInEnd + p.arrivalInvulnMs;
+
+  // Phase update
+  if (elapsed < fadeOutEnd) {
+    w.phase = 'fadeOut';
+  } else if (elapsed < transitEnd) {
+    w.phase = 'transit';
+  } else if (elapsed < fadeInEnd) {
+    if (w.phase !== 'fadeIn') {
+      // Phase entry: snap player to target + spawn target blast.
+      player.x = w.targetX;
+      player.y = w.targetY;
+      var fxT = _fx('purple', w.count);
+      if (fxT) {
+        var maxRT = clampRadiusToArena(fxT.radiusPx * p.targetScale);
+        var dmgT = Math.max(1, Math.round((fxT.dmg || 0) * p.targetScale));
+        purpleBursts.push({ r:0, maxR:maxRT, alpha:1, done:false, hit:false, ox:w.targetX, oy:w.targetY, dmg:dmgT, isCrit:w.isCrit, purpleTier:w.count });
+        if (w.isCrit) {
+          spawnCritShockwave(w.targetX, w.targetY, '#7B2FBE', { r0: 14, maxR: maxRT, thickness: 4, growth: 380 });
+          spawnCritFlourish(w.targetX, w.targetY, '#9B6FD4', 26);
+          spawnCritFlourish(w.targetX, w.targetY, '#CC99FF', 16);
+        }
+      }
+      w.targetBlastFired = true;
+    }
+    w.phase = 'fadeIn';
+  } else if (elapsed < totalEnd) {
+    w.phase = 'arrivalInvuln';
+  } else {
+    // Sequence complete — clear state.
+    player.warpState = null;
+    return;
+  }
+
+  // Particle emission during fadeOut + transit. Sparks drift origin→target.
+  if ((w.phase === 'fadeOut' || w.phase === 'transit') && p.trailDensity > 0) {
+    var dx = w.targetX - w.originX, dy = w.targetY - w.originY;
+    var dist = Math.hypot(dx, dy);
+    if (dist > 1) {
+      // Progress along path matches elapsed time so particles "lead" the warp.
+      var progress = Math.min(1, elapsed / transitEnd);
+      var spawnX = w.originX + dx * progress;
+      var spawnY = w.originY + dy * progress;
+      for (var i = 0; i < p.trailDensity; i++) {
+        var jitter = (Math.random() - 0.5) * 14;
+        var perpX = -dy / dist, perpY = dx / dist;
+        warpTrails.push({
+          x: spawnX + perpX * jitter,
+          y: spawnY + perpY * jitter,
+          vx: (dx / dist) * (40 + Math.random() * 30) + (Math.random() - 0.5) * 20,
+          vy: (dy / dist) * (40 + Math.random() * 30) + (Math.random() - 0.5) * 20,
+          life: 0.4 + Math.random() * 0.2,
+          age: 0,
+          r: 1.5 + Math.random() * 1.5,
+        });
+      }
+    }
+  }
+}
+
+function updateWarpTrails(dt) {
+  for (var i = warpTrails.length - 1; i >= 0; i--) {
+    var t = warpTrails[i];
+    t.age += dt;
+    t.x += t.vx * dt;
+    t.y += t.vy * dt;
+    t.vx *= 0.92;
+    t.vy *= 0.92;
+    if (t.age >= t.life) warpTrails.splice(i, 1);
+  }
+}
+
+function drawWarpTrails() {
+  if (!warpTrails.length) return;
+  ctx.save();
+  for (var i = 0; i < warpTrails.length; i++) {
+    var t = warpTrails[i];
+    var a = 1 - (t.age / t.life);
+    ctx.globalAlpha = a * 0.85;
+    ctx.fillStyle = '#9B6FD4';
+    ctx.shadowColor = '#9B6FD4';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Helpers used by the player render block to apply warp visuals. Kept
+// separate so the main render block stays readable.
+//
+// getWarpAlpha — sprite alpha multiplier (1.0 normal, 0.0 mid-transit).
+// getWarpPulse — radiant glow strength (0..1, peaks at departure + arrival).
+function getWarpAlpha() {
+  if (!player || !player.warpState) return 1.0;
+  var w = player.warpState;
+  var p = w.profile;
+  var elapsed = performance.now() - w.startTs;
+  var fadeOutEnd = p.fadeOutMs;
+  var transitEnd = fadeOutEnd + p.transitMs;
+  var fadeInEnd  = transitEnd + p.fadeInMs;
+  if (elapsed < fadeOutEnd) {
+    return 1 - (elapsed / fadeOutEnd);              // 1 → 0
+  } else if (elapsed < transitEnd) {
+    return 0;                                        // invisible
+  } else if (elapsed < fadeInEnd) {
+    return (elapsed - transitEnd) / p.fadeInMs;     // 0 → 1
+  }
+  return 1.0;                                        // arrivalInvuln onward
+}
+
+function getWarpPulse() {
+  if (!player || !player.warpState) return 0;
+  var w = player.warpState;
+  var p = w.profile;
+  var elapsed = performance.now() - w.startTs;
+  var fadeOutEnd = p.fadeOutMs;
+  var transitEnd = fadeOutEnd + p.transitMs;
+  var fadeInEnd  = transitEnd + p.fadeInMs;
+  var totalEnd   = fadeInEnd + p.arrivalInvulnMs;
+  // Departure pulse: ramp up during fadeOut (peaks at departure)
+  if (elapsed < fadeOutEnd) {
+    return elapsed / fadeOutEnd;                    // 0 → 1
+  }
+  // Transit: pulse off (player is gone)
+  if (elapsed < transitEnd) {
+    return 0;
+  }
+  // Arrival pulse: ramps up during fadeIn, fades out across arrivalInvuln
+  if (elapsed < fadeInEnd) {
+    return (elapsed - transitEnd) / p.fadeInMs;     // 0 → 1
+  }
+  if (elapsed < totalEnd) {
+    return 1 - ((elapsed - fadeInEnd) / p.arrivalInvulnMs); // 1 → 0
+  }
+  return 0;
 }
 
 var purpleParticles = [];  // shared across all bursts
@@ -8666,7 +8863,7 @@ function _internalStart(config) {
   // singleton that could persist between battles needs to be cleared here —
   // otherwise a fresh battle starts with leftover corpses, floating text, or
   // mid-flight projectiles from the previous fight.
-  blueBolts = []; blueFieldFlashes = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = [];
+  blueBolts = []; blueFieldFlashes = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = []; warpTrails = [];
   greenBurst = null; greenDragActive = false; greenDragPos = null; purpleBursts = []; purpleParticles = []; greenSlowAuras = []; greenBubbles = []; _greenBubbleAccum = 0;
   blackEffect = null; playerSparkles = []; entityRespawnPending = false; playerRegen = null;
   yellowAura = null; whiteFields = [];
@@ -9949,6 +10146,15 @@ function _internalEnd(reason) {
   running = false;
   _victoryRefillActive = false;
   _stopVictoryRefillLoop();
+  // Cancel any in-flight warp so player is at a deterministic position
+  // when the next battle starts. If teleport hadn't completed, snap to
+  // target so the screen matches "where the player intended to be".
+  if (player && player.warpState) {
+    player.x = player.warpState.targetX;
+    player.y = player.warpState.targetY;
+    player.warpState = null;
+  }
+  warpTrails = [];
   // v4: tear down revive minigame if still active
   if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
   _reviveState = null;

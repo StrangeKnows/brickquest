@@ -73,11 +73,24 @@ var CHARACTERS = {
     // drag) plays as a normal purple burst at self. Per design doc §2.3
     // (FW PURPLE: teleport on tap/drag target, dual blast at each end).
     // Engine reads this via getPurpleProfile(cls); other classes return null.
+    //
+    // Warp sequence (1000ms total, all phases relative to drag release):
+    //   t=0      origin blast fires + departure pulse begins + alpha 1→0
+    //   t=200    player invisible, particles in transit
+    //   t=500    player snaps to target + alpha 0→1 + target blast fires
+    //            + arrival pulse begins
+    //   t=650    player fully visible, arrival pulse continues
+    //   t=1000   arrival pulse ends, sequence complete
+    // Invuln applies for the entire 1000ms (depart + transit + arrive).
     purpleProfile: {
       teleport: true,
-      targetScale: 1.3,    // drop-location blast: 130% radius + damage
-      originScale: 0.7,    // residual blast at prior position: 70% radius + damage
-      residualDelayMs: 80, // ms to wait before spawning the origin blast
+      targetScale: 1.3,        // drop-location blast: 130% radius + damage
+      originScale: 0.7,        // origin blast: 70% radius + damage (fires at t=0)
+      fadeOutMs: 200,          // departure: player alpha 1→0
+      transitMs: 300,          // 200→500: invisible, particles in flight
+      fadeInMs: 150,           // arrival: player alpha 0→1
+      arrivalInvulnMs: 350,    // 650→1000: post-arrival safety window
+      trailDensity: 6,         // particles per frame during fadeOut + transit
     },
   },
   snapstep: {
