@@ -68,6 +68,17 @@ var CHARACTERS = {
     secondary: ['white'],
     startingKit: { blue: 2, purple: 1 },
     weight: 'light', dashBreakChance: 0.15, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    // Purple signature: drag-and-drop teleports player to the drop point,
+    // fires DUAL blasts at scaled radii. Tap or hold-release on bar (no
+    // drag) plays as a normal purple burst at self. Per design doc §2.3
+    // (FW PURPLE: teleport on tap/drag target, dual blast at each end).
+    // Engine reads this via getPurpleProfile(cls); other classes return null.
+    purpleProfile: {
+      teleport: true,
+      targetScale: 1.3,    // drop-location blast: 130% radius + damage
+      originScale: 0.7,    // residual blast at prior position: 70% radius + damage
+      residualDelayMs: 80, // ms to wait before spawning the origin blast
+    },
   },
   snapstep: {
     name: 'Snapstep', icon: '🏃',
@@ -159,6 +170,14 @@ function getCharUiStyle(cls) {
 }
 function getSignature(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].signature) || []; }
 function getSecondary(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].secondary) || []; }
+
+// Class-specific purple cast profile. Returns the profile object when the
+// class has signature purple behavior (FW teleport dual-blast), null
+// otherwise. Engine call sites (rumble.js doFwTeleportPurple, drag indicator
+// preview) read this to decide whether to apply teleport mechanics.
+function getPurpleProfile(cls) {
+  return (CHARACTERS[cls] && CHARACTERS[cls].purpleProfile) || null;
+}
 
 // ── BASE HEAL AMOUNT ────────────────────────────────────────────────────
 // The raw white-tap heal value before any multipliers are applied.
@@ -384,6 +403,7 @@ if (typeof window !== 'undefined') {
   window.getCharUiStyle = getCharUiStyle;
   window.getSignature = getSignature;
   window.getSecondary = getSecondary;
+  window.getPurpleProfile = getPurpleProfile;
   window.baseHeal = baseHeal;
   window.affinityMult = affinityMult;
   window.brickTier = brickTier;
@@ -406,7 +426,7 @@ if (typeof module !== 'undefined' && module.exports) {
     STARTING_KIT_COUNTS,
     CLASS_AFFINITY,
     getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
-    getSignature, getSecondary,
+    getSignature, getSecondary, getPurpleProfile,
     baseHeal,
     affinityMult,
     brickTier,

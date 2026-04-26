@@ -2053,6 +2053,16 @@ function fireOverloadGreen(count, ox, oy, followPlayer) {
   }
 }
 function fireOverloadPurple(count, ox, oy) {
+  // Class-driven teleport profile (FW signature, per design doc §2.3).
+  // Detect drag by checking the drop point: if it's not at the player
+  // position, the user dragged the cast. _usePlayer logic in fireOverload
+  // sets oxP/oyP to player position for taps; drop ≠ player = drag intent.
+  var prof = player ? getPurpleProfile(player.cls) : null;
+  var isDrag = Math.hypot(ox - player.x, oy - player.y) > scaleDist(20);
+  if (prof && prof.teleport && isDrag) {
+    doTeleportPurple(prof, ox, oy, count, _currentCrit);
+    return;
+  }
   var fx = _fx('purple', count);
   if (!fx) return;
   var maxR = clampRadiusToArena(fx.radiusPx);
@@ -2392,7 +2402,17 @@ function onBrickDown(e, color) {
   var dragPos = null;
   var dragFns = {
     green:  function(cx,cy){ startGreenBurst(cx,cy); },
-    purple: function(cx,cy){ startPurpleBurst(cx,cy); },
+    purple: function(cx,cy,isDrag){
+      // Drag-and-drop with a class that has a teleport purple profile
+      // (FW signature, per design doc §2.3) → teleport + dual blast.
+      // Tap or no-drag → normal burst at the (typically self) origin.
+      var prof = isDrag && player ? getPurpleProfile(player.cls) : null;
+      if (prof && prof.teleport) {
+        doTeleportPurple(prof, cx, cy, 1, _currentCrit);
+      } else {
+        startPurpleBurst(cx, cy);
+      }
+    },
     black:  function(cx,cy){ startWitherbolt(cx,cy); },
     orange: function(cx,cy,isDrag,tier){ startOrangeTrap(cx,cy,isDrag?tier:undefined); },
     yellow: function(cx,cy,isDrag){
@@ -7027,6 +7047,40 @@ function drawCastIndicator(color, hex, dragPos) {
     : 1;
   var fx = _fx(color, tier);
   if (!fx) return;
+  // Class-driven dual preview for purple teleport profile (FW signature).
+  // When active-dragging purple and the class has a teleport profile, show
+  // BOTH blast zones at their scaled radii plus the warp line between them.
+  // Held-without-drag preview stays single ring at player (no drop point yet).
+  var purpleProf = (color === 'purple' && isActiveDrag && player) ? getPurpleProfile(player.cls) : null;
+  if (purpleProf && purpleProf.teleport) {
+    var rTarget = clampRadiusToArena(fx.radiusPx * purpleProf.targetScale);
+    var rOrigin = clampRadiusToArena(fx.radiusPx * purpleProf.originScale);
+    ctx.save();
+    // Warp line: solid arrow from origin (player) to target (drop point).
+    // Stronger than a normal drag-line — this is a teleport, not a cast.
+    ctx.setLineDash([8, 4]);
+    ctx.strokeStyle = hex + 'CC';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
+    ctx.setLineDash([]);
+    // Target ring (larger, where player will arrive)
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = hex;
+    ctx.shadowColor = hex;
+    ctx.shadowBlur = 12;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 8]);
+    ctx.beginPath(); ctx.arc(cx, cy, rTarget, 0, Math.PI * 2); ctx.stroke();
+    // Origin ring (smaller, residual blast at prior position) — fainter
+    // because it fires after the teleport, not now
+    ctx.globalAlpha = 0.30;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(player.x, player.y, rOrigin, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+    return;
+  }
+  // Standard single-ring indicator for all other casts.
   var radius = clampRadiusToArena(fx.radiusPx);
   ctx.save();
   // Dashed line from player to drop point — only when cursor is over the
@@ -7055,20 +7109,6 @@ function drawCastIndicator(color, hex, dragPos) {
   ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.stroke();
   ctx.setLineDash([]);
   ctx.restore();
-}
-
-// Legacy aliases retained for any external callers that may have the old
-// names. Internal call sites should use drawCastIndicator(color, hex, pos).
-function drawDragIndicator(dragPos, color, label) {
-  // legacy 3-arg signature (dragPos, hex, label) — we ignore label.
-  // Need to map hex back to a color key — this is fragile; prefer the new API.
-  // Best-effort lookup via reverse map of BRICK_COLORS:
-  var key = null;
-  for (var k in BRICK_COLORS) if (BRICK_COLORS[k] === color) { key = k; break; }
-  if (key) drawCastIndicator(key, color, dragPos);
-}
-function drawBlueDrag() {
-  drawCastIndicator('blue', '#4db8ff', (typeof blueDragPos !== 'undefined') ? blueDragPos : null);
 }
 
 // ═══════════════════════════════════════════════════
@@ -8018,6 +8058,55 @@ function startPurpleBurst(ox, oy) {
     spawnCritFlourish(x, y, '#9B6FD4', 22);
     spawnCritFlourish(x, y, '#CC99FF', 14);
   }
+}
+
+// Class-driven teleport-and-dual-blast purple cast. Reads the cast profile
+// from characters.js (CHARACTERS[cls].purpleProfile via getPurpleProfile).
+// Currently FW signature only — other classes have no purpleProfile and
+// dispatch to the standard burst path. Tap-cast (no drag) is unchanged
+// regardless of class; this only fires on drag-and-drop.
+//
+// Per design doc §2.3 (FW PURPLE: teleport on tap/drag target, dual blast
+// at each end). Sequencing per locked S015 spec: target blast spawns
+// immediately at drop point, player teleports, then origin blast spawns
+// after `residualDelayMs` so the warp visually leaves a residual behind.
+function doTeleportPurple(profile, targetX, targetY, count, isCrit) {
+  if (!player || !profile) return;
+  var bounds = getRumbleBounds();
+  var tx = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, targetX));
+  var ty = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, targetY));
+  var originX = player.x, originY = player.y;
+  var fxT = _fx('purple', count);
+  if (fxT) {
+    var maxRT = clampRadiusToArena(fxT.radiusPx * profile.targetScale);
+    var dmgT = Math.max(1, Math.round((fxT.dmg || 0) * profile.targetScale));
+    purpleBursts.push({ r:0, maxR:maxRT, alpha:1, done:false, hit:false, ox:tx, oy:ty, dmg:dmgT, isCrit:isCrit, purpleTier:count });
+    if (isCrit) {
+      spawnCritShockwave(tx, ty, '#7B2FBE', { r0: 14, maxR: maxRT, thickness: 4, growth: 380 });
+      spawnCritFlourish(tx, ty, '#9B6FD4', 26);
+      spawnCritFlourish(tx, ty, '#CC99FF', 16);
+    }
+  }
+  // Teleport player. Direct position write — same pattern as red dash
+  // landing (see updateBrickAction red-charge resolution).
+  player.x = tx;
+  player.y = ty;
+  if (typeof showFloatingText === 'function') {
+    showFloatingText(tx, ty - 40, '◆ WARP', '#9B6FD4', player);
+  }
+  // Origin blast — residual warp echo at prior position. Delayed so the
+  // player visually arrives first, then leftover energy detonates behind.
+  setTimeout(function() {
+    var fxO = _fx('purple', count);
+    if (!fxO) return;
+    var maxRO = clampRadiusToArena(fxO.radiusPx * profile.originScale);
+    var dmgO = Math.max(1, Math.round((fxO.dmg || 0) * profile.originScale));
+    purpleBursts.push({ r:0, maxR:maxRO, alpha:1, done:false, hit:false, ox:originX, oy:originY, dmg:dmgO, isCrit:isCrit, purpleTier:count });
+    if (isCrit) {
+      spawnCritShockwave(originX, originY, '#7B2FBE', { r0: 10, maxR: maxRO, thickness: 3, growth: 320 });
+      spawnCritFlourish(originX, originY, '#9B6FD4', 18);
+    }
+  }, profile.residualDelayMs);
 }
 
 var purpleParticles = [];  // shared across all bursts
