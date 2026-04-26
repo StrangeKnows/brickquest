@@ -2328,7 +2328,9 @@ function _dashPhaseContext(me) {
       html += renderLandPanel(me);
     }
   }
-  html += renderGateActions(me);
+  // Gate buttons stripped (S015) — renderGateActions removed; gates now
+  // resolved via DM screen forceGate / setGate. Future brick-bar overhaul
+  // will re-introduce class-driven gate interactions.
   return html;
 }
 
