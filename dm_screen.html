@@ -186,7 +186,7 @@ select{width:100%;padding:6px 8px;border-radius:7px;border:1px solid var(--borde
               style="width:70px;padding:6px;border-radius:7px;border:1px solid var(--border);background:var(--surface3);color:var(--text);">
             <button class="btn btn-sm" style="background:#3a1a1a;border-color:var(--red);" onclick="forceDashClick()">💥 Force Dash</button>
           </div>
-          <div style="font-size:10px;color:var(--dim);margin-top:4px;">No brick cost. Respects key-only gates. Rolls break chance per class.</div>
+          <div style="font-size:10px;color:var(--dim);margin-top:4px;">No brick cost. Respects key-only gates. Break chance varies by class.</div>
         </div>
       </div>
     </div>
@@ -553,8 +553,8 @@ client.on(function(event, data) {
     var p2 = G && G.players && G.players[data.cls];
     var nm = p2 ? (p2.playerName || p2.name) : (data.cls || '?');
     var msg = data.note || (data.success
-      ? nm + ' forced the gate open! (rolled ' + data.roll + ')'
-      : nm + ' failed to force gate (rolled ' + data.roll + ', need 5+)');
+      ? nm + ' forced the gate open!'
+      : nm + ' failed to force the gate');
     showDMBanner('Gate Force Attempt', msg, data.success ? 'var(--green)' : 'var(--red)');
   }
   if (event === 'skillUnlocked') {

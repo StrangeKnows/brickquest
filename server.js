@@ -87,24 +87,24 @@ function freshState() {
       //   Starting bricks: 2 signature + 1 secondary (3 total per class).
       // Players earn more bricks through play (loot drops, landing events,
       // rewards); these are just the opening kit.
-      breaker:     mkPlayer('breaker',    '⚔️', '#993C1D', 14, 'd8',  {red:2,  gray:1}),
-      formwright:  mkPlayer('formwright', '🔮', '#3C3489',  6, 'd6',  {blue:2, purple:1}),
-      snapstep:    mkPlayer('snapstep',   '🏃', '#085041',  9, 'd6',  {orange:2, red:1}),
-      blocksmith:  mkPlayer('blocksmith', '🔧', '#C87800', 12, 'd6',  {gray:2, orange:1}),
-      fixer:       mkPlayer('fixer',      '💊', '#72243E',  8, 'd4',  {white:2, black:1}),
-      wild_one:    mkPlayer('wild_one',   '🐾', '#27500A', 10, 'd6',  {green:2, yellow:1}),
+      breaker:     mkPlayer('breaker',    '⚔️', '#993C1D', 14, {red:2,  gray:1}),
+      formwright:  mkPlayer('formwright', '🔮', '#3C3489',  6, {blue:2, purple:1}),
+      snapstep:    mkPlayer('snapstep',   '🏃', '#085041',  9, {orange:2, red:1}),
+      blocksmith:  mkPlayer('blocksmith', '🔧', '#C87800', 12, {gray:2, orange:1}),
+      fixer:       mkPlayer('fixer',      '💊', '#72243E',  8, {white:2, black:1}),
+      wild_one:    mkPlayer('wild_one',   '🐾', '#27500A', 10, {green:2, yellow:1}),
     }
   };
 }
 
-function mkPlayer(cls, icon, color, hp, die, bricks) {
+function mkPlayer(cls, icon, color, hp, bricks) {
   const allBricks = {red:0,blue:0,green:0,white:0,gray:0,purple:0,yellow:0,orange:0,black:0};
   const startBricks = {...allBricks,...bricks};
   return {
     cls, icon, color,
     name: {breaker:'Breaker',formwright:'Formwright',snapstep:'Snapstep',blocksmith:'Blocksmith',fixer:'Fixer',wild_one:'Wild One'}[cls]||cls,
     hp, hpMax:hp, armor:0, gold:3,
-    die, space:0, alive:true,
+    space:0, alive:true,
     bricks: startBricks,            // owned inventory (ceiling)
     bricksCharged: {...startBricks},// active charges (<= bricks[c]). Spent on action; refreshed at rumble entry + zone gate crossing. See DESIGN_S012_PROPOSAL_V2 §1.1.
     lastDropped: {},                // per-color last-spend timestamp (§1.2 pulse timing). Map color → ms since epoch.
@@ -435,6 +435,10 @@ function loadState() {
           // S013: per-color pulse-timing map. Empty map means no charges have
           // been spent yet this session (no pulse until first use).
           if (p.lastDropped === undefined) p.lastDropped = {};
+          // S015: dice strip — drop legacy `die` field from saved players.
+          // No mechanic ever consumed this field; it was display-only and is
+          // removed from mkPlayer + UI in 0.15.x.
+          if (p.die !== undefined) delete p.die;
         });
       }
       if (G.pendingDashRequest === undefined) G.pendingDashRequest = null;
@@ -584,6 +588,13 @@ function roll(sides) { return Math.floor(Math.random()*sides)+1; }
 function rollRange(min,max) { return min + Math.floor(Math.random()*(max-min+1)); }
 
 // ── DASH RESOLVER ─────────────────────────────────────────
+// REVISIT (S015 strip): UI surface for player-initiated red dash was stripped
+// from players.html in v0.15.x. This handler stays intact for the forthcoming
+// brick-bar dash overhaul (red brick on character dashboard will trigger
+// `requestRedDash` again). DM-side force dash also reuses this. Class-specific
+// dash parameters (chance, damage range, weight) live in characters.js
+// per architectural rule.
+//
 // Handles movement, gate interactions, damage, and landing event for both
 // player-initiated (approveRedDash) and DM force-dash (forceDash).
 // Emits a dashResult message to all clients with everything that happened,
@@ -2473,6 +2484,10 @@ wss.on('connection', (ws, req) => {
 
 
     // ── TRAP DISARM ──
+    // REVISIT (S015 strip): Snapstep "Disarm Trap" UI button stripped from
+    // players.html in v0.15.x as part of legacy class-action button cleanup.
+    // Handler stays intact for future class-action overhaul where Snapstep's
+    // disarm becomes a brick-driven mechanic. UI text drops dice language.
     if (type === 'disarmTrap') {
       const { cls, spaceIdx } = P;
       const p = G.players[cls];
@@ -2486,26 +2501,26 @@ wss.on('connection', (ws, req) => {
         if (G.orangeSpaces[spaceIdx]<=0) delete G.orangeSpaces[spaceIdx];
         log(`Blocksmith disarmed trap at space ${spaceIdx+1} (1 gray spent)`,'action');
       } else if (cls === 'snapstep') {
-        // Spend yellow brick, disarm 1, then roll for more
+        // Spend yellow brick, disarm 1, then RNG-decide chain continue
         if ((p.bricks.yellow||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 yellow brick'})); broadcastState(); return; }
         p.bricks.yellow--;
         G.orangeSpaces[spaceIdx] = Math.max(0,(G.orangeSpaces[spaceIdx]||1)-1);
         if (G.orangeSpaces[spaceIdx]<=0) delete G.orangeSpaces[spaceIdx];
         log(`Snapstep disarmed trap at space ${spaceIdx+1}`,'action');
-        // Check if more in zone — server sends back result, DM decides chain
+        // 50% chance the disarm chain continues (uses roll(6) odd/even internally)
         const r = roll(6);
         ws.send(JSON.stringify({ type:'snapstepDisarmChain', roll:r, continueDisarm: r%2!==0 }));
       } else {
-        // Roll d6 4+ success, fail triggers trap
+        // 50% disarm chance; on fail the trap fires for 1-3 damage
         const r = roll(6);
         if (r >= 4) {
           G.orangeSpaces[spaceIdx] = Math.max(0,(G.orangeSpaces[spaceIdx]||1)-1);
           if (G.orangeSpaces[spaceIdx]<=0) delete G.orangeSpaces[spaceIdx];
-          log(`${p.name} disarmed trap (rolled ${r})`,'action');
+          log(`${p.name} disarmed trap`,'action');
         } else {
           const dmg = rollRange(1,3);
           p.hp = Math.max(0,p.hp-dmg); if(p.hp<=0)p.alive=false;
-          log(`${p.name} failed disarm (${r}) — trap fires! −${dmg} HP`,'damage');
+          log(`${p.name} failed disarm — trap fires! −${dmg} HP`,'damage');
         }
       }
     }
@@ -2797,9 +2812,15 @@ wss.on('connection', (ws, req) => {
     }
 
     // ── GATES ──
+    // REVISIT (S015 strip): forceGate UI button stripped from players.html in
+    // v0.15.x. Handler intact for future brick-bar gate-force overhaul. DM
+    // screen still uses this via existing forceGateResult message. Mechanic
+    // is 33% success chance, 2 HP damage either way (unchanged).
     if (type === 'forceGate') {
       const { cls, gate } = P;
       const p = G.players[cls];
+      // S015: still uses roll(6)≥5 internally for the 33% success rate.
+      // External UI text drops "rolled" / "d6" language per dice strip.
       const r = roll(6);
       const success = r>=5;
       let dmg = 2;
@@ -2812,7 +2833,7 @@ wss.on('connection', (ws, req) => {
       }
       p.hp = Math.max(0, p.hp-dmg); if(p.hp<=0)p.alive=false;
       if(success) { G.gates[gate]='open'; }
-      const note = (success?'Gate forced open':'Gate held') + ' (rolled '+r+') — '+(armorAbsorbed>0?armorAbsorbed+' absorbed by armor, ':'')+(dmg>0?dmg+' HP damage':'no HP damage');
+      const note = (success?'Gate forced open':'Gate held') + ' — ' + (armorAbsorbed>0?armorAbsorbed+' absorbed by armor, ':'')+(dmg>0?dmg+' HP damage':'no HP damage');
       log((p.playerName||p.name)+' '+note,'gate');
       const fgMsg = JSON.stringify({ type:'forceGateResult', roll:r, success, cls, gate, dmg, armorAbsorbed, note });
       clients.forEach((info, cws) => { if(cws.readyState===1) cws.send(fgMsg); });

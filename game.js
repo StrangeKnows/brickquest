@@ -182,7 +182,7 @@ const RIDDLES = [
     q: "The more you take, the more you leave behind. What am I?",
     a: "footsteps",
     zone: 0,
-    clue: "GATES & FORCE: Every gate that isn't magic-locked can be forced open. Roll 5+ on the attempt or take damage trying. Breaker and Blocksmith — hold red and DASH — break gates clean without a roll.",
+    clue: "GATES & FORCE: Every gate that isn't magic-locked can be forced open. Heavy classes — Breaker and Blocksmith — shoulder-rush gates clean. Lighter classes can attempt, but the gate may hold. Hold red and DASH to commit.",
     category: "Zone Progression",
     answerType: "noun"
   },
@@ -243,7 +243,7 @@ const RIDDLES = [
     a: "breaker",
     a_alt: ["the breaker"],
     zone: 3,
-    clue: "BREAKER'S STRENGTH: The Breaker rolls a d8 on movement — the biggest die in the party. Shoulder-rushes gates clean like Blocksmith. Stacks shields 1-to-1 from gray. Built to eat damage so the softer classes can work. First through the gate, last from the field.",
+    clue: "BREAKER'S STRENGTH: 14 HP, slow but unstoppable. Shoulder-rushes gates clean every time. Stacks shields 1-to-1 from gray bricks. Built to eat damage so the softer classes can work. First through the gate, last from the field.",
     category: "Class Tips",
     answerType: "class"
   },
@@ -267,7 +267,7 @@ const RIDDLES = [
     q: "I turn a locked door to rubble in a single rush. What color am I?",
     a: "red",
     zone: 0,
-    clue: "RED BRICK DASH: Breaker and Blocksmith can shoulder-rush gates for a guaranteed break — no roll, no damage. Light-weight classes can try but break only some of the time. Red is the key to every forceable gate.",
+    clue: "RED BRICK DASH: Breaker and Blocksmith can shoulder-rush gates for a guaranteed break — clean through, no resistance. Light-weight classes can try but break only some of the time. Red is the key to every forceable gate.",
     category: "Bricks",
     answerType: "color"
   },

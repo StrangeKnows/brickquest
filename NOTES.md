@@ -3553,3 +3553,184 @@ A chunk is "done" when:
 When all chunks complete, the next push is `./save.sh -V "..."` to bump 0.16.0.
 
 ---
+
+## Session 015 — v0.15.x Patch Log
+
+Running log of patches landing inside Build 0.15.0 ("Class Identity: Rumble").
+Each entry corresponds to a single `./save.sh -v` push. When all 0.15.0 scope
+items are complete, the next push will be `./save.sh -V` to open 0.16.0.
+
+### v0.15.1 — FW purple teleport (Chunk 1 v1)
+
+First per-class identity mechanic shipped on top of the v0.15.0 architectural
+foundations. Formwright drag-purple now teleports the player and fires dual
+blasts at scaled radii. Tap or hold-release on bar plays as a normal purple
+burst at self.
+
+* Added `purpleProfile` to formwright in characters.js with `targetScale: 1.3`,
+  `originScale: 0.7`, `residualDelayMs: 80` (initial timing values, refined
+  in v0.15.2).
+* Engine: `doTeleportPurple(profile, ...)` reads profile via
+  `getPurpleProfile(cls)` exported from characters.js. Called from both the
+  tap dispatch (`dragFns.purple` + `isDrag`) and overload dispatch
+  (`fireOverloadPurple` + drop ≠ player).
+* Targeting reticle (`drawCastIndicator` purple branch) shows dual preview
+  when active-dragging: bright dashed warp line player→drop, larger ring
+  at drop (target blast at 1.3× radius, 55% alpha), smaller ring at player
+  (origin residual at 0.7× radius, 30% alpha).
+* Stripped legacy `drawDragIndicator` and `drawBlueDrag` orphan aliases.
+* Reverted unused `opts` parameter on `startPurpleBurst` — was added then
+  immediately made redundant by `doTeleportPurple` building bursts directly.
+
+### v0.15.2 — FW purple warp visual sequence
+
+Visual upgrade per locked spec: instead of an instant teleport with a small
+delay, the warp is now a full 1-second sequence with stateful phase machine,
+particle trail, dual radiant pulses on the player sprite, and full-event
+invuln.
+
+Phase machine (data lives in characters.js purpleProfile):
+
+| Phase | Time | Visual |
+|-------|------|--------|
+| fadeOut | 0 → 200ms | Origin blast fires at t=0. Departure pulse begins. Player alpha 1→0. Particle trail emits toward target. |
+| transit | 200 → 500ms | Player invisible. Particles drift toward target. |
+| fadeIn | 500 → 650ms | Player snaps to target. Target blast fires. Alpha 0→1. Arrival pulse begins. |
+| arrivalInvuln | 650 → 1000ms | Arrival pulse fades 1→0. Player visible. |
+
+Invuln applies for the entire 1000ms — depart, transit, arrive all safe.
+"WARP" floater shows on incoming damage during the window (mirrors the
+SS First Step "EVADED" pattern).
+
+Engine additions:
+
+* `player.warpState` — phase machine state (originX/Y, targetX/Y, profile,
+  startTs, current phase). Cleared when sequence completes or battle ends.
+* `updateWarp(dt)` — phase transitions per frame, fires target blast on
+  fadeIn entry, emits trail particles during fadeOut + transit.
+* `warpTrails[]` array + `updateWarpTrails(dt)` + `drawWarpTrails()` —
+  lightweight purple sparks drifting along origin→target line.
+* `getWarpAlpha()` / `getWarpPulse()` — render helpers feeding the player
+  sprite render block. Pulse renders as a soft purple radial gradient
+  behind the sprite.
+* Mid-warp battle end: `_internalEnd()` clears `warpState` and snaps player
+  to `targetX/targetY` so the next battle starts at a deterministic position.
+* No `setTimeout` anywhere — pure frame-loop driven.
+
+Profile values updated for the new sequence:
+`fadeOutMs: 200, transitMs: 300, fadeInMs: 150, arrivalInvulnMs: 350,
+trailDensity: 6`.
+
+### v0.15.3 — Dice strip + legacy button cleanup
+
+Cleanup pass removing dice mechanics from UI and stripping the legacy
+class-action button surface that duplicated the rumble brick bar.
+Foundational for the upcoming brick-bar overhaul (0.16.0 Class Identity:
+Board) since it removes the confused architectural state where bricks AND
+buttons both routed to the same server handlers.
+
+**Dice strip (Option B — surgical):**
+
+Movement still uses a physical die that the active player rolls and calls
+to the DM (per locked design). All other dice references stripped from UI.
+Internal `roll()` / `rollRange()` helpers in server.js retained as
+non-dice-named RNG utilities (used widely for event tables, damage ranges).
+
+* characters.js — already cleaned in v0.15.0 batch (`die: 'd6'` field
+  removed from all 6 classes + PLAYER_META derivation + doc comment).
+* server.js — stripped `die` parameter from `mkPlayer()` signature, all 6
+  callsites, and the player object property assignment. Added load-state
+  migration to drop legacy `die` field from saved players. UI text in
+  `forceGate` and `disarmTrap` handlers stripped of "rolled X" / "5+"
+  language; mechanics preserved (33% gate force, 50% disarm).
+* game.js — 3 riddle clues rewritten to remove dice-mechanic references:
+  GATES & FORCE, BREAKER'S STRENGTH, RED BRICK DASH. Game intent preserved.
+* players.html / test_players.html — stripped all `var die = ...` reads,
+  `🎲` icons, "Roll your d6", "rolled X", "need 5+" strings from gate
+  toasts, disarm chain toasts, Pilgrim Self-Rest button, Blood Price desc.
+* dm_screen.html — stripped dice mentions in dash hint text and forced
+  gate result text. DM-side movement input (where DM types player's
+  rolled number) preserved as the legitimate physical-die surface.
+
+**Legacy button cleanup (~960 lines removed):**
+
+The board-phase player UI had two parallel action surfaces:
+`buildPrepareActions` (cards on prepare phase) and `_dashActions` block
+(SELF / ALLY / CLASS / BOARD sections in non-prepare phases). Both
+duplicated brick functionality already canonical on the rumble bar.
+All class-specific board buttons stripped — these will return as
+brick-bar gestures during 0.16.0 (Class Identity Board) overhaul.
+
+Stripped from `buildPrepareActions` (only Market remains):
+* 🎲 Move card + 🎲 Roll Die child + 🔴 Red Brick Dash child
+* 💊 Self Heal (white duplicate of rumble bar)
+* 🛡 Add Shield (gray duplicate of rumble bar)
+* 💊 Heal Ally (Fixer class action)
+* 💊 Mass Repair (Fixer class action)
+* ✨ Revive (Fixer class action)
+* 🔧 Forge (Blocksmith brick transformation)
+* 📋 Blueprint (Blocksmith brick transformation)
+
+Stripped entirely:
+* `_dashActions` block + 4 sub-functions (`_dashActionsSelf`,
+  `_dashActionsAlly`, `_dashActionsClass`, `_dashActionsBoard`)
+* `renderGateActions` (Force Gate, Use Key, Deconstruct Gate, Rebuild
+  Bridge — all class-specific or contextual board buttons)
+* `renderMovePanel`, `renderDashControl`, `useRedBrickMove` (move + dash UI)
+* `cleansePoisonAction` + 🩹 Cleanse Poison header banner button
+* `giftCheeseTo` orphan (already gone from UI in v0.14, function lingered)
+* `showHealSelector`, `showReviveSelector`, `showForge`, `showBlueprint`,
+  `selfHeal`, `showCheeseActions`, `consumeCheese1`, `disarmTrap`,
+  `doForge` (modal helpers and class actions)
+* 🔧 Disarm Trap inline button in `renderLandPanel` (Snapstep)
+* Cheese chip onclick (chip remains as display, no longer clickable)
+* Dead `(me.bricks.white||0) > 0 || true` conditional
+
+**Server handlers preserved with REVISIT comments:**
+
+All server-side game state handlers stay intact for future re-wiring via
+the brick-bar overhaul. REVISIT comments planted at every entry point:
+
+* `resolveDash` — dash + gate-break + landing event resolver
+* `forceGate` — 33% chance gate force with 2 HP cost
+* `disarmTrap` — Snapstep yellow-brick disarm + Blocksmith gray disarm
+* `requestRedDash` / `approveRedDash` / `denyRedDash` / `forceDash` —
+  dash request approval flow
+* `client.healPlayer`, `client.addShield`, `client.revivePlayer`,
+  `client.massRepair`, `client.forge`, `client.useBrick` — all canonical
+  client methods preserved
+
+DM screen buttons all preserved (per scope: keep DM controls, strip dice
+language only). DM can still force-dash, approve/deny dash, force gate.
+
+**Net diff:**
+
+| File | Δ |
+|------|---|
+| players.html | -479 lines |
+| test_players.html | -478 lines |
+| server.js | +3 lines (REVISIT comments, migration) |
+| characters.js | unchanged this push (cleaned in v0.15.0) |
+| game.js | unchanged line count (3 string rewrites in place) |
+| dm_screen.html | unchanged line count (string rewrites in place) |
+
+**Architectural wins:**
+
+* Brick bar is now the unambiguous canonical action surface for combat
+* Board-phase brick interactions deferred to a single design pass (0.16.0)
+  rather than competing with stripped buttons
+* Dice usage scoped to one place: physical movement die in DM movement
+  input. Everything else is RNG with descriptive UI text
+* Save file migration ensures old saves load cleanly without orphan `die`
+  fields polluting player objects
+* Every removed feature has a server handler waiting in place for the
+  brick-bar reimplementation — no work was lost
+
+**What's next per roadmap:**
+
+Chunk 2 — Breaker + Snapstep mechanics (BK red knockback + larger hitbox,
+SS orange 0.5s tap-invuln window). Or Chunk 3 — Blocksmith + Wild One
+(BS gray regen + yellow taunt, WO viral poison). Either chunk now drops
+into a clean architecture with no legacy buttons crowding the dashboard.
+
+---

@@ -32,7 +32,6 @@
 //
 //   Combat
 //     hp            — starting + max HP               (14)
-//     die           — hit die for rolls               ('d8')
 //     speed         — rumble movement speed px/s      (150)
 //
 //   Affinity (per design doc §2.2 — the canonical spec)
@@ -45,15 +44,21 @@
 //     weight        — gate-break class                ('heavy', 'mid', 'light')
 //     dashBreakChance — 0..1 chance to break a gate   (1.00)
 //     dashBreakDmg    — [min, max] damage range       ([0, 3])
-//     dashDmgAlwaysRolls — true = always rolls,       (false)
-//                         false = only on actual break
+//     dashDmgAlwaysRolls — true = always damages,     (false)
+//                          false = only on actual break
+//
+//     REVISIT (S015) — the player-side red-dash UI button was stripped in the
+//     S015 cleanup pass. dashBreakChance/Dmg/AlwaysRolls are still consumed by
+//     server.js resolveDash and remain functional via DM controls. When the
+//     brick-bar action overhaul lands, consider whether to keep probabilistic
+//     dash-break or move to deterministic class-based outcomes.
 // ═══════════════════════════════════════════════════════════════════════
 var CHARACTERS = {
   breaker: {
     name: 'Breaker', icon: '⚔️',
     color: '#993C1D', uiColor: '#993C1D',
     uiBg: 'rgba(153,60,29,0.15)', uiBorder: 'rgba(153,60,29,0.4)',
-    hp: 14, die: 'd8', speed: 150,
+    hp: 14, speed: 150,
     signature: ['red', 'gray'],
     secondary: ['orange'],
     startingKit: { red: 2, gray: 1 },
@@ -63,7 +68,7 @@ var CHARACTERS = {
     name: 'Formwright', icon: '🔮',
     color: '#3C3489', uiColor: '#534AB7',
     uiBg: 'rgba(83,74,183,0.15)', uiBorder: 'rgba(83,74,183,0.4)',
-    hp: 6, die: 'd6', speed: 180,
+    hp: 6, speed: 180,
     signature: ['blue', 'purple', 'black'],
     secondary: ['white'],
     startingKit: { blue: 2, purple: 1 },
@@ -97,7 +102,7 @@ var CHARACTERS = {
     name: 'Snapstep', icon: '🏃',
     color: '#085041', uiColor: '#1D9E75',
     uiBg: 'rgba(29,158,117,0.15)', uiBorder: 'rgba(29,158,117,0.4)',
-    hp: 9, die: 'd6', speed: 260,
+    hp: 9, speed: 260,
     signature: ['orange', 'red'],
     secondary: ['yellow'],
     startingKit: { orange: 2, red: 1 },
@@ -107,7 +112,7 @@ var CHARACTERS = {
     name: 'Blocksmith', icon: '🔧',
     color: '#C87800', uiColor: '#EF9F27',
     uiBg: 'rgba(239,159,39,0.15)', uiBorder: 'rgba(239,159,39,0.4)',
-    hp: 12, die: 'd6', speed: 150,
+    hp: 12, speed: 150,
     signature: ['gray', 'yellow'],
     secondary: ['orange'],
     startingKit: { gray: 2, orange: 1 },
@@ -117,7 +122,7 @@ var CHARACTERS = {
     name: 'Fixer', icon: '💊',
     color: '#72243E', uiColor: '#D4537E',
     uiBg: 'rgba(212,83,126,0.15)', uiBorder: 'rgba(212,83,126,0.4)',
-    hp: 8, die: 'd4', speed: 160,
+    hp: 8, speed: 160,
     signature: ['white', 'black'],
     secondary: ['purple'],
     startingKit: { white: 2, black: 1 },
@@ -127,7 +132,7 @@ var CHARACTERS = {
     name: 'Wild One', icon: '🐾',
     color: '#27500A', uiColor: '#5DA831',
     uiBg: 'rgba(93,168,49,0.15)', uiBorder: 'rgba(93,168,49,0.4)',
-    hp: 10, die: 'd6', speed: 220,
+    hp: 10, speed: 220,
     signature: ['green', 'yellow'],
     secondary: ['black'],
     startingKit: { green: 2, yellow: 1 },
@@ -148,7 +153,7 @@ Object.keys(CHARACTERS).forEach(function(cls) {
   var c = CHARACTERS[cls];
   PLAYER_META[cls] = {
     name: c.name, icon: c.icon, color: c.color,
-    hp: c.hp, speed: c.speed, die: c.die,
+    hp: c.hp, speed: c.speed,
     signature: c.signature, secondary: c.secondary,
     weight: c.weight, dashBreakChance: c.dashBreakChance,
     dashBreakDmg: c.dashBreakDmg, dashDmgAlwaysRolls: c.dashDmgAlwaysRolls,
