@@ -2162,7 +2162,7 @@ function fireOverloadBlack(count, ox, oy) {
   if (!fx) return;
   var crit = !!_currentCrit;
   var radius = clampRadiusToArena(fx.radiusPx);
-  // Per S015 v0.16.0: black overload pull strength + duration scale with
+  // Per S015 v0.15.10: black overload pull strength + duration scale with
   // tier (count). Half-value lock per playtest tuning.
   //   T1 pull: 50 px/s, hold 2s
   //   T10 pull: 220 px/s, hold 5s
@@ -6055,7 +6055,7 @@ function useBrickAction(color) {
 
 // ── RED — Charge ──────────────────────────────────
 
-// ── RED DASH DIAGNOSTIC (S015 v0.16.0) ──────────────────────────────────
+// ── RED DASH DIAGNOSTIC (S015 v0.15.10) ──────────────────────────────────
 // Captures full state on every red dash for visual replay. Helps identify
 // why dashes stop short of expected positions (range cap, hit detection,
 // wall block, target-buffer early-out, arena edge clamp). Persists for
@@ -7050,7 +7050,12 @@ function updateBrickAction(dt, bounds) {
         brickAction = null;
       } else if (brickAction && brickAction.usePoint) {
         var ptDist = Math.hypot(player.x - brickAction.targetX, player.y - brickAction.targetY);
-        if (ptDist < player.r + 8) {
+        // S015 v0.15.11 fix (per diagnostic capture from v0.15.10): old buffer
+        // was player.r + 8 (≈22px), causing every drag-drop dash to stop
+        // ~22px short of the visible endpoint marker. Diagnostic showed
+        // 92% travel ratio universally — bug confirmed. New 2px buffer
+        // is just float-precision tolerance; dash now reaches the marker.
+        if (ptDist < 2) {
           if (typeof finalizeRedDashDiag === 'function') {
             finalizeRedDashDiag(brickAction._stopReason || 'target-reached');
           }
@@ -8894,7 +8899,7 @@ function updateBlackEffect(dt) {
   }
   // Pull entities toward origin + damage ticks
   // BLACK SINGULARITY: crit doubles pull speed and tick damage.
-  // Per S015 v0.16.0: pull strength is tier-scaled at cast time
+  // Per S015 v0.15.10: pull strength is tier-scaled at cast time
   // (stored on blackEffect.pullStrength: 50 px/s @ T1 → 220 px/s @ T10).
   // Crit doubles whatever the current strength is.
   var singularity = !!blackEffect.isCrit;

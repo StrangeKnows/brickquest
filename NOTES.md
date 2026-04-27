@@ -4233,7 +4233,7 @@ rumble.js ~15 lines changed (3 call sites + comments).
 
 ---
 
-### v0.16.0 — Playtest patches: gray radius, white verification, black overload redesign, red dash diagnostic
+### v0.15.10 — Playtest patches: gray radius, white verification, black overload redesign, red dash diagnostic
 
 Four changes shipping together. Three are confirmed fixes from playtest;
 one is a diagnostic (per diagnostic-first protocol) before fixing a bug
@@ -4402,6 +4402,38 @@ fixes it without changing dash behavior.
 4. **Red dash diagnostic visible after each red attack.** Yellow arc,
    blue line, red line, dots, text panel. Persists 2.5s. Use this to
    capture 3-5 dashes and report what the stop reasons say.
+
+---
+
+### v0.15.11 — Hotfix: red dash 22px short bug confirmed and fixed
+
+Diagnostic from v0.15.10 captured the bug cleanly. Image showed:
+
+```
+reason: target-reached
+traveled: 230 / 250 px (92%)
+max range: 250 px
+```
+
+92% travel ratio = consistent ~22px gap between visible endpoint marker
+and actual dash stop. Cause located at line 7042 in the charge-end
+logic: `if (ptDist < player.r + 8)` — with player.r=14, this is a 22px
+"close enough" buffer that ended the dash early.
+
+The buffer was originally added to prevent oscillation, but red charge
+phase is one-directional (no springback), so oscillation isn't a real
+risk during charge. The buffer was overcautious for this code path.
+
+**Fix:** reduced buffer from `player.r + 8` (~22px) to `2` (just float-
+precision tolerance). Dash now reaches the visible endpoint marker
+within ~2px. Travel ratio should now read 99-100% in diagnostic.
+
+**Diagnostic kept on** for one more push to confirm the fix works in
+playtest. Will strip out diagnostic code in a later cleanup once
+behavior is verified across multiple scenarios.
+
+**Net diff:** rumble.js ~3 lines (one buffer constant changed,
+comment added).
 
 ---
 
