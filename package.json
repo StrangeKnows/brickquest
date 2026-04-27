@@ -1,6 +1,6 @@
 {
   "name": "brick-quest",
-  "version": "0.15.19",
+  "version": "0.15.20",
   "description": "Brick Quest — LEGO tabletop RPG server",
   "main": "server.js",
   "scripts": {

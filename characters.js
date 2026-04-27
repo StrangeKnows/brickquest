@@ -189,6 +189,27 @@ var CHARACTERS = {
     secondary: ['yellow'],
     startingKit: { orange: 2, red: 1 },
     weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    // Orange signature: overload-orange traps form a CHAIN NETWORK. Each
+    // trap dropped is "chain-linked" — when any trap in the network is
+    // triggered (entity contact), all transitively-linked traps within
+    // chainRadius detonate together. Per design lock S015 v0.15.20:
+    //   - Network is transitive: A links to B, B links to C → trigger A
+    //     fires all three even if A and C aren't directly within range
+    //   - Damage scales smoothly per entity by how many trap radii
+    //     contain that entity. Curve: min(3.0, 1 + 0.5 × (N - 1))
+    //     so N=1 → 1.0×, N=2 → 1.5×, N=4 → 2.5×, N=5+ caps at 3.0×
+    //   - Tap-orange (spike aura) is universal — chain only applies to
+    //     overload casts that create persistent traps in the world
+    // Other classes have no orangeProfile → null → standard single-trap
+    // behavior (no chain, no stacking). Engine reads via
+    // getOrangeProfile(cls); null means baseline.
+    orangeProfile: {
+      trapsChainOnTrigger: true,
+      chainRadius: 200,             // px — link distance between traps
+      stackingMaxMult: 3.0,         // damage cap when entity in many trap radii
+      // stackingCurve(N) = min(stackingMaxMult, 1 + 0.5 × (N - 1))
+      // Inlined in engine; field documents the design intent.
+    },
     // Red signature: longest reach class (light weight + sig affinity).
     // Matches hit-and-run identity. No hitbox/knockback bonus (those are BK).
     redProfile: { rangeBase: 240, rangeAffinityBonus: 1.25 },
@@ -295,6 +316,16 @@ function getPurpleProfile(cls) {
 // sites (fireOverloadBlue, blue cast indicator preview) read this.
 function getBlueProfile(cls) {
   return (CHARACTERS[cls] && CHARACTERS[cls].blueProfile) || null;
+}
+
+// Class-specific orange cast profile. Currently used to gate overload-
+// orange CHAIN NETWORK behavior: SS has trapsChainOnTrigger = true (sig
+// orange identity, chain trap network); other classes return null and
+// drop standalone traps with no chain. Per S015 v0.15.20. Engine call
+// sites (fireOverloadOrange, trap trigger handler, orange cast indicator)
+// read this.
+function getOrangeProfile(cls) {
+  return (CHARACTERS[cls] && CHARACTERS[cls].orangeProfile) || null;
 }
 
 // Class-specific red cast profile. Returns the per-class red mechanics
@@ -656,6 +687,7 @@ if (typeof window !== 'undefined') {
   window.getSecondary = getSecondary;
   window.getPurpleProfile = getPurpleProfile;
   window.getBlueProfile = getBlueProfile;
+  window.getOrangeProfile = getOrangeProfile;
   window.getRedProfile = getRedProfile;
   window.getRedDashProfile = getRedDashProfile;
   window.getRedRange = getRedRange;
@@ -684,7 +716,7 @@ if (typeof module !== 'undefined' && module.exports) {
     STARTING_KIT_COUNTS,
     CLASS_AFFINITY,
     getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
-    getSignature, getSecondary, getPurpleProfile, getBlueProfile, getRedProfile, getRedDashProfile, getRedRange, getGrayProfile, getGrayPips, getGrayWallHp,
+    getSignature, getSecondary, getPurpleProfile, getBlueProfile, getOrangeProfile, getRedProfile, getRedDashProfile, getRedRange, getGrayProfile, getGrayPips, getGrayWallHp,
     baseHeal,
     affinityMult,
     brickTier,

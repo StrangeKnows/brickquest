@@ -973,6 +973,7 @@ function update(dt) {
   updateWarpTrails(dt);
   updateWitherbolts(dt);
   updateTraps(dt);
+  updateChainLinkVisuals(dt);
   updateGrayWalls(dt);
   updateArmorBursts(dt);
   updateGreenBurst(dt);
@@ -1077,6 +1078,7 @@ function draw() {
   drawBlackEffect(_bounds);
   // ── Traps ──
   drawTraps();
+  drawChainLinkVisuals();
   // ── PHASE C hazards (poison puddles, thorn shards) ── under everything else
   drawPoisonPuddles();
   drawThornShards();
@@ -7956,6 +7958,36 @@ function drawCastIndicator(color, hex, dragPos) {
     : 1;
   var fx = _fx(color, tier);
   if (!fx) return;
+  // S015 v0.15.20: SS chain-trap drop zone preview. When a class with
+  // orangeProfile.trapsChainOnTrigger is overload-holding orange, render
+  // dashed rings around existing chained traps showing where a new trap
+  // would join the chain network. Renders before standard indicator so
+  // the player sees both the drop-zone hints AND the standard cast preview.
+  if (color === 'orange' && isHeld && player) {
+    var oProf = (typeof getOrangeProfile === 'function') ? getOrangeProfile(player.cls) : null;
+    if (oProf && oProf.trapsChainOnTrigger) {
+      var chainR = oProf.chainRadius || 200;
+      ctx.save();
+      ctx.strokeStyle = hex;
+      ctx.shadowColor = hex;
+      ctx.shadowBlur = 4;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 6]);
+      // Pulse alpha softly so the rings read as "advisory" not "primary"
+      var pulseT = performance.now() * 0.003;
+      var ringAlpha = 0.18 + 0.12 * (0.5 + 0.5 * Math.sin(pulseT));
+      ctx.globalAlpha = ringAlpha;
+      // Iterate active chain traps. Skip triggered ones (they won't link).
+      for (var tci = 0; tci < traps.length; tci++) {
+        var tc = traps[tci];
+        if (!tc.chained || tc.triggered) continue;
+        ctx.beginPath();
+        ctx.arc(tc.x, tc.y, chainR, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
   // Class-driven dual preview for purple teleport profile (FW signature).
   // When active-dragging purple and the class has a teleport profile, show
   // BOTH blast zones at their scaled radii plus the warp line between them.
@@ -8194,9 +8226,155 @@ var orangeAura = null;
 // Bleed tracking
 var bleeds = []; // { target, dmg, timer, tick }
 
-function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit) {
+// ─── ORANGE CHAIN NETWORK (S015 v0.15.20, SS signature) ───────────
+// When an SS chain trap triggers, the entire transitive network of
+// linked chain traps detonates together. The trap that triggered is
+// the seed; BFS finds all chained traps within chainRadius of any
+// already-found trap (chains can be longer than a single chainRadius
+// hop because A→B→C still all fire when A triggers).
+//
+// Damage to entities scales smoothly by how many trap radii contain
+// them. Curve: min(stackingMaxMult, 1 + 0.5 × (N - 1)) where N is the
+// count of trap radii covering the entity. So:
+//   N=1 → 1.0× (single trap, normal damage)
+//   N=2 → 1.5×
+//   N=4 → 2.5×
+//   N=5+ caps at stackingMaxMult (default 3.0)
+// This rewards careful clustering placement without becoming an
+// instakill at high cluster density.
+//
+// Chain detonation marks every trap in the network as triggered so
+// they don't re-fire when a second entity walks into another node.
+// Each entity gets ONE damage event from the chain, not one per trap.
+function detonateChainNetwork(seedTrap) {
+  if (!seedTrap || !seedTrap.chained) return;
+  // BFS to find the network. Includes the seed.
+  var network = [seedTrap];
+  var visited = [seedTrap];  // small N, array indexOf is fine
+  var queue = [seedTrap];
+  while (queue.length > 0) {
+    var current = queue.shift();
+    var linkR = current.chainRadius || 0;
+    for (var ti = 0; ti < traps.length; ti++) {
+      var other = traps[ti];
+      if (!other.chained) continue;
+      if (visited.indexOf(other) >= 0) continue;
+      if (other.triggered) continue;  // already-fired traps don't re-link
+      if (Math.hypot(other.x - current.x, other.y - current.y) <= linkR) {
+        visited.push(other);
+        network.push(other);
+        queue.push(other);
+      }
+    }
+  }
+  // Mark all triggered + start hold timer + spawn caught list
+  network.forEach(function(t) {
+    t.triggered = true;
+    t.holdTimer = t.HOLD_DURATION;
+    t.caughtEntities = t.caughtEntities || [];
+  });
+  // Per-entity damage stacking: count how many trap radii contain each.
+  // Use the seed's stackingMaxMult (all traps in the network share class
+  // identity so this is consistent).
+  var maxMult = seedTrap.stackingMaxMult || 3.0;
+  var entityHits = []; // {entity, count}
+  entities.forEach(function(g) {
+    if (g.hp <= 0 || g.dead) return;
+    var count = 0;
+    for (var nti = 0; nti < network.length; nti++) {
+      var nt = network[nti];
+      if (Math.hypot(g.x - nt.x, g.y - nt.y) < nt.r + g.r) {
+        count++;
+      }
+    }
+    if (count > 0) {
+      entityHits.push({ entity: g, count: count });
+    }
+  });
+  // Apply stacking damage curve. Use seed's initialDmg for base
+  // (all chain traps in a single overload cast share fx values).
+  var baseDmg = seedTrap.initialDmg;
+  entityHits.forEach(function(hit) {
+    var mult = Math.min(maxMult, 1 + 0.5 * (hit.count - 1));
+    var dmgAmt = Math.ceil(baseDmg * mult);
+    var dRes = damageEntity(hit.entity, dmgAmt, false, 'orange');
+    hit.entity.flashTimer = 0.25;
+    // Damage number color hints at the chain bonus: standard orange for
+    // single-trap (no bonus), brighter shrapnel orange for stacked hits.
+    var dmgColor = hit.count > 1 ? '#FF8833' : '#ff6600';
+    showDamageNumber(hit.entity.x, hit.entity.y - 30, dRes.applied,
+      dmgColor, dRes.tier, hit.entity.x, hit.entity.y,
+      undefined, dRes.witherBoost, hit.entity);
+    // Add to caughtEntities list of any trap that contained the entity,
+    // so the hold-timer visual cleanup works the same as standard traps.
+    network.forEach(function(nt) {
+      if (Math.hypot(hit.entity.x - nt.x, hit.entity.y - nt.y) < nt.r + hit.entity.r) {
+        if (nt.caughtEntities.indexOf(hit.entity) < 0) {
+          nt.caughtEntities.push(hit.entity);
+        }
+      }
+    });
+  });
+  // Spawn visual chain links between connected traps in the network.
+  // Each pair within chainRadius gets a brief line.
+  for (var ai = 0; ai < network.length; ai++) {
+    for (var bi = ai + 1; bi < network.length; bi++) {
+      var ta = network[ai], tb = network[bi];
+      var d = Math.hypot(ta.x - tb.x, ta.y - tb.y);
+      var maxLink = Math.max(ta.chainRadius || 0, tb.chainRadius || 0);
+      if (d <= maxLink) {
+        chainLinkVisuals.push({
+          x1: ta.x, y1: ta.y, x2: tb.x, y2: tb.y,
+          alpha: 1.0, life: 0.35,
+          age: 0,
+        });
+      }
+    }
+  }
+  // Crit shockwave at the seed if it was crit
+  if (seedTrap.isCrit) {
+    spawnCritShockwave(seedTrap.x, seedTrap.y, '#F57C00',
+      { r0: 12, maxR: seedTrap.r * 2.2, thickness: 4, growth: 360 });
+    spawnCritFlourish(seedTrap.x, seedTrap.y, '#FF9933', 18);
+  }
+  triggerVictory();
+}
+
+// Visual links between linked chain traps when the network detonates.
+// Drawn as fading orange lines for ~350ms after detonation, then expire.
+var chainLinkVisuals = [];
+
+function updateChainLinkVisuals(dt) {
+  for (var i = chainLinkVisuals.length - 1; i >= 0; i--) {
+    var l = chainLinkVisuals[i];
+    l.age += dt;
+    l.alpha = Math.max(0, 1 - (l.age / l.life));
+    if (l.age >= l.life) chainLinkVisuals.splice(i, 1);
+  }
+}
+
+function drawChainLinkVisuals() {
+  if (!chainLinkVisuals.length || !ctx) return;
+  ctx.save();
+  chainLinkVisuals.forEach(function(l) {
+    ctx.globalAlpha = l.alpha * 0.7;
+    ctx.strokeStyle = '#FF8833';
+    ctx.lineWidth = 2.5;
+    ctx.shadowColor = '#FF6600';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(l.x1, l.y1);
+    ctx.lineTo(l.x2, l.y2);
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit, chainOpts) {
   // sealed=true means trap immediately snaps (used for aura/drag at placement)
   // isCrit=true flags ORANGE SHRAPNEL: detonation hits AoE radius instead of single target.
+  // chainOpts={chained, chainRadius, stackingMaxMult} — when present, trap is part
+  //   of a chain network. Per S015 v0.15.20 (SS orange signature).
   var t = {
     x: x, y: y, r: r,
     triggered: false, sealed: sealed||false,
@@ -8208,41 +8386,62 @@ function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit) {
     isCrit: !!isCrit,
     // if sealed, trap contains already-caught entities
     caughtEntities: [],
+    // S015 v0.15.20: chain-linked trap fields. Other classes' traps have
+    // chained=false (default falsy) and use the standard single-trap path.
+    chained: !!(chainOpts && chainOpts.chained),
+    chainRadius: (chainOpts && chainOpts.chainRadius) || 0,
+    stackingMaxMult: (chainOpts && chainOpts.stackingMaxMult) || 1.0,
   };
+  traps.push(t);  // push BEFORE potential chain detonation so the trap is in
+                  // the network when detonateChainNetwork scans
   if (sealed) {
-    // Catch entities within radius immediately
-    entities.forEach(function(g) {
-      if (Math.hypot(g.x-x, g.y-y) < r + g.r) {
-        t.caughtEntities.push(g);
-        t.triggered = true;
-        t.holdTimer = t.HOLD_DURATION;
-        var tRes = damageEntity(g, t.initialDmg, false, 'orange');
-        showDamageNumber(g.x, g.y-30, tRes.applied, '#ff6600', tRes.tier, g.x, g.y, undefined, tRes.witherBoost, g);
+    if (t.chained) {
+      // Chain-linked sealed trap: if an entity is already inside the radius
+      // at placement, treat that as the trigger and detonate the network.
+      var anyEntityCaught = false;
+      for (var sci = 0; sci < entities.length; sci++) {
+        var sg = entities[sci];
+        if (Math.hypot(sg.x-x, sg.y-y) < r + sg.r) { anyEntityCaught = true; break; }
       }
-    });
-    // ORANGE SHRAPNEL: on crit sealed-trap placement, also hit anyone in a
-    // wider AoE around the trap center (1.8x radius).
-    if (isCrit) {
-      var aoeR = r * 1.8;
+      if (anyEntityCaught) {
+        detonateChainNetwork(t);
+      }
+      // If no entity caught, the trap waits as a network node (will detonate
+      // when something walks into ANY linked trap).
+    } else {
+      // Standard sealed-trap path (no chain): immediate per-entity damage.
       entities.forEach(function(g) {
-        // Skip already-caught entities so we don't double-hit them
-        if (t.caughtEntities.indexOf(g) >= 0) return;
-        if (Math.hypot(g.x-x, g.y-y) < aoeR + g.r) {
-          var sRes = damageEntity(g, t.initialDmg, true, 'orange');
-          g.flashTimer = 0.2;
-          showDamageNumber(g.x, g.y-30, sRes.applied, '#ff9933', sRes.tier, g.x, g.y, undefined, sRes.witherBoost, g);
+        if (Math.hypot(g.x-x, g.y-y) < r + g.r) {
+          t.caughtEntities.push(g);
+          t.triggered = true;
+          t.holdTimer = t.HOLD_DURATION;
+          var tRes = damageEntity(g, t.initialDmg, false, 'orange');
+          showDamageNumber(g.x, g.y-30, tRes.applied, '#ff6600', tRes.tier, g.x, g.y, undefined, tRes.witherBoost, g);
         }
       });
-      spawnCritShockwave(x, y, '#F57C00', { r0: 10, maxR: aoeR, thickness: 4, growth: 360 });
-      spawnCritFlourish(x, y, '#FF9933', 22);
-      spawnCritFlourish(x, y, '#FFC080', 14);
+      // ORANGE SHRAPNEL: on crit sealed-trap placement, also hit anyone in a
+      // wider AoE around the trap center (1.8x radius).
+      if (isCrit) {
+        var aoeR = r * 1.8;
+        entities.forEach(function(g) {
+          // Skip already-caught entities so we don't double-hit them
+          if (t.caughtEntities.indexOf(g) >= 0) return;
+          if (Math.hypot(g.x-x, g.y-y) < aoeR + g.r) {
+            var sRes = damageEntity(g, t.initialDmg, true, 'orange');
+            g.flashTimer = 0.2;
+            showDamageNumber(g.x, g.y-30, sRes.applied, '#ff9933', sRes.tier, g.x, g.y, undefined, sRes.witherBoost, g);
+          }
+        });
+        spawnCritShockwave(x, y, '#F57C00', { r0: 10, maxR: aoeR, thickness: 4, growth: 360 });
+        spawnCritFlourish(x, y, '#FF9933', 22);
+        spawnCritFlourish(x, y, '#FFC080', 14);
+      }
+      // BUGFIX (0.14.3): sealed traps fire damage on spawn. If this kills the
+      // last entity, no hit path will follow up to call triggerVictory. Same
+      // hang pattern as the unsealed-trap trigger site below.
+      triggerVictory();
     }
-    // BUGFIX (0.14.3): sealed traps fire damage on spawn. If this kills the
-    // last entity, no hit path will follow up to call triggerVictory. Same
-    // hang pattern as the unsealed-trap trigger site below.
-    triggerVictory();
   }
-  traps.push(t);
 }
 
 function startOrangeTrap(ox, oy, tier) {
@@ -8261,7 +8460,16 @@ function startOrangeTrap(ox, oy, tier) {
 function fireOverloadOrangeScatter(count, ox, oy) {
   var fx = _fx('orange', count);
   if (!fx) return;
-  spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, _currentCrit);
+  // S015 v0.15.20: SS overload-orange traps are chain-linked. Read class
+  // orangeProfile to determine whether this trap joins the chain network.
+  // Other classes get null → no chain → standard single trap.
+  var oProf = (typeof getOrangeProfile === 'function') ? getOrangeProfile(player.cls) : null;
+  var chainOpts = (oProf && oProf.trapsChainOnTrigger) ? {
+    chained: true,
+    chainRadius: oProf.chainRadius || 200,
+    stackingMaxMult: oProf.stackingMaxMult || 3.0,
+  } : null;
+  spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, _currentCrit, chainOpts);
 }
 
 function applyBleed(g, dmg, tier) {
@@ -8332,6 +8540,11 @@ function updateTraps(dt) {
       // Waiting — detect entity
       entities.forEach(function(g) {
         if (!t.triggered && Math.hypot(g.x-t.x,g.y-t.y)<t.r+g.r) {
+          // S015 v0.15.20: chain-linked traps fire the entire network.
+          if (t.chained) {
+            detonateChainNetwork(t);
+            return; // detonate handles everything
+          }
           t.triggered = true;
           t.holdTimer = t.HOLD_DURATION;
           t.caughtEntities = [g];

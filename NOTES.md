@@ -5281,6 +5281,146 @@ that absorption happened.
 
 ---
 
+### v0.15.20 — Snapstep orange signature: chain-trap network
+
+First class-baseline-parity push for Snapstep. Their orange-sig
+identity now has mechanical teeth: overload-orange traps form a
+**chain network**. Drop multiple traps within `chainRadius` of each
+other and they're linked. When ANY trap triggers, the entire transitive
+network detonates together. Damage to entities scales smoothly by how
+many trap radii they're inside, capped at 3× single-trap damage.
+
+This continues the per-color profile pattern (red/purple/blue have
+schemas, now orange does too): **`orangeProfile`** lives on SS, other
+classes return null and get the standard single-trap behavior.
+
+---
+
+**The schema (characters.js):**
+
+```js
+snapstep: {
+  // ...
+  orangeProfile: {
+    trapsChainOnTrigger: true,
+    chainRadius: 200,        // px — link distance between traps
+    stackingMaxMult: 3.0,    // damage cap when entity in many trap radii
+  },
+  // ...
+}
+```
+
+New helper `getOrangeProfile(cls)` exported alongside the others.
+
+---
+
+**Engine flow (rumble.js):**
+
+`spawnSpikeTrap` extended to accept a `chainOpts` parameter:
+
+```js
+spawnSpikeTrap(x, y, r, dmg, sealed, isCrit, chainOpts);
+```
+
+When `chainOpts` is non-null, the trap is tagged `chained: true` and
+stores `chainRadius` + `stackingMaxMult` on itself. `fireOverloadOrangeScatter`
+reads the player's class profile and constructs `chainOpts` only for SS;
+other classes pass `null` → standard behavior.
+
+**Trigger paths:** both sealed (placement-time entity catch) and
+unsealed (entity walks in) branch on `t.chained`. Chain traps call
+`detonateChainNetwork(seedTrap)` instead of doing per-trap damage.
+
+**Network detonation algorithm:**
+
+1. **BFS from seed:** find all chained, untriggered traps reachable via
+   `chainRadius` hops. Transitive — A links to B links to C, all three
+   fire even if A and C aren't directly within range.
+2. **Mark all triggered:** every trap in the network is marked done at
+   the same moment (no re-trigger when next entity walks in).
+3. **Per-entity stacking:** count how many network-trap radii contain
+   each entity. Damage multiplier = `min(stackingMaxMult, 1 + 0.5 ×
+   (N - 1))`:
+   - N=1 → 1.0× (single-trap, normal damage)
+   - N=2 → 1.5×
+   - N=3 → 2.0×
+   - N=4 → 2.5×
+   - N=5+ → caps at 3.0×
+4. **One damage event per entity:** entity gets ONE `damageEntity` call
+   with the stacked total, not N separate hits. Plays cleanly with the
+   damage number merge from v0.15.19 (single number, not pile-on).
+5. **Visuals:** chain links draw as fading orange lines (~350ms) between
+   every linked pair in the network — visual honesty, shows what
+   actually fired together. Damage numbers go bright shrapnel-orange
+   `#FF8833` for stacked hits (count > 1), standard orange for singles.
+
+---
+
+**Cast indicator: chain drop-zone preview.**
+
+When SS holds overload-orange, the standard cast indicator gets an
+overlay: dashed pulsing rings around every active (untriggered) chain
+trap, sized to `chainRadius`. Drop the new trap inside any ring → it
+joins that network. Drop outside all rings → isolated trap (won't
+chain to anything else).
+
+The indicator pulses gently (alpha ~0.18-0.30 sin wave) so it reads as
+advisory not primary — the standard AOE drop ring at the cursor is
+still the focus.
+
+Other classes don't see these rings — schema-gated on
+`orangeProfile.trapsChainOnTrigger`.
+
+---
+
+**Architectural notes:**
+
+- **Engine has zero class-name checks.** Engine reads
+  `getOrangeProfile(cls)`, branches on `trapsChainOnTrigger` boolean.
+  Adding chain-orange to a future class = data change.
+- **Damage stacking math is in the engine.** Curve is `1 + 0.5 ×
+  (N-1)`, cap from schema field. If SS feels too strong, tune
+  `stackingMaxMult` to 2.5 or change the slope; both are data tweaks.
+- **Network detonation handles the v0.15.19 merge naturally:** since
+  damage is delivered as ONE call per entity (with stacked total), the
+  damage number system sees one number per entity per chain event.
+  Rapid chain events on the same entity merge per the existing
+  same-target rules.
+- **Untriggered-only network expansion:** BFS skips already-triggered
+  traps. Means a chain that fires today doesn't get re-fired by a
+  different network later — old triggered traps are inert.
+
+---
+
+**Net diff:**
+* characters.js: ~25 lines (orangeProfile schema, getOrangeProfile,
+  exports)
+* rumble.js: ~150 lines (chain detonation function, chain link
+  visuals, chainOpts thread through spawnSpikeTrap, trigger path
+  branching, cast indicator overlay)
+
+**Test focus:**
+
+1. **SS overload-orange drops chain trap.** Verify dashed ring appears
+   around it after drop (visible in indicator on next held cast).
+2. **Drop second SS trap inside the first's chain ring.** Walk a goblin
+   into either trap → BOTH detonate together. Visible chain link line
+   between them for ~350ms.
+3. **Drop second SS trap OUTSIDE chain ring.** Trigger one — only that
+   one fires. The other stays armed.
+4. **Three-trap chain (A within range of B, B within range of C, A NOT
+   within range of C).** Trigger A → all three fire (transitive).
+5. **Stacking damage.** Drop two overlapping chain traps so a goblin
+   stands inside both. Trigger → goblin takes 1.5× single-trap damage
+   (one number, not two). Three overlapping → 2.0×.
+6. **Other classes' overload-orange unchanged.** BK/FW/FX/etc. drop a
+   single trap, no chain rings, no network detonation.
+7. **Architectural verification:** in characters.js, change SS's
+   `orangeProfile.chainRadius` from 200 to 100. Reload. Chain rings
+   should shrink. No engine edits needed.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
