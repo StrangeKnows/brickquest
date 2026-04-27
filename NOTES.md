@@ -5159,6 +5159,128 @@ confused. No effect when yellow isn't being used.
 
 ---
 
+### v0.15.19 — Damage number merge for rapid same-target taps (Case 1)
+
+Playtest readout: rapid blue taps on the same goblin spawn three or
+four damage numbers stacked at the same position, hard to read. Solved
+the narrowest version of the problem first — Case 1 only (same target,
+rapid taps merge into one growing number).
+
+Future tuning may extend to Case 2 (BK Model 2 multi-entity blast,
+where damage numbers spawn at different positions for different
+entities and could optionally merge into a centroid total). Deferred —
+ship the focused fix, evaluate, then decide.
+
+---
+
+**Existing infrastructure already partially in place:**
+
+`floatingTexts` records had `mergeable` and `accum` fields, and
+`showFloatingText` (the heal/cleanse/text path) already implemented
+position-based merging within a 120ms window (line ~2984). But
+`showDamageNumber` (the damage path) wrote `mergeable: false` and
+never checked for an existing merge target before pushing. So damage
+numbers piled up on rapid taps; heal numbers didn't.
+
+This push wires the same pattern into showDamageNumber, with one
+architectural improvement: anchor the merge on **parent entity
+identity** instead of screen position. More reliable since entities
+move during the absorb window — same goblin always merges with the
+text on itself, regardless of where the goblin walks during 200ms.
+
+---
+
+**The merge logic:**
+
+```js
+if (par && tier !== 'RESIST' && tier !== 'IMMUNE') {
+  var mergeWindow = 200;
+  var mergeTarget = floatingTexts.find(ft =>
+    ft.mergeable && ft.parent === par
+    && ft.color === cfg.color && ft.tier === tier
+    && now - ft.spawnTime < mergeWindow);
+  if (mergeTarget) {
+    mergeTarget.accum += applied;
+    mergeTarget.text = mergeTarget.accum + suffix;
+    // re-scale font + fade based on new total
+    return;  // skip the regular spawn
+  }
+}
+floatingTexts.push({ ..., mergeable: tier !== 'RESIST' && tier !== 'IMMUNE' });
+```
+
+**Anchor fields for matching:**
+* **parent entity identity** (`ft.parent === par`) — same target
+* **color** (separates crit orange from base red, separates damage
+  from heals)
+* **tier** (NEUTRAL doesn't merge with VULN, etc.)
+* **spawn time within 200ms** of the existing text
+
+**Excluded tiers:**
+* RESIST — has bounce-off geometry that would lie if absorbed
+* IMMUNE — the "0" fizzle is a distinct outcome signal
+* World-space hits with no parent — nothing to anchor on
+
+---
+
+**Behavior in practice:**
+
+Rapid tap blue 4× on a goblin (taps at 0, 120, 280, 480 ms):
+* **Tap 1 (t=0):** spawn "4", marked mergeable, spawn time 0
+* **Tap 2 (t=120):** find tap-1's text on same goblin, within 200ms →
+  merge → text becomes "8", font slightly larger
+* **Tap 3 (t=280):** find tap-2's text → time delta 280ms > window →
+  no merge. Spawn fresh "4"
+* **Tap 4 (t=480):** find tap-3's text on same goblin (within
+  200ms of tap 3) → merge → text becomes "8"
+
+Net visual: two numbers ("8" and "8") instead of four ("4 4 4 4").
+Tighter screen.
+
+If user taps faster (all within 200ms), all four merge into a single
+"16". The window is fixed from the original spawn — not refreshed by
+each merge — to prevent indefinite absorption (the "continuous"
+option that was deferred).
+
+---
+
+**Visual scaling:**
+
+The existing magScale curve (`1 + 0.22 * log2(applied + 1)`, capped
+at 2.0) handles font growth gracefully:
+* 4 dmg: 1.51× (~21px font)
+* 8 dmg: 1.70× (~24px)
+* 12 dmg: 1.81× (~25px)
+* 16+ dmg: approaches 1.90-2.00× (~27-28px)
+
+So a merged number visibly grows without becoming absurd at high
+totals. Small "alpha kick" (+0.15) on each merge gives subtle feedback
+that absorption happened.
+
+---
+
+**Net diff:**
+* characters.js: untouched
+* rumble.js: ~45 lines (merge check + `mergeable: true` flag toggle in
+  showDamageNumber NEUTRAL/VULN/WEAK push)
+
+**Test focus:**
+
+1. **Rapid blue taps on one goblin** — should see numbers grow
+   (4 → 8 → 12 → 16) instead of stacking. Single number visible,
+   not multiple overlaying.
+2. **Single tap unchanged** — one number rises and fades normally.
+3. **Two different goblins hit same frame** — separate numbers
+   (different parents). Each goblin's number is its own.
+4. **Crit + base on same goblin** — colors differ, numbers stay
+   separate.
+5. **RESIST and IMMUNE unchanged** — bounce-off and fizzle "0"
+   render exactly as before, not merged.
+6. **Heal and damage on same target** — different colors, stay
+   separate.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

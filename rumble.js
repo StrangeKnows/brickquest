@@ -3231,11 +3231,55 @@ function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, 
   var finalFontSize = Math.round(cfg.fontSize * witherFontScale * magScale);
   var finalFadeRate = cfg.fade * witherFadeScale * magFadeScale;
   var finalGlow     = cfg.glow * (1 + wb * 0.15) * (1 + 0.25 * (magScale - 1));
+  // S015 v0.15.19: Case 1 merge — rapid taps on the same target combine
+  // into one growing number. Anchor on parent entity identity (more
+  // reliable than screen position since entities move); same color +
+  // tier; within 200ms absorb window. Excluded: RESIST (bounce geometry
+  // would lie if absorbed), IMMUNE (fizzle '0' is distinct outcome),
+  // hits with no parent (world-space hits don't have an anchor).
+  // Wither-boosted hits also merge — wb already baked into accum text.
+  if (par && tier !== 'RESIST' && tier !== 'IMMUNE') {
+    var mergeWindow = 200;  // ms after spawn during which new hits absorb
+    var mergeTarget = null;
+    for (var fti = floatingTexts.length - 1; fti >= 0; fti--) {
+      var ft = floatingTexts[fti];
+      if (!ft.mergeable) continue;
+      if (ft.parent !== par) continue;       // same-target only
+      if (ft.color !== cfg.color) continue;  // same color (separates crit/base/heal)
+      if (ft.tier !== tier) continue;        // same tier
+      if (now - ft.spawnTime > mergeWindow) continue;
+      mergeTarget = ft;
+      break;
+    }
+    if (mergeTarget) {
+      // Accumulate. Preserve any prefix icon on the original text.
+      mergeTarget.accum = (mergeTarget.accum || 0) + applied;
+      var oldText = mergeTarget.text || '';
+      var sufMatch = oldText.match(/^[0-9.]+(.*)$/);
+      var sufText = sufMatch ? sufMatch[1] : (icon ? ' ' + icon : '');
+      mergeTarget.text = mergeTarget.accum + sufText;
+      // Re-scale font + fade with new total. Same magScale curve as fresh.
+      var mergedMagScale = Math.min(2.0, Math.max(1.0, 1 + 0.22 * Math.log2(mergeTarget.accum + 1)));
+      var mergedMagFadeScale = 1 / Math.sqrt(mergedMagScale);
+      mergeTarget.fontSize = Math.round(cfg.fontSize * witherFontScale * mergedMagScale);
+      mergeTarget.fadeRate = cfg.fade * witherFadeScale * mergedMagFadeScale;
+      mergeTarget.glowMult = cfg.glow * (1 + wb * 0.15) * (1 + 0.25 * (mergedMagScale - 1));
+      // DO NOT refresh spawnTime — the absorb window is fixed from the
+      // original spawn, so the number locks at 200ms regardless of how
+      // many merges occurred. Prevents indefinite absorption (the
+      // 'continuous' option we deferred).
+      // Brief visual feedback for the merge — small alpha bump if it had
+      // started fading (tiny "kick" effect).
+      mergeTarget.alpha = Math.min(1.0, (mergeTarget.alpha || 1) + 0.15);
+      return;
+    }
+  }
   floatingTexts.push({
     x: x, y: y, text: text, color: cfg.color,
     alpha: 1, vy: -cfg.rise, fadeRate: finalFadeRate,
     fontSize: finalFontSize,
-    mergeable: false, accum: applied, spawnTime: now,
+    mergeable: (tier !== 'RESIST' && tier !== 'IMMUNE'),  // S015 v0.15.19: enable merging
+    accum: applied, spawnTime: now,
     tier: tier, glowMult: finalGlow,
     pulse: !!cfg.pulse || wb > 0, // withered hits pulse even at neutral tier
     shake: !!cfg.shake, outline: !!cfg.outline || wb >= 3,
