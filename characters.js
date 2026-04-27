@@ -67,12 +67,39 @@ var CHARACTERS = {
     // larger hitbox, and stronger knockback. Per design doc §2.3
     // (BREAKER RED: larger hitbox, knockback 1.5× on attacks).
     // S015 build: scale values upgraded per playtest discussion (knockback ×2.0).
+    // S015 v0.15.13: full dash profile schema — class identity for dash
+    // mechanic lives here, not in engine. Engine reads fields generically;
+    // adding/changing dash behavior for any class = data change in this
+    // file, not engine surgery.
     // Engine reads via getRedProfile(cls); other classes get null and use baseline.
     redProfile: {
-      rangeBase: 160,            // heavy weight — shorter base reach
-      rangeAffinityBonus: 1.25,  // signature red — final ×1.25 to base
+      rangeBase: 160,            // heavy weight — shorter base reach (vestigial; v0.15.9 unified to BASE=200)
+      rangeAffinityBonus: 1.25,  // signature red — final ×1.25 to base (vestigial; v0.15.9 unified)
       hitboxScale: 1.3,          // 30% larger hit radius for red dash
       knockbackScale: 2.0,       // 2× knockback velocity on red impact
+      // ── DASH SCHEMA (v0.15.13) ──
+      // dashModel selects the on-impact behavior. Engine reads this field
+      // and dispatches without checking class name. Future classes can
+      // adopt 'aoe-blast' or other models by setting their own redProfile.
+      //   'recoil'    — stop on first hit, single target, recoil to start
+      //                 (default; what every class without an override gets)
+      //   'aoe-blast' — stop on first hit, AOE blast at impact, no recoil
+      dashModel: 'aoe-blast',
+      // Model-specific params. Engine only reads these when the matching
+      // dashModel is active. blastRadiusMult: blast radius = bubble × this.
+      blastRadiusMult: 1.0,        // BK blast = bubble radius (~36px at hitboxScale 1.3)
+      // knockbackMode applies regardless of dashModel; describes direction.
+      //   'forward' — knockback in dash direction (default — punch entity forward)
+      //   'radial'  — knockback radial outward from impact center (explosion feel)
+      knockbackMode: 'radial',     // BK blast pushes entities outward from impact
+      recoilOnHit: false,          // BK plants on impact — no spring back
+      // Visual payoff config. null disables that visual.
+      blastVisual: {
+        ringColors: ['#E24B4A', '#FFAA00'],  // primary red, secondary orange
+        bloomCount: 12,              // base count, scaled +3 per tier in engine
+        bloomColor: '#FFAA00',
+      },
+      critScreenShake: { mag: 5, ms: 200 },  // crit-only shake on Model 2 impact
     },
     // Gray signature: lethal blow triggers a one-per-rumble death save.
     // All current armor pips drain one-at-a-time (visible cinematic) and
@@ -247,6 +274,39 @@ function getPurpleProfile(cls) {
 // design. If a future class is added without one, defaults to baseline.
 function getRedProfile(cls) {
   return (CHARACTERS[cls] && CHARACTERS[cls].redProfile) || null;
+}
+
+// Returns a fully-normalized red dash profile with defaults filled in.
+// Engine should call this (not getRedProfile) when reading dash schema
+// fields, so it can read them without || fallbacks scattered everywhere.
+//
+// Default profile = Model 3 (recoil). Any class without redProfile fields
+// for the dash schema gets these defaults automatically. Adding a new
+// class with custom dash mechanics = override the relevant fields in
+// characters.js — no engine changes needed.
+//
+// Schema documented HERE so future class additions know what's tunable.
+function getRedDashProfile(cls) {
+  var p = getRedProfile(cls) || {};
+  return {
+    // ── HIT GEOMETRY ──
+    hitboxScale: (typeof p.hitboxScale === 'number') ? p.hitboxScale : 1.0,
+    knockbackScale: (typeof p.knockbackScale === 'number') ? p.knockbackScale : 1.0,
+
+    // ── DASH MODEL ──
+    // 'recoil'    — single target, recoil after hit (default Model 3)
+    // 'aoe-blast' — AOE blast at impact, no recoil (Model 2, BK identity)
+    dashModel: p.dashModel || 'recoil',
+
+    // ── MODEL PARAMS ──
+    blastRadiusMult: (typeof p.blastRadiusMult === 'number') ? p.blastRadiusMult : 1.0,
+    knockbackMode: p.knockbackMode || 'forward', // 'radial' | 'forward'
+    recoilOnHit: (typeof p.recoilOnHit === 'boolean') ? p.recoilOnHit : true,
+
+    // ── VISUAL ──
+    blastVisual: p.blastVisual || null,    // { ringColors:[...], bloomCount, bloomColor }
+    critScreenShake: p.critScreenShake || null,  // { mag, ms }
+  };
 }
 
 // Compute red dash range for a class given current red brick inventory.
@@ -563,6 +623,7 @@ if (typeof window !== 'undefined') {
   window.getSecondary = getSecondary;
   window.getPurpleProfile = getPurpleProfile;
   window.getRedProfile = getRedProfile;
+  window.getRedDashProfile = getRedDashProfile;
   window.getRedRange = getRedRange;
   window.getGrayProfile = getGrayProfile;
   window.getGrayPips = getGrayPips;
@@ -589,7 +650,7 @@ if (typeof module !== 'undefined' && module.exports) {
     STARTING_KIT_COUNTS,
     CLASS_AFFINITY,
     getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
-    getSignature, getSecondary, getPurpleProfile, getRedProfile, getRedRange, getGrayProfile, getGrayPips, getGrayWallHp,
+    getSignature, getSecondary, getPurpleProfile, getRedProfile, getRedDashProfile, getRedRange, getGrayProfile, getGrayPips, getGrayWallHp,
     baseHeal,
     affinityMult,
     brickTier,

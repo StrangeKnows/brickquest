@@ -4539,6 +4539,136 @@ rewrite + dead code removal). characters.js untouched.
 
 ---
 
+### v0.15.13 — Dash class identity via schema (architecturally correct)
+
+Following the Model 2 (BK AOE blast) / Model 3 (other classes recoil)
+design lock from playtest, this push refactors the dash mechanic to
+be **schema-driven** rather than class-name-checked. Per architectural
+rule: **data/profile/config in characters.js, runtime/engine in
+rumble.js. No inverted dependencies.**
+
+The first draft of the Model 2/3 split (not pushed) had hardcoded
+`isBK = (player.cls === 'breaker')` checks and inlined values
+(blast radius, ring colors, shake magnitude) in the engine. That
+pinned class identity into the runtime layer — adding Model 2 to
+another class would require editing rumble.js. This push fixes that
+before it lands.
+
+---
+
+**The redProfile schema (lives in characters.js):**
+
+```js
+redProfile: {
+  // Existing fields
+  hitboxScale: 1.0,           // bubble radius multiplier
+  knockbackScale: 1.0,        // knockback magnitude multiplier
+
+  // S015 v0.15.13 dash schema fields
+  dashModel: 'recoil',        // 'recoil' | 'aoe-blast'
+  blastRadiusMult: 1.0,       // blast = bubble × this (only when 'aoe-blast')
+  knockbackMode: 'forward',   // 'forward' | 'radial'
+  recoilOnHit: true,          // false = end at impact (no return phase)
+
+  // Visual config — null disables that visual
+  blastVisual: null,          // { ringColors:[...], bloomCount, bloomColor }
+  critScreenShake: null,      // { mag, ms }
+}
+```
+
+**Defaults** (any class without these fields gets Model 3 behavior):
+* `dashModel: 'recoil'`
+* `knockbackMode: 'forward'`
+* `recoilOnHit: true`
+* No blast visual, no crit shake
+
+**BK profile** (the only class currently overriding the defaults):
+* `dashModel: 'aoe-blast'`
+* `blastRadiusMult: 1.0`
+* `knockbackMode: 'radial'`
+* `recoilOnHit: false`
+* `blastVisual: { ringColors: ['#E24B4A', '#FFAA00'], bloomCount: 12, bloomColor: '#FFAA00' }`
+* `critScreenShake: { mag: 5, ms: 200 }`
+
+---
+
+**Engine refactor (rumble.js):**
+
+* New helper `getRedDashProfile(cls)` in characters.js returns the
+  normalized profile with all defaults filled in. Engine calls this
+  once at the start of each charge frame.
+* All `if (player.cls === 'breaker')` checks in dash logic removed.
+* Engine reads `dashProfile.dashModel`, `dashProfile.knockbackMode`,
+  `dashProfile.recoilOnHit`, `dashProfile.blastVisual`,
+  `dashProfile.critScreenShake` — never the class name.
+* `isBlastModel = (dashProfile.dashModel === 'aoe-blast')` is a local
+  flag derived from data, not class identity.
+* `triggerScreenShake(mag, ms)` and `updateScreenShake(dt)` helpers
+  added (used by `dashProfile.critScreenShake` config).
+
+**What this enables:**
+
+* **Future class additions** with custom dash mechanics = data change in
+  characters.js, no engine surgery. Want SS to get a chain-strike
+  instead of standard recoil? Add a new dashModel to the schema, add
+  one branch in the engine dispatch, set the field in SS's redProfile.
+* **Tuning BK** (blast radius, colors, shake magnitude) = data change.
+* **Disabling shake on a class that crits a lot** = `critScreenShake:
+  null` in characters.js.
+
+---
+
+**Other v0.15.13 contents (alongside the architectural refactor):**
+
+* **Class-specific dash models locked from playtest:** BK uses Model 2
+  (stop on first hit, AOE blast at impact, radial knockback, no
+  recoil), all other classes use Model 3 (single-target, forward
+  knockback, recoil back to start). Decision came from playtest
+  captures of v0.15.12's bubble-sweep showing it didn't fit precision
+  classes.
+* **Diagnostic enhancements:** hit list in panel
+  (`hits: g1×1 g2×1 g3×1`); blast circle rendered as orange dashed
+  ring at impact location for AOE-blast model; new stop reasons
+  `entity-blast` (Model 2) and `entity-hit` (Model 3 via return phase
+  finalize).
+* **Screen shake module:** `screenShake` state object with
+  `triggerScreenShake` / `updateScreenShake` helpers. Applied via
+  `ctx.translate` at start of `draw()`, restored at end. Take-louder
+  logic prevents stacking.
+* **Range computation** unchanged from v0.15.12 (Read B / pre-spend
+  snapshot via `_redCastOwnedSnapshot`).
+
+---
+
+**Net diff:**
+
+* characters.js: +47 lines (extended BK redProfile, added
+  getRedDashProfile helper + defaults, exports)
+* rumble.js: ~290 lines changed (schema-driven dispatch, screen shake
+  module, return phase restoration, diagnostic enhancements)
+
+**Test focus:**
+
+1. **BK feels like wrecking ball:** stops on first hit, blast catches
+   nearby entities (~36px radius), no recoil, visible ring + bloom.
+   Crit triggers screen shake.
+2. **Other classes feel precise:** SS, BS, FX, FW, WO all stop on
+   first hit, hit one entity, recoil back. No blast visual. No shake
+   on crit.
+3. **Range matches commitment** (unchanged from v0.15.12 — verify
+   not regressed). T3 with 3 owned → BK 300px, baseline 240px.
+4. **Hit list reads sensibly:** BK with 2 goblins close together →
+   `hits: g1×1 g2×1`. Other class single-hit → `hits: g1×1`. No
+   contact → `hits: none`.
+5. **Diagnostic blast circle visible** at BK impact location after
+   any AOE-blast dash (orange dashed ring).
+6. **Architectural verification:** open characters.js, change BK's
+   `blastRadiusMult` to 1.5, reload — blast should be 50% larger.
+   Change `critScreenShake: null` — shake should disappear. No
+   engine edits needed for either.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

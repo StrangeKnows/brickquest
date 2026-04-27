@@ -348,6 +348,42 @@ function triggerCritSignature(color, x, y) {
 // radius, max radius, color, ring thickness.
 var critShockwaves = [];
 
+// Screen shake state. Small impulse applied during canvas render via
+// ctx.translate of (shakeX, shakeY) before drawing. Decays linearly over
+// duration. Used for BK Model 2 crits (S015 v0.15.13 visual payoff).
+// Magnitude is in canvas pixels; 4-6 px reads as a meaningful jolt
+// without disorienting. Duration ≤ 200ms keeps it punchy not
+// disorienting.
+var screenShake = { mag: 0, durTotal: 0, dur: 0, x: 0, y: 0 };
+
+function triggerScreenShake(magnitude, durationMs) {
+  // If a shake is in flight, take the louder of (current remaining, new).
+  // Avoids overlapping shakes stacking into chaos but also doesn't squash
+  // a meaningful new impact under a tail of an old one.
+  var newMag = magnitude || 4;
+  var newDur = (durationMs || 180) / 1000;
+  if (screenShake.dur > 0 && screenShake.mag > newMag) return;
+  screenShake.mag = newMag;
+  screenShake.durTotal = newDur;
+  screenShake.dur = newDur;
+}
+
+function updateScreenShake(dt) {
+  if (screenShake.dur <= 0) return;
+  screenShake.dur -= dt;
+  if (screenShake.dur <= 0) {
+    screenShake.dur = 0;
+    screenShake.x = 0;
+    screenShake.y = 0;
+    return;
+  }
+  // Decaying random offset
+  var fade = screenShake.dur / screenShake.durTotal;
+  var m = screenShake.mag * fade;
+  screenShake.x = (Math.random() * 2 - 1) * m;
+  screenShake.y = (Math.random() * 2 - 1) * m;
+}
+
 function spawnCritShockwave(x, y, color, opts) {
   var o = opts || {};
   critShockwaves.push({
@@ -947,6 +983,7 @@ function update(dt) {
   updateCritFlash(dt);
   updateCritBanners(dt);
   updateCritShockwaves(dt);
+  updateScreenShake(dt);
   updateConfuseParticles(dt);
   updateRegen(dt);
   updateBleedOut(dt);
@@ -971,6 +1008,16 @@ function update(dt) {
 // ═══════════════════════════════════════════════════
 function draw() {
   ctx.clearRect(0, 0, W, H);
+
+  // Screen shake (S015 v0.15.13 — BK Model 2 crit visual payoff).
+  // Apply shake offset before any drawing; restore at end of frame.
+  // Tiny perf cost (one ctx.save + ctx.translate + ctx.restore per frame
+  // when active; nothing when shake.dur === 0).
+  var _shaking = (screenShake.dur > 0);
+  if (_shaking) {
+    ctx.save();
+    ctx.translate(screenShake.x, screenShake.y);
+  }
 
   var bounds = getRumbleBounds();
 
@@ -3340,6 +3387,7 @@ draw = function() {
   drawCritFlash();
   drawCritBanners();
   drawRedDashDiag();
+  if (_shaking) ctx.restore();
 };
 
 // ═══════════════════════════════════════════════════
@@ -6114,6 +6162,17 @@ function finalizeRedDashDiag(reason) {
   redDashDiag.capturedAt = performance.now();
   redDashDiag.ttl = 2500;
   redDashDiag.state = 'persist';
+  // S015 v0.15.13: capture hit list and (if BK) blast meta for diagnostic.
+  // brickAction may already be null by the time finalize is called for
+  // late-terminating paths; pull from it if still present.
+  if (typeof brickAction !== 'undefined' && brickAction) {
+    redDashDiag.hitSet = (brickAction._hitSet || []).slice();
+    redDashDiag.blastX = brickAction._blastX;
+    redDashDiag.blastY = brickAction._blastY;
+    redDashDiag.blastR = brickAction._blastR;
+  } else {
+    redDashDiag.hitSet = [];
+  }
 }
 
 function updateRedDashDiag(dt) {
@@ -6158,6 +6217,19 @@ function drawRedDashDiag() {
   ctx.fillStyle = '#FF4444'; // actual = red
   ctx.beginPath(); ctx.arc(d.actualX, d.actualY, 5, 0, Math.PI*2); ctx.fill();
 
+  // BK Model 2 blast circle (S015 v0.15.13). Renders as a faint orange
+  // dashed ring at the impact location showing the blast radius. Helps
+  // post-mortem visualize "this is the AOE that fired."
+  if (d.blastR && d.blastX !== undefined && d.blastY !== undefined) {
+    ctx.strokeStyle = '#FFAA00';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.arc(d.blastX, d.blastY, d.blastR, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
   // Text panel near actual stop point
   var pct = d.intendedDist > 0 ? Math.round(100 * d.traveled / d.intendedDist) : 0;
   var lines = [
@@ -6165,6 +6237,21 @@ function drawRedDashDiag() {
     'traveled: ' + Math.round(d.traveled) + ' / ' + Math.round(d.intendedDist) + ' px (' + pct + '%)',
     'max range: ' + Math.round(d.maxRange) + ' px',
   ];
+  // Hit list (S015 v0.15.13): one line summarizing per-entity hits.
+  // Format: 'hits: g1×1 g2×1 g3×1' — each entity in the dash's hit set
+  // gets a label (g1, g2, ...) and count. Per-entity count is always 1
+  // in current models (each entity hit at most once per dash via _hitSet
+  // dedup), but the format leaves room for future per-entity multi-hit
+  // designs (e.g., piercing dashes that re-hit on return phase).
+  if (d.hitSet && d.hitSet.length > 0) {
+    var parts = [];
+    for (var _hsi = 0; _hsi < d.hitSet.length; _hsi++) {
+      parts.push('g' + (_hsi + 1) + '×1');
+    }
+    lines.push('hits: ' + parts.join(' '));
+  } else {
+    lines.push('hits: none');
+  }
   ctx.font = '11px monospace';
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(0,0,0,0.7)';
@@ -6938,13 +7025,19 @@ function updateBrickAction(dt, bounds) {
 
   if (brickAction.type === 'red') {
     if (brickAction.phase === 'charge') {
-      // Read class red profile for this dash. BK gets hitboxScale +
-      // knockbackScale; all classes get range cap (maxRange stored on
-      // brickAction at launch). See characters.js redProfile.
-      var rProf = (typeof getRedProfile === 'function')
-        ? getRedProfile(player.cls) : null;
-      var hitboxScale = (rProf && rProf.hitboxScale) || 1.0;
-      var knockbackScale = (rProf && rProf.knockbackScale) || 1.0;
+      // Read full dash profile from characters.js. All class identity
+      // for dash mechanics lives in CHARACTERS[cls].redProfile and is
+      // read here as a normalized object with defaults filled in. Engine
+      // does NOT check class names — adding a new class with custom dash
+      // = data change in characters.js, no engine edits needed.
+      // Per S015 v0.15.13 architectural refactor.
+      var dashProfile = (typeof getRedDashProfile === 'function')
+        ? getRedDashProfile(player.cls)
+        : { hitboxScale: 1.0, knockbackScale: 1.0, dashModel: 'recoil',
+            blastRadiusMult: 1.0, knockbackMode: 'forward', recoilOnHit: true,
+            blastVisual: null, critScreenShake: null };
+      var hitboxScale = dashProfile.hitboxScale;
+      var knockbackScale = dashProfile.knockbackScale;
       if (brickAction.usePoint) {
         // Fixed direction toward dropped point
       } else {
@@ -7010,80 +7103,169 @@ function updateBrickAction(dt, bounds) {
       }
       player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
       player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
-      // ── BUBBLE-SWEEP HIT DETECTION (S015 v0.15.12) ──
-      // Replaces previous "first entity touched ends the charge" model.
-      // The hit-radius bubble (matching what the drag indicator draws)
-      // travels with the player. Every frame, every entity inside the
-      // bubble that hasn't already been hit on this dash takes full
-      // damage + knockback. Dash continues to range-cap / wall / timeout.
-      // Per playtest lock: "need to hit all in zone." Bubble radius mirrors
-      // the visual indicator: (player.r + 14) × hitboxScale.
+      // ── DASH HIT DETECTION (S015 v0.15.13) ──
+      // Two models, dispatched by class:
+      //   BK (cls === 'breaker') uses Model 2: dash stops at first entity
+      //     hit, then triggers an AOE blast at impact location. All
+      //     entities in blast radius take full damage. Knockback radial
+      //     outward from impact center. No recoil — BK plants and
+      //     unleashes. Visual: shockwave ring + central particle bloom +
+      //     screen shake on crit.
+      //   All other classes use Model 3: dash stops at first entity hit,
+      //     single entity damaged, knockback in dash direction, then
+      //     recoil back to start (return phase). Hit-and-run rhythm.
+      //
+      // Bubble radius for first-hit detection: (player.r + 14) × hitboxScale.
+      // Same as drag indicator visual. For BK, also serves as blast radius.
+      // brickAction._hitSet tracks per-dash hits (used by diagnostic, and
+      // ensures Model 2's AOE doesn't double-hit the primary target).
       if (!brickAction.hit) {
         if (!brickAction._hitSet) brickAction._hitSet = [];
         var hbR = (player.r + 14) * hitboxScale;
+        // Find first entity inside bubble (closest preferred).
+        var firstHit = null;
+        var firstHitDist = Infinity;
         for (var _hi = 0; _hi < entities.length; _hi++) {
-          var hitG = entities[_hi];
-          if (!hitG || hitG.hp <= 0) continue;
-          // Skip entities already hit on this dash
-          var alreadyHit = false;
-          for (var _ahi = 0; _ahi < brickAction._hitSet.length; _ahi++) {
-            if (brickAction._hitSet[_ahi] === hitG) { alreadyHit = true; break; }
-          }
-          if (alreadyHit) continue;
-          // Bubble check: entity center inside (player + bubbleR + entity.r).
-          // Using entity.r in addition to bubble matches the previous
-          // single-hit threshold style (player.r + g.r) × scale, just
-          // applied to all entities not just the first.
-          if (Math.hypot(player.x - hitG.x, player.y - hitG.y) >= hbR + (hitG.r || 0)) continue;
-          // Entity is inside bubble — apply full hit.
-          brickAction._hitSet.push(hitG);
+          var _eg = entities[_hi];
+          if (!_eg || _eg.hp <= 0) continue;
+          var _ed = Math.hypot(player.x - _eg.x, player.y - _eg.y);
+          if (_ed >= hbR + (_eg.r || 0)) continue;
+          if (_ed < firstHitDist) { firstHit = _eg; firstHitDist = _ed; }
+        }
+        if (firstHit) {
           var rTier = brickAction.dmgMult || 1;
           var crit = !!brickAction.isCrit;
           var critMult = crit ? 2.0 : 1.0;
           var knockMult = (crit ? 2.0 : 1.0) * knockbackScale;
           var rfx = _fx('red', rTier);
           var rDmg = Math.ceil((rfx ? rfx.dmg : 3) * critMult);
-          var rRes = damageEntity(hitG, rDmg, undefined, 'red');
-          hitG.flashTimer = 0.3;
-          showDamageNumber(hitG.x, hitG.y - 30, rRes.applied,
-            crit ? '#FFAA00' : '#E24B4A', rRes.tier, hitG.x, hitG.y,
-            undefined, rRes.witherBoost, hitG);
+          // Schema-driven dispatch — no class-name checks. Engine reads
+          // dashProfile fields and acts on them generically.
+          var isBlastModel = (dashProfile.dashModel === 'aoe-blast');
+          // Targets list: 'aoe-blast' collects all entities in blast
+          // radius; other models hit only the primary target.
+          var targets = [firstHit];
+          if (isBlastModel) {
+            // Blast radius = bubble × dashProfile.blastRadiusMult.
+            // Centered on impact (player position at the moment of
+            // contact). Sweep all entities within that radius (primary
+            // already in list).
+            var blastR = hbR * dashProfile.blastRadiusMult;
+            for (var _bi = 0; _bi < entities.length; _bi++) {
+              var _be = entities[_bi];
+              if (!_be || _be === firstHit || _be.hp <= 0) continue;
+              if (Math.hypot(player.x - _be.x, player.y - _be.y) < blastR + (_be.r || 0)) {
+                targets.push(_be);
+              }
+            }
+          }
+          // Apply per-entity damage + knockback.
+          for (var _ti = 0; _ti < targets.length; _ti++) {
+            var hitG = targets[_ti];
+            brickAction._hitSet.push(hitG);
+            var rRes = damageEntity(hitG, rDmg, undefined, 'red');
+            hitG.flashTimer = 0.3;
+            showDamageNumber(hitG.x, hitG.y - 30, rRes.applied,
+              crit ? '#FFAA00' : '#E24B4A', rRes.tier, hitG.x, hitG.y,
+              undefined, rRes.witherBoost, hitG);
+            // Per-target particle burst — small per-entity bloom.
+            var rBurst = 4 + Math.ceil(rTier * 2);
+            for (var rbi = 0; rbi < rBurst; rbi++) {
+              var rba = Math.random()*Math.PI*2;
+              var rbs = (1.5+Math.random())*(30+rTier*15);
+              purpleParticles.push({ x:hitG.x, y:hitG.y,
+                vx:Math.cos(rba)*rbs, vy:Math.sin(rba)*rbs,
+                r:3+rTier+Math.random()*3, alpha:0.9, color:'#ff3300' });
+            }
+            // Knockback direction reads dashProfile.knockbackMode:
+            //   'radial'  — outward from impact center (explosion feel)
+            //   'forward' — along dash direction (punch through)
+            var kvx, kvy;
+            if (dashProfile.knockbackMode === 'radial') {
+              var kdx = hitG.x - player.x;
+              var kdy = hitG.y - player.y;
+              var kd = Math.hypot(kdx, kdy) || 1;
+              kvx = (kdx / kd) * 300 * knockMult;
+              kvy = (kdy / kd) * 300 * knockMult;
+            } else {
+              kvx = brickAction.dirX * 300 * knockMult;
+              kvy = brickAction.dirY * 300 * knockMult;
+            }
+            hitG.bounceVx = kvx;
+            hitG.bounceVy = kvy;
+            hitG.bounceTimer = 0.35;
+            hitG.state = 'bounce';
+          }
+          // First-hit metadata for diagnostic
+          brickAction._firstHitEntity = firstHit;
+          // Per-crit standard visuals (apply to any model)
           if (crit) {
-            spawnCritShockwave(hitG.x, hitG.y, '#FFAA00', { r0: 6, maxR: scaleDist(180), thickness: 4, growth: 320 });
-            spawnCritShockwave(hitG.x, hitG.y, '#FF4400', { r0: 10, maxR: scaleDist(140), thickness: 2, growth: 220, fadeRate: 2.6 });
-            spawnCritFlourish(hitG.x, hitG.y, '#FFAA00', 24);
+            spawnCritShockwave(firstHit.x, firstHit.y, '#FFAA00', { r0: 6, maxR: scaleDist(180), thickness: 4, growth: 320 });
+            spawnCritShockwave(firstHit.x, firstHit.y, '#FF4400', { r0: 10, maxR: scaleDist(140), thickness: 2, growth: 220, fadeRate: 2.6 });
+            spawnCritFlourish(firstHit.x, firstHit.y, '#FFAA00', 24);
           }
-          // Per-hit particle burst — scaled down vs. single-hit-stop era
-          // because we can now stack many hits per dash; full bursts on
-          // every hit would be visual overload. Half count, same colors.
-          var rBurst = 4 + Math.ceil(rTier * 2);
-          for (var rbi = 0; rbi < rBurst; rbi++) {
-            var rba = Math.random()*Math.PI*2;
-            var rbs = (1.5+Math.random())*(30+rTier*15);
-            purpleParticles.push({ x:hitG.x, y:hitG.y,
-              vx:Math.cos(rba)*rbs, vy:Math.sin(rba)*rbs,
-              r:3+rTier+Math.random()*3, alpha:0.9, color:'#ff3300' });
+          // Blast visual — reads dashProfile.blastVisual config. Engine
+          // doesn't pick the colors; data does. Any class with blast
+          // visuals defined gets them automatically. null = no blast viz.
+          if (isBlastModel && dashProfile.blastVisual) {
+            var bv = dashProfile.blastVisual;
+            // Capture blast meta for diagnostic to render later.
+            brickAction._blastX = player.x;
+            brickAction._blastY = player.y;
+            brickAction._blastR = blastR;
+            // Shockwave rings — one per color in ringColors array.
+            var ringColors = bv.ringColors || ['#E24B4A'];
+            if (ringColors[0]) {
+              spawnCritShockwave(player.x, player.y, ringColors[0],
+                { r0: 8, maxR: blastR * 1.3, thickness: 4, growth: 360, fadeRate: 2.2 });
+            }
+            if (ringColors[1]) {
+              spawnCritShockwave(player.x, player.y, ringColors[1],
+                { r0: 4, maxR: blastR, thickness: 2, growth: 280, fadeRate: 2.6 });
+            }
+            // Central particle bloom. bloomCount scales +3 per tier.
+            var bloomCount = (bv.bloomCount || 12) + rTier * 3;
+            var bloomColor = bv.bloomColor || '#FFAA00';
+            for (var _bli = 0; _bli < bloomCount; _bli++) {
+              var _bla = Math.random() * Math.PI * 2;
+              var _bls = 60 + Math.random() * 80;
+              purpleParticles.push({ x: player.x, y: player.y,
+                vx: Math.cos(_bla) * _bls, vy: Math.sin(_bla) * _bls,
+                r: 3 + Math.random() * 4, alpha: 0.95, color: bloomColor });
+            }
           }
-          // Knockback in DASH direction (forward), not push-away-from-player.
-          // Player is barreling THROUGH the entity; entity gets punched
-          // forward in the line of charge. Matches kinetic intuition.
-          hitG.bounceVx = brickAction.dirX * 300 * knockMult;
-          hitG.bounceVy = brickAction.dirY * 300 * knockMult;
-          hitG.bounceTimer = 0.35; hitG.state = 'bounce';
-          // Track first hit for stop-reason diagnostic. Dash does NOT end
-          // here — it continues to range-cap / wall / timeout. The
-          // _stopReason is updated on whichever terminates the dash.
-          if (!brickAction._firstHitEntity) {
-            brickAction._firstHitEntity = hitG;
+          // Crit-only screen shake — reads dashProfile.critScreenShake.
+          // null disables shake for that class. Schema-driven; any class
+          // with config gets shake on crit automatically.
+          if (crit && dashProfile.critScreenShake && typeof triggerScreenShake === 'function') {
+            triggerScreenShake(dashProfile.critScreenShake.mag, dashProfile.critScreenShake.ms);
+          }
+          // Terminate dash. Set hit flag + stop reason so the unified
+          // termination block below handles cleanup.
+          brickAction.hit = true;
+          if (!brickAction._stopReason) {
+            brickAction._stopReason = isBlastModel ? 'entity-blast' : 'entity-hit';
+          }
+          // Recoil decision reads dashProfile.recoilOnHit. true = enter
+          // return phase (Model 3 default); false = end at impact (BK).
+          if (dashProfile.recoilOnHit) {
+            brickAction.phase = 'return';
+            brickAction.returnTimer = 0;
+            brickAction._trailRMult = rTier;
           }
           triggerVictory();
         }
       }
-      // Stop charge: if hit flag was set by range-cap or wall-block,
-      // terminate immediately. Per S015 v0.15.12 (no return phase), set
-      // brickAction = null and finalize diagnostic. Without this check,
-      // dash would only end via 2s timeout even though range-cap fired.
-      if (brickAction && brickAction.hit) {
+      // Stop charge / transition. Per S015 v0.15.13 (Model 2/3 split):
+      //   Model 2 (BK): brickAction.hit set + phase still 'charge' →
+      //     terminate (no recoil for BK).
+      //   Model 3 (other): brickAction.hit set + phase changed to
+      //     'return' → don't terminate here, let the return-phase block
+      //     animate the recoil back to start.
+      //   Range-cap, wall-block, timeout, target-reached: phase still
+      //     'charge', hit flag set → terminate immediately.
+      // The phase check is the discriminator.
+      if (brickAction && brickAction.hit && brickAction.phase === 'charge') {
         if (typeof finalizeRedDashDiag === 'function') {
           finalizeRedDashDiag(brickAction._stopReason || 'range-cap');
         }
@@ -7093,7 +7275,7 @@ function updateBrickAction(dt, bounds) {
           finalizeRedDashDiag(brickAction._stopReason || 'timeout');
         }
         brickAction = null;
-      } else if (brickAction && brickAction.usePoint) {
+      } else if (brickAction && brickAction.usePoint && brickAction.phase === 'charge') {
         var ptDist = Math.hypot(player.x - brickAction.targetX, player.y - brickAction.targetY);
         // S015 v0.15.11 fix (per diagnostic capture from v0.15.10): old buffer
         // was player.r + 8 (≈22px), causing every drag-drop dash to stop
@@ -7107,14 +7289,48 @@ function updateBrickAction(dt, bounds) {
           brickAction = null;
         }
       }
-      // S015 v0.15.12: 'return' phase removed. Bubble-sweep dashes end
-      // at endpoint via range-cap/wall/target-reached/timeout. No recoil
-      // animation — player ends where they barreled to, not back at start.
+    } else if (brickAction && brickAction.phase === 'return') {
+      // ── RETURN PHASE (Model 3 only, S015 v0.15.13) ──
+      // Triggered after Model 3 entity-hit. Player springs back toward
+      // dash start position. Emits red trail particles. Ends when player
+      // reaches start (rd <= 8), distance to nearest entity exceeds the
+      // safe stop threshold, or 3s safety timeout.
+      // Model 2 (BK) never enters this phase.
+      if (player && brickAction._trailRMult !== undefined) {
+        var _rMult2 = brickAction._trailRMult;
+        var _ba2 = Math.atan2(-brickAction.dirY, -brickAction.dirX);
+        for (var _ei = 0; _ei < 2; _ei++) {
+          var _ea = _ba2 + (Math.random()-0.5)*1.2;
+          var _es = 30 + Math.random()*50;
+          purpleParticles.push({
+            x: player.x + Math.cos(_ea)*(player.r*0.6),
+            y: player.y + Math.sin(_ea)*(player.r*0.6),
+            vx: Math.cos(_ea)*_es, vy: Math.sin(_ea)*_es,
+            r: 2 + Math.random()*_rMult2, alpha: 0.8,
+            color: '#ff3300', isRed: true,
+          });
+        }
+      }
+      var rx = brickAction.startX - player.x;
+      var ry = brickAction.startY - player.y;
+      var rd = Math.sqrt(rx*rx+ry*ry);
+      var nearestForReturn = entities.length ? entities[0] : null;
+      var safeStop = nearestForReturn ? nearestForReturn.AGGRO_RANGE * 1.5 : 0;
+      var distToEntity = nearestForReturn ? Math.hypot(player.x-nearestForReturn.x, player.y-nearestForReturn.y) : 9999;
+      brickAction.returnTimer = (brickAction.returnTimer||0) + dt;
+      if (distToEntity >= safeStop || rd <= 8 || brickAction.returnTimer >= 3.0) {
+        if (typeof finalizeRedDashDiag === 'function') {
+          finalizeRedDashDiag(brickAction._stopReason || 'entity-hit');
+        }
+        brickAction = null;
+      } else {
+        var rs = Math.min((player.speed * 2) * dt, rd);
+        player.x += (rx/rd)*rs;
+        player.y += (ry/rd)*rs;
+      }
     }
   }
-
 }
-
 
 // ── UPDATE ENTITY MIND-EFFECT TICK ───────────────────
 // Drives both yellow-base (daze, wandering) and yellow-crit (confuse,
