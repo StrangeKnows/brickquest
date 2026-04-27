@@ -5058,6 +5058,107 @@ Future color profiles to add as their signature classes claim them:
 
 ---
 
+### v0.15.18 — Confused enemies attack each other regardless of attack type
+
+Playtest report: "yellow confusion entities become hostile toward each
+other" — but in playtest, confused slingers wandered without ever
+attacking neighboring goblins. Bug confirmed.
+
+**Root cause:** the wrong-target attack block in `updateEntity`
+(rumble.js line ~5463) was gated on `pat === 'touch'` — only melee
+entities ever entered the path. Ranged_kite entities (slingers) silently
+skipped the attack logic, so confused slingers had nothing to do but
+wander.
+
+This was a single-line bug visible at first read of the code. The
+session's first attempt was an over-engineered diagnostic
+instrumentation rather than a direct fix — useful instrumentation
+to keep, but the actual fix should have been called out immediately.
+Lesson: when reviewing code for a reported bug and finding a clear
+gating restriction that contradicts the obvious design intent
+("confused enemies attack each other"), promote the contradiction
+to top-of-response, don't bury it in a list of possibilities.
+
+---
+
+**The fix (rumble.js):**
+
+Two changes in updateEntity:
+
+1. **Wrong-target attack block** — strip the `pat === 'touch'` gate.
+   Any confused entity now enters this path:
+   ```js
+   if (g.confused && (g.silencedTimer||0) <= 0 && g.attackCooldown <= 0) {
+     // find nearest other entity, damage if in range
+   }
+   ```
+
+2. **Ranged_kite AI branch** — when `g.confused`, replace the kite-
+   distance-from-player + projectile-fire logic with "walk toward
+   nearest other entity." Without this, a confused slinger would
+   simultaneously kite the player AND fire at them AND attempt the
+   wrong-target melee — three contradictory behaviors. With it, a
+   confused slinger walks toward the nearest goblin and bonks them.
+
+Confused melee entities (touch attackers) work the same as before
+the fix — just no longer gated by the `pat === 'touch'` check.
+
+---
+
+**Important pre-existing constraint that may surprise users:**
+
+Confuse only applies on **CRIT yellow**. Both `startYellowConfuse`
+(drag-cast) and the held aura tick gate the confuse application on
+`isCrit`. Base (non-crit) yellow only applies daze, which makes
+entities wander but does NOT trigger entity-vs-entity attacks.
+
+If users expect base yellow to confuse, that's a separate design
+decision — flag for future tuning, not a bug fix.
+
+---
+
+**Diagnostic shipped alongside (kept for future use):**
+
+A `yellowDiag` overlay (parallel to `redDashDiag`) captures:
+* Cast intent: was it crit? hit / dazed / confused counts
+* Per-frame state of every confused entity: `pat`, timers, nearest
+  other entity, distance, contact threshold, inRange flag
+* Attack events: every successful wrong-target attack delivery
+
+Renders bottom-left of arena, persists 4s after all confused entities
+expire. Will be useful for future yellow tuning (verifying changes
+don't break the confuse mechanic again, diagnosing edge cases like
+"confuse on stationary AI types," etc.).
+
+Negligible perf cost — only updates while at least one entity is
+confused. No effect when yellow isn't being used.
+
+---
+
+**Net diff:**
+* characters.js: untouched
+* rumble.js: ~180 lines (yellowDiag scaffolding + 4 hook sites
+  + ranged_kite confused branch + pat gate removal)
+
+**Test focus:**
+
+1. **Crit yellow confuses a slinger.** The slinger should walk
+   toward the nearest goblin and bonk it. Yellow `?` flash on
+   slinger when it lands the wrong-target hit. Floating "N ?"
+   damage number above the slinger.
+2. **Crit yellow confuses a melee goblin.** Same as before, no
+   regression.
+3. **Diagnostic panel** appears bottom-left when yellow casts.
+   Verify cast type, per-entity table, attack events.
+4. **Base (non-crit) yellow** still only dazes. Diagnostic NOTE
+   confirms this expected behavior. If we want base yellow to
+   also confuse, that's a separate change.
+5. **Confused entities don't attack the player.** Player-attack
+   path still gated on `!g.confused`; only the wrong-target
+   path is permitted.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -988,6 +988,7 @@ function update(dt) {
   updateRegen(dt);
   updateBleedOut(dt);
   updateRedDashDiag(dt);
+  updateYellowDiag(dt);
   updateDrain(dt);
   entities.forEach(function(g) {
     updateEntityPoison(g, dt);
@@ -3407,6 +3408,7 @@ draw = function() {
   drawCritFlash();
   drawCritBanners();
   drawRedDashDiag();
+  drawYellowDiag();
   // S015 v0.15.13 fix: paired with ctx.save+translate at top of this
   // function (NOT inside _origDraw — that's a different function scope).
   if (_shaking) ctx.restore();
@@ -5211,8 +5213,31 @@ function updateEntity(g, dt, bounds) {
           }
         }
       } else if (aiType === 'ranged_kite') {
-        // Keep kiteDistance from player; fire projectiles on cooldown.
-        var kite = scaleDist(g.kiteDistance || 260);
+        // S015 v0.15.18: while confused, replace ranged_kite AI with
+        // "walk toward nearest other entity." The wrong-target attack
+        // block downstream (line ~5493) handles the actual bonk. Without
+        // this branch, a confused slinger would kite the player AND fire
+        // projectiles AND attempt wrong-target melee — three contradictory
+        // behaviors. With it, a confused slinger walks toward neighbor and
+        // hits them once in range. Daze still uses wander logic separately.
+        if (g.confused) {
+          var nearestOther = null, ndOther = Infinity;
+          for (var ki = 0; ki < entities.length; ki++) {
+            var o = entities[ki];
+            if (o === g || o.hp <= 0 || o.dead) continue;
+            var od = Math.hypot(o.x - g.x, o.y - g.y);
+            if (od < ndOther) { nearestOther = o; ndOther = od; }
+          }
+          if (nearestOther && ndOther > g.r + nearestOther.r + 2) {
+            var ndx = (nearestOther.x - g.x) / ndOther;
+            var ndy = (nearestOther.y - g.y) / ndOther;
+            g.x += ndx * effSpeed * dt;
+            g.y += ndy * effSpeed * dt;
+          }
+          // Fall through — DON'T return. Wrong-target attack block runs later.
+        } else {
+          // Normal ranged_kite AI: kite player + fire projectiles
+          var kite = scaleDist(g.kiteDistance || 260);
         if (distToPlayer < kite * 0.9) {
           // Too close — back away
           g.x -= (dx/distToPlayer) * effSpeed * dt;
@@ -5255,6 +5280,7 @@ function updateEntity(g, dt, bounds) {
             g.rangedTimer = g.rangedCooldown || 1.5;
           }
         }
+        }  // close the non-confused ranged_kite path opened at v0.15.18
       } else if (aiType === 'stationary') {
         // Doesn't move. Periodic AoE pulse centered on self.
         g.pulseTimer = Math.max(0, g.pulseTimer - dt);
@@ -5460,7 +5486,15 @@ function updateEntity(g, dt, bounds) {
   // alone. Yellow flash on the attacker telegraphs the wrong-target hit.
   // Runs BEFORE the player-touch path; player-touch is gated to skip when
   // confused so a single entity doesn't attack twice in one frame.
-  if (pat === 'touch' && g.confused && (g.silencedTimer||0) <= 0 && g.attackCooldown <= 0) {
+  // S015 v0.15.18: confused entities attack nearest other entity
+  // REGARDLESS of attack pattern. Previously gated on pat === 'touch',
+  // which silently excluded ranged_kite entities (slingers) — confused
+  // slingers wandered but never attacked anyone. Now any confused entity
+  // applies contact damage to the nearest other entity when in physical
+  // range. Their normal ranged firing logic is already suppressed by
+  // g.confused elsewhere, so they don't fire at the player either.
+  // The g.dazed exclusion is implicit — confuse stomps daze on apply.
+  if (g.confused && (g.silencedTimer||0) <= 0 && g.attackCooldown <= 0) {
     // Find nearest other living entity, excluding self.
     var nearest = null;
     var nearestDist = Infinity;
@@ -5485,6 +5519,8 @@ function updateEntity(g, dt, bounds) {
       g._confuseFlashTimer = 0.25;
       // Floating "wrong-target" indicator above the attacker.
       showFloatingText(g.x, g.y - (g.r + 28), dmgAmt + ' ?', '#FFEE44', g);
+      // S015 v0.15.18: record for yellow diagnostic.
+      recordYellowConfuseAttack(g, target, dmgAmt);
       // Standard attack cooldown applies so confused entities don't
       // chain-hit. Slow modifiers respected the same as normal attacks.
       var _cIsSlowed = g.attackSlowed || g.attackDebuff > 0
@@ -6290,6 +6326,170 @@ function drawRedDashDiag() {
   ctx.restore();
 }
 
+// ─── YELLOW CONFUSE DIAGNOSTIC (S015 v0.15.18) ─────────────────────
+// Goal: capture why confused entities sometimes don't attack each
+// other in playtest. Two suspect failure modes:
+//   1. Yellow cast applied DAZE not CONFUSE (only crit causes confuse;
+//      a non-crit yellow tap dazes but doesn't trigger entity-vs-entity
+//      attacks). User may have expected base yellow to confuse.
+//   2. Confused state IS set but a gating field (pat !== 'touch',
+//      attackCooldown stuck > 0, silencedTimer stuck > 0, range never
+//      satisfied) prevents the wrong-target attack from firing.
+//
+// Diagnostic captures:
+//   - At cast time (snapshotYellowCast): isCrit, hit count, dazed count,
+//     confused count, cast position
+//   - Per-frame for each confused entity (recordYellowConfuseFrame):
+//     entity id, pat, confused/timer, silencedTimer, attackCooldown,
+//     nearestOther id + dist, contactThreshold, attackedThisFrame flag
+//   - On attack attempt (recordYellowConfuseAttack): the actual hit
+//     event so we can confirm the wrong-target path fired vs missed
+//
+// Renders bottom-left of arena: cast summary + per-entity status table.
+// Persists for 4s after all confused entities expire.
+var yellowDiag = null;
+
+function snapshotYellowCast(isCrit, hitCount, dazedCount, confusedCount, cx, cy) {
+  yellowDiag = {
+    castX: cx, castY: cy,
+    castIsCrit: isCrit,
+    hitCount: hitCount,
+    dazedCount: dazedCount,
+    confusedCount: confusedCount,
+    capturedAt: performance.now(),
+    perEntity: {},  // keyed by entity id
+    attackEvents: [], // {attackerId, targetId, dmgAmt, t}
+    state: 'live',
+    ttl: 0,
+  };
+}
+
+function recordYellowConfuseFrame(g) {
+  if (!yellowDiag || yellowDiag.state !== 'live') return;
+  var id = g.id || ('e' + entities.indexOf(g));
+  // Find nearest other entity for this entity right now
+  var nearest = null, nearestDist = Infinity;
+  for (var ci = 0; ci < entities.length; ci++) {
+    var o = entities[ci];
+    if (o === g || o.hp <= 0 || o.dead) continue;
+    var od = Math.hypot(o.x - g.x, o.y - g.y);
+    if (od < nearestDist) { nearest = o; nearestDist = od; }
+  }
+  var contactThreshold = nearest ? (g.r + nearest.r + 4) : 0;
+  yellowDiag.perEntity[id] = {
+    id: id,
+    pat: g.atk || g.attackPattern || 'unknown',  // store whatever pattern field is in use
+    confused: !!g.confused,
+    confuseTimer: +(g.confuseTimer || 0).toFixed(2),
+    silencedTimer: +(g.silencedTimer || 0).toFixed(2),
+    attackCooldown: +(g.attackCooldown || 0).toFixed(2),
+    nearestId: nearest ? (nearest.id || ('e' + entities.indexOf(nearest))) : null,
+    nearestDist: nearest ? +nearestDist.toFixed(1) : null,
+    contactThreshold: +contactThreshold.toFixed(1),
+    inRange: nearest ? (nearestDist < contactThreshold) : false,
+    lastSeen: performance.now(),
+  };
+}
+
+function recordYellowConfuseAttack(g, target, dmgAmt) {
+  if (!yellowDiag) return;
+  var aid = g.id || ('e' + entities.indexOf(g));
+  var tid = target.id || ('e' + entities.indexOf(target));
+  yellowDiag.attackEvents.push({
+    attackerId: aid,
+    targetId: tid,
+    dmgAmt: dmgAmt,
+    t: performance.now(),
+  });
+}
+
+function updateYellowDiag(dt) {
+  if (!yellowDiag) return;
+  // Determine if any entity in perEntity is still confused live.
+  var anyLive = false;
+  if (yellowDiag.state === 'live') {
+    Object.keys(yellowDiag.perEntity).forEach(function(id) {
+      var rec = yellowDiag.perEntity[id];
+      if (rec.confused && rec.confuseTimer > 0) anyLive = true;
+    });
+    if (!anyLive) {
+      yellowDiag.state = 'persist';
+      yellowDiag.ttl = 4000;
+    }
+  } else {
+    yellowDiag.ttl -= dt * 1000;
+    if (yellowDiag.ttl <= 0) yellowDiag = null;
+  }
+}
+
+function drawYellowDiag() {
+  if (!yellowDiag || !ctx) return;
+  var d = yellowDiag;
+  var alpha = (d.state === 'persist') ? Math.max(0, d.ttl / 4000) : 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  // Cast marker
+  ctx.strokeStyle = d.castIsCrit ? '#FFD700' : '#FFEE44';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.arc(d.castX, d.castY, 8, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  // Build text panel
+  var lines = [];
+  lines.push('YELLOW DIAG');
+  lines.push('cast: ' + (d.castIsCrit ? 'CRIT (confuse)' : 'BASE (daze only)'));
+  lines.push('hit: ' + d.hitCount + ' | dazed: ' + d.dazedCount + ' | confused: ' + d.confusedCount);
+  if (!d.castIsCrit) {
+    lines.push('NOTE: base yellow does NOT confuse');
+    lines.push('only crit yellow triggers entity-vs-entity attacks');
+  }
+  lines.push('');
+  lines.push('--- per confused entity ---');
+  var ids = Object.keys(d.perEntity);
+  if (ids.length === 0) {
+    lines.push('(none captured)');
+  } else {
+    ids.forEach(function(id) {
+      var r = d.perEntity[id];
+      lines.push(id + ' pat=' + r.pat + ' conf=' + r.confused +
+                 ' tmr=' + r.confuseTimer);
+      lines.push('  cd=' + r.attackCooldown + ' silenced=' + r.silencedTimer +
+                 ' nearest=' + (r.nearestId || 'none') +
+                 ' d=' + (r.nearestDist != null ? r.nearestDist : '-') +
+                 '/' + r.contactThreshold +
+                 ' inRange=' + r.inRange);
+    });
+  }
+  lines.push('');
+  lines.push('--- attack events ---');
+  if (d.attackEvents.length === 0) {
+    lines.push('(none — no wrong-target attacks fired)');
+  } else {
+    d.attackEvents.slice(-6).forEach(function(ev) {
+      lines.push(ev.attackerId + ' -> ' + ev.targetId + ' (' + ev.dmgAmt + ' dmg)');
+    });
+  }
+  // Render
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  var pad = 4, lh = 12;
+  // Position bottom-left of arena
+  var tx = 12;
+  var ty = (canvas.height || H) - (lines.length * lh) - 16;
+  var maxW = 0;
+  lines.forEach(function(l){ maxW = Math.max(maxW, ctx.measureText(l).width); });
+  ctx.fillStyle = 'rgba(0,0,0,0.78)';
+  ctx.fillRect(tx - pad, ty - pad, maxW + pad*2, lines.length * lh + pad*2);
+  ctx.fillStyle = '#FFEE44';
+  lines.forEach(function(l, i){
+    if (l.indexOf('NOTE:') === 0) ctx.fillStyle = '#FF6666';
+    else if (l.indexOf('--- ') === 0) ctx.fillStyle = '#88CCFF';
+    else ctx.fillStyle = '#FFEE44';
+    ctx.fillText(l, tx, ty + i * lh + 8);
+  });
+  ctx.restore();
+}
+
 function startRedChargeTo(dmgMult, tx, ty) {
   // Charge toward a specific canvas point. Range gate: if drop point is
   // beyond the class's effective red range, clamp the dash endpoint to
@@ -7015,22 +7215,31 @@ function startYellowConfuse(ox, oy, radius) {
   var cy = oy !== undefined ? oy : player.y;
   var r = radius || (fx ? clampRadiusToArena(fx.radiusPx) : scaleDist(50));
   var hit = 0;
+  var dazedThisCast = 0, confusedThisCast = 0;
   var isCrit = _currentCrit;
   entities.forEach(function(g) {
     if (Math.hypot(g.x-cx, g.y-cy) <= r) {
       if (isCrit) {
         // CONFUSE replaces any existing daze on the entity.
+        var wasConfused = !!g.confused;
         g.confused = true;
         g.confuseTimer = (g.confuseTimer || 0) + seed;
         g.dazed = false; g.dazeTimer = 0;
+        if (!wasConfused) confusedThisCast++;
       } else if (!g.confused || (g.confuseTimer || 0) <= 0) {
         // DAZE — but only if entity isn't already confused (don't downgrade).
+        var wasDazed = !!g.dazed;
         g.dazed = true;
         g.dazeTimer = (g.dazeTimer || 0) + seed;
+        if (!wasDazed) dazedThisCast++;
       }
       hit++;
     }
   });
+  // S015 v0.15.18: snapshot for yellow diagnostic. Captures cast intent
+  // so we can see in playtest whether the issue is "not crit" (no confuse
+  // applied) or "confuse applied but not behaving" (next-frame data).
+  snapshotYellowCast(isCrit, hit, dazedThisCast, confusedThisCast, cx, cy);
   brickAction = null;
   // Spawn ? particles within radius
   spawnConfuseParticles(cx, cy, r, Math.round((8 + hit * 3) * vScale(1)));
@@ -7393,6 +7602,10 @@ function updateEntityConfusion(g, dt) {
       g.confuseTimer = 0;
       g._confuseTargetId = null;
     }
+    // S015 v0.15.18: per-frame snapshot for yellow diagnostic. Captures
+    // gating fields (pat, silencedTimer, attackCooldown) and nearest
+    // entity geometry. Cheap — only runs while confused.
+    recordYellowConfuseFrame(g);
   }
   // Yellow-flash decay (set by attack site when confused entity lands a hit)
   if (g._confuseFlashTimer && g._confuseFlashTimer > 0) {
