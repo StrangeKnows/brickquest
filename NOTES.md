@@ -4233,6 +4233,178 @@ rumble.js ~15 lines changed (3 call sites + comments).
 
 ---
 
+### v0.16.0 — Playtest patches: gray radius, white verification, black overload redesign, red dash diagnostic
+
+Four changes shipping together. Three are confirmed fixes from playtest;
+one is a diagnostic (per diagnostic-first protocol) before fixing a bug
+whose cause isn't yet certain.
+
+---
+
+**Change 1: Gray wall radius — tighter, flatter scaling.**
+
+Problem: T10 wall radius was 162px sig (≈half arena width). Combined with
+v0.15.9's wall HP rebalance (T10 sig = 63 HP), high-tier walls were
+fortress-tier AND screen-dominating.
+
+Fix: gray gets a custom `radiusBase` and `radiusSlope` in COLOR table
+(same pattern as blue's custom profile from v0.15.0).
+
+```
+gray: { hp: 0.80, radiusBase: 35, radiusSlope: 0.08 }
+```
+
+* Smaller starting radius (35px vs universal 50px BASE_R)
+* Flatter slope (0.08 vs default 0.15)
+
+Wall radius table:
+
+| Class | T1 | T4 | T10 |
+|-------|-----|-----|------|
+| Sig (BS, BK) | 48px | 60px | 83px |
+| Baseline | 31px | 38px | 53px |
+
+Was: T1 sig 69px, T10 sig 162px. Now T1 still readable, T10 controlled.
+Damage and HP unchanged (HP fix already shipped in v0.15.9).
+
+---
+
+**Change 2: White self-field verification.**
+
+Investigated playtest concern that "white overload no timer tickdown."
+
+**Verdict: not a bug — intended healing-reservoir behavior.** White has
+two field types:
+
+* Stationary drag-drop fields (`followTarget = null`) drain only when
+  consumed. Player drops a healing reservoir, returns to it later,
+  pool ticks down only on actual heal. Persists indefinitely otherwise.
+* Self-targeted fields (`followTarget = player`) deliver burst at cast
+  time, then linger as visual; expire after duration.
+
+Code path was correct, comments were stale and confusing. Cleaned up
+the expiry block with clear delineation between the two paths.
+
+No mechanical change. Comments now match implementation.
+
+---
+
+**Change 3: Black overload — tier-scaled hold mechanic redesign.**
+
+Problem: black overload felt OP. Audit showed:
+
+* Wither stacks only come from tap-path (`startWitherbolt`), NOT from
+  overload — already correct, no change needed
+* Pull strength was fixed at 220 px/s regardless of tier — felt
+  paralyzing at low tier, no progression at high tier
+* Duration came from `fx.duration` which scaled to 9.7s at T10 — too
+  long
+* Damage = 4 dmg × 0.5s ticks × 9.7s = ~76 total per entity in zone
+  (very high)
+
+Fix: tier-scaled pull strength + tier-scaled duration (half-value lock
+per playtest tuning):
+
+```
+T1  pull: 50 px/s, hold 2.0s
+T10 pull: 220 px/s, hold 5.0s
+```
+
+Linear interpolation across tiers 1-10. Crit doubles whatever the
+current pull is. New `blackEffect.pullStrength` field stores the
+tier-scaled value at cast time; `updateBlackEffect` reads it instead
+of the previous hardcoded 220.
+
+This means:
+* Low-tier black ovld is a brief touch — entities drift toward origin
+  but recover in 2s
+* High-tier black ovld is meaningful crowd control — strong pull for
+  5s feels like a real cooldown to commit
+* Entities naturally "break free" when zone ends (no explicit escape
+  mechanic needed — duration ending IS the escape)
+
+Damage per tick was NOT changed in this push. Want playtest data on
+the new tier-scaled hold first to see if total damage budget feels
+right with the shorter duration. Damage rebalance will follow if
+needed.
+
+---
+
+**Change 4: Red dash diagnostic (per diagnostic-first protocol).**
+
+Playtest reported: "red overload + release on arena, only travels
+portion of what's shown as target." Symptom unclear — could be range
+cap, wall block, target-buffer early-out, or visual mismatch.
+
+Per the locked debugging protocol, FIRST ship a diagnostic. Get real
+output. THEN apply targeted fix.
+
+Implementation: every red dash now snapshots:
+
+* startX, startY — where dash began
+* intendedX, intendedY — where the player aimed (drag drop point or
+  auto-target entity position)
+* clampedX, clampedY — endpoint after maxRange clamp (what the
+  indicator shows)
+* maxRange — class+inventory effective range
+* actualX, actualY — where dash actually stopped
+* stopReason — one of: `range-cap`, `entity-hit`, `wall-block`,
+  `target-reached`, `timeout`
+* traveled vs intendedDist — actual vs expected travel distance, with %
+
+After dash ends, the snapshot persists for 2.5s as on-arena overlay:
+
+* Faint dashed yellow arc at max-range
+* Blue line: intended path (start → clampedEnd)
+* Red line: actual path (start → actualEnd)
+* Green dot: start | Blue dot/ring: intended end | Red dot: actual end
+* Text panel: stop reason, travel %, max range
+
+This makes dash behavior visible. Once we collect a few playtest dashes
+showing the bug, we'll know exactly which stop reason is firing
+unexpectedly and can apply a targeted fix in the next push.
+
+**Suspected pre-diagnostic finding (not yet a fix):** code at line 7042
+ends drag-drop dashes when player is within `player.r + 8` (~22px) of
+the clamped target. This means dashes ALWAYS stop ~22px short of the
+visible endpoint marker. Diagnostic will confirm if this is the issue.
+If yes, lowering the buffer to 2-4px (just float-precision tolerance)
+fixes it without changing dash behavior.
+
+---
+
+**Architecture summary:**
+
+* characters.js: gray COLOR profile gets radiusBase + radiusSlope
+* rumble.js:
+  * `updateBlackEffect`: read tier-scaled `pullStrength` from blackEffect
+  * `fireOverloadBlack`: compute pullStrength + holdDuration from `count`,
+    store on blackEffect, override `fx.duration`
+  * White field expiry block: comment cleanup only (no logic change)
+  * Red dash diagnostic: 4 new functions (snapshot/finalize/update/draw)
+    + 2 wires into update loop and render loop + `_stopReason` tagging
+    at 4 dash-end sites + finalize calls at 3 termination points
+
+**Net diff:** characters.js ~2 lines (gray COLOR profile). rumble.js
+~165 lines (diagnostic module + black redesign + comment cleanup).
+
+**Test focus:**
+
+1. **Gray walls feel large but not dominant.** T1 wall = 48px sig
+   (slightly bigger than player), T10 wall = 83px (chunky barrier).
+2. **White self-field works as healing reservoir.** Drop white at a
+   spot, walk away, come back — pool still there, ticks heal as you
+   stand in it. Confirm draging-to-self gives instant burst + lingering
+   visual that fades over time.
+3. **Black overload feels different at low vs high tier.** T1 = brief
+   gentle pull. T5 = noticeable hold. T10 = meaningful stuck-in-place
+   for 5s.
+4. **Red dash diagnostic visible after each red attack.** Yellow arc,
+   blue line, red line, dots, text panel. Persists 2.5s. Use this to
+   capture 3-5 dashes and report what the stop reasons say.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

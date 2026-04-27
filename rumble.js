@@ -950,6 +950,7 @@ function update(dt) {
   updateConfuseParticles(dt);
   updateRegen(dt);
   updateBleedOut(dt);
+  updateRedDashDiag(dt);
   updateDrain(dt);
   entities.forEach(function(g) {
     updateEntityPoison(g, dt);
@@ -1934,16 +1935,27 @@ function updateWhiteField(dt) {
       var dist = Math.random() * r * 0.9;
       spawnHealSparkleAt(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
     }
-    // Expire when healRemaining exhausted (only for fields that have any
-    // tickable consumer; follow-self fields are never consumed, so they
-    // expire instead via duration. Track via tickTimer accumulation)
+    // ── EXPIRY (two paths, both correct) ──
+    // Path A: stationary drag-drop fields (followTarget = null).
+    //   Heal pool drains as the player walks into the zone and ticks heal.
+    //   Field persists indefinitely until pool exhausted. This is the
+    //   "healing reservoir" pattern — drop a field, return to it later.
+    // Path B: follow-self fields (followTarget = player).
+    //   Player got the burst at cast time; the field lingers as a visual.
+    //   Tick-heal is skipped for follow-self (line 1894 condition), so
+    //   pool never drains. Expires after a duration window instead.
+    //
+    // Both paths share the same `if (healRemaining <= 0)` early exit so
+    // any consumed field cleans up immediately.
     if (wf.healRemaining <= 0) {
       whiteFields.splice(i, 1);
       continue;
     }
-    // Follow-self fields with no other consumer: expire after duration.
-    // Without this, a self-cast field with no allies would persist forever.
     if (playerIsTarget) {
+      // Follow-self: tick a lifetime timer; expire after enough time
+      // would have drained the pool at the normal heal-per-tick rate.
+      // Equivalent to "show this field for as long as it would have
+      // taken to drain naturally if the player were standing in it."
       wf.lifetimeTimer = (wf.lifetimeTimer || 0) + dt;
       if (wf.lifetimeTimer >= (wf.tickInterval * (wf.maxHealForViz / wf.healPerTick + 1))) {
         whiteFields.splice(i, 1);
@@ -2150,18 +2162,27 @@ function fireOverloadBlack(count, ox, oy) {
   if (!fx) return;
   var crit = !!_currentCrit;
   var radius = clampRadiusToArena(fx.radiusPx);
+  // Per S015 v0.16.0: black overload pull strength + duration scale with
+  // tier (count). Half-value lock per playtest tuning.
+  //   T1 pull: 50 px/s, hold 2s
+  //   T10 pull: 220 px/s, hold 5s
+  // Pull = lerp 50→220 across tier 1→10. Duration = lerp 2→5 across same.
+  // Higher tier feels meaningfully stronger; lower tier is brief touch.
+  // Replaces previous fixed pull (220 px/s, 2x crit) and uncapped fx.duration.
+  var t = Math.max(1, Math.min(10, count || 1));
+  var pullStrength = 50 + (220 - 50) * (t - 1) / 9;     // T1=50, T10=220
+  var holdDuration = 2.0 + (5.0 - 2.0) * (t - 1) / 9;   // T1=2, T10=5
   if (blackEffect) {
-    // Existing effect: take the larger of the new cast's radius and the
-    // current radius (effects expand to encompass the new cast, never
-    // shrink). Reset duration to the fresh cast's window.
     blackEffect.RADIUS = Math.max(blackEffect.RADIUS, radius);
-    blackEffect.timer = fx.duration;
-    blackEffect.DURATION = fx.duration;
+    blackEffect.timer = holdDuration;
+    blackEffect.DURATION = holdDuration;
     blackEffect.tickDmg = fx.dmg;
+    blackEffect.pullStrength = Math.max(blackEffect.pullStrength || 0, pullStrength);
     if (crit) blackEffect.isCrit = true;
   } else {
-    blackEffect = { timer: fx.duration, DURATION: fx.duration, tickTimer: 0, TICK: 0.5, alpha: 0,
-      FADE_IN: 0.8, FADE_OUT: 0.8, ox: ox, oy: oy, RADIUS: radius, tickDmg: fx.dmg, isCrit: crit };
+    blackEffect = { timer: holdDuration, DURATION: holdDuration, tickTimer: 0, TICK: 0.5, alpha: 0,
+      FADE_IN: 0.8, FADE_OUT: 0.8, ox: ox, oy: oy, RADIUS: radius,
+      tickDmg: fx.dmg, isCrit: crit, pullStrength: pullStrength };
   }
   if (crit) {
     spawnCritShockwave(ox, oy, '#552288', { r0: 12, maxR: blackEffect.RADIUS, thickness: 4, growth: 280 });
@@ -3303,6 +3324,7 @@ draw = function() {
   drawCritShockwaves();
   drawCritFlash();
   drawCritBanners();
+  drawRedDashDiag();
 };
 
 // ═══════════════════════════════════════════════════
@@ -6032,6 +6054,118 @@ function useBrickAction(color) {
 }
 
 // ── RED — Charge ──────────────────────────────────
+
+// ── RED DASH DIAGNOSTIC (S015 v0.16.0) ──────────────────────────────────
+// Captures full state on every red dash for visual replay. Helps identify
+// why dashes stop short of expected positions (range cap, hit detection,
+// wall block, target-buffer early-out, arena edge clamp). Persists for
+// 2.5s after dash ends so the player can read what happened.
+//
+// State per snapshot:
+//   startX, startY     — where dash began
+//   intendedX, intendedY — drag drop point (where player aimed)
+//   clampedX, clampedY — endpoint after maxRange clamp (what the indicator shows)
+//   maxRange           — class+inventory effective range
+//   actualX, actualY   — where dash actually stopped
+//   stopReason         — 'range-cap' | 'entity-hit' | 'wall-block' | 'target-reached' | 'timeout' | 'arena-edge'
+//   traveled           — px actually moved
+//   intendedDist       — px from start to clampedX/Y
+//   capturedAt         — performance.now() at dash end
+//   ttl                — fade-out timer (2500ms)
+var redDashDiag = null;
+
+function snapshotRedDashStart(intendedX, intendedY, clampedX, clampedY, maxRange) {
+  redDashDiag = {
+    startX: player.x, startY: player.y,
+    intendedX: intendedX, intendedY: intendedY,
+    clampedX: clampedX, clampedY: clampedY,
+    maxRange: maxRange,
+    actualX: null, actualY: null,
+    stopReason: 'in-progress',
+    traveled: 0,
+    intendedDist: Math.hypot(clampedX - player.x, clampedY - player.y),
+    capturedAt: 0,
+    ttl: 0,
+    state: 'live',
+  };
+}
+
+function finalizeRedDashDiag(reason) {
+  if (!redDashDiag || redDashDiag.state !== 'live') return;
+  redDashDiag.actualX = player.x;
+  redDashDiag.actualY = player.y;
+  redDashDiag.stopReason = reason;
+  redDashDiag.traveled = Math.hypot(player.x - redDashDiag.startX, player.y - redDashDiag.startY);
+  redDashDiag.capturedAt = performance.now();
+  redDashDiag.ttl = 2500;
+  redDashDiag.state = 'persist';
+}
+
+function updateRedDashDiag(dt) {
+  if (!redDashDiag || redDashDiag.state !== 'persist') return;
+  redDashDiag.ttl -= dt * 1000;
+  if (redDashDiag.ttl <= 0) {
+    redDashDiag = null;
+  }
+}
+
+function drawRedDashDiag() {
+  if (!redDashDiag || redDashDiag.state !== 'persist' || !ctx) return;
+  var d = redDashDiag;
+  var fade = Math.min(1, d.ttl / 800); // fade in last 800ms
+  ctx.save();
+  ctx.globalAlpha = fade * 0.85;
+
+  // Max-range arc (faint dashed)
+  ctx.strokeStyle = '#FFCC44';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 8]);
+  ctx.beginPath(); ctx.arc(d.startX, d.startY, d.maxRange, 0, Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Intended path: line from start to clampedX/Y (where indicator pointed)
+  ctx.strokeStyle = '#88AAFF';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(d.startX, d.startY); ctx.lineTo(d.clampedX, d.clampedY); ctx.stroke();
+
+  // Actual path: line from start to actualX/Y (where dash actually went)
+  ctx.strokeStyle = '#FF4444';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(d.startX, d.startY); ctx.lineTo(d.actualX, d.actualY); ctx.stroke();
+
+  // Markers
+  ctx.fillStyle = '#88FF88'; // start = green
+  ctx.beginPath(); ctx.arc(d.startX, d.startY, 4, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#88AAFF'; // intended = blue
+  ctx.beginPath(); ctx.arc(d.clampedX, d.clampedY, 5, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#88AAFF'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(d.clampedX, d.clampedY, 9, 0, Math.PI*2); ctx.stroke();
+  ctx.fillStyle = '#FF4444'; // actual = red
+  ctx.beginPath(); ctx.arc(d.actualX, d.actualY, 5, 0, Math.PI*2); ctx.fill();
+
+  // Text panel near actual stop point
+  var pct = d.intendedDist > 0 ? Math.round(100 * d.traveled / d.intendedDist) : 0;
+  var lines = [
+    'reason: ' + d.stopReason,
+    'traveled: ' + Math.round(d.traveled) + ' / ' + Math.round(d.intendedDist) + ' px (' + pct + '%)',
+    'max range: ' + Math.round(d.maxRange) + ' px',
+  ];
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  var pad = 4;
+  var lh = 14;
+  var tx = d.actualX + 12;
+  var ty = d.actualY - 10;
+  // Box behind text
+  var maxW = 0;
+  lines.forEach(function(l){ maxW = Math.max(maxW, ctx.measureText(l).width); });
+  ctx.fillRect(tx - pad, ty - lh - pad, maxW + pad*2, lines.length * lh + pad*2);
+  ctx.fillStyle = '#FFCC44';
+  lines.forEach(function(l, i){ ctx.fillText(l, tx, ty + i * lh - lh + 2); });
+  ctx.restore();
+}
+
 function startRedChargeTo(dmgMult, tx, ty) {
   // Charge toward a specific canvas point. Range gate: if drop point is
   // beyond the class's effective red range, clamp the dash endpoint to
@@ -6053,6 +6187,10 @@ function startRedChargeTo(dmgMult, tx, ty) {
   var endDist = Math.min(dist, maxRange);
   var endX = startX + nx * endDist;
   var endY = startY + ny * endDist;
+  // Snapshot for diagnostic — captures intended drop point + clamped end.
+  if (typeof snapshotRedDashStart === 'function') {
+    snapshotRedDashStart(tx, ty, endX, endY, maxRange);
+  }
   brickAction = {
     type: 'red', phase: 'charge',
     startX: startX, startY: startY,
@@ -6085,6 +6223,13 @@ function startRedCharge(dmgMult, targetEntity) {
   var maxRange = (typeof getRedRange === 'function')
     ? getRedRange(player.cls, ownedRed)
     : 1e9;
+  // Snapshot for diagnostic — auto-target uses entity position as intended.
+  // No clamping in this path; range cap enforced during charge update loop.
+  if (typeof snapshotRedDashStart === 'function') {
+    var clampX = startX + nx * Math.min(dist, maxRange);
+    var clampY = startY + ny * Math.min(dist, maxRange);
+    snapshotRedDashStart(entity.x, entity.y, clampX, clampY, maxRange);
+  }
   brickAction = {
     type: 'red',
     phase: 'charge',
@@ -6801,6 +6946,7 @@ function updateBrickAction(dt, bounds) {
         // Clamp to remaining distance, mark hit so charge ends this frame
         step = Math.max(0, brickAction.maxRange - traveled);
         brickAction.hit = true; // ends charge → return phase next frame
+        brickAction._stopReason = 'range-cap';
       }
       // Wall sweep: test the line segment from current position to the
       // intended next position against each gray wall. If it intersects,
@@ -6832,6 +6978,7 @@ function updateBrickAction(dt, bounds) {
         player.y = player.y + dym * tStop;
         blocked = true;
         brickAction.hit = true; // ends the charge on the next frame
+        brickAction._stopReason = 'wall-block';
       }
       if (!blocked) {
         player.x = nextX;
@@ -6876,6 +7023,7 @@ function updateBrickAction(dt, bounds) {
           hitG.bounceVx = (kx/kd)*300*knockMult; hitG.bounceVy = (ky/kd)*300*knockMult;
           hitG.bounceTimer = 0.35; hitG.state = 'bounce';
           brickAction.hit = true;
+          if (!brickAction._stopReason) brickAction._stopReason = 'entity-hit';
           triggerVictory();
           // Reverse red particles to stream back toward player origin
           var _rdx = brickAction.startX - hitG.x, _rdy = brickAction.startY - hitG.y;
@@ -6888,14 +7036,24 @@ function updateBrickAction(dt, bounds) {
           brickAction._trailRMult = rTier;
           brickAction.phase = 'return';
           brickAction.returnTimer = 0;
+          // Diagnostic: dash ended via entity hit (or range cap that triggered hit)
+          if (typeof finalizeRedDashDiag === 'function') {
+            finalizeRedDashDiag(brickAction._stopReason || 'entity-hit');
+          }
         }
       }
       // Stop charge after 2s timeout OR reaching drag target — no return unless hit enemy
-      if (brickAction.chargeTimer >= 2.0) {
+      if (brickAction && brickAction.chargeTimer >= 2.0) {
+        if (typeof finalizeRedDashDiag === 'function') {
+          finalizeRedDashDiag(brickAction._stopReason || 'timeout');
+        }
         brickAction = null;
-      } else if (brickAction.usePoint) {
+      } else if (brickAction && brickAction.usePoint) {
         var ptDist = Math.hypot(player.x - brickAction.targetX, player.y - brickAction.targetY);
         if (ptDist < player.r + 8) {
+          if (typeof finalizeRedDashDiag === 'function') {
+            finalizeRedDashDiag(brickAction._stopReason || 'target-reached');
+          }
           brickAction = null;
         }
       }
@@ -8736,14 +8894,18 @@ function updateBlackEffect(dt) {
   }
   // Pull entities toward origin + damage ticks
   // BLACK SINGULARITY: crit doubles pull speed and tick damage.
+  // Per S015 v0.16.0: pull strength is tier-scaled at cast time
+  // (stored on blackEffect.pullStrength: 50 px/s @ T1 → 220 px/s @ T10).
+  // Crit doubles whatever the current strength is.
   var singularity = !!blackEffect.isCrit;
   var pullMult = singularity ? 2.0 : 1.0;
   var tickDmgMult = singularity ? 2.0 : 1.0;
+  var basePull = blackEffect.pullStrength || 220; // legacy fallback
   entities.forEach(function(g) {
     var dx = blackEffect.ox - g.x, dy = blackEffect.oy - g.y;
     var dist = Math.sqrt(dx*dx+dy*dy);
     if (dist < blackEffect.RADIUS && dist > 4) {
-      var pullStr = 220 * dt * pullMult; // pull speed px/s
+      var pullStr = basePull * dt * pullMult;
       g.x += (dx/dist) * pullStr;
       g.y += (dy/dist) * pullStr;
     }

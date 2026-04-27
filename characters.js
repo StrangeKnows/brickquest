@@ -462,7 +462,7 @@ var COLOR = {
   },
   yellow: { dur: 0.60, yellowSeed: 0.40 },
   orange: { dmg: 0.40, bleedDur: 0.60, charges: 0.40 },
-  gray:   { hp: 0.80 },
+  gray:   { hp: 0.80, radiusBase: 35, radiusSlope: 0.08 },
 };
 
 // Tier curve. Linear gentle: T1=1.0, T4=1.45, T8=2.05.
