@@ -5421,6 +5421,113 @@ Other classes don't see these rings — schema-gated on
 
 ---
 
+### v0.15.21 — Per-color merge window (schema-driven)
+
+Playtest readout: black tap wither damage piling up on screen — sequential
+witherbolt impacts each spawn separate damage numbers that don't merge,
+even though v0.15.19 introduced same-target merging. Diagnosed: black's
+slow projectile (260px/s) means sequential bolts arrive at the target
+~250-300ms apart. The default 200ms merge window CLOSES before the next
+bolt impacts, so each one spawns fresh.
+
+Fix: **per-color merge window** as a COLOR-table override, schema-driven.
+Black gets 400ms; everyone else keeps the 200ms default. Future colors
+with different timing characteristics (slow projectiles, DoT ticks, etc.)
+can add their own override via a single field in `characters.js`.
+
+Generalizes for free: any color casting `showDamageNumber` with a `source`
+parameter benefits. The architecture mirrors the per-class profile pattern
+(`redProfile`, `blueProfile`, `purpleProfile`, `orangeProfile`) but at the
+COLOR level instead of the CLASS level — because merge timing is determined
+by **how the damage source delivers numbers**, not by which class cast it.
+
+---
+
+**The schema (characters.js COLOR table):**
+
+```js
+black: {
+  dmg: 0.20, dur: 0.60, witherDmg: 0.40, witherStacks: 0.20,
+  mergeWindowMs: 400,  // slow projectile — sequential bolts arrive ~250-300ms apart
+},
+```
+
+Other colors omit the field; engine defaults to 200ms.
+
+---
+
+**Engine changes (rumble.js):**
+
+`showDamageNumber` gained an optional final `source` parameter (canonical
+color name like `'red'`, `'black'`):
+
+```js
+function showDamageNumber(x, y, applied, color, tier, entityX, entityY,
+                          prefix, witherBoost, parent, source);
+```
+
+Inside the merge gate, the engine now reads:
+
+```js
+var mergeWindow = 200;  // default
+if (source && window.COLOR_PROFILE) {
+  var entry = window.COLOR_PROFILE[source];
+  if (entry && typeof entry.mergeWindowMs === 'number') {
+    mergeWindow = entry.mergeWindowMs;
+  }
+}
+```
+
+All 15 damage-number call sites updated to pass their canonical source:
+* Red dash hits → `'red'`
+* Blue bolt primary + burst (FW AOE) + field flash → `'blue'`
+* Orange traps (sealed, unsealed, shrapnel, chain network) + bleed ticks → `'orange'`
+* Black witherbolt + overload accumulator (periodic + final flush) → `'black'`
+* Green poison ticks → `'green'`
+* Purple blast → `'purple'`
+
+Bleed ticks tagged `'orange'` (since bleed is the orange family DoT),
+which is intentional — bleed damage from an orange trap should merge
+with the trap's primary damage if they land within the window.
+
+---
+
+**Architectural payoff:**
+
+Per-color merge timing is now a single-field tune in `characters.js`. If
+future playtests show DoT ticks need a wider window (e.g. poison ticks
+every 1s shouldn't merge across entirely separate poison applications),
+adjust `green.mergeWindowMs`. If a new lightning-fast color needs a
+tighter window to avoid combining genuinely-separate hits, set its
+window lower. No engine changes — just data.
+
+This composes cleanly with the existing `mergeable`/`accum` infrastructure
+from v0.15.19. Same merge logic (parent identity + color match + tier
+match), just with a per-color time gate.
+
+---
+
+**Net diff:**
+* characters.js: 2 lines (add `mergeWindowMs: 400` to black entry,
+  doc comment)
+* rumble.js: ~30 lines (showDamageNumber signature + merge window
+  lookup + 15 call sites updated to pass source)
+
+**Test focus:**
+
+1. **Black rapid tap** on one goblin → damage numbers merge into one
+   growing total instead of stacking, even with slow bolt flight time.
+2. **Black overload zone** → periodic flush still merges if rapid
+   damage events land within the 400ms window.
+3. **Other colors unchanged** — blue/red/orange behave exactly as
+   before with 200ms windows.
+4. **Architectural verification:** in characters.js, change `black`
+   `mergeWindowMs` from 400 to 100. Reload. Black should pile up
+   numbers again (window now too tight). Change to 800. Reload.
+   Even broader merging. Pure data tune.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -546,7 +546,14 @@ var COLOR = {
     radiusSlope: 0.30, // overrides global tierCurve slope (0.15) for radius only
   },
   purple: { dmg: 0.60 },
-  black:  { dmg: 0.20, dur: 0.60, witherDmg: 0.40, witherStacks: 0.20 },
+  // Black: slow witherbolt projectile (260px/s) means sequential taps land
+  // ~250-300ms apart at the target. Default 200ms damage-number merge window
+  // is too short — bolts arrive serially with gaps that exceed it, producing
+  // multiple stacked numbers instead of one growing total. Per S015 v0.15.21:
+  // mergeWindowMs override raises the absorb window to 400ms for black so
+  // rapid-tap bolts merge cleanly into one number per target.
+  black:  { dmg: 0.20, dur: 0.60, witherDmg: 0.40, witherStacks: 0.20,
+            mergeWindowMs: 400 },
   green:  { stackDmg: 0.20, stacks: 0.40 },
   // White uses a custom tier function instead of universal m-based scaling.
   // Heal-over-time accumulates discretely, so universal m can't deliver

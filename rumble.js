@@ -3093,7 +3093,7 @@ function _spawnFizzleSparks(ex, ey, count, color, entR) {
 //   NEUTRAL → standard floater (baseline)
 //   VULN    → bigger, brighter, faster rise, pulsing glow
 //   WEAK    → largest, white-outlined, rises with SHAKE jitter + strong glow
-function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, witherBoost, parent) {
+function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, witherBoost, parent, source) {
   var baseColor = color || '#fff';
   var now = performance.now();
   // Entity center defaults to hit point if not supplied.
@@ -3236,12 +3236,23 @@ function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, 
   // S015 v0.15.19: Case 1 merge — rapid taps on the same target combine
   // into one growing number. Anchor on parent entity identity (more
   // reliable than screen position since entities move); same color +
-  // tier; within 200ms absorb window. Excluded: RESIST (bounce geometry
-  // would lie if absorbed), IMMUNE (fizzle '0' is distinct outcome),
-  // hits with no parent (world-space hits don't have an anchor).
-  // Wither-boosted hits also merge — wb already baked into accum text.
+  // tier; within mergeWindow ms absorb window. Excluded: RESIST (bounce
+  // geometry would lie if absorbed), IMMUNE (fizzle '0' is distinct
+  // outcome), hits with no parent (world-space hits don't have an
+  // anchor). Wither-boosted hits also merge — wb already baked into
+  // accum text.
+  // S015 v0.15.21: per-color merge window. Slow projectiles (black
+  // witherbolt, ~260px/s) need a longer absorb window than fast hits
+  // because sequential bolts arrive serially with ~250-300ms gaps.
+  // COLOR table can override mergeWindowMs per color; default 200ms.
   if (par && tier !== 'RESIST' && tier !== 'IMMUNE') {
-    var mergeWindow = 200;  // ms after spawn during which new hits absorb
+    var mergeWindow = 200;  // default
+    if (source && typeof window !== 'undefined' && window.COLOR_PROFILE) {
+      var colorEntry = window.COLOR_PROFILE[source];
+      if (colorEntry && typeof colorEntry.mergeWindowMs === 'number') {
+        mergeWindow = colorEntry.mergeWindowMs;
+      }
+    }
     var mergeTarget = null;
     for (var fti = floatingTexts.length - 1; fti >= 0; fti--) {
       var ft = floatingTexts[fti];
@@ -6106,7 +6117,7 @@ function updateWitherbolts(dt) {
       var res = damageEntity(b.target, dmg, undefined, 'black');
       _witherboltDamage = false;
       b.target.flashTimer = 0.2;
-      showDamageNumber(b.target.x, b.target.y - 30, res.applied, '#552288', res.tier, b.target.x, b.target.y, undefined, res.witherBoost, b.target);
+      showDamageNumber(b.target.x, b.target.y - 30, res.applied, '#552288', res.tier, b.target.x, b.target.y, undefined, res.witherBoost, b.target, 'black');
       // Apply wither stacks + refresh shared timer. Stack readout lives in
       // the unified buff bar above the entity now — no impact floater.
       // Apply stacks, capped at MAX_WITHER_STACKS. Casts beyond cap still
@@ -7444,7 +7455,7 @@ function updateBrickAction(dt, bounds) {
             hitG.flashTimer = 0.3;
             showDamageNumber(hitG.x, hitG.y - 30, rRes.applied,
               crit ? '#FFAA00' : '#E24B4A', rRes.tier, hitG.x, hitG.y,
-              undefined, rRes.witherBoost, hitG);
+              undefined, rRes.witherBoost, hitG, 'red');
             // Per-target particle burst — schema-gated. Only fires for
             // classes whose blastVisual defines perTargetCount/perTargetColor
             // (BK has these; other classes don't, so their dashes are visually
@@ -7791,7 +7802,7 @@ function updateBlueBolts(dt, bounds) {
         if (Math.hypot(ent.x - ix, ent.y - iy) <= impactR + ent.r) {
           var fpRes = damageEntity(ent, hitDmg, undefined, 'blue');
           ent.flashTimer = 0.2;
-          showDamageNumber(ent.x, ent.y - 30, fpRes.applied, '#4db8ff', fpRes.tier, ent.x, ent.y, undefined, fpRes.witherBoost, ent);
+          showDamageNumber(ent.x, ent.y - 30, fpRes.applied, '#4db8ff', fpRes.tier, ent.x, ent.y, undefined, fpRes.witherBoost, ent, 'blue');
           if (b.isCrit && !primaryHit) {
             primaryHit = ent;
             ent.markedTimer = 3.0;
@@ -7835,7 +7846,7 @@ function updateBlueBolts(dt, bounds) {
     if (!b.fixedPoint && b.travelled > 30 && dist < b.r + b.target.r) {
       var bRes = damageEntity(b.target, b.dmg, undefined, 'blue');
       b.target.flashTimer = 0.2;
-      showDamageNumber(b.target.x, b.target.y - 30, bRes.applied, '#4db8ff', bRes.tier, b.target.x, b.target.y, undefined, bRes.witherBoost, b.target);
+      showDamageNumber(b.target.x, b.target.y - 30, bRes.applied, '#4db8ff', bRes.tier, b.target.x, b.target.y, undefined, bRes.witherBoost, b.target, 'blue');
       // BLUE MARK: on crit, mark target to take +50% damage from all sources for 3s.
       if (b.isCrit) {
         b.target.markedTimer = 3.0;
@@ -7853,7 +7864,7 @@ function updateBlueBolts(dt, bounds) {
           if (Math.hypot(other.x - b.target.x, other.y - b.target.y) <= b.burstRadius) {
             var burstRes = damageEntity(other, b.burstDmg, undefined, 'blue');
             other.flashTimer = 0.2;
-            showDamageNumber(other.x, other.y - 30, burstRes.applied, '#6fb8ff', burstRes.tier, other.x, other.y, undefined, burstRes.witherBoost, other);
+            showDamageNumber(other.x, other.y - 30, burstRes.applied, '#6fb8ff', burstRes.tier, other.x, other.y, undefined, burstRes.witherBoost, other, 'blue');
           }
         });
       }
@@ -8304,7 +8315,7 @@ function detonateChainNetwork(seedTrap) {
     var dmgColor = hit.count > 1 ? '#FF8833' : '#ff6600';
     showDamageNumber(hit.entity.x, hit.entity.y - 30, dRes.applied,
       dmgColor, dRes.tier, hit.entity.x, hit.entity.y,
-      undefined, dRes.witherBoost, hit.entity);
+      undefined, dRes.witherBoost, hit.entity, 'orange');
     // Add to caughtEntities list of any trap that contained the entity,
     // so the hold-timer visual cleanup works the same as standard traps.
     network.forEach(function(nt) {
@@ -8416,7 +8427,7 @@ function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit, chainOpts) {
           t.triggered = true;
           t.holdTimer = t.HOLD_DURATION;
           var tRes = damageEntity(g, t.initialDmg, false, 'orange');
-          showDamageNumber(g.x, g.y-30, tRes.applied, '#ff6600', tRes.tier, g.x, g.y, undefined, tRes.witherBoost, g);
+          showDamageNumber(g.x, g.y-30, tRes.applied, '#ff6600', tRes.tier, g.x, g.y, undefined, tRes.witherBoost, g, 'orange');
         }
       });
       // ORANGE SHRAPNEL: on crit sealed-trap placement, also hit anyone in a
@@ -8429,7 +8440,7 @@ function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit, chainOpts) {
           if (Math.hypot(g.x-x, g.y-y) < aoeR + g.r) {
             var sRes = damageEntity(g, t.initialDmg, true, 'orange');
             g.flashTimer = 0.2;
-            showDamageNumber(g.x, g.y-30, sRes.applied, '#ff9933', sRes.tier, g.x, g.y, undefined, sRes.witherBoost, g);
+            showDamageNumber(g.x, g.y-30, sRes.applied, '#ff9933', sRes.tier, g.x, g.y, undefined, sRes.witherBoost, g, 'orange');
           }
         });
         spawnCritShockwave(x, y, '#F57C00', { r0: 10, maxR: aoeR, thickness: 4, growth: 360 });
@@ -8487,7 +8498,7 @@ function updateBleeds(dt) {
     if (b.tick >= 1.0) {
       b.tick -= 1.0;
       var bRes2 = damageEntity(b.target, b.dmg, false, 'orange');
-      showDamageNumber(b.target.x, b.target.y-20, bRes2.applied, '#cc2200', bRes2.tier, b.target.x, b.target.y, '🩸', bRes2.witherBoost, b.target);
+      showDamageNumber(b.target.x, b.target.y-20, bRes2.applied, '#cc2200', bRes2.tier, b.target.x, b.target.y, '🩸', bRes2.witherBoost, b.target, 'orange');
       triggerVictory();
     }
   });
@@ -8549,7 +8560,7 @@ function updateTraps(dt) {
           t.holdTimer = t.HOLD_DURATION;
           t.caughtEntities = [g];
           var uRes = damageEntity(g, t.initialDmg, false, 'orange');
-          showDamageNumber(g.x, g.y-30, uRes.applied, '#ff6600', uRes.tier, g.x, g.y, undefined, uRes.witherBoost, g);
+          showDamageNumber(g.x, g.y-30, uRes.applied, '#ff6600', uRes.tier, g.x, g.y, undefined, uRes.witherBoost, g, 'orange');
           // ORANGE SHRAPNEL: on crit unsealed-trap trigger, detonate AoE.
           if (t.isCrit) {
             var aoeR2 = t.r * 1.8;
@@ -8558,7 +8569,7 @@ function updateTraps(dt) {
               if (Math.hypot(other.x-t.x, other.y-t.y) < aoeR2 + other.r) {
                 var shRes = damageEntity(other, t.initialDmg, true, 'orange');
                 other.flashTimer = 0.2;
-                showDamageNumber(other.x, other.y-30, shRes.applied, '#ff9933', shRes.tier, other.x, other.y, undefined, shRes.witherBoost, other);
+                showDamageNumber(other.x, other.y-30, shRes.applied, '#ff9933', shRes.tier, other.x, other.y, undefined, shRes.witherBoost, other, 'orange');
               }
             });
             spawnCritShockwave(t.x, t.y, '#F57C00', { r0: 8, maxR: aoeR2, thickness: 4, growth: 340 });
@@ -9167,7 +9178,7 @@ function updateEntityPoison(g, dt) {
     var poisonDmg = g.poisonStack || 1;
     var pRes = damageEntity(g, poisonDmg, false, 'green');
     g.flashTimer = 0.08;
-    showDamageNumber(g.x, g.y-30, pRes.applied, '#1D9E75', pRes.tier, g.x, g.y, '☠', pRes.witherBoost, g);
+    showDamageNumber(g.x, g.y-30, pRes.applied, '#1D9E75', pRes.tier, g.x, g.y, '☠', pRes.witherBoost, g, 'green');
     triggerVictory();
   }
 }
@@ -9553,7 +9564,7 @@ function updatePurpleBursts(dt) {
       var prevHp = entity.hp;
       var puRes = damageEntity(entity, purpleDmg, !pbRemote, 'purple'); entity.flashTimer = 0.2;
       var actualDmg = prevHp - entity.hp; // actual damage dealt (may be less if entity low HP)
-      showDamageNumber(entity.x, entity.y-30, actualDmg, '#7B2FBE', puRes.tier, entity.x, entity.y, undefined, puRes.witherBoost, entity);
+      showDamageNumber(entity.x, entity.y-30, actualDmg, '#7B2FBE', puRes.tier, entity.x, entity.y, undefined, puRes.witherBoost, entity, 'purple');
 
       // PURPLE SILENCE: crit bursts silence entities for 2s (can't attack).
       if (purpleBurst.isCrit) {
@@ -9738,7 +9749,7 @@ function updateBlackEffect(dt) {
     entities.forEach(function(entity) {
       if (entity._blackAccumDmg && entity._blackAccumDmg > 0) {
         showDamageNumber(entity.x, entity.y-25, entity._blackAccumDmg,
-          '#888888', entity._blackAccumTier || 'NEUTRAL', entity.x, entity.y, undefined, entity._blackAccumWither || 0, entity);
+          '#888888', entity._blackAccumTier || 'NEUTRAL', entity.x, entity.y, undefined, entity._blackAccumWither || 0, entity, 'black');
         entity._blackAccumDmg = 0;
         entity._blackAccumTier = null;
         entity._blackAccumWither = 0;
@@ -9755,7 +9766,7 @@ function updateBlackEffect(dt) {
       // Flush any pending black accum damage text so players see final total
       if (g._blackAccumDmg && g._blackAccumDmg > 0) {
         showDamageNumber(g.x, g.y-25, g._blackAccumDmg,
-          '#888888', g._blackAccumTier || 'NEUTRAL', g.x, g.y, undefined, g._blackAccumWither || 0, g);
+          '#888888', g._blackAccumTier || 'NEUTRAL', g.x, g.y, undefined, g._blackAccumWither || 0, g, 'black');
         g._blackAccumDmg = 0;
         g._blackAccumTier = null;
         g._blackAccumWither = 0;
