@@ -1941,12 +1941,16 @@ function updateWhiteField(dt) {
     }
 
     var cx = wf.ox, cy = wf.oy, r = wf.radius;
-    // S015 v0.15.15: unified white field model. ALL fields tick heal when
-    // player is inside (regardless of followTarget identity) and persist
-    // until pool exhausted. No double-dip — pool sizes already reflect
-    // whether burst was delivered (stationary uses totalHeal, follow-self
-    // uses fieldPool = totalHeal - burst).
-    if (Math.hypot(player.x - cx, player.y - cy) <= r && wf.healRemaining > 0) {
+    // ── HEAL TICK (S015 v0.15.16: gated by 'will heal actually deliver') ──
+    // Tick timer ONLY advances when conditions are right for a heal to land
+    // this frame: player inside field, player below max HP, pool > 0.
+    // If any condition fails, timer freezes at its current value — the
+    // field is patient. Step out and back in: tick countdown resumes from
+    // where it paused. Stand at full HP inside the field: timer freezes,
+    // pool stays full. The field drains ONLY when actual healing delivered.
+    var playerInside = Math.hypot(player.x - cx, player.y - cy) <= r;
+    var canHeal = playerInside && wf.healRemaining > 0 && player.hp < player.hpMax;
+    if (canHeal) {
       wf.tickTimer += dt;
       if (wf.tickTimer >= wf.tickInterval) {
         wf.tickTimer -= wf.tickInterval;
@@ -1961,7 +1965,11 @@ function updateWhiteField(dt) {
         var cap = Math.max(player.hpMax, player.hp);
         player.hp = Math.min(cap, player.hp + tickHeal);
         var actual = player.hp - prev;
-        wf.healRemaining -= tickHeal;
+        // Decrement pool by ACTUAL heal applied (overflow returns to pool).
+        // E.g., player at hpMax-2, tickHeal=5 → applies 2, refunds 3 to pool.
+        // Without this, white fields silently waste pool when player is
+        // near full HP. Only a real concern when player.hp >= hpMax-tickHeal.
+        wf.healRemaining -= actual;
         if (actual > 0) {
           applyBleedRescue(actual);
           if (_battleStats) {
@@ -1981,7 +1989,7 @@ function updateWhiteField(dt) {
         e.whiteFieldSlowTimer = 0.25;
       }
     });
-    // Sparkle shimmer
+    // Sparkle shimmer (always — visual life of the field, not gated by heal)
     wf.sparkleTimer += dt;
     if (wf.sparkleTimer >= 0.08) {
       wf.sparkleTimer = 0;
@@ -2026,6 +2034,24 @@ function drawWhiteField() {
     ctx.lineWidth = 3;
     ctx.stroke();
     ctx.restore();
+    // Numeric "+N" label at field center showing remaining heal pool.
+    // Per S015 v0.15.16: pink to match heal sparkle palette so player
+    // reads it as "this is heal storage." Decrements as pool drains.
+    // Hidden when pool is 0 (about to expire anyway).
+    var remaining = Math.ceil(wf.healRemaining);
+    if (remaining > 0) {
+      ctx.save();
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // Subtle dark outline for legibility against varied backdrops
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.strokeText('+' + remaining, cx, cy);
+      ctx.fillStyle = '#FF99CC'; // pink, matches heal sparkle accent color
+      ctx.fillText('+' + remaining, cx, cy);
+      ctx.restore();
+    }
   });
 }
 
@@ -7723,19 +7749,36 @@ function drawCastIndicator(color, hex, dragPos) {
     ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(endX, endY); ctx.stroke();
     // Hit-radius bubble at endpoint — shows the "connect zone" where an
-    // enemy's center must land for the dash to hit. Renders for all
-    // classes; BK's naturally larger via redProfile.hitboxScale (1.2×).
+    // enemy's center must land for the dash to STOP (first-hit detection).
     // Standard entity radius = 14px (typical goblin); the bubble = the
-    // exact circle hit detection uses at impact: (player.r + ~14) × scale.
-    var rProf = (typeof getRedProfile === 'function')
-      ? getRedProfile(player.cls) : null;
-    var hbScale = (rProf && rProf.hitboxScale) || 1.0;
+    // exact circle hit detection uses at impact: (player.r + 14) × scale.
+    // For aoe-blast classes, ALSO render an outer blast ring showing
+    // where AOE damage will land at impact. Two rings communicate two
+    // things: inner = "dash stops here," outer = "everything in here
+    // takes damage." Per S015 v0.15.16, schema-driven.
+    var dashProfile = (typeof getRedDashProfile === 'function')
+      ? getRedDashProfile(player.cls)
+      : { hitboxScale: 1.0, dashModel: 'recoil', blastRadiusMult: 1.0 };
+    var hbScale = dashProfile.hitboxScale;
     var hitBubbleR = (player.r + 14) * hbScale;
+    // Inner bubble — where the dash stops on first contact
     ctx.globalAlpha = 0.22;
     ctx.lineWidth = 1.5;
     ctx.setLineDash([5, 6]);
     ctx.strokeStyle = hex;
     ctx.beginPath(); ctx.arc(endX, endY, hitBubbleR, 0, Math.PI * 2); ctx.stroke();
+    // Outer blast ring — only for aoe-blast model. Shows AOE damage zone.
+    // Slightly thicker dash + brighter alpha so it reads as the "louder"
+    // ring (the gameplay-relevant one for BK), with the inner bubble as
+    // a quieter "this is where I stop" hint.
+    if (dashProfile.dashModel === 'aoe-blast') {
+      var blastR = hitBubbleR * dashProfile.blastRadiusMult;
+      ctx.globalAlpha = 0.32;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([7, 5]);
+      ctx.strokeStyle = hex;
+      ctx.beginPath(); ctx.arc(endX, endY, blastR, 0, Math.PI * 2); ctx.stroke();
+    }
     ctx.setLineDash([]);
     // Endpoint marker — small filled circle where the dash will stop.
     // When out of range, this lands at the max-range mark, not the cursor,

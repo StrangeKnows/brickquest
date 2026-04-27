@@ -4780,6 +4780,119 @@ fieldPool is consumed. Previously the field was visual-only.
 
 ---
 
+### v0.15.16 — White field gated tick + numeric label, drag indicator dual-ring
+
+Three playtest follow-ups bundled together. Two refine the white field
+behavior locked in v0.15.15; one fixes a drag-indicator-vs-actual-blast
+visual mismatch on BK.
+
+---
+
+**Change 1: White field tick timer gated on actual heal delivery.**
+
+v0.15.15 unified white field persistence (heal pool drains until
+exhausted, no timer fallback). But the internal `tickTimer` still
+advanced every frame when the player was inside the field, regardless
+of whether a heal could actually fire. Two side effects:
+
+* Standing inside a white field at full HP still consumed the tick
+  countdown (no heal delivered, but timer kept running). On the next
+  damage taken, the timer was already past `tickInterval` so a heal
+  fired instantly — but the pool had already implicitly "wasted" the
+  prior frames' worth of time.
+* Stepping out of the field reset the `tickTimer` momentum but the
+  pool was untouched, leading to confusing "I felt like that should
+  have healed" moments.
+
+Fix: `tickTimer += dt` only runs when **all three conditions are met**:
+
+```js
+var canHeal = playerInside && wf.healRemaining > 0 && player.hp < player.hpMax;
+if (canHeal) { wf.tickTimer += dt; ... }
+```
+
+If any condition fails, the timer freezes at its current value. The
+field is patient — re-enter and the tick countdown resumes from where
+it paused. Stand at full HP inside: timer freezes, pool stays full.
+
+**Pool decrement also fixed** to subtract by **actual heal applied**
+(not the would-be tickHeal value). Edge case: player at hpMax-2,
+tickHeal=5 → applies 2, pool decrements by 2 not 5. Without this fix,
+white fields silently wasted pool when player was near full HP.
+`wf.healRemaining -= actual` instead of `-= tickHeal`.
+
+**Net behavior:** the field drains EXACTLY the amount of heal it
+delivers. Pool counts your real healing budget, not approximate.
+
+---
+
+**Change 2: Numeric "+N" label at white field center.**
+
+Players couldn't see how much heal a field had stored — they had to
+infer from the field's alpha (which scales with `healRemaining /
+maxHealForViz`). Hard to plan around.
+
+Fix: render `+N` at field center in pink (`#FF99CC`, matching the
+heal sparkle palette so the player reads it as "this is heal
+storage"). Decrements as pool drains. Hidden when pool reaches 0
+(field about to expire anyway).
+
+Bold 16px sans-serif, dark outline for legibility on varied backdrops.
+Sits inside the existing draw loop after the gradient + arc render.
+
+---
+
+**Change 3: Drag indicator dual-ring for AOE-blast classes.**
+
+Previous indicator drew a single dashed bubble at the dash endpoint
+sized to `(player.r + 14) × hitboxScale` — the FIRST-HIT detection
+zone. For BK with `blastRadiusMult: 1.5`, the actual blast at impact
+was 50% larger than the visualized bubble. Players couldn't see what
+their AOE blast would catch.
+
+Fix: indicator now reads the full `dashProfile` and renders TWO rings
+for AOE-blast classes:
+
+* **Inner bubble** (dashed thin, alpha 0.22) — where the dash stops
+  on first contact. Communicates "this is where I land."
+* **Outer blast ring** (dashed thicker, alpha 0.32) — where AOE damage
+  is dealt. Communicates "everything in here gets hit."
+
+For non-blast classes (`dashModel: 'recoil'`), only the inner bubble
+renders — the outer ring would be redundant since they only hit one
+target.
+
+Schema-driven: indicator reads `dashProfile.dashModel` and
+`dashProfile.blastRadiusMult` directly. No class-name checks. Future
+classes adopting `aoe-blast` automatically get the dual-ring viz.
+
+---
+
+**Net diff:**
+* characters.js: untouched (schema already in place)
+* rumble.js: ~50 lines (white field tick gating, numeric label,
+  drag indicator dual-ring + dashProfile read)
+
+**Test focus:**
+
+1. **White field doesn't tick when at full HP.** Stand at full HP
+   inside a white field — pool should NOT drain. Take damage — heals
+   start flowing.
+2. **White field doesn't tick when player outside.** Drop field,
+   walk far away, watch pool stay constant. Walk back in (below
+   full HP) — heal resumes.
+3. **Numeric label visible and decrements.** "+12" or similar at
+   field center. Drains as ticks fire. Disappears when pool hits 0.
+4. **BK drag indicator shows two rings.** Inner thin dashed (~36px),
+   outer thicker dashed (~54px). Outer ring matches the actual blast
+   zone shown in the post-dash diagnostic.
+5. **Other classes show only inner bubble** (no outer blast ring).
+6. **Pool drain matches actual heal.** Cast white at near-full HP,
+   take 3 damage, walk into field — should see exactly 3 heal
+   delivered and pool decrement by exactly 3, not by `healPerTick`.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
