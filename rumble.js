@@ -7198,6 +7198,21 @@ function drawCastIndicator(color, hex, dragPos) {
     ctx.globalAlpha = inRange ? 0.65 : 0.40;
     ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(endX, endY); ctx.stroke();
+    // Hit-radius bubble at endpoint — shows the "connect zone" where an
+    // enemy's center must land for the dash to hit. Renders for all
+    // classes; BK's naturally larger via redProfile.hitboxScale (1.2×).
+    // Standard entity radius = 14px (typical goblin); the bubble = the
+    // exact circle hit detection uses at impact: (player.r + ~14) × scale.
+    var rProf = (typeof getRedProfile === 'function')
+      ? getRedProfile(player.cls) : null;
+    var hbScale = (rProf && rProf.hitboxScale) || 1.0;
+    var hitBubbleR = (player.r + 14) * hbScale;
+    ctx.globalAlpha = 0.22;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 6]);
+    ctx.strokeStyle = hex;
+    ctx.beginPath(); ctx.arc(endX, endY, hitBubbleR, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
     // Endpoint marker — small filled circle where the dash will stop.
     // When out of range, this lands at the max-range mark, not the cursor,
     // so the player can see "I dropped past my reach, this is where I stop".

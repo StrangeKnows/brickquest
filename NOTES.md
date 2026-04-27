@@ -3733,4 +3733,198 @@ SS orange 0.5s tap-invuln window). Or Chunk 3 — Blocksmith + Wild One
 (BS gray regen + yellow taunt, WO viral poison). Either chunk now drops
 into a clean architecture with no legacy buttons crowding the dashboard.
 
+### v0.15.4 — Hotfix: orphan renderGateActions caller
+
+Quick fix push immediately after v0.15.3. The bulk strip in v0.15.3 used a
+Python script to remove function definitions and string-match callers.
+test_players.html had one caller in `_dashPhaseContext` (line 2331) with
+slightly different surrounding text than the players.html version, so the
+caller-cleanup pattern didn't trigger. Function gone + caller present =
+`ReferenceError: renderGateActions is not defined` on every dashboard
+render in test_players.
+
+* test_players.html: stripped the orphan `html += renderGateActions(me);`
+  call from `_dashPhaseContext`, replaced with the same comment used in
+  players.html.
+* Added workflow rule to memory: when stripping a function from paired
+  files, ALWAYS grep for the function name in BOTH files independently
+  after the strip — don't trust string-match patterns to catch every
+  caller across paired files.
+
+Single-file commit. Both player files now render cleanly.
+
+### v0.15.5 — Chunk 2.1: BK red signature package
+
+First mechanic from Chunk 2 (Breaker + Snapstep), Breaker side. Three
+linked features ship together as the BK red signature: per-class red
+range system with class-driven reach, larger hitbox for BK, stronger
+knockback for BK. All values defined in characters.js redProfile.
+
+**Per-class red range (new universal system):**
+
+Range determined by `rangeBase × (1 + 0.10 × (tier - 1)) × rangeAffinityBonus`,
+matching the universal pipeline tier curve (slope 0.10) introduced in
+v0.15.0. Class differentiation comes from rangeBase (weight-driven) and
+the signature affinity bonus (1.25× for sig-red classes, 1.0× otherwise).
+
+| Class | Weight | Sig-red? | rangeBase | T1 | T3 | T5 |
+|-------|--------|----------|-----------|-----|-----|-----|
+| Breaker | heavy | ✅ | 160 | 200px | 240px | 280px |
+| Blocksmith | heavy | ❌ | 160 | 160px | 192px | 224px |
+| Fixer | mid | ❌ | 200 | 200px | 240px | 280px |
+| Formwright | light | ❌ | 240 | 240px | 288px | 336px |
+| Wild One | light | ❌ | 240 | 240px | 288px | 336px |
+| Snapstep | light | ✅ | 240 | 300px | 360px | 420px |
+
+Snapstep gets the longest reach (matches hit-and-run identity). Blocksmith
+shortest (heavy + no signature). Breaker matches mid/standard at T1
+despite heavy weight — signature affinity bonus offsets the heavy penalty.
+
+**Out-of-range behavior:** drop point past max range → dash still launches
+but stops at the max-range mark in the dragged direction. Player gets
+visual feedback during drag (see indicator below). No brick refunded —
+commit is real, you just don't reach further than your class allows.
+
+**BK signature multipliers:**
+
+* `hitboxScale: 1.2` — hit detection radius is `(player.r + entity.r) × 1.2`,
+  so BK reaches 20% further to land hits even at the same dash endpoint
+* `knockbackScale: 2.0` — bounce velocity multiplied 2.0× on impact;
+  combines with crit's existing 2.0× doubler so BK + crit = 4.0× total
+  knockback ("send the goblin flying" feel)
+
+Other classes: `hitboxScale` undefined → engine treats as 1.0; same for
+knockbackScale. No code path in non-BK classes affected.
+
+**Visual: red drag indicator updated**
+
+When dragging red:
+* Faint dashed arc around player at max-range distance — the "reach bubble"
+* Solid line from player to clamped endpoint
+* Filled circle at endpoint (where the dash actually stops)
+* Dashed circle around endpoint at the hit-radius scale — shows "if a
+  goblin's center lands inside this, you connect." BK's bubble naturally
+  larger via hitboxScale; visual signature emerges from data, no
+  special-case render branch
+* When drop point past range: small dashed ring around cursor + endpoint
+  stays at max-range mark, communicating "you dropped past your reach"
+
+**Architecture:**
+
+* `redProfile` field on all 6 classes in characters.js (data layer)
+* `getRedProfile(cls)` and `getRedRange(cls, tier)` helpers exported to
+  window + module.exports
+* `startRedChargeTo` and `startRedCharge` clamp endpoint to max range,
+  store `maxRange` on `brickAction` state
+* Charge update loop reads `redProfile` per frame; range cap enforced by
+  tracking distance traveled vs `maxRange`
+* Hit detection uses `hitboxScale` multiplier on combined radius
+* Knockback combines crit doubler with `knockbackScale` (BK signature)
+* Drag indicator new branch for red — independent from purple teleport
+  branch, both are class-driven via their respective profiles
+
+**Net diff:** characters.js +28 lines (redProfile data + 2 helpers + exports).
+rumble.js +43 lines (range gate at launch, range cap in update loop, BK
+multipliers wired, indicator branch).
+
+**Still queued for Chunk 2:**
+
+* BK gray death save (armor absorbs lethal blow once per rumble)
+* SS orange 0.5s tap-invuln window
+* Audit Thread A pair: red combo stacks (consecutive red +damage / +crit)
+
+Each is a separate v0.15.x patch.
+
+---
+
+## Design Parking Lot
+
+Captured ideas, design provocations, and "ponder while we build" threads
+that don't fit a current chunk but should not be lost. Each entry includes
+the seed idea + initial design unpacking so future sessions can pick up
+without starting cold. When an idea is ready to build, move it to a chunk
+in the relevant build's roadmap section.
+
+### Forced enemy encounter on dry streak (logged S015)
+
+**Seed:** if a player completes 2 turns without an enemy encounter, the
+next turn forces one. Prevents long stretches of pure board navigation
+that drain combat tension.
+
+**Design space — open questions to resolve before building:**
+
+1. **Counter scope — per player or per party?**
+   * **Per player** (recommended) — each player tracks their own dry streak.
+     Snapstep moving fast through empty zones racks up; their next turn
+     forces. Breaker who fights every turn never triggers. Independent
+     counters reward dodgers' luck up to a point, then demand engagement.
+   * **Per party** — single counter advances each turn nobody fought.
+     Simpler but punishes the wrong player ("Snapstep gets the forced
+     fight because Breaker had a long dry streak").
+
+2. **What counts as an encounter?**
+   * Cleanest definition: anything that triggers a rumble battle resets
+     the counter. Events without combat don't.
+   * Force-gate, poison ticks, environmental damage: don't count.
+   * Rumble that ends in 0 entities (instant clear from prior wave): does
+     count (battle was triggered).
+
+3. **How does the encounter manifest?**
+   * **Spawn at next landing space** (recommended) — wherever they land
+     turn 3, plant a monster regardless of what was there. Cleaner
+     architecturally — overrides the landing event roll.
+   * **Spawn mid-move** — interrupt their movement, force a battle on the
+     spot. More dramatic but changes movement mechanics significantly.
+   * **Choose monster from current zone** (recommended) — zone-appropriate
+     (zone 1 = goblin, zone 4 = stone troll).
+   * **Tier scales with streak** — 2-turn dry = standard, 3+ = harder
+     (encourages not letting it pile up).
+
+4. **Player communication:**
+   * **Counter visible on dashboard** (recommended) — small chip:
+     "🎯 1 quiet turn" → "🎯 2 quiet turns — encounter pending". Gives the
+     player tactical info without ruining surprise. They can choose
+     whether to burn red dash to avoid landing on a bad space, or
+     prepare for combat.
+   * Silent: surprise but feels arbitrary.
+   * Warning toasts at 1 / 2: noisy, breaks rhythm.
+
+5. **Counter reset timing:**
+   * **Reset on rumble entry** (recommended), not outcome. Avoids
+     feedback loop where losing → still owe an encounter → harder to
+     recover.
+
+6. **Class identity hooks:**
+   * Snapstep (speed signature) — most likely to chain dry turns. The
+     forced encounter gives them a real cost for high-mobility play.
+   * Wild One (poison spread) — viral poison could spread to forced-spawn
+     enemies, immediate payoff.
+   * Breaker (high HP) — handles forced encounters well.
+   * Fixer (lowest HP) — forced encounter is genuinely punishing.
+   * Could shape forced-encounter type per class (deep design, probably
+     0.18+ material).
+
+**Architectural placement:**
+* Board mechanic in `server.js`, not rumble.
+* New field: `G.players[cls].quietTurns` (counter, persists across turns).
+* Reset hook in rumble entry/exit.
+* Increment hook at end-of-turn handler if no rumble fired.
+* Forced-encounter logic in landing-event resolver — when a player lands
+  and `quietTurns >= 2`, override the landing event with a monster spawn.
+* Parameters in characters.js (`forcedEncounterThreshold` per class) or
+  game.js (universal threshold).
+
+**Roadmap fit:**
+* Closest match in design doc §8: 0.20.0 "Entity Overload" (entity
+  behavior systems pass).
+* Could also fit 0.21.0+ "Polish" (pacing tuning).
+* Small enough to slot earlier alongside any entity AI work
+  (e.g., goblin charge AI from audit Thread A).
+
+**Recommended v1 defaults if shipping quickly:**
+per-player counter, 2-turn threshold, reset on rumble entry, next-landing
+override, visible counter chip, uniform threshold across classes.
+
+**Build estimate:** small to medium chunk, mostly server.js.
+
 ---
