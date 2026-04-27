@@ -1009,16 +1009,6 @@ function update(dt) {
 function draw() {
   ctx.clearRect(0, 0, W, H);
 
-  // Screen shake (S015 v0.15.13 — BK Model 2 crit visual payoff).
-  // Apply shake offset before any drawing; restore at end of frame.
-  // Tiny perf cost (one ctx.save + ctx.translate + ctx.restore per frame
-  // when active; nothing when shake.dur === 0).
-  var _shaking = (screenShake.dur > 0);
-  if (_shaking) {
-    ctx.save();
-    ctx.translate(screenShake.x, screenShake.y);
-  }
-
   var bounds = getRumbleBounds();
 
   // ── Rumble floor ──
@@ -3302,6 +3292,16 @@ function _darkenHex(hex, amount) {
 // (injected into draw loop)
 var _origDraw = draw;
 draw = function() {
+  // S015 v0.15.13 fix: shake transform must be in this function (the
+  // outer draw that the game loop calls), NOT in the inner _origDraw.
+  // Earlier attempt put the var/restore in different functions causing
+  // a ReferenceError. Wraps everything: world (_origDraw), floating
+  // text, crit visuals, diagnostic — all shift together.
+  var _shaking = (screenShake.dur > 0);
+  if (_shaking) {
+    ctx.save();
+    ctx.translate(screenShake.x, screenShake.y);
+  }
   _origDraw();
   var now = performance.now();
   floatingTexts = floatingTexts.filter(function(ft) { return ft.alpha > 0.05; });
@@ -3387,6 +3387,8 @@ draw = function() {
   drawCritFlash();
   drawCritBanners();
   drawRedDashDiag();
+  // S015 v0.15.13 fix: paired with ctx.save+translate at top of this
+  // function (NOT inside _origDraw — that's a different function scope).
   if (_shaking) ctx.restore();
 };
 
