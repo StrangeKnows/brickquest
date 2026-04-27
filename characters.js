@@ -63,6 +63,17 @@ var CHARACTERS = {
     secondary: ['orange'],
     startingKit: { red: 2, gray: 1 },
     weight: 'heavy', dashBreakChance: 1.00, dashBreakDmg: [0, 3], dashDmgAlwaysRolls: false,
+    // Red signature: heavy hitter with extra reach via signature affinity,
+    // larger hitbox, and stronger knockback. Per design doc §2.3
+    // (BREAKER RED: larger hitbox, knockback 1.5× on attacks).
+    // S015 build: scale values upgraded per playtest discussion (knockback ×2.0).
+    // Engine reads via getRedProfile(cls); other classes get null and use baseline.
+    redProfile: {
+      rangeBase: 160,            // heavy weight — shorter base reach
+      rangeAffinityBonus: 1.25,  // signature red — final ×1.25 to base
+      hitboxScale: 1.2,          // 20% larger hit radius for red dash
+      knockbackScale: 2.0,       // 2× knockback velocity on red impact
+    },
   },
   formwright: {
     name: 'Formwright', icon: '🔮',
@@ -97,6 +108,9 @@ var CHARACTERS = {
       arrivalInvulnMs: 350,    // 650→1000: post-arrival safety window
       trailDensity: 6,         // particles per frame during fadeOut + transit
     },
+    // Red baseline: light weight + no signature affinity. Range only —
+    // no hitbox/knockback bonus (those are BK signature).
+    redProfile: { rangeBase: 240, rangeAffinityBonus: 1.0 },
   },
   snapstep: {
     name: 'Snapstep', icon: '🏃',
@@ -107,6 +121,9 @@ var CHARACTERS = {
     secondary: ['yellow'],
     startingKit: { orange: 2, red: 1 },
     weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    // Red signature: longest reach class (light weight + sig affinity).
+    // Matches hit-and-run identity. No hitbox/knockback bonus (those are BK).
+    redProfile: { rangeBase: 240, rangeAffinityBonus: 1.25 },
   },
   blocksmith: {
     name: 'Blocksmith', icon: '🔧',
@@ -117,6 +134,8 @@ var CHARACTERS = {
     secondary: ['orange'],
     startingKit: { gray: 2, orange: 1 },
     weight: 'heavy', dashBreakChance: 1.00, dashBreakDmg: [0, 3], dashDmgAlwaysRolls: false,
+    // Red baseline: heavy weight, no signature affinity. Shortest reach.
+    redProfile: { rangeBase: 160, rangeAffinityBonus: 1.0 },
   },
   fixer: {
     name: 'Fixer', icon: '💊',
@@ -127,6 +146,8 @@ var CHARACTERS = {
     secondary: ['purple'],
     startingKit: { white: 2, black: 1 },
     weight: 'mid', dashBreakChance: 0.50, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    // Red baseline: mid weight, no signature affinity. Standard reach.
+    redProfile: { rangeBase: 200, rangeAffinityBonus: 1.0 },
   },
   wild_one: {
     name: 'Wild One', icon: '🐾',
@@ -137,6 +158,8 @@ var CHARACTERS = {
     secondary: ['black'],
     startingKit: { green: 2, yellow: 1 },
     weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    // Red baseline: light weight, no signature affinity. Long reach baseline.
+    redProfile: { rangeBase: 240, rangeAffinityBonus: 1.0 },
   },
 };
 
@@ -195,6 +218,29 @@ function getSecondary(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].secondar
 // preview) read this to decide whether to apply teleport mechanics.
 function getPurpleProfile(cls) {
   return (CHARACTERS[cls] && CHARACTERS[cls].purpleProfile) || null;
+}
+
+// Class-specific red cast profile. Returns the per-class red mechanics
+// data: rangeBase (px), rangeAffinityBonus (1.0 baseline, 1.25 signature),
+// and BK-only hitboxScale / knockbackScale. Engine call sites
+// (rumble.js red dash launcher, hit detection, knockback application,
+// drag indicator preview) read this for class-driven behavior.
+//
+// All 6 classes have a redProfile defined — never returns null in current
+// design. If a future class is added without one, defaults to baseline.
+function getRedProfile(cls) {
+  return (CHARACTERS[cls] && CHARACTERS[cls].redProfile) || null;
+}
+
+// Compute effective red dash range for a class at a given tier.
+// Per locked design: rangeBase × (1 + 0.10 × (tier - 1)) × rangeAffinityBonus
+// matches the universal pipeline tier curve (slope 0.10).
+function getRedRange(cls, tier) {
+  var prof = getRedProfile(cls);
+  if (!prof) return 200; // fallback baseline
+  var t = Math.max(1, tier || 1);
+  var bonus = (typeof prof.rangeAffinityBonus === 'number') ? prof.rangeAffinityBonus : 1.0;
+  return prof.rangeBase * (1 + 0.10 * (t - 1)) * bonus;
 }
 
 // ── BASE HEAL AMOUNT ────────────────────────────────────────────────────
@@ -422,6 +468,8 @@ if (typeof window !== 'undefined') {
   window.getSignature = getSignature;
   window.getSecondary = getSecondary;
   window.getPurpleProfile = getPurpleProfile;
+  window.getRedProfile = getRedProfile;
+  window.getRedRange = getRedRange;
   window.baseHeal = baseHeal;
   window.affinityMult = affinityMult;
   window.brickTier = brickTier;
@@ -444,7 +492,7 @@ if (typeof module !== 'undefined' && module.exports) {
     STARTING_KIT_COUNTS,
     CLASS_AFFINITY,
     getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
-    getSignature, getSecondary, getPurpleProfile,
+    getSignature, getSecondary, getPurpleProfile, getRedProfile, getRedRange,
     baseHeal,
     affinityMult,
     brickTier,

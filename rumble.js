@@ -5998,20 +5998,33 @@ function useBrickAction(color) {
 
 // ── RED — Charge ──────────────────────────────────
 function startRedChargeTo(dmgMult, tx, ty) {
-  // Charge toward a specific canvas point
+  // Charge toward a specific canvas point. Range gate: if drop point is
+  // beyond the class's effective red range (per characters.js redProfile),
+  // clamp the dash endpoint to the max-range mark in the same direction.
+  // Player still gets to commit and travel; they just don't reach further
+  // than their class allows. See getRedRange(cls, tier) for math.
   var _dmgMult = dmgMult || 1;
   var startX = player.x, startY = player.y;
   var dx = tx - player.x, dy = ty - player.y;
   var dist = Math.sqrt(dx*dx+dy*dy) || 1;
+  var nx = dx/dist, ny = dy/dist;
+  var maxRange = (typeof getRedRange === 'function')
+    ? getRedRange(player.cls, _dmgMult)
+    : 1e9;
+  // Clamp endpoint to maxRange in the dash direction
+  var endDist = Math.min(dist, maxRange);
+  var endX = startX + nx * endDist;
+  var endY = startY + ny * endDist;
   brickAction = {
     type: 'red', phase: 'charge',
     startX: startX, startY: startY,
-    dirX: dx/dist, dirY: dy/dist,
+    dirX: nx, dirY: ny,
     chargeSpeed: player.speed * 4,
     returnSpeed: player.speed * 2,
     hit: false, dmgMult: _dmgMult,
-    targetX: tx, targetY: ty, // fixed target point
+    targetX: endX, targetY: endY,    // clamped target
     usePoint: true,
+    maxRange: maxRange,              // hard cap on travel distance
     isCrit: _currentCrit,
   };
 }
@@ -6025,6 +6038,13 @@ function startRedCharge(dmgMult, targetEntity) {
   var dx = entity.x - player.x, dy = entity.y - player.y;
   var dist = Math.sqrt(dx*dx + dy*dy) || 1;
   var nx = dx/dist, ny = dy/dist;
+  // Range gate: same as startRedChargeTo. Auto-targeted dash to nearest
+  // entity is also capped at class effective range. If nearest entity is
+  // out of range, dash still launches and ends at the max-range mark
+  // (entity escapes this swing — design choice favors the entity).
+  var maxRange = (typeof getRedRange === 'function')
+    ? getRedRange(player.cls, _dmgMult)
+    : 1e9;
   brickAction = {
     type: 'red',
     phase: 'charge',
@@ -6034,6 +6054,7 @@ function startRedCharge(dmgMult, targetEntity) {
     returnSpeed: player.speed * 2,
     hit: false,
     dmgMult: _dmgMult,
+    maxRange: maxRange,
     isCrit: _currentCrit,
   };
 }
@@ -6611,6 +6632,13 @@ function updateBrickAction(dt, bounds) {
 
   if (brickAction.type === 'red') {
     if (brickAction.phase === 'charge') {
+      // Read class red profile for this dash. BK gets hitboxScale +
+      // knockbackScale; all classes get range cap (maxRange stored on
+      // brickAction at launch). See characters.js redProfile.
+      var rProf = (typeof getRedProfile === 'function')
+        ? getRedProfile(player.cls) : null;
+      var hitboxScale = (rProf && rProf.hitboxScale) || 1.0;
+      var knockbackScale = (rProf && rProf.knockbackScale) || 1.0;
       if (brickAction.usePoint) {
         // Fixed direction toward dropped point
       } else {
@@ -6624,6 +6652,17 @@ function updateBrickAction(dt, bounds) {
       }
       brickAction.chargeTimer = (brickAction.chargeTimer||0) + dt;
       var step = brickAction.chargeSpeed * dt;
+      // Range cap: if travelling further would exceed maxRange, clamp the
+      // step and end the charge (transition to return phase). Without this,
+      // the dash would run unlimited toward target. Per S015 design:
+      // class-specific reach driven by characters.js redProfile.rangeBase
+      // and rangeAffinityBonus, with tier-curve scaling.
+      var traveled = Math.hypot(player.x - brickAction.startX, player.y - brickAction.startY);
+      if (brickAction.maxRange && traveled + step >= brickAction.maxRange) {
+        // Clamp to remaining distance, mark hit so charge ends this frame
+        step = Math.max(0, brickAction.maxRange - traveled);
+        brickAction.hit = true; // ends charge → return phase next frame
+      }
       // Wall sweep: test the line segment from current position to the
       // intended next position against each gray wall. If it intersects,
       // clamp the move to the wall's near edge and end the charge. Without
@@ -6661,14 +6700,20 @@ function updateBrickAction(dt, bounds) {
       }
       player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
       player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
-      // Hit check
+      // Hit check — BK redProfile.hitboxScale enlarges hit radius for
+      // signature mechanic ("larger hitbox" per design doc §2.3).
       if (!brickAction.hit) {
-        var hitG = entities.find(function(g){ return Math.hypot(player.x-g.x,player.y-g.y) < player.r+g.r; });
+        var hitRadiusMult = hitboxScale;
+        var hitG = entities.find(function(g){
+          return Math.hypot(player.x-g.x,player.y-g.y) < (player.r + g.r) * hitRadiusMult;
+        });
         if (hitG) {
           var rTier = brickAction.dmgMult||1;
           var crit = !!brickAction.isCrit;
           var critMult = crit ? 2.0 : 1.0; // CRUSHING BLOW: 2x damage
-          var knockMult = crit ? 2.0 : 1.0; // 2x knockback
+          // Knockback combines crit doubler with BK signature multiplier.
+          // BK + crit = 4.0× knockback (2.0 crit × 2.0 BK signature).
+          var knockMult = (crit ? 2.0 : 1.0) * knockbackScale;
           var rfx = _fx('red', rTier);
           var rDmg = Math.ceil((rfx ? rfx.dmg : 3) * critMult);
           var rRes = damageEntity(hitG, rDmg, undefined, 'red'); hitG.flashTimer = 0.3;
@@ -7118,6 +7163,56 @@ function drawCastIndicator(color, hex, dragPos) {
     ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(player.x, player.y, rOrigin, 0, Math.PI * 2); ctx.stroke();
     ctx.setLineDash([]);
+    ctx.restore();
+    return;
+  }
+  // Class-driven RED range preview. When active-dragging red, show the
+  // class's effective range as a faint arc around the player + an endpoint
+  // marker showing where the dash will actually stop. If the drop point is
+  // within range the endpoint matches it; if past range, the endpoint is
+  // the max-range mark in the dash direction. See characters.js redProfile
+  // and getRedRange(cls, tier).
+  if (color === 'red' && isActiveDrag && player && typeof getRedRange === 'function') {
+    var maxRange = getRedRange(player.cls, tier);
+    var rdx = cx - player.x, rdy = cy - player.y;
+    var rdist = Math.hypot(rdx, rdy) || 1;
+    var inRange = rdist <= maxRange;
+    var endX, endY;
+    if (inRange) { endX = cx; endY = cy; }
+    else {
+      endX = player.x + (rdx / rdist) * maxRange;
+      endY = player.y + (rdy / rdist) * maxRange;
+    }
+    ctx.save();
+    // Max-range arc — faint circle around player showing reach bubble
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = hex;
+    ctx.shadowColor = hex;
+    ctx.shadowBlur = 6;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 8]);
+    ctx.beginPath(); ctx.arc(player.x, player.y, maxRange, 0, Math.PI * 2); ctx.stroke();
+    // Dash line from player to clamped endpoint — solid + brighter than
+    // standard drag line so it reads as a strike vector
+    ctx.setLineDash([]);
+    ctx.globalAlpha = inRange ? 0.65 : 0.40;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(endX, endY); ctx.stroke();
+    // Endpoint marker — small filled circle where the dash will stop.
+    // When out of range, this lands at the max-range mark, not the cursor,
+    // so the player can see "I dropped past my reach, this is where I stop".
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = hex;
+    ctx.beginPath(); ctx.arc(endX, endY, 7, 0, Math.PI * 2); ctx.fill();
+    // Out-of-range hint: small ring around cursor showing the drop point
+    // is NOT where the dash ends
+    if (!inRange) {
+      ctx.globalAlpha = 0.30;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = hex + '88';
+      ctx.beginPath(); ctx.arc(cx, cy, 12, 0, Math.PI * 2); ctx.stroke();
+    }
     ctx.restore();
     return;
   }
