@@ -1941,10 +1941,12 @@ function updateWhiteField(dt) {
     }
 
     var cx = wf.ox, cy = wf.oy, r = wf.radius;
-    // Heal the player if inside, but skip if the player IS the followed
-    // target — they got their share via the burst at cast time.
-    var playerIsTarget = (wf.followTarget === player);
-    if (!playerIsTarget && Math.hypot(player.x - cx, player.y - cy) <= r && wf.healRemaining > 0) {
+    // S015 v0.15.15: unified white field model. ALL fields tick heal when
+    // player is inside (regardless of followTarget identity) and persist
+    // until pool exhausted. No double-dip — pool sizes already reflect
+    // whether burst was delivered (stationary uses totalHeal, follow-self
+    // uses fieldPool = totalHeal - burst).
+    if (Math.hypot(player.x - cx, player.y - cy) <= r && wf.healRemaining > 0) {
       wf.tickTimer += dt;
       if (wf.tickTimer >= wf.tickInterval) {
         wf.tickTimer -= wf.tickInterval;
@@ -1987,31 +1989,13 @@ function updateWhiteField(dt) {
       var dist = Math.random() * r * 0.9;
       spawnHealSparkleAt(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
     }
-    // ── EXPIRY (two paths, both correct) ──
-    // Path A: stationary drag-drop fields (followTarget = null).
-    //   Heal pool drains as the player walks into the zone and ticks heal.
-    //   Field persists indefinitely until pool exhausted. This is the
-    //   "healing reservoir" pattern — drop a field, return to it later.
-    // Path B: follow-self fields (followTarget = player).
-    //   Player got the burst at cast time; the field lingers as a visual.
-    //   Tick-heal is skipped for follow-self (line 1894 condition), so
-    //   pool never drains. Expires after a duration window instead.
-    //
-    // Both paths share the same `if (healRemaining <= 0)` early exit so
-    // any consumed field cleans up immediately.
+    // ── EXPIRY (unified, S015 v0.15.15) ──
+    // Single path: pool exhausted → field expires. No timer fallback.
+    // Both stationary and follow-self fields use this. The only way a
+    // white field disappears is by being fully consumed.
     if (wf.healRemaining <= 0) {
       whiteFields.splice(i, 1);
       continue;
-    }
-    if (playerIsTarget) {
-      // Follow-self: tick a lifetime timer; expire after enough time
-      // would have drained the pool at the normal heal-per-tick rate.
-      // Equivalent to "show this field for as long as it would have
-      // taken to drain naturally if the player were standing in it."
-      wf.lifetimeTimer = (wf.lifetimeTimer || 0) + dt;
-      if (wf.lifetimeTimer >= (wf.tickInterval * (wf.maxHealForViz / wf.healPerTick + 1))) {
-        whiteFields.splice(i, 1);
-      }
     }
   }
 }

@@ -4669,6 +4669,117 @@ redProfile: {
 
 ---
 
+### v0.15.14 — Hotfix: screen shake ReferenceError on every frame
+
+v0.15.13 introduced a ReferenceError immediately on rumble load:
+`_shaking is not defined` at draw line ~3390.
+
+Cause: rumble.js has TWO `draw` functions. The original at line 1009
+(`function draw() {...}`) and an outer wrapper at line 3294 (`draw =
+function() { _origDraw(); ... }`) that adds floating text + crit
+visuals on top of the world render. The outer wrapper is what the
+game loop actually calls.
+
+The v0.15.13 build placed `var _shaking` in the inner `_origDraw` at
+line 1016 but the matching `if (_shaking) ctx.restore()` at line 3390
+was inside the OUTER draw — different function scope. JS variable
+hoisting only applies within a single function body.
+
+Fix: moved both the open (var + ctx.save + ctx.translate) and close
+(ctx.restore) into the outer wrapper draw — same function, same scope.
+Removed the misplaced versions in `_origDraw`.
+
+Architectural lesson: the two-draw pattern is non-obvious and
+surfaces only when adding cross-frame state. Future state additions
+should target the outer wrapper if they need to span the entire
+render (text + crit visuals + diagnostic), or the inner `_origDraw`
+if they only span the world layer.
+
+---
+
+### v0.15.15 — White field persistence unified + BK blast radius tune
+
+Two changes from playtest readout.
+
+---
+
+**Change 1: BK blastRadiusMult 1.0 → 1.5** (data-only, characters.js).
+
+Playtest revealed BK's "wrecking ball" feel didn't land — secondary
+entities rarely got caught in the blast because the radius was too
+tight (bubble × 1.0 = ~36px). With goblin radius ~14px, two adjacent
+goblins (~28px center-to-center when touching) might both be in
+range, but realistic combat spacing put the secondary outside the
+blast.
+
+New value: `blastRadiusMult: 1.5` → blast = ~54px. Effective catch
+radius (blast + goblin r) = ~68px. Now picks up loosely clustered
+goblins, not just stacked-on-top ones.
+
+**Architectural significance:** this change touched ONLY characters.js
+(one number). The engine reads `dashProfile.blastRadiusMult` and
+applied 1.5 automatically. v0.15.13's schema architecture proven —
+class identity tuning is now data work, not engine work.
+
+---
+
+**Change 2: White field persistence unified.**
+
+Playtest concern: white fields should persist until ALL healing
+potential is consumed. Code review showed two separate paths:
+
+* **Stationary fields** (drag-far drop): tick heal when player
+  inside, expire only when pool exhausted. Already correct.
+* **Self-target fields** (drag-to-self / no-drag): player got
+  `fx.burst` at cast time. Field followed player as a visual but did
+  NOT tick heal (`!playerIsTarget` exclusion at the heal site). Field
+  expired by `lifetimeTimer` after a duration window equal to
+  "natural drain time."
+
+The lifetime timer was a workaround for "follow-self fields don't
+drain, can't expire by exhaustion." The fix removes the workaround:
+follow-self fields ALSO tick heal.
+
+No double-dip risk: stationary fields use `fx.totalHeal` for pool
+size; follow-self fields use `fx.fieldPool` (which is
+`totalHeal − burst`). The burst was already paid out at cast time;
+fieldPool is just what's left.
+
+After unification:
+* All white fields tick heal when player inside
+* All white fields expire ONLY at pool exhaustion
+* No timer fallback, no per-path branching
+* Code shrinks: `playerIsTarget` flag and `lifetimeTimer` accumulator
+  both removed (no remaining references confirmed via grep)
+
+Net behavior change: a self-target white cast now provides residual
+healing to the player as they take damage afterward, until the
+fieldPool is consumed. Previously the field was visual-only.
+
+---
+
+**Net diff:**
+* characters.js: 1 line (blastRadiusMult value + comment)
+* rumble.js: ~25 lines (white field block simplified, dead concepts
+  stripped)
+
+**Test focus:**
+
+1. **BK blast catches more entities.** Two goblins ~50px apart, BK
+   dashes into one — both should take damage + radial knockback.
+   Previously only the primary got hit at this spacing.
+2. **White self-cast heals over time.** Cast white on yourself at
+   full HP, take damage from a goblin afterward — the lingering
+   field should tick heal you while you stand in it. Field should
+   not disappear by timer.
+3. **White stationary still works as reservoir.** Drop field in
+   arena, walk away, return — pool should still be there.
+4. **Double-dip check.** Self-cast burst should equal `fx.burst`
+   (not bigger). Subsequent tick heals should drain `fieldPool`,
+   not exceed total `fx.totalHeal`.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

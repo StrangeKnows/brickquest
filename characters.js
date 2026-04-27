@@ -87,7 +87,10 @@ var CHARACTERS = {
       dashModel: 'aoe-blast',
       // Model-specific params. Engine only reads these when the matching
       // dashModel is active. blastRadiusMult: blast radius = bubble × this.
-      blastRadiusMult: 1.0,        // BK blast = bubble radius (~36px at hitboxScale 1.3)
+      blastRadiusMult: 1.5,        // S015 v0.15.15: bubble × 1.5 = ~54px blast for BK
+                                   //   (was 1.0 / ~36px — too tight for wrecking-ball feel,
+                                   //    rarely caught secondary entities). 1.5 reaches
+                                   //    ~68px with goblin r=14 in scope.
       // knockbackMode applies regardless of dashModel; describes direction.
       //   'forward' — knockback in dash direction (default — punch entity forward)
       //   'radial'  — knockback radial outward from impact center (explosion feel)
