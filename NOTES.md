@@ -4099,6 +4099,140 @@ get their first signature mechanics in subsequent chunks.
 
 ---
 
+### v0.15.9 — Chunk 2.4: tapScaleMult kit-neutral + wall HP rebalance + red range simplified
+
+Three architectural changes shipping together. All in service of "simple
+unity" — same formula machinery, fewer special cases, identity from
+affinity rather than accidental kit-size dependencies.
+
+---
+
+**Change 1: tapScaleMult kit-neutral rewrite.**
+
+Old formula: `tapScaleMult = 1.0 + 0.10 × max(0, owned - starting)`
+New formula: `tapScaleMult = 1.0 + 0.10 × max(0, owned - 1)`
+
+The starting-kit dependency created accidental class ordering: classes
+with smaller starting kits got tap-scaling sooner, outpacing classes
+with bigger kits at the same inventory level.
+
+Example before fix:
+* BK (starting 2 red) at 3 owned: tap = 1.10 × aff 1.25 = 1.375 mult
+* SS (starting 1 red) at 3 owned: tap = 1.20 × aff 1.25 = 1.500 mult
+* SS edges BK on red despite both being signature
+
+Example after fix:
+* BK (sig 1.25) at 3 owned: tap = 1.20 × 1.25 = 1.500 mult
+* SS (sig 1.25) at 3 owned: tap = 1.20 × 1.25 = 1.500 mult
+* Identical — class differentiation comes purely from affinityMult
+
+Affects every damage output across every class/color. Modest shifts:
+BK red damage +0.37 across all inventory levels, SS unchanged, others
+(start kit 0) -0.24. System-wide shift, slightly tighter overall.
+
+---
+
+**Change 2: Wall HP rebalanced — independent BASE.**
+
+Old formula (v0.15.8): `wallHp = pips × 2`
+* T1 walls were 2 HP — died to one goblin swing — useless
+* Locked rule "1 tap = 1 pip = T1 floor" prevented bumping T1 pips
+
+New formula: `wallHp = max(1, round(5 × grayAffinity × tier))`
+* Same shape as pips (`BASE × aff × tier`), with BASE=5 instead of 1
+* Decoupled from pip count for independent tuning
+* Architectural unity preserved (same machine, calibrated per output)
+* T1 walls now have real durability (sig 6 HP, baseline 5 HP — survive
+  2 goblin swings)
+
+Wall HP table:
+
+| Class | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 |
+|-------|----|----|----|----|----|----|----|----|----|----|
+| BS, BK (sig) | **6** | 13 | 19 | 25 | 31 | 38 | 44 | 50 | 56 | 63 |
+| Others (baseline) | **5** | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 45 | 50 |
+
+T10 fortress walls (50-63 HP) are deliberate — by then the player has
+hoarded 10+ gray and is pumping max overload. Massive commitment,
+fortress payoff. If high-tier walls dominate playtest, can tune the
+BASE later without changing formula shape.
+
+---
+
+**Change 3: Red range simplified — inventory-driven.**
+
+Old formula (v0.15.5/7): `range = rangeBase × tierCurve × rangeAffinityBonus`
+* Per-class `rangeBase` (160 heavy, 200 mid, 240 light) tied to weight tag
+* Tier scaled both damage AND range together
+* `rangeAffinityBonus` was a separate field per class
+
+New formula:
+```
+range = round(200 × redAffinity × (1 + 0.10 × max(0, owned - 1)))
+```
+* BASE = 200 (universal, no per-class)
+* `redAffinity` = 1.25 if red is signature, 1.0 otherwise (gray-economy
+  baseline override — no 0.8 penalty since range isn't damage)
+* Inventory drives the multiplier via the reformed kit-neutral
+  tapScaleMult
+* **Tier no longer affects range.** Tap and overload have identical
+  reach. Tier scales damage only.
+
+Red range table:
+
+| Class | 1 red | 2 red | 3 red | 5 red | 10 red |
+|-------|-------|-------|-------|-------|--------|
+| Snapstep (sig 1.25) | **250** | 275 | 300 | 350 | 475 |
+| Breaker (sig 1.25) | **250** | 275 | 300 | 350 | 475 |
+| Blocksmith (1.0) | **200** | 220 | 240 | 280 | 380 |
+| Fixer (1.0) | **200** | 220 | 240 | 280 | 380 |
+| Formwright (1.0) | **200** | 220 | 240 | 280 | 380 |
+| Wild One (1.0) | **200** | 220 | 240 | 280 | 380 |
+
+BK and SS share the same range (both red-sig). BS now starts shorter
+than BK (200 vs 250) because BS is baseline red, not signature. This
+fixes a v0.15.5 issue where BK and BS had the same `rangeBase` (160)
+because of shared 'heavy' weight, with BK only edging BS via affinity.
+
+The `redProfile.rangeBase` and `rangeAffinityBonus` fields are now
+vestigial — kept in the data for backward compatibility but no longer
+read by `getRedRange`. Future cleanup pass can strip them.
+
+**Speed and range stay independent.** Player.speed affects red attack
+animation tempo (chargeSpeed = player.speed × 4) but not reach. Range
+expresses inventory commitment; speed expresses class identity in
+movement. Two distinct axes.
+
+---
+
+**Architecture summary:**
+
+* characters.js: tapScaleMult body simplified (signature unchanged).
+  getGrayWallHp formula independent (no longer reads getGrayPips).
+  getRedRange signature changed from (cls, tier) to (cls, owned).
+* rumble.js: 3 call sites for getRedRange now pass
+  `player.bricks.red` instead of tier — startRedChargeTo,
+  startRedCharge, drawCastIndicator (red drag preview).
+* No new data fields. Vestigial `redProfile.rangeBase` and
+  `rangeAffinityBonus` left in place for save compatibility.
+
+**Net diff:** characters.js ~30 lines changed (3 functions reworked),
+rumble.js ~15 lines changed (3 call sites + comments).
+
+**Test focus:**
+
+1. **Kit-neutral tapScaleMult:** BK and SS produce identical damage on
+   red at the same inventory level (both scale 1.10× per brick above 1).
+2. **Wall HP:** drag T1 gray wall → 5-6 HP, survives 2 goblin swings.
+   T4 wall → 20-25 HP, sustained pressure.
+3. **Red range:** tap red with 1 brick → 200-250px reach. Tap red with
+   5 bricks → 280-350px reach. Hold red to overload — range stays the
+   same as tap (only damage grows). Drag preview arc matches actual cast.
+4. **No regressions:** death save still fires when bleed bottoms out,
+   excess-pip overflow still spawns wall around nearest entity.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
@@ -4324,6 +4458,86 @@ Class signature mappings (matches existing affinity from characters.js):
   affinities, they unlock unique build paths.
 * Pairs with brick economy: gives players a long-term goal for hoarding
   specific colors.
+
+---
+
+### BS gray wall regen — pips back on wall destruction (logged S015 v0.15.8)
+
+**Seed:** when a Blocksmith-built gray wall is destroyed (HP reduced to 0
+by entity attacks), BS gets +1 armor pip back. Walls become a renewable
+resource cycle for BS — they're the only class who benefits when their
+walls die.
+
+**The BS gameplay loop this enables:**
+
+1. BS taps yellow → entities aggro toward BS (taunt mechanic, deferred
+   for BS chunk)
+2. BS taps gray to wall up → entities attack wall instead of BS
+3. Wall dies → BS gets pip back → BS rebuilds wall
+4. Repeat
+
+This wall-regen mechanic is the keystone that closes the BS combat loop.
+Without it, walls are a one-time-use mechanic. With it, BS gameplay is
+continuously turning enemy aggression into more walls.
+
+**Why this works as the BS gray identity:**
+
+* Differentiates BS from BK without breaking numerical unity (per
+  v0.15.8 lock: BS = BK numerically, mechanical differentiation only)
+* Pairs with existing BS pre-rumble passive (Builder's Guard +1 starting
+  armor) — BS starts the wall cycle ahead
+* Pairs naturally with planned BS yellow taunt + BS arc-wall variant
+* No other class has a "gain from your own things being destroyed"
+  mechanic — distinctive identity
+
+**Design questions to lock when building:**
+
+1. **Universal or BS-only?** BS-only matches signature identity.
+   Recommend BS-only.
+2. **Trigger condition:** wall HP reaches 0 only, or any destruction
+   (including arena cleanup at battle end)? Recommend HP=0 only — reward
+   for absorbing damage, not for placement.
+3. **Cap respect:** if BS is at armor cap when wall dies, is the pip
+   lost? Recommend yes, respects cap (consistent with other pip
+   mechanics). Could combo with overflow → spawn another wall around
+   nearest entity, continuing the loop.
+4. **Multi-wall scenarios:** if 3 walls die in one frame, +3 pips at
+   once? Recommend yes, stack normally.
+5. **Excess-overflow walls count?** When BS overflows pips into a wall
+   around nearest entity (universal mechanic from v0.15.8), does THAT
+   wall regen on destruction? Recommend yes — same wall, same rule.
+6. **Visual feedback:** wall dying with regen needs a clear pip-back
+   beat. Suggested: gray particle trail from dying wall to BS player,
+   plus small "+1" floater at BS.
+
+**Architectural placement:**
+
+* characters.js: add `wallRegenPip: true` to `blocksmith.grayProfile`.
+  Optional helper `getGrayWallRegen(cls)` returns true/false.
+* rumble.js: track wall ownership — `grayWalls[].ownerCls` set on
+  creation. In wall destruction handler (likely `updateGrayWalls` when
+  `wall.hp <= 0`), check if owner has `wallRegenPip`. If yes and current
+  armor < cap, increment armor + spawn visual (particle trail player-ward
+  + floater).
+* Need to handle player-departed scenarios: if BS player leaves the
+  rumble before their wall dies, what happens? Probably no regen (player
+  not present to receive it).
+
+**Roadmap fit:**
+
+* Lands in BS chunk — bundled with yellow taunt + arc wall variant on
+  excess-pip overflow + mid-fight regen rate (if any additional regen
+  is needed beyond wall-destruction pips).
+
+**Build estimate:** small chunk. Wall ownership tracking is the only
+new state. Regen logic is a single hook in the existing wall destruction
+path. Visual is one particle system + one floater.
+
+**Why log this now:**
+
+BS is queued as the third class to receive signature mechanics (after
+BK and SS per current order). When BS chunk lands, this seed is the
+locked starting point so we don't redesign from scratch.
 
 ---
 

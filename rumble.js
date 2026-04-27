@@ -6034,17 +6034,20 @@ function useBrickAction(color) {
 // ── RED — Charge ──────────────────────────────────
 function startRedChargeTo(dmgMult, tx, ty) {
   // Charge toward a specific canvas point. Range gate: if drop point is
-  // beyond the class's effective red range (per characters.js redProfile),
-  // clamp the dash endpoint to the max-range mark in the same direction.
-  // Player still gets to commit and travel; they just don't reach further
-  // than their class allows. See getRedRange(cls, tier) for math.
+  // beyond the class's effective red range, clamp the dash endpoint to
+  // the max-range mark in the same direction. Player still gets to
+  // commit and travel; they just don't reach further than their
+  // inventory + affinity allows. See getRedRange(cls, owned) for math.
+  // Per S015 v0.15.9: range is INVENTORY-driven, not tier-driven. Tap
+  // and overload have the same range; tier scales damage only.
   var _dmgMult = dmgMult || 1;
   var startX = player.x, startY = player.y;
   var dx = tx - player.x, dy = ty - player.y;
   var dist = Math.sqrt(dx*dx+dy*dy) || 1;
   var nx = dx/dist, ny = dy/dist;
+  var ownedRed = (player.bricks && player.bricks.red) || 0;
   var maxRange = (typeof getRedRange === 'function')
-    ? getRedRange(player.cls, _dmgMult)
+    ? getRedRange(player.cls, ownedRed)
     : 1e9;
   // Clamp endpoint to maxRange in the dash direction
   var endDist = Math.min(dist, maxRange);
@@ -6074,11 +6077,13 @@ function startRedCharge(dmgMult, targetEntity) {
   var dist = Math.sqrt(dx*dx + dy*dy) || 1;
   var nx = dx/dist, ny = dy/dist;
   // Range gate: same as startRedChargeTo. Auto-targeted dash to nearest
-  // entity is also capped at class effective range. If nearest entity is
+  // entity is also capped at inventory-driven range. If nearest entity is
   // out of range, dash still launches and ends at the max-range mark
   // (entity escapes this swing — design choice favors the entity).
+  // Per S015 v0.15.9: range driven by red brick inventory, not tier.
+  var ownedRed = (player.bricks && player.bricks.red) || 0;
   var maxRange = (typeof getRedRange === 'function')
-    ? getRedRange(player.cls, _dmgMult)
+    ? getRedRange(player.cls, ownedRed)
     : 1e9;
   brickAction = {
     type: 'red',
@@ -7301,13 +7306,16 @@ function drawCastIndicator(color, hex, dragPos) {
     return;
   }
   // Class-driven RED range preview. When active-dragging red, show the
-  // class's effective range as a faint arc around the player + an endpoint
-  // marker showing where the dash will actually stop. If the drop point is
+  // effective range as a faint arc around the player + an endpoint marker
+  // showing where the dash will actually stop. If the drop point is
   // within range the endpoint matches it; if past range, the endpoint is
-  // the max-range mark in the dash direction. See characters.js redProfile
-  // and getRedRange(cls, tier).
+  // the max-range mark in the dash direction.
+  // Per S015 v0.15.9: range is INVENTORY-driven, not tier-driven. Tap and
+  // overload show the same arc; tier scales damage, not range.
+  // See characters.js getRedRange(cls, owned).
   if (color === 'red' && isActiveDrag && player && typeof getRedRange === 'function') {
-    var maxRange = getRedRange(player.cls, tier);
+    var ownedRed = (player.bricks && player.bricks.red) || 0;
+    var maxRange = getRedRange(player.cls, ownedRed);
     var rdx = cx - player.x, rdy = cy - player.y;
     var rdist = Math.hypot(rdx, rdy) || 1;
     var inRange = rdist <= maxRange;

@@ -249,15 +249,27 @@ function getRedProfile(cls) {
   return (CHARACTERS[cls] && CHARACTERS[cls].redProfile) || null;
 }
 
-// Compute effective red dash range for a class at a given tier.
-// Per locked design: rangeBase × (1 + 0.10 × (tier - 1)) × rangeAffinityBonus
-// matches the universal pipeline tier curve (slope 0.10).
-function getRedRange(cls, tier) {
-  var prof = getRedProfile(cls);
-  if (!prof) return 200; // fallback baseline
-  var t = Math.max(1, tier || 1);
-  var bonus = (typeof prof.rangeAffinityBonus === 'number') ? prof.rangeAffinityBonus : 1.0;
-  return prof.rangeBase * (1 + 0.10 * (t - 1)) * bonus;
+// Compute red dash range for a class given current red brick inventory.
+// Per S015 v0.15.9 unification: range = round(BASE × redAffinity × tapMult)
+// where:
+//   BASE = 200px (universal, no per-class rangeBase)
+//   redAffinity = 1.25 for sig (BK, SS), 1.0 for baseline (no 0.8 penalty
+//     since red range is a positioning property, not damage)
+//   tapMult = 1.0 + 0.10 × max(0, owned - 1) — kit-neutral via the
+//     reformed tapScaleMult
+//
+// Tier no longer affects range — overload pushes damage higher but
+// reach stays constant per cast. Range depends purely on what red the
+// player has banked. Hoarding bricks pays off in positioning power.
+//
+// The redProfile.rangeBase and rangeAffinityBonus fields are now
+// vestigial — kept for backward compatibility with playtest saves that
+// might reference them. New code reads only this helper.
+function getRedRange(cls, owned) {
+  var sigArr = (CHARACTERS[cls] && CHARACTERS[cls].signature) || [];
+  var aff = (sigArr.indexOf('red') >= 0) ? 1.25 : 1.0;
+  var tap = 1.0 + 0.10 * Math.max(0, (owned || 1) - 1);
+  return Math.round(200 * aff * tap);
 }
 
 // Class-specific gray cast profile. Returns the profile object when the
@@ -301,7 +313,18 @@ function getGrayPips(cls, tier) {
   return Math.max(1, Math.round(1 * aff * t));
 }
 function getGrayWallHp(cls, tier) {
-  return getGrayPips(cls, tier) * 2;
+  // Wall HP per S015 v0.15.9 unification: same formula shape as pips and
+  // damage (BASE × affinity × tier), with BASE=5 to give walls real
+  // durability at T1 (sig 6 HP / baseline 5 HP — survives 2 goblin
+  // swings cleanly). Decoupled from pips × 2 ratio for independent
+  // tuning while preserving architectural unity.
+  //
+  // Same gray-affinity override as getGrayPips (1.0 baseline, not 0.8)
+  // to keep the T1 floor honest across all classes.
+  var sigArr = (CHARACTERS[cls] && CHARACTERS[cls].signature) || [];
+  var aff = (sigArr.indexOf('gray') >= 0) ? 1.25 : 1.0;
+  var t = Math.max(1, tier || 1);
+  return Math.max(1, Math.round(5 * aff * t));
 }
 
 // ── BASE HEAL AMOUNT ────────────────────────────────────────────────────
@@ -339,12 +362,22 @@ function brickTier(cls, color) {
 }
 
 // ── TAP SCALING ─────────────────────────────────────────────────────────
-// Owning more bricks of a color than your starting kit boosts output
-// for that color. +10% per extra brick beyond starting count.
+// Owning more bricks of a color boosts output for that color. Counts from
+// the first brick — every class hits 1.0× multiplier at owned=1, gains
+// +10% per additional brick beyond that.
+//
+// S015 v0.15.9 reform: removed kit-size dependency. Previous formula
+// `1.0 + 0.10 × max(0, owned - starting)` created accidental class
+// ordering: classes with smaller starting kits got tap-scaling sooner,
+// outpacing classes with bigger kits at the same inventory level.
+// Example: BK (starting 2 red) at 3 owned = 1.10×; SS (starting 1 red)
+// at 3 owned = 1.20×. SS edged BK on red despite both being signature.
+// New formula treats the cast brick (first one) as the neutral state;
+// each additional brick is a real bonus regardless of starting kit.
+// Class differentiation now lives purely in affinityMult (sig 1.25,
+// secondary 1.0, baseline 0.8).
 function tapScaleMult(cls, color, owned) {
-  var starting = (STARTING_KIT_COUNTS[cls] && STARTING_KIT_COUNTS[cls][color]) || 0;
-  var extra = Math.max(0, (owned || 0) - starting);
-  return 1.0 + 0.10 * extra;
+  return 1.0 + 0.10 * Math.max(0, (owned || 0) - 1);
 }
 
 // ════════════════════════════════════════════════════════════════════════
