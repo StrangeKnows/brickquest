@@ -4893,6 +4893,171 @@ classes adopting `aoe-blast` automatically get the dual-ring viz.
 
 ---
 
+### v0.15.17 — Schema-driven AOE gating: red bursts BK-only + blue AOE FW-only
+
+Three changes that lock visual-and-mechanical identity per class via the
+per-color profile pattern. Continues the architecture established for
+red dash (v0.15.13) and purple teleport (FW signature) — class
+identity for color mechanics lives in characters.js, engine reads
+schema fields, no class-name checks.
+
+This push establishes **`blueProfile`** as the third per-color profile,
+matching the convention of `redProfile` and `purpleProfile`. Future
+color mechanics (green AOE for Wild One, white follow-target heal for
+Fixer signature, etc.) follow the same pattern.
+
+---
+
+**Change 1: Per-target red bursts now BK-only.**
+
+Playtest readout: when any class dashed red and connected, a red
+particle burst appeared around the hit entity. Other classes do
+single-hit Model 3 — no AOE — so the burst was misleading visual
+noise. BK is the wrecking ball; the explosion sparks should signal
+*BK identity*, not "I hit something."
+
+Schema extension (characters.js): `redProfile.blastVisual` gained
+`perTargetCount` and `perTargetColor` fields. Engine reads:
+
+```js
+var bv = dashProfile.blastVisual;
+if (bv && bv.perTargetCount) {
+  // spawn per-target burst with bv.perTargetColor, count scaled by tier
+}
+```
+
+Classes without `blastVisual` (everyone but BK) skip the burst path
+entirely. Their dashes now hit visually quieter — just damage number
+floats up, no surrounding sparks. Reads as a precision strike.
+
+BK's dash retains the full payoff: per-target sparks per entity hit +
+central blast bloom + shockwave rings + crit screen shake. The visual
+language now matches the mechanical language — only BK does explosions.
+
+---
+
+**Change 2: Blue impact AOE now FW-only.**
+
+Playtest readout: any class casting overload-blue saw a growing AOE
+ring in the cast indicator (size scaled with tier), and all entities
+within `fx.radiusPx` of the bolt's primary target took burst damage on
+impact. This made overload-blue feel universally AOE-capable. But FW
+is the blue signature class — the dual-blast / impact-zone identity
+belongs to them, not to a Snapstep accidentally dipping into blue.
+
+Schema addition (characters.js): new **`blueProfile`** field on FW.
+
+```js
+formwright: {
+  // ...
+  blueProfile: {
+    hasImpactAOE: true,
+    // future: burstRadiusMult (multiplier on fx.radiusPx)
+  },
+  // ...
+}
+```
+
+New helper `getBlueProfile(cls)` returns the profile or null. Same
+shape as `getPurpleProfile` and `getRedProfile`.
+
+`fireOverloadBlue` rewrite (rumble.js):
+
+```js
+var blueProf = getBlueProfile(player.cls);
+var hasAOE = !!(blueProf && blueProf.hasImpactAOE);
+blueBolts.push({
+  // ...
+  burstRadius: hasAOE ? clampRadiusToArena(fx.radiusPx) : 0,
+  burstDmg: hasAOE ? Math.ceil(fx.burstDmg * bcritMult) : 0,
+});
+```
+
+The impact handler in `updateBlueBolts` already gates burst on
+`if (b.burstRadius && b.burstDmg)`, so non-AOE classes naturally skip
+the burst path with the new zero values.
+
+**Net behavior change:** non-FW classes still fire the bolt and deal
+primary-target damage (with crit doubler) on impact, but no entities
+beyond the primary take damage. FW retains full AOE-on-impact.
+
+---
+
+**Change 3: Blue cast indicator matches schema.**
+
+Previous indicator drew a single AOE ring sized to `fx.radiusPx` for
+all blue casts. Misleading for non-FW classes who saw a growing ring
+that promised AOE coverage but never landed.
+
+Indicator rewrite (rumble.js): blue now reads `getBlueProfile`. If
+class has `hasImpactAOE`, the indicator renders the AOE ring as
+before. If not, the AOE ring is suppressed entirely, replaced with a
+**small target marker** (~10px ring + center dot at the bolt landing
+point). Single-target signature: "bolt lands here, hits one entity,
+no spread."
+
+Schema-driven: indicator reads `blueProfile.hasImpactAOE` directly.
+No class-name checks. Future classes adopting blue AOE (data change
+in characters.js) automatically get the AOE preview.
+
+---
+
+**Architectural payoff: per-color profile pattern established.**
+
+After this push, the class-identity-for-color-mechanics architecture
+is:
+
+| Profile | Schema fields | Classes with override | Engine reads via |
+|---|---|---|---|
+| `redProfile` | `dashModel`, `blastRadiusMult`, `knockbackMode`, `recoilOnHit`, `blastVisual.{ringColors,bloomCount,bloomColor,perTargetCount,perTargetColor}`, `critScreenShake`, plus `hitboxScale`/`knockbackScale` | BK (full AOE-blast schema) | `getRedDashProfile(cls)` (normalized with defaults) |
+| `purpleProfile` | `teleport`, `targetScale`, `originScale`, `fadeOutMs`, `transitMs`, `fadeInMs`, `arrivalInvulnMs`, `trailDensity` | FW (teleport dual-blast) | `getPurpleProfile(cls)` (raw, may be null) |
+| `blueProfile` | `hasImpactAOE` (more fields TBD: `burstRadiusMult`, etc.) | FW (impact AOE) | `getBlueProfile(cls)` (raw, may be null) |
+
+The pattern is consistent: per-class data, default-if-absent semantics,
+engine never checks class names, adding a new class behavior =
+data change in characters.js plus optionally extending the engine
+dispatch with a new schema field.
+
+Future color profiles to add as their signature classes claim them:
+- `greenProfile` — Wild One spore mechanics
+- `orangeProfile` — Snapstep aura behavior or projectile signature
+- `yellowProfile` — confuse-aura tuning per class
+- `whiteProfile` — Fixer follow-target / cleanse signature
+- `blackProfile` — wither/overload tuning
+- `grayProfile` — already exists for BK death save (smaller schema,
+  may grow)
+
+---
+
+**Net diff:**
+* characters.js: ~22 lines (BK blastVisual perTarget fields, FW
+  blueProfile, getBlueProfile helper, exports)
+* rumble.js: ~35 lines (per-target burst gated, fireOverloadBlue
+  AOE gated, blue cast indicator schema-aware)
+
+**Test focus:**
+
+1. **BK dash hits show red sparks** at each hit entity (per-target
+   burst). Other classes' red dashes hit visually quiet — damage
+   number only, no sparks.
+2. **FW overload-blue impact spreads damage** to entities near the
+   primary target (within fx.radiusPx). Damage numbers float up
+   for every entity in the burst zone.
+3. **Other classes overload-blue** lands single-target damage only.
+   Entities adjacent to the primary target stay untouched.
+4. **FW blue cast indicator** shows growing AOE ring with tier
+   (preview matches actual zone).
+5. **Other classes blue cast indicator** shows small target marker
+   (~10px ring + dot) at landing point — no AOE ring at all. The
+   indicator size doesn't grow with overload tier.
+6. **Architectural verification:** in characters.js, change FW's
+   `blueProfile.hasImpactAOE` to false. Reload. FW's blue indicator
+   should switch to single-target marker, and overload-blue should
+   no longer spread damage. No engine code change needed to test
+   this — pure data swap.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

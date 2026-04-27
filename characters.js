@@ -97,10 +97,17 @@ var CHARACTERS = {
       knockbackMode: 'radial',     // BK blast pushes entities outward from impact
       recoilOnHit: false,          // BK plants on impact — no spring back
       // Visual payoff config. null disables that visual.
+      // S015 v0.15.17: extended with perTarget params. Per-target particle
+      // bursts now schema-gated (only classes with blastVisual.perTarget
+      // get them). Non-BK Model 3 hits become quieter — only the central
+      // damage number shows, no surrounding red sparks.
       blastVisual: {
         ringColors: ['#E24B4A', '#FFAA00'],  // primary red, secondary orange
-        bloomCount: 12,              // base count, scaled +3 per tier in engine
+        bloomCount: 12,              // central bloom base count, scaled +3 per tier
         bloomColor: '#FFAA00',
+        // Per-target burst (small particle ring around each entity hit)
+        perTargetCount: 4,           // base count, scaled +ceil(tier*2) per tier in engine
+        perTargetColor: '#ff3300',
       },
       critScreenShake: { mag: 5, ms: 200 },  // crit-only shake on Model 2 impact
     },
@@ -154,6 +161,20 @@ var CHARACTERS = {
       fadeInMs: 150,           // arrival: player alpha 0→1
       arrivalInvulnMs: 350,    // 650→1000: post-arrival safety window
       trailDensity: 6,         // particles per frame during fadeOut + transit
+    },
+    // Blue signature: tap blue is single-target homing bolt (universal).
+    // Overload blue gets an AOE burst at the impact site — but ONLY for
+    // FW. Other classes still fire the bolt and get the primary-target
+    // damage, but no surrounding burst. Per S015 v0.15.17: AOE-on-impact
+    // is now class-gated via blueProfile.hasImpactAOE flag (was universal,
+    // which made cast-indicator AOE preview misleading for non-FW players
+    // who saw a growing ring with tier but never landed AOE damage).
+    // Engine reads this via getBlueProfile(cls); other classes return null
+    // and skip the burst path entirely.
+    blueProfile: {
+      hasImpactAOE: true,
+      // Future tunable: burstRadiusMult (multiplier on fx.radiusPx).
+      // Currently 1.0 implicit — burst zone == fx.radiusPx (same as before).
     },
     // Red baseline: light weight + no signature affinity. Range only —
     // no hitbox/knockback bonus (those are BK signature).
@@ -265,6 +286,15 @@ function getSecondary(cls) { return (CHARACTERS[cls] && CHARACTERS[cls].secondar
 // preview) read this to decide whether to apply teleport mechanics.
 function getPurpleProfile(cls) {
   return (CHARACTERS[cls] && CHARACTERS[cls].purpleProfile) || null;
+}
+
+// Class-specific blue cast profile. Currently used to gate overload-blue
+// AOE behavior on impact: FW has hasImpactAOE = true (sig blue identity);
+// other classes return null and don't get the AOE burst around the bolt
+// target. Per S015 v0.15.17, replaces universal-AOE behavior. Engine call
+// sites (fireOverloadBlue, blue cast indicator preview) read this.
+function getBlueProfile(cls) {
+  return (CHARACTERS[cls] && CHARACTERS[cls].blueProfile) || null;
 }
 
 // Class-specific red cast profile. Returns the per-class red mechanics
@@ -625,6 +655,7 @@ if (typeof window !== 'undefined') {
   window.getSignature = getSignature;
   window.getSecondary = getSecondary;
   window.getPurpleProfile = getPurpleProfile;
+  window.getBlueProfile = getBlueProfile;
   window.getRedProfile = getRedProfile;
   window.getRedDashProfile = getRedDashProfile;
   window.getRedRange = getRedRange;
@@ -653,7 +684,7 @@ if (typeof module !== 'undefined' && module.exports) {
     STARTING_KIT_COUNTS,
     CLASS_AFFINITY,
     getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
-    getSignature, getSecondary, getPurpleProfile, getRedProfile, getRedDashProfile, getRedRange, getGrayProfile, getGrayPips, getGrayWallHp,
+    getSignature, getSecondary, getPurpleProfile, getBlueProfile, getRedProfile, getRedDashProfile, getRedRange, getGrayProfile, getGrayPips, getGrayWallHp,
     baseHeal,
     affinityMult,
     brickTier,

@@ -2099,6 +2099,13 @@ function fireOverloadBlue(count) {
   var fx = _fx('blue', count);
   if (!fx) return;
   var bcritMult = _currentCrit ? 2.0 : 1.0;
+  // S015 v0.15.17: AOE-on-impact gated on blueProfile.hasImpactAOE.
+  // FW has it (sig blue, dual-blast identity); other classes don't.
+  // Burst fields only set when the class profile says yes — keeps the
+  // engine's blue impact handler agnostic (it checks burstRadius/Dmg
+  // truthiness) while making the gate visible at cast time.
+  var blueProf = (typeof getBlueProfile === 'function') ? getBlueProfile(player.cls) : null;
+  var hasAOE = !!(blueProf && blueProf.hasImpactAOE);
   blueBolts.push({
     x: player.x, y: player.y,
     target: target,
@@ -2110,8 +2117,11 @@ function fireOverloadBlue(count) {
     tier: count,
     glow: count * 10,
     delayTimer: 0,
-    burstRadius: clampRadiusToArena(fx.radiusPx),
-    burstDmg: Math.ceil(fx.burstDmg * bcritMult),
+    // Burst fields only populated for AOE classes. The impact handler in
+    // updateBlueBolts checks `if (b.burstRadius && b.burstDmg)` so leaving
+    // them undefined for non-AOE classes naturally skips the burst path.
+    burstRadius: hasAOE ? clampRadiusToArena(fx.radiusPx) : 0,
+    burstDmg: hasAOE ? Math.ceil(fx.burstDmg * bcritMult) : 0,
     isCrit: _currentCrit,
   });
 }
@@ -7180,14 +7190,23 @@ function updateBrickAction(dt, bounds) {
             showDamageNumber(hitG.x, hitG.y - 30, rRes.applied,
               crit ? '#FFAA00' : '#E24B4A', rRes.tier, hitG.x, hitG.y,
               undefined, rRes.witherBoost, hitG);
-            // Per-target particle burst — small per-entity bloom.
-            var rBurst = 4 + Math.ceil(rTier * 2);
-            for (var rbi = 0; rbi < rBurst; rbi++) {
-              var rba = Math.random()*Math.PI*2;
-              var rbs = (1.5+Math.random())*(30+rTier*15);
-              purpleParticles.push({ x:hitG.x, y:hitG.y,
-                vx:Math.cos(rba)*rbs, vy:Math.sin(rba)*rbs,
-                r:3+rTier+Math.random()*3, alpha:0.9, color:'#ff3300' });
+            // Per-target particle burst — schema-gated. Only fires for
+            // classes whose blastVisual defines perTargetCount/perTargetColor
+            // (BK has these; other classes don't, so their dashes are visually
+            // quieter — just damage number, no surrounding sparks).
+            // Per S015 v0.15.17: red burst is now BK-only via schema, no
+            // class-name check needed in engine.
+            var bv = dashProfile.blastVisual;
+            if (bv && bv.perTargetCount) {
+              var ptColor = bv.perTargetColor || '#ff3300';
+              var rBurst = bv.perTargetCount + Math.ceil(rTier * 2);
+              for (var rbi = 0; rbi < rBurst; rbi++) {
+                var rba = Math.random()*Math.PI*2;
+                var rbs = (1.5+Math.random())*(30+rTier*15);
+                purpleParticles.push({ x:hitG.x, y:hitG.y,
+                  vx:Math.cos(rba)*rbs, vy:Math.sin(rba)*rbs,
+                  r:3+rTier+Math.random()*3, alpha:0.9, color: ptColor });
+              }
             }
             // Knockback direction reads dashProfile.knockbackMode:
             //   'radial'  — outward from impact center (explosion feel)
@@ -7800,6 +7819,20 @@ function drawCastIndicator(color, hex, dragPos) {
   }
   // Standard single-ring indicator for all other casts.
   var radius = clampRadiusToArena(fx.radiusPx);
+  // S015 v0.15.17: blue-specific — gate the AOE ring on blueProfile.
+  // Only classes with hasImpactAOE (FW) get the growing AOE preview;
+  // other classes see a small target marker showing single-target bolt
+  // landing point. Schema-driven, no class-name checks. Engine reads
+  // dashProfile-style data and renders accordingly.
+  var skipAOERing = false;
+  var showTargetMarker = false;
+  if (color === 'blue' && typeof getBlueProfile === 'function') {
+    var blueProf = getBlueProfile(player.cls);
+    if (!blueProf || !blueProf.hasImpactAOE) {
+      skipAOERing = true;
+      showTargetMarker = true;
+    }
+  }
   ctx.save();
   // Dashed line from player to drop point — only when cursor is over the
   // arena (otherwise we'd be drawing a line into the brick bar).
@@ -7811,21 +7844,39 @@ function drawCastIndicator(color, hex, dragPos) {
     ctx.setLineDash([]);
   }
   // Outer AoE ring. Brighter and solid-bordered when actively dragged;
-  // faint pulsing preview when only held.
-  if (isActiveDrag) {
-    ctx.globalAlpha = 0.5;
-  } else {
-    // Pulse 0.10 → 0.30 over ~0.5s for a gentle "ready" indicator at player
-    var t = performance.now() * 0.003;
-    ctx.globalAlpha = 0.10 + 0.20 * (0.5 + 0.5 * Math.sin(t));
+  // faint pulsing preview when only held. Skipped for blue casts on
+  // non-AOE classes (would mislead — no AOE will land).
+  if (!skipAOERing) {
+    if (isActiveDrag) {
+      ctx.globalAlpha = 0.5;
+    } else {
+      // Pulse 0.10 → 0.30 over ~0.5s for a gentle "ready" indicator at player
+      var t = performance.now() * 0.003;
+      ctx.globalAlpha = 0.10 + 0.20 * (0.5 + 0.5 * Math.sin(t));
+    }
+    ctx.strokeStyle = hex;
+    ctx.shadowColor = hex;
+    ctx.shadowBlur = 10;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 8]);
+    ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
   }
-  ctx.strokeStyle = hex;
-  ctx.shadowColor = hex;
-  ctx.shadowBlur = 10;
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 8]);
-  ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.stroke();
-  ctx.setLineDash([]);
+  // Single-target marker — small ring at landing point for non-AOE blue
+  // casters. Communicates "bolt lands here, hits one entity, no spread."
+  if (showTargetMarker && isActiveDrag) {
+    ctx.globalAlpha = 0.65;
+    ctx.strokeStyle = hex;
+    ctx.shadowColor = hex;
+    ctx.shadowBlur = 6;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(cx, cy, 10, 0, Math.PI * 2); ctx.stroke();
+    // Tiny center dot
+    ctx.fillStyle = hex;
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fill();
+  }
   ctx.restore();
 }
 
