@@ -5528,6 +5528,146 @@ match), just with a per-color time gate.
 
 ---
 
+### v0.15.22 — SS chain network rework: unified blast + all paths chain + per-trap visuals
+
+Playtest readout on v0.15.20 chain mechanic: not functioning as expected.
+Diagnosis surfaced four real concerns and one architectural gap. This push
+addresses the gap and the visual/behavior issues; the design parking lot
+captures the spike-aura disposition.
+
+---
+
+**Concerns identified:**
+
+1. **Per-trap-overlap stacking damage felt wrong.** The previous
+   implementation counted how many trap radii each entity was inside and
+   scaled damage per-overlap. Worked mathematically but didn't read as
+   "one chain reaction" — felt like multiple separate hits.
+2. **Per-trap explosion visuals missing.** Only the seed trap got crit
+   shockwaves; the other linked traps detonated silently. Player saw
+   damage numbers float up across the map but couldn't see the actual
+   chain reaction firing across the trap positions.
+3. **Tap-placed traps not chaining.** Only `fireOverloadOrangeScatter`
+   (overload-drag) had `chainOpts` threaded in. SS's tap-orange and
+   tap-drag-orange paths created traps with `chained: false`, so:
+   - SS taps orange → unsealed half-radius trap at feet → not in chain
+   - SS tap-drags orange → sealed full-radius trap at drop → not in chain
+   - SS overload-drags orange → chain trap (only this case worked)
+   Result: the chain network rarely formed in practice because the
+   user's natural trap placement (tap or tap-drag) was creating
+   isolated traps. Architectural inconsistency.
+4. **Spike aura's role in SS identity unclear.** With chain traps as the
+   signature mechanic, the existing spike aura (overload-no-drag) feels
+   like a vestigial mechanic. Doesn't fit "SS = trap-network class."
+
+---
+
+**Changes shipped:**
+
+**(1) Unified blast damage model.** Replaces per-overlap stacking with
+network-size scaling applied uniformly to entities in the union of trap
+radii. The whole network detonates as one event:
+
+```js
+var networkSize = network.length;
+var blastMult = Math.min(stackingMaxMult, 1 + 0.5 * (networkSize - 1));
+// All entities inside ANY trap's radius take baseDmg × blastMult
+```
+
+* N=1 (single trap, no chain) → 1.0× (unchanged from non-chain trap)
+* N=2 → 1.5×
+* N=3 → 2.0×
+* N=5+ → caps at 3.0× (stackingMaxMult)
+
+Reads as "this network is bigger, it's a bigger boom" — every entity in
+the area takes the same damage, scaled to network size.
+
+Damage area is the **union** of trap radii (entity in ANY trap's radius
+gets hit). Empty gaps between distant traps remain safe — preserves
+strategic placement: you can drop traps in a wide spread for area
+denial, but only entities actually inside a trap take damage.
+
+**(2) Per-trap explosion visuals on detonation.** Every trap in the
+network now spawns:
+* Orange shockwave ring (`#F57C00`) at its position, sized to ~1.6×
+  trap radius
+* Inner brighter shockwave (`#FFAA44`) at ~1.2× radius for layering
+* Particle bloom (8 + 1.5×N orange/yellow shrapnel particles) scattering
+  from each trap center
+
+Plus the existing chain-link lines between connected traps (~350ms
+fading orange lines). Crit on the seed trap also gets the
+extra-loud flourishes it had before.
+
+Net effect: chain detonation reads as multiple synchronized blasts
+firing across the map, not a single silent trigger.
+
+**(3) All SS-placed orange traps chain.** Threaded `chainOpts` through
+`startOrangeTrap` so tap-at-feet AND tap-drag also tag traps as
+`chained: true` for SS. Same pattern as `fireOverloadOrangeScatter`:
+read `getOrangeProfile(player.cls)`, build chainOpts only if the class
+has the profile, pass to `spawnSpikeTrap`. Other classes get null →
+standard non-chain traps as before.
+
+After this change, SS's "drop traps to set up the battlefield" identity
+is consistent across all cast methods — every trap becomes a chain node.
+
+**(4) Spike aura parked as fusion-gate idea.** Aura mechanic stays in
+place (no code removal) — overload-no-drag still creates
+`orangeAura.charges` per the existing pattern. But it's no longer SS
+signature. Logged in Design Parking Lot as candidate for the 0.16.5
+Fusion grid system: orange + (red/yellow/gray) fusion patterns might
+unlock the aura as an opt-in skill any class could earn.
+
+---
+
+**Architectural notes:**
+
+* Schema layer untouched — `orangeProfile` shape, `chainRadius`, and
+  `stackingMaxMult` in characters.js work identically. Only engine
+  semantics changed (per-overlap → network-size scaling).
+* `spawnSpikeTrap` signature unchanged (`chainOpts` last param).
+  Single caller change point: every entry path now reads the profile
+  the same way.
+* Damage curve formula identical to v0.15.20's per-overlap version,
+  just applied per-network rather than per-entity-overlap. The cap
+  (3.0×) and slope (0.5) unchanged.
+
+---
+
+**Net diff:**
+* characters.js: untouched
+* rumble.js: ~70 lines (startOrangeTrap chain threading + unified blast
+  damage refactor + per-trap visual loop)
+* NOTES.md: ~30 lines (this entry + parking lot entry for spike aura)
+
+**Test focus:**
+
+1. **SS taps orange at feet.** Trap drops (half-radius unsealed). Is now
+   chain-tagged. If SS taps a second time within `chainRadius`, the new
+   trap joins the network with the first.
+2. **SS tap-drags orange.** Sealed trap drops at point. Joins chain
+   network if within range of existing chain trap.
+3. **Walk a goblin into ANY chain trap in network.** Entire network
+   detonates simultaneously — visible orange shockwaves at each trap
+   position, particles bursting outward from each trap, chain-link
+   lines fading. Entities in union of trap radii take scaled damage
+   (one number per entity, not multiple).
+4. **Two-trap chain damage.** Goblin in either trap's radius takes
+   1.5× single-trap damage.
+5. **Five+ trap chain damage.** Caps at 3.0× — no further escalation.
+6. **Single SS trap (no chain).** Behaves as before — entity walks in,
+   single damage event at 1.0× (no bonus). Per-trap explosion visual
+   still fires (just the one trap's burst).
+7. **Other classes' tap-orange.** Unchanged — drops standard
+   non-chain traps. Existing trap visuals (crit shrapnel ring on crit
+   only) apply as before. The new per-trap explosion visuals are
+   chain-network-specific and don't fire for non-chain traps.
+8. **Spike aura.** Overload-no-drag still creates the aura on any
+   class. Unchanged by this push — parked as future fusion gate.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
@@ -5535,6 +5675,31 @@ that don't fit a current chunk but should not be lost. Each entry includes
 the seed idea + initial design unpacking so future sessions can pick up
 without starting cold. When an idea is ready to build, move it to a chunk
 in the relevant build's roadmap section.
+
+### Spike aura → fusion-gate candidate (logged S015 v0.15.22)
+
+**Seed:** the existing orange spike aura (currently the overload-no-drag
+path: `fireOverloadOrange` else-branch creates `orangeAura` on player) is
+mechanically interesting but has no clear class home in the new
+trap-as-signature model. SS's orange identity is now the chain-trap
+network — explicitly traps in the world, not auras attached to player.
+
+**Question parked:** does the spike aura become a **fusion gate**
+unlockable rather than a class-baseline mechanic? Fusion candidates:
+* Orange + red + something → "kinetic shroud" (the existing aura model,
+  enabled via fusion pattern, available to any class that can fuse it)
+* Orange + yellow → "deterrent halo" (slows attackers + reflects damage)
+* Orange + gray → "spiked armor" (charges convert to armor when struck)
+
+**Current state:** aura code stays in place (no removal). It's still
+reachable via overload-orange-no-drag and works as a self-targeted
+defensive option for any class. Just no longer counts as SS signature
+identity. Future fusion work can claim it cleanly.
+
+**Decision deferred to:** 0.16.5 Fusion slot when the grid-skill system
+lands. At that point, decide whether aura becomes a fusion-only mechanic
+(remove from baseline cast paths) or stays as both (baseline + fusion
+buffs).
 
 ### Fusion system — 3x3 grid skill creation (logged S015 v0.15.5)
 

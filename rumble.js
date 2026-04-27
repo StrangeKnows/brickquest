@@ -8284,35 +8284,36 @@ function detonateChainNetwork(seedTrap) {
     t.holdTimer = t.HOLD_DURATION;
     t.caughtEntities = t.caughtEntities || [];
   });
-  // Per-entity damage stacking: count how many trap radii contain each.
-  // Use the seed's stackingMaxMult (all traps in the network share class
-  // identity so this is consistent).
+  // S015 v0.15.22: unified-blast damage model. Damage scales by NETWORK
+  // SIZE N (count of traps in the chain), not by per-entity overlap count.
+  // Curve: min(stackingMaxMult, 1 + 0.5 × (N - 1)). All entities inside
+  // the UNION of trap radii take the same scaled damage. Replaces the
+  // earlier per-overlap stacking model — chain now reads as one big blast
+  // with damage scaled to its size, not as many overlapping per-trap hits.
   var maxMult = seedTrap.stackingMaxMult || 3.0;
-  var entityHits = []; // {entity, count}
+  var networkSize = network.length;
+  var blastMult = Math.min(maxMult, 1 + 0.5 * (networkSize - 1));
+  var entityHits = []; // {entity}
   entities.forEach(function(g) {
     if (g.hp <= 0 || g.dead) return;
-    var count = 0;
+    // Inside union iff inside any trap's radius
     for (var nti = 0; nti < network.length; nti++) {
       var nt = network[nti];
       if (Math.hypot(g.x - nt.x, g.y - nt.y) < nt.r + g.r) {
-        count++;
+        entityHits.push({ entity: g });
+        return;
       }
     }
-    if (count > 0) {
-      entityHits.push({ entity: g, count: count });
-    }
   });
-  // Apply stacking damage curve. Use seed's initialDmg for base
-  // (all chain traps in a single overload cast share fx values).
+  // Apply damage uniformly. Use seed's initialDmg for base.
   var baseDmg = seedTrap.initialDmg;
+  var dmgAmt = Math.ceil(baseDmg * blastMult);
   entityHits.forEach(function(hit) {
-    var mult = Math.min(maxMult, 1 + 0.5 * (hit.count - 1));
-    var dmgAmt = Math.ceil(baseDmg * mult);
     var dRes = damageEntity(hit.entity, dmgAmt, false, 'orange');
     hit.entity.flashTimer = 0.25;
     // Damage number color hints at the chain bonus: standard orange for
-    // single-trap (no bonus), brighter shrapnel orange for stacked hits.
-    var dmgColor = hit.count > 1 ? '#FF8833' : '#ff6600';
+    // single-trap (no bonus), brighter shrapnel orange for any chain size > 1.
+    var dmgColor = networkSize > 1 ? '#FF8833' : '#ff6600';
     showDamageNumber(hit.entity.x, hit.entity.y - 30, dRes.applied,
       dmgColor, dRes.tier, hit.entity.x, hit.entity.y,
       undefined, dRes.witherBoost, hit.entity, 'orange');
@@ -8342,11 +8343,39 @@ function detonateChainNetwork(seedTrap) {
       }
     }
   }
-  // Crit shockwave at the seed if it was crit
+  // S015 v0.15.22: per-trap explosion visuals. Every trap in the network
+  // gets its own shockwave + particle burst at its position so the chain
+  // reads as multiple synchronized blasts, not a single silent trigger.
+  // Without this, only the seed trap had visible feedback.
+  network.forEach(function(nt) {
+    // Orange shockwave ring at this trap's position
+    spawnCritShockwave(nt.x, nt.y, '#F57C00',
+      { r0: 6, maxR: nt.r * 1.6, thickness: 3, growth: 320, fadeRate: 2.4 });
+    // Inner brighter shockwave for layering
+    spawnCritShockwave(nt.x, nt.y, '#FFAA44',
+      { r0: 3, maxR: nt.r * 1.2, thickness: 2, growth: 260, fadeRate: 2.8 });
+    // Particle bloom — orange shrapnel scattering outward
+    var burstCount = 8 + Math.floor(networkSize * 1.5);
+    for (var pi = 0; pi < burstCount; pi++) {
+      var pa = Math.random() * Math.PI * 2;
+      var ps = (1.5 + Math.random()) * (60 + networkSize * 8);
+      purpleParticles.push({
+        x: nt.x, y: nt.y,
+        vx: Math.cos(pa) * ps,
+        vy: Math.sin(pa) * ps,
+        r: 2 + Math.random() * 3,
+        alpha: 0.95,
+        color: Math.random() < 0.4 ? '#FFCC44' : '#FF6600',
+      });
+    }
+  });
+  // Crit shockwave on the seed gets an extra flourish (the chain originator
+  // gets the loudest visual). Other traps already have the standard burst above.
   if (seedTrap.isCrit) {
     spawnCritShockwave(seedTrap.x, seedTrap.y, '#F57C00',
-      { r0: 12, maxR: seedTrap.r * 2.2, thickness: 4, growth: 360 });
-    spawnCritFlourish(seedTrap.x, seedTrap.y, '#FF9933', 18);
+      { r0: 12, maxR: seedTrap.r * 2.4, thickness: 4, growth: 380 });
+    spawnCritFlourish(seedTrap.x, seedTrap.y, '#FF9933', 22);
+    spawnCritFlourish(seedTrap.x, seedTrap.y, '#FFCC80', 14);
   }
   triggerVictory();
 }
@@ -8460,11 +8489,23 @@ function startOrangeTrap(ox, oy, tier) {
   var isDrag = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) > scaleDist(40);
   var fx = _fx('orange', tier || 1);
   if (!fx) return;
+  // S015 v0.15.22: thread chainOpts through tap and tap-drag paths too.
+  // Previously only fireOverloadOrangeScatter (overload-drag) tagged traps
+  // as chained, leaving tap-at-feet and tap-drag SS traps as isolated nodes.
+  // Now ALL SS-placed orange traps (tap, tap-drag, overload-drag) join the
+  // chain network. Spike aura (overload no-drag) is NOT a trap and stays
+  // exempt — see Design Parking Lot for the aura→fusion-gate idea.
+  var oProf = (typeof getOrangeProfile === 'function') ? getOrangeProfile(player.cls) : null;
+  var chainOpts = (oProf && oProf.trapsChainOnTrigger) ? {
+    chained: true,
+    chainRadius: oProf.chainRadius || 200,
+    stackingMaxMult: oProf.stackingMaxMult || 3.0,
+  } : null;
   if (isDrag) {
-    spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, crit);
+    spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, crit, chainOpts);
   } else {
     // Tap-on-self trap is half-radius (sharper, focused at feet) but full damage.
-    spawnSpikeTrap(player.x, player.y, clampRadiusToArena(fx.radiusPx * 0.5), fx.dmg, false, crit);
+    spawnSpikeTrap(player.x, player.y, clampRadiusToArena(fx.radiusPx * 0.5), fx.dmg, false, crit, chainOpts);
   }
 }
 
