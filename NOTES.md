@@ -5668,6 +5668,138 @@ unlock the aura as an opt-in skill any class could earn.
 
 ---
 
+### v0.15.23 — Blue overload respects drop point (homing or fixed-point)
+
+Playtest readout: blue overload-cast on drag was always picking the
+entity nearest to the player, ignoring the drop coordinates. Drop
+location had zero influence on what the bolt targeted. Diagnosed:
+`fireOverloadBlue(count)` was the only color overload handler with
+no `(ox, oy)` parameters — drop coords were lost at the dispatch
+line. Every other color (red, white, yellow, orange, gray, green,
+purple, black) properly threads drop coords and respects the
+player's chosen point on drag.
+
+This push fixes blue specifically. The targeting model was also
+formalized as a roster-wide rule:
+
+---
+
+**Roster-wide targeting rule (now codified):**
+
+* **Tap (no drag, brick-button release):** auto-target nearest
+  entity to player. Fire-and-forget mode.
+* **Drag (release at chosen point in arena):** drop point IS the
+  target. No nearest-entity override. Player's choice respected.
+* **At drop point, behavior diverges by ability type:**
+  - **Homing abilities (blue):** seek entity at/near drop point.
+    If entity present → home on it. If empty drop point →
+    fixed-point bolt with AoE on arrival.
+  - **Non-homing abilities (red dash, orange trap, etc.):** land
+    at drop point. Hit anything in effective area. If empty,
+    misses gracefully.
+
+Audit confirmed: **only blue had this bug.** Every other color was
+already correct. So this is a single-color fix that brings blue
+into compliance with the existing rule, not a roster-wide refactor.
+
+---
+
+**The fix (rumble.js):**
+
+`fireOverloadBlue` signature changed from `(count)` to `(count, ox, oy)`
+to match every other color's overload handler.
+
+Inside, branch on drag distance (using the standard `scaleDist(40)`
+threshold consistent with all other handlers):
+
+```js
+var isDrag = ox !== undefined && Math.hypot(ox - player.x, oy - player.y) > scaleDist(40);
+var target = null;
+if (isDrag) {
+  // Find entity nearest to drop point, within fx.radiusPx tolerance.
+  // Tolerance = the AOE radius the player visually sees when holding
+  // the cast — that's the area they were aiming at.
+  var dropRadius = clampRadiusToArena(fx.radiusPx);
+  entities.forEach(function(g) {
+    if (g.hp <= 0) return;
+    var d = Math.hypot(g.x - ox, g.y - oy);
+    if (d > dropRadius + g.r) return;
+    if (!target || d < Math.hypot(target.x - ox, target.y - oy)) target = g;
+  });
+} else {
+  // Tap: nearest-to-player (existing behavior).
+  target = entities.length ? entities.reduce(function(a, b) {
+    return Math.hypot(a.x-player.x, a.y-player.y) < Math.hypot(b.x-player.x, b.y-player.y) ? a : b;
+  }) : null;
+}
+```
+
+Then two outcomes:
+
+1. **Target found** → homing bolt with primary `dmg`, optional FW
+   AOE burst (`hasImpactAOE` schema gate from v0.15.17 still
+   applies). Bolt seeks the entity until it dies or impacts.
+
+2. **No target on drag** → fixed-point bolt to drop coords. Bolt
+   travels to `targetX, targetY` (uses existing `fixedPoint: true`
+   bolt path). AOE damage on arrival via the FW burst path; non-AOE
+   classes effectively miss (no primary target + no AOE = harmless
+   landing). Visual still confirms the cast happened.
+
+3. **No target on tap** → bolt doesn't fire (legacy behavior, prevents
+   wasted brick when no entities exist).
+
+Dispatch line at top of `fireOverload` updated to pass `oxP, oyP`:
+
+```js
+if (color === 'blue')   fireOverloadBlue(count, oxP, oyP);
+```
+
+---
+
+**Architectural notes:**
+
+* `_fx('blue', count)` returns the same overload-tier values whether
+  the cast targets an entity or a fixed point. Damage scales by
+  tier (count) in both cases.
+* FW's `blueProfile.hasImpactAOE` schema (v0.15.17) still gates
+  burst behavior — both the homing-target bolts AND the fixed-point
+  bolts respect it. FW gets AOE on either path; non-AOE classes get
+  primary-only on homing path and no-damage on fixed-point miss.
+* Tolerance for "entity at drop point" = `fx.radiusPx`. This matches
+  the AOE radius the player sees in the cast indicator. If they
+  dropped on a goblin, the goblin will be inside that radius.
+* The homing-bolt and fixed-point bolt machinery already existed
+  (the latter via `startBlueBoltAtPoint`). The fix just connects
+  them through the overload entry point.
+
+---
+
+**Net diff:**
+* characters.js: untouched
+* rumble.js: ~70 lines (fireOverloadBlue refactor + dispatch line update)
+* NOTES.md: this entry
+
+**Test focus:**
+
+1. **Blue tap (no drag)** — bolt homes nearest entity to player.
+   Unchanged from before.
+2. **Blue overload + drag onto a goblin** — bolt homes that goblin,
+   regardless of whether other goblins are closer to the player.
+3. **Blue overload + drag onto empty arena floor** — bolt travels to
+   that empty point. Lands. FW: AOE damages anyone within burst
+   radius. Other classes: harmless landing visual, no damage.
+4. **Blue overload + drag onto a goblin near another goblin** — bolt
+   targets the goblin actually inside the drop-point radius (not
+   "whichever is closest to player").
+5. **Blue overload + drag with NO entities anywhere** — fixed-point
+   bolt fires at drop coords, travels and lands. Visual confirms
+   cast happened.
+6. **FW gets full dual-blast** — primary homing damage on goblin AND
+   FW's burst AOE damage on neighbors of impact. Both paths fire.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

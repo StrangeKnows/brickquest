@@ -1729,7 +1729,7 @@ function fireOverload(dragX, dragY, bricksUsed) {
   if (color === 'red')    fireOverloadRed(count, oxP, oyP);
   if (color === 'white')  fireOverloadWhite(count, ox, oy);  // needs raw undefined for tap detection
   if (color === 'yellow') fireOverloadYellow(count, oxP, oyP);
-  if (color === 'blue')   fireOverloadBlue(count);
+  if (color === 'blue')   fireOverloadBlue(count, oxP, oyP);
   if (color === 'orange') fireOverloadOrange(count, oxP, oyP);
   if (color === 'gray')   fireOverloadGray(count, oxP, oyP);
   if (color === 'green')  fireOverloadGreen(count, oxP, oyP, _usePlayer);
@@ -2092,39 +2092,81 @@ function fireOverloadYellow(count, ox, oy) {
     isCrit: _currentCrit,
   });
 }
-function fireOverloadBlue(count) {
-  var target = entities.length ? entities.reduce(function(a,b){
-    return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null;
-  if (!target) return;
-  // BLUE CRUSHING STRIKE: crit doubles bolt damage (matches red/gray/purple
-  // convention). Previously blue crit only marked targets for +50% follow-up
-  // damage, which was wasted on solo kills and made blue crit feel weak.
+function fireOverloadBlue(count, ox, oy) {
+  // S015 v0.15.23: respect drop point on drag-overload (was always
+  // nearest-to-player, ignoring drop coordinates). Branching:
+  //   - Tap (no drag): home on entity nearest to PLAYER (existing).
+  //   - Drag: drop point IS the target. If an entity is within
+  //     fx.radiusPx of the drop point at button-up, home on it
+  //     (blue is homing by nature). If no entity at drop point,
+  //     fire a fixed-point bolt that travels to the drop coords
+  //     and AOE-impacts on arrival. Non-AOE classes effectively
+  //     miss (no homing target + no AOE = harmless landing).
   var fx = _fx('blue', count);
   if (!fx) return;
   var bcritMult = _currentCrit ? 2.0 : 1.0;
-  // S015 v0.15.17: AOE-on-impact gated on blueProfile.hasImpactAOE.
-  // FW has it (sig blue, dual-blast identity); other classes don't.
-  // Burst fields only set when the class profile says yes — keeps the
-  // engine's blue impact handler agnostic (it checks burstRadius/Dmg
-  // truthiness) while making the gate visible at cast time.
   var blueProf = (typeof getBlueProfile === 'function') ? getBlueProfile(player.cls) : null;
   var hasAOE = !!(blueProf && blueProf.hasImpactAOE);
+  var isDrag = ox !== undefined && Math.hypot(ox - player.x, oy - player.y) > scaleDist(40);
+  // Resolve target: nearest-to-player on tap, nearest-to-drop-point on
+  // drag (within fx.radiusPx tolerance — entity must be in the area
+  // the player aimed at, not just somewhere on the field).
+  var target = null;
+  if (isDrag) {
+    var dropRadius = clampRadiusToArena(fx.radiusPx);
+    entities.forEach(function(g) {
+      if (g.hp <= 0) return;
+      var d = Math.hypot(g.x - ox, g.y - oy);
+      if (d > dropRadius + g.r) return;
+      if (!target || d < Math.hypot(target.x - ox, target.y - oy)) target = g;
+    });
+  } else {
+    target = entities.length ? entities.reduce(function(a, b) {
+      return Math.hypot(a.x-player.x, a.y-player.y) < Math.hypot(b.x-player.x, b.y-player.y) ? a : b;
+    }) : null;
+  }
+  if (target) {
+    // Homing bolt — entity is the target.
+    blueBolts.push({
+      x: player.x, y: player.y,
+      target: target,
+      speed: 400 + count * 40,
+      dmg: Math.ceil(fx.dmg * bcritMult),
+      r: 6 + count * 4,       // x1=10, x5=26  (visual size, not damage)
+      dead: false,
+      travelled: 0,
+      tier: count,
+      glow: count * 10,
+      delayTimer: 0,
+      // Burst fields only populated for AOE classes (FW).
+      burstRadius: hasAOE ? clampRadiusToArena(fx.radiusPx) : 0,
+      burstDmg: hasAOE ? Math.ceil(fx.burstDmg * bcritMult) : 0,
+      isCrit: _currentCrit,
+    });
+    return;
+  }
+  // No target. On tap with no entities, nothing fires (legacy behavior).
+  // On drag with no entity at drop point, fire fixed-point bolt to drop
+  // coords. FW gets AOE damage on arrival; other classes' bolts arrive
+  // and impact harmlessly (no primary target + no AOE = miss). Visual
+  // confirms the cast happened even on miss.
+  if (!isDrag) return;
   blueBolts.push({
     x: player.x, y: player.y,
-    target: target,
+    target: null, fixedPoint: true,
+    targetX: ox, targetY: oy,
     speed: 400 + count * 40,
-    dmg: Math.ceil(fx.dmg * bcritMult),
-    r: 6 + count * 4,       // x1=10, x5=26  (visual size, not damage)
+    dmg: 0,  // no primary target → no primary damage
+    r: 6 + count * 4,
     dead: false,
     travelled: 0,
     tier: count,
     glow: count * 10,
     delayTimer: 0,
-    // Burst fields only populated for AOE classes. The impact handler in
-    // updateBlueBolts checks `if (b.burstRadius && b.burstDmg)` so leaving
-    // them undefined for non-AOE classes naturally skips the burst path.
+    // FW still gets AOE damage at the arrival point. Other classes get 0.
     burstRadius: hasAOE ? clampRadiusToArena(fx.radiusPx) : 0,
     burstDmg: hasAOE ? Math.ceil(fx.burstDmg * bcritMult) : 0,
+    impactR: clampRadiusToArena(fx.radiusPx),  // legacy field for hit detection
     isCrit: _currentCrit,
   });
 }
