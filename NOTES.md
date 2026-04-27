@@ -4437,6 +4437,108 @@ comment added).
 
 ---
 
+### v0.15.12 — Dash redesign: bubble-sweep multi-hit + range timing fix
+
+Two architectural changes to red dash, both from playtest captures of
+v0.15.11.
+
+---
+
+**Change 1: Range timing — Read B (pre-spend snapshot).**
+
+Playtest showed: T3 cast (3 bricks consumed) reading 250px range, which
+matched "1 red owned" not "3 red committed." Cause: dash read
+`player.bricks.red` AFTER consumption. With 3 bricks → cast all 3 →
+inventory = 0 → range computed from 0 (treated as 1 floor) = 250.
+
+Per playtest lock: "Read B is correct functionality" — bricks committed
+to a cast count toward range.
+
+Implementation:
+* New global `_redCastOwnedSnapshot` (next to `_currentCrit`)
+* `fireOverload` clears + sets it BEFORE consuming bricks (red only)
+* `startRedChargeTo` and `startRedCharge` prefer the snapshot over
+  `player.bricks.red` (with fallback for tap-path that doesn't go
+  through fireOverload)
+
+New range table (BK sig red, by bricks committed at cast time):
+
+| Owned/committed | 1 | 2 | 3 | 5 | 10 |
+|---|---|---|---|---|---|
+| Range | 250 | 275 | 300 | 350 | 475 |
+
+T3 with 3 owned now correctly computes range from owned=3 → 300px
+(was reading 0→1 floor = 250).
+
+---
+
+**Change 2: Bubble-sweep multi-hit detection.**
+
+Playtest showed: drag indicator's hit-radius bubble visibly contained
+an entity at the endpoint, but actual dash didn't hit the entity.
+Cause: previous hit detection used `entities.find` (first match) +
+`brickAction.hit = true` (terminate dash). The first entity hit ended
+the dash; the visual bubble just communicated "where the impact zone
+WOULD be at endpoint" without that geometry being the actual hit
+mechanic.
+
+Per playtest lock: "Option 3 — keep current path-based hits + ADD
+endpoint impact, AND not just endpoint, also on impact." Read as:
+the hit zone (visible bubble) should hit ANY entity inside it AT ANY
+POINT along the dash path. Bubble travels with the player.
+
+Implementation:
+* Single-entity find replaced with for-loop over all entities
+* Bubble radius: `(player.r + 14) × hitboxScale` — exact match to
+  drag indicator visual
+* `brickAction._hitSet` tracks entities already hit this dash (no
+  double-hits)
+* Each entity inside the bubble takes full damage + knockback in dash
+  direction (`dirX × 300 × knockMult`) — entities punched FORWARD
+  along the line of charge, not pushed away from player center
+* Per-hit particle burst halved (was 8+rTier×4, now 4+rTier×2) to
+  avoid visual overload when sweeping multiple enemies
+
+The dash NO LONGER ends on first entity hit. Continues to range-cap /
+wall-block / target-reached / 2s timeout.
+
+---
+
+**Architectural cleanup ("strip dead code" per memory rule):**
+
+* `'return'` phase removed entirely from red dash. Was tied to "hit
+  one thing, recoil back" model that doesn't fit bubble-sweep. Player
+  now ends at endpoint, not back at start.
+* `brickAction.returnSpeed` field stripped (was set, never read after
+  return phase removal)
+* `brickAction._trailRMult` stripped (was set in entity-hit path,
+  consumed in return phase, both gone)
+* Stale comments referencing return phase updated
+* `brickAction.hit = true` (set by range-cap/wall-block) now triggers
+  immediate dash termination + finalizeRedDashDiag, instead of
+  transitioning to return phase
+
+**Net diff:** rumble.js ~110 lines changed (mostly the multi-hit
+rewrite + dead code removal). characters.js untouched.
+
+**Test focus:**
+
+1. **Range matches commitment.** Cast T3 with 3 red owned → diagnostic
+   should show `max range: 300 px` (BK sig). T3 with 5 red owned →
+   `max range: 350 px`.
+2. **Bubble sweep hits multiple.** Line up 2-3 goblins, dash through
+   them — all should take damage + get knocked forward. Diagnostic
+   reason should be `range-cap` or `target-reached` (not entity-hit
+   anymore — that path is gone).
+3. **Single-target dashes still hit.** Auto-target tap dash should hit
+   the targeted entity in passing AND continue to where it lands.
+4. **No recoil.** Dash should END at endpoint, not snap back to start.
+5. **Diagnostic reason values:** post-v0.15.12, `entity-hit` should
+   never appear as a stop reason (the path is removed). Expect
+   `range-cap`, `target-reached`, `wall-block`, or `timeout`.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

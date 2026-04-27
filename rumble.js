@@ -1556,6 +1556,12 @@ function cancelOverload() {
 }
 
 var _currentCrit = false;      // crit flag from last cast; color handlers apply threshold effects
+// S015 v0.15.12: snapshot of red brick inventory at the moment of cast,
+// captured BEFORE the spend in fireOverload. Read by getRedRange callers
+// in startRedCharge / startRedChargeTo / drawCastIndicator (drag preview)
+// to compute range from "bricks committed" rather than "bricks left."
+// null when no red cast in flight; read with `??` style fallback.
+var _redCastOwnedSnapshot = null;
 
 function fireOverload(dragX, dragY, bricksUsed) {
   if (!overloadState || !player) return;
@@ -1564,6 +1570,15 @@ function fireOverload(dragX, dragY, bricksUsed) {
   var count = bricksUsed !== undefined ? Math.min(bricksUsed, maxAvail) : maxAvail;
   if (count <= 0) return;
   count = Math.max(1, count);
+  // S015 v0.15.12: capture pre-spend red brick count so range computation
+  // can read "bricks committed to this cast" rather than "bricks left
+  // after spend." Always clear first (defensive against stale snapshot
+  // from a previous cast that didn't reach termination cleanly), then set
+  // for red casts only. Read B from playtest lock.
+  _redCastOwnedSnapshot = null;
+  if (color === 'red') {
+    _redCastOwnedSnapshot = maxAvail;
+  }
   player.bricks[color] = Math.max(0, maxAvail - count);
   if (_battleStats) {
     _addBrickStat(_battleStats.bricksUsed, color, count);
@@ -6179,7 +6194,13 @@ function startRedChargeTo(dmgMult, tx, ty) {
   var dx = tx - player.x, dy = ty - player.y;
   var dist = Math.sqrt(dx*dx+dy*dy) || 1;
   var nx = dx/dist, ny = dy/dist;
-  var ownedRed = (player.bricks && player.bricks.red) || 0;
+  // Read B (S015 v0.15.12): prefer pre-spend snapshot from fireOverload
+  // (set BEFORE bricks were consumed). Falls back to current inventory
+  // for tap-path dashes that don't go through fireOverload. Snapshot is
+  // null between casts, so the fallback covers all non-overload paths.
+  var ownedRed = (_redCastOwnedSnapshot != null)
+    ? _redCastOwnedSnapshot
+    : ((player.bricks && player.bricks.red) || 0);
   var maxRange = (typeof getRedRange === 'function')
     ? getRedRange(player.cls, ownedRed)
     : 1e9;
@@ -6196,7 +6217,6 @@ function startRedChargeTo(dmgMult, tx, ty) {
     startX: startX, startY: startY,
     dirX: nx, dirY: ny,
     chargeSpeed: player.speed * 4,
-    returnSpeed: player.speed * 2,
     hit: false, dmgMult: _dmgMult,
     targetX: endX, targetY: endY,    // clamped target
     usePoint: true,
@@ -6219,7 +6239,10 @@ function startRedCharge(dmgMult, targetEntity) {
   // out of range, dash still launches and ends at the max-range mark
   // (entity escapes this swing — design choice favors the entity).
   // Per S015 v0.15.9: range driven by red brick inventory, not tier.
-  var ownedRed = (player.bricks && player.bricks.red) || 0;
+  // Read B (S015 v0.15.12): prefer pre-spend snapshot from fireOverload.
+  var ownedRed = (_redCastOwnedSnapshot != null)
+    ? _redCastOwnedSnapshot
+    : ((player.bricks && player.bricks.red) || 0);
   var maxRange = (typeof getRedRange === 'function')
     ? getRedRange(player.cls, ownedRed)
     : 1e9;
@@ -6236,7 +6259,6 @@ function startRedCharge(dmgMult, targetEntity) {
     startX: startX, startY: startY,
     dirX: nx, dirY: ny,
     chargeSpeed: player.speed * 4,
-    returnSpeed: player.speed * 2,
     hit: false,
     dmgMult: _dmgMult,
     maxRange: maxRange,
@@ -6943,9 +6965,11 @@ function updateBrickAction(dt, bounds) {
       // and rangeAffinityBonus, with tier-curve scaling.
       var traveled = Math.hypot(player.x - brickAction.startX, player.y - brickAction.startY);
       if (brickAction.maxRange && traveled + step >= brickAction.maxRange) {
-        // Clamp to remaining distance, mark hit so charge ends this frame
+        // Clamp to remaining distance, mark hit so dash terminates this
+        // frame. Per S015 v0.15.12: brickAction.hit triggers immediate
+        // dash termination + finalize (no return phase).
         step = Math.max(0, brickAction.maxRange - traveled);
-        brickAction.hit = true; // ends charge → return phase next frame
+        brickAction.hit = true;
         brickAction._stopReason = 'range-cap';
       }
       // Wall sweep: test the line segment from current position to the
@@ -6977,7 +7001,7 @@ function updateBrickAction(dt, bounds) {
         player.x = player.x + dxm * tStop;
         player.y = player.y + dym * tStop;
         blocked = true;
-        brickAction.hit = true; // ends the charge on the next frame
+        brickAction.hit = true; // terminates dash this frame (v0.15.12)
         brickAction._stopReason = 'wall-block';
       }
       if (!blocked) {
@@ -6986,31 +7010,53 @@ function updateBrickAction(dt, bounds) {
       }
       player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
       player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
-      // Hit check — BK redProfile.hitboxScale enlarges hit radius for
-      // signature mechanic ("larger hitbox" per design doc §2.3).
+      // ── BUBBLE-SWEEP HIT DETECTION (S015 v0.15.12) ──
+      // Replaces previous "first entity touched ends the charge" model.
+      // The hit-radius bubble (matching what the drag indicator draws)
+      // travels with the player. Every frame, every entity inside the
+      // bubble that hasn't already been hit on this dash takes full
+      // damage + knockback. Dash continues to range-cap / wall / timeout.
+      // Per playtest lock: "need to hit all in zone." Bubble radius mirrors
+      // the visual indicator: (player.r + 14) × hitboxScale.
       if (!brickAction.hit) {
-        var hitRadiusMult = hitboxScale;
-        var hitG = entities.find(function(g){
-          return Math.hypot(player.x-g.x,player.y-g.y) < (player.r + g.r) * hitRadiusMult;
-        });
-        if (hitG) {
-          var rTier = brickAction.dmgMult||1;
+        if (!brickAction._hitSet) brickAction._hitSet = [];
+        var hbR = (player.r + 14) * hitboxScale;
+        for (var _hi = 0; _hi < entities.length; _hi++) {
+          var hitG = entities[_hi];
+          if (!hitG || hitG.hp <= 0) continue;
+          // Skip entities already hit on this dash
+          var alreadyHit = false;
+          for (var _ahi = 0; _ahi < brickAction._hitSet.length; _ahi++) {
+            if (brickAction._hitSet[_ahi] === hitG) { alreadyHit = true; break; }
+          }
+          if (alreadyHit) continue;
+          // Bubble check: entity center inside (player + bubbleR + entity.r).
+          // Using entity.r in addition to bubble matches the previous
+          // single-hit threshold style (player.r + g.r) × scale, just
+          // applied to all entities not just the first.
+          if (Math.hypot(player.x - hitG.x, player.y - hitG.y) >= hbR + (hitG.r || 0)) continue;
+          // Entity is inside bubble — apply full hit.
+          brickAction._hitSet.push(hitG);
+          var rTier = brickAction.dmgMult || 1;
           var crit = !!brickAction.isCrit;
-          var critMult = crit ? 2.0 : 1.0; // CRUSHING BLOW: 2x damage
-          // Knockback combines crit doubler with BK signature multiplier.
-          // BK + crit = 4.0× knockback (2.0 crit × 2.0 BK signature).
+          var critMult = crit ? 2.0 : 1.0;
           var knockMult = (crit ? 2.0 : 1.0) * knockbackScale;
           var rfx = _fx('red', rTier);
           var rDmg = Math.ceil((rfx ? rfx.dmg : 3) * critMult);
-          var rRes = damageEntity(hitG, rDmg, undefined, 'red'); hitG.flashTimer = 0.3;
-          showDamageNumber(hitG.x, hitG.y - 30, rRes.applied, crit ? '#FFAA00' : '#E24B4A', rRes.tier, hitG.x, hitG.y, undefined, rRes.witherBoost, hitG);
+          var rRes = damageEntity(hitG, rDmg, undefined, 'red');
+          hitG.flashTimer = 0.3;
+          showDamageNumber(hitG.x, hitG.y - 30, rRes.applied,
+            crit ? '#FFAA00' : '#E24B4A', rRes.tier, hitG.x, hitG.y,
+            undefined, rRes.witherBoost, hitG);
           if (crit) {
-            // RED flourish: molten gold shockwave ring + dense red particle burst
             spawnCritShockwave(hitG.x, hitG.y, '#FFAA00', { r0: 6, maxR: scaleDist(180), thickness: 4, growth: 320 });
             spawnCritShockwave(hitG.x, hitG.y, '#FF4400', { r0: 10, maxR: scaleDist(140), thickness: 2, growth: 220, fadeRate: 2.6 });
             spawnCritFlourish(hitG.x, hitG.y, '#FFAA00', 24);
           }
-          var rBurst = 8 + rTier * 4; // consistent count regardless of vScale
+          // Per-hit particle burst — scaled down vs. single-hit-stop era
+          // because we can now stack many hits per dash; full bursts on
+          // every hit would be visual overload. Half count, same colors.
+          var rBurst = 4 + Math.ceil(rTier * 2);
           for (var rbi = 0; rbi < rBurst; rbi++) {
             var rba = Math.random()*Math.PI*2;
             var rbs = (1.5+Math.random())*(30+rTier*15);
@@ -7018,32 +7064,31 @@ function updateBrickAction(dt, bounds) {
               vx:Math.cos(rba)*rbs, vy:Math.sin(rba)*rbs,
               r:3+rTier+Math.random()*3, alpha:0.9, color:'#ff3300' });
           }
-          var kx = hitG.x - player.x, ky = hitG.y - player.y;
-          var kd = Math.sqrt(kx*kx+ky*ky)||1;
-          hitG.bounceVx = (kx/kd)*300*knockMult; hitG.bounceVy = (ky/kd)*300*knockMult;
+          // Knockback in DASH direction (forward), not push-away-from-player.
+          // Player is barreling THROUGH the entity; entity gets punched
+          // forward in the line of charge. Matches kinetic intuition.
+          hitG.bounceVx = brickAction.dirX * 300 * knockMult;
+          hitG.bounceVy = brickAction.dirY * 300 * knockMult;
           hitG.bounceTimer = 0.35; hitG.state = 'bounce';
-          brickAction.hit = true;
-          if (!brickAction._stopReason) brickAction._stopReason = 'entity-hit';
-          triggerVictory();
-          // Reverse red particles to stream back toward player origin
-          var _rdx = brickAction.startX - hitG.x, _rdy = brickAction.startY - hitG.y;
-          var _rd = Math.sqrt(_rdx*_rdx+_rdy*_rdy)||1;
-          // Log before clear
-          var _before = purpleParticles.map(function(p){return p.color+':'+(p.isRed?'isRed':'noFlag')+'@'+Math.round(p.x)+','+Math.round(p.y);});
-          purpleParticles = purpleParticles.filter(function(p){ return p.color !== '#ff3300' && !p.isRed; });
-          // Spawn trail particles behind player (opposite to charge direction)
-          // Store return trail state on brickAction — emits particles each frame during return
-          brickAction._trailRMult = rTier;
-          brickAction.phase = 'return';
-          brickAction.returnTimer = 0;
-          // Diagnostic: dash ended via entity hit (or range cap that triggered hit)
-          if (typeof finalizeRedDashDiag === 'function') {
-            finalizeRedDashDiag(brickAction._stopReason || 'entity-hit');
+          // Track first hit for stop-reason diagnostic. Dash does NOT end
+          // here — it continues to range-cap / wall / timeout. The
+          // _stopReason is updated on whichever terminates the dash.
+          if (!brickAction._firstHitEntity) {
+            brickAction._firstHitEntity = hitG;
           }
+          triggerVictory();
         }
       }
-      // Stop charge after 2s timeout OR reaching drag target — no return unless hit enemy
-      if (brickAction && brickAction.chargeTimer >= 2.0) {
+      // Stop charge: if hit flag was set by range-cap or wall-block,
+      // terminate immediately. Per S015 v0.15.12 (no return phase), set
+      // brickAction = null and finalize diagnostic. Without this check,
+      // dash would only end via 2s timeout even though range-cap fired.
+      if (brickAction && brickAction.hit) {
+        if (typeof finalizeRedDashDiag === 'function') {
+          finalizeRedDashDiag(brickAction._stopReason || 'range-cap');
+        }
+        brickAction = null;
+      } else if (brickAction && brickAction.chargeTimer >= 2.0) {
         if (typeof finalizeRedDashDiag === 'function') {
           finalizeRedDashDiag(brickAction._stopReason || 'timeout');
         }
@@ -7062,37 +7107,9 @@ function updateBrickAction(dt, bounds) {
           brickAction = null;
         }
       }
-    } else {
-      // Return toward start — emit trail particles behind player
-      if (player && brickAction._trailRMult !== undefined) {
-        var _rMult2 = brickAction._trailRMult;
-        var _ba2 = Math.atan2(-brickAction.dirY, -brickAction.dirX); // opposite to charge = behind
-        for (var _ei = 0; _ei < 2; _ei++) {
-          var _ea = _ba2 + (Math.random()-0.5)*1.2;
-          var _es = 30 + Math.random()*50;
-          purpleParticles.push({
-            x: player.x + Math.cos(_ea)*(player.r*0.6),
-            y: player.y + Math.sin(_ea)*(player.r*0.6),
-            vx: Math.cos(_ea)*_es, vy: Math.sin(_ea)*_es,
-            r: 2 + Math.random()*_rMult2, alpha: 0.8,
-            color: '#ff3300', isRed: true,
-          });
-        }
-      }
-      var rx = brickAction.startX - player.x;
-      var ry = brickAction.startY - player.y;
-      var rd = Math.sqrt(rx*rx+ry*ry);
-      var nearestForReturn = entities.length ? entities[0] : null;
-      var safeStop = nearestForReturn ? nearestForReturn.AGGRO_RANGE * 1.5 : 0;
-      var distToEntity = nearestForReturn ? Math.hypot(player.x-nearestForReturn.x, player.y-nearestForReturn.y) : 9999;
-      brickAction.returnTimer = (brickAction.returnTimer||0) + dt;
-      if (distToEntity >= safeStop || rd <= 8 || brickAction.returnTimer >= 3.0) {
-        brickAction = null; // always terminates within 3s
-      } else {
-        var rs = Math.min(brickAction.returnSpeed * dt, rd);
-        player.x += (rx/rd)*rs;
-        player.y += (ry/rd)*rs;
-      }
+      // S015 v0.15.12: 'return' phase removed. Bubble-sweep dashes end
+      // at endpoint via range-cap/wall/target-reached/timeout. No recoil
+      // animation — player ends where they barreled to, not back at start.
     }
   }
 
