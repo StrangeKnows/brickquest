@@ -74,6 +74,23 @@ var CHARACTERS = {
       hitboxScale: 1.3,          // 30% larger hit radius for red dash
       knockbackScale: 2.0,       // 2× knockback velocity on red impact
     },
+    // Gray signature: lethal blow triggers a one-per-rumble death save.
+    // All current armor pips drain one-at-a-time (visible cinematic) and
+    // HP is set to ceil(armorDrained × armorToHpRatio), floor minHp.
+    // Triggers vs. ANY lethal damage source (physical, poison, wither,
+    // bleed) — the save's value is highest vs. true damage that bypasses
+    // armor since BK has no other counter to it. Per design doc §2.3
+    // (BREAKER GRAY: armor absorbs lethal blow once per rumble).
+    //
+    // Refactor target: at 0.16.5 Fusion this becomes a forge recipe
+    // (e.g. plus pattern + 5 gray = self-resurrect) so other classes
+    // can earn it too. Baseline passive shipped now for impact.
+    grayProfile: {
+      deathSave: true,
+      armorToHpRatio: 0.5,   // ceil(armor × 0.5) HP after save
+      minHp: 1,              // floor — even 1 armor saves to 1 HP
+      pipDrainMs: 150,       // each pip takes 150ms to drain (cinematic)
+    },
   },
   formwright: {
     name: 'Formwright', icon: '🔮',
@@ -241,6 +258,50 @@ function getRedRange(cls, tier) {
   var t = Math.max(1, tier || 1);
   var bonus = (typeof prof.rangeAffinityBonus === 'number') ? prof.rangeAffinityBonus : 1.0;
   return prof.rangeBase * (1 + 0.10 * (t - 1)) * bonus;
+}
+
+// Class-specific gray cast profile. Returns the profile object when the
+// class has signature gray behavior (BK death save), null otherwise.
+// Engine call sites (rumble.js applyDamageToPlayer death-save check) read
+// this to decide whether to trigger the save sequence.
+function getGrayProfile(cls) {
+  return (CHARACTERS[cls] && CHARACTERS[cls].grayProfile) || null;
+}
+
+// ── GRAY ECONOMY (S015 v0.15.8 unification) ─────────────────────────────
+// Single formula for both pip yield (tap-gray armor) and wall HP (drag-gray
+// or excess-pip overflow). Per locked design:
+//
+//   pips(cls, tier)   = max(1, round(1 × affinityMult(cls, 'gray') × tier))
+//   wallHp(cls, tier) = pips(cls, tier) × 2
+//
+// T1 = 1 pip universally (rounding eats the 1.25 affinity at tier=1, which
+// matches the "1 tap = 1 pip = T1" floor). Affinity emerges from T2 onward
+// — sig classes (BK, BS) yield more per cast at higher tiers, baseline
+// classes scale linearly. No plateaus: every tier grows for every class.
+//
+// BK and BS have identical numerical output (same ×1.25 sig affinity).
+// Their differentiation is mechanical, not numerical:
+//   BK gray = death save (built v0.15.8)
+//   BS gray = mid-fight pip regen + arc wall variant (deferred to BS chunk)
+//
+// Walls are always exactly 2× pip count for the same cast — one source of
+// truth, one ratio. Drag-walls and overflow-walls (excess pips spawning
+// a wall around nearest entity) use the same wallHp helper.
+function getGrayPips(cls, tier) {
+  // Clean affinity for gray: sig classes get 1.25, all others get 1.0
+  // (baseline). This intentionally diverges from the universal 0.8
+  // baseline-color penalty — for armor/wall economy the "1 tap = 1 pip
+  // = T1 floor" rule requires baseline = 1.0 so light classes don't
+  // plateau at T2/T3 from rounding. Damage output still uses the
+  // standard 0.8 baseline penalty via the universal pipeline.
+  var sigArr = (CHARACTERS[cls] && CHARACTERS[cls].signature) || [];
+  var aff = (sigArr.indexOf('gray') >= 0) ? 1.25 : 1.0;
+  var t = Math.max(1, tier || 1);
+  return Math.max(1, Math.round(1 * aff * t));
+}
+function getGrayWallHp(cls, tier) {
+  return getGrayPips(cls, tier) * 2;
 }
 
 // ── BASE HEAL AMOUNT ────────────────────────────────────────────────────
@@ -470,6 +531,9 @@ if (typeof window !== 'undefined') {
   window.getPurpleProfile = getPurpleProfile;
   window.getRedProfile = getRedProfile;
   window.getRedRange = getRedRange;
+  window.getGrayProfile = getGrayProfile;
+  window.getGrayPips = getGrayPips;
+  window.getGrayWallHp = getGrayWallHp;
   window.baseHeal = baseHeal;
   window.affinityMult = affinityMult;
   window.brickTier = brickTier;
@@ -492,7 +556,7 @@ if (typeof module !== 'undefined' && module.exports) {
     STARTING_KIT_COUNTS,
     CLASS_AFFINITY,
     getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
-    getSignature, getSecondary, getPurpleProfile, getRedProfile, getRedRange,
+    getSignature, getSecondary, getPurpleProfile, getRedProfile, getRedRange, getGrayProfile, getGrayPips, getGrayWallHp,
     baseHeal,
     affinityMult,
     brickTier,

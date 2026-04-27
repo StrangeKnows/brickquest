@@ -3847,6 +3847,258 @@ Each is a separate v0.15.x patch.
 
 ---
 
+### v0.15.8 — Chunk 2.2: BK gray death save
+
+Second BK signature mechanic ships. Per design doc §2.3 (BREAKER GRAY:
+armor absorbs lethal blow once per rumble) — refactored during build to
+work as a *terminal* save that fires when bleed actually bottoms out HP,
+NOT as a pre-emptive intercept of damage. This preserves the bleed
+rescue window for allies and keeps the save as the LAST line of defense.
+
+**Mechanic flow:**
+
+1. Lethal damage hits BK (any source — physical, poison, wither, bleed)
+2. Bleed initiates normally (universal mechanic, not BK-special)
+3. Bleed cinema plays — HP ticks down toward toHp over the bleed window
+4. **Allies can heal during bleed**: this rescues BK without consuming
+   the death save (rescue path stays meaningful)
+5. If bleed completes with HP at 0 (no rescue) → **try death save**
+   * If BK has at least 1 armor pip + unused save: save fires
+   * If no armor or save already used: BK respawns/dies normally
+
+**Death save sequence:**
+
+* All armor pips clear immediately
+* HP target set to `max(minHp, ceil(armor × armorToHpRatio))` — 50% of
+  armor, rounded up, floor of 1
+* `_globalFreeze = true` — entity movement, projectiles, most engine
+  systems halt. Particles + crit visuals continue so cinema renders.
+* Pip drain cinema: each pip ticks over 150ms (configurable per profile)
+  * Per-pip: gray particle burst from BK, "+N HP" floater, HP number
+    visibly increments toward target
+* Final beat after last pip: large "◆ SAVED" floater + crit shockwave
+  + flourish particles
+* 250ms hold, then `_globalFreeze = false`, world resumes
+
+**Save HP table (BK with N armor):**
+
+| Armor | HP saved | Cinema duration |
+|-------|----------|-----------------|
+| 1 | 1 HP | 150ms |
+| 2 | 1 HP | 300ms |
+| 3 | 2 HP | 450ms |
+| 4 | 2 HP | 600ms |
+| 5 | 3 HP | 750ms |
+| 6 | 3 HP | 900ms |
+| 8 | 4 HP | 1200ms |
+| 10 | 5 HP | 1500ms |
+
+More armor = more HP saved AND more dramatic cinema. Visual scales with
+investment, mechanic rewards gray-stacking playstyle.
+
+**Architecture:**
+
+* characters.js: `breaker.grayProfile = { deathSave: true, armorToHpRatio:
+  0.5, minHp: 1, pipDrainMs: 150 }`. Other classes return `null` from
+  `getGrayProfile(cls)`.
+* New helper `getGrayProfile(cls)` exported to window + module.exports.
+* rumble.js: state field `player.deathSave` (sequence object) + flag
+  `player.deathSaveUsed` (consumed once per rumble).
+* Engine helpers `tryDeathSave()` and `updateDeathSave(dt)` — first
+  fires the save if eligible, second drives the pip cinema.
+* Hooked into `updateBleedOut` completion: when bleed finishes with
+  HP ≤ 0, try death save before respawn. NOT hooked into
+  `applyDamageToPlayer` directly — the design intent is that bleed
+  always plays first.
+* New global flag `_globalFreeze` — checked at top of `update(dt)`.
+  When true, only the death save controller + particle/crit systems
+  update; everything else early-returns.
+* Reset in pre-rumble passive block (`deathSaveUsed = false`,
+  `deathSave = null`) and on rumble end (`_globalFreeze = false` and
+  `deathSave = null` for safety).
+
+**Why bleed plays first:**
+
+This was a build-time reframe. Initial implementation pre-empted bleed —
+death save fired immediately on lethal damage, no bleed cinema. That
+broke two things:
+1. The bleed rescue window (where allies can heal you) became
+   unreachable for BK with unused save.
+2. Two cinemas would compete: bleed visuals (red overlay, HP draining)
+   and death save visuals (gray flash, pips). Sequencing them as
+   bleed → save instead is cleaner.
+
+So the rule: **bleed initiates universally, save fires only when bleed
+truly bottoms out**. BK with allies = rescue. BK alone = save kicks in.
+
+**Refactor target (0.16.5 Fusion):**
+
+This becomes a forge recipe (likely "Plus pattern + 5 gray = self-save")
+when the fusion system lands. Other classes will be able to forge it
+too if they invest the bricks. Baseline BK passive ships now for
+immediate gameplay impact.
+
+**Net diff:** characters.js +18 lines (grayProfile + getGrayProfile +
+exports). rumble.js +95 lines (death save module: tryDeathSave,
+updateDeathSave, _globalFreeze; hook in updateBleedOut completion;
+freeze gate at top of update; pre-rumble reset; cleanup in
+_internalEnd).
+
+**Class baseline parity audit (S015 v0.15.8):**
+
+Per the "every class should have same amount of class specificity at
+start" standard surfaced during this build:
+
+| Class | Pre-rumble passive | Affinity | Signature mechanics shipped |
+|-------|--------------------|----------|------------------------------|
+| Breaker | First Strike | red, gray (×1.25) | red package (v0.15.5/7), **gray death save (v0.15.8)** |
+| Formwright | Charge | blue, purple, black (×1.25) | purple teleport warp (v0.15.1/2) |
+| Snapstep | First Step | orange, red (×1.25) | none yet |
+| Blocksmith | Builder's Guard | gray, yellow (×1.25) | none yet |
+| Fixer | Mend Ready | white, black (×1.25) | white redesign (v0.15.0) |
+| Wild One | Blight Mark | green, yellow (×1.25) | none yet |
+
+BK now has 2 signature mechanics shipped — ahead of FW, FX (1 each) and
+SS, BS, WO (0 each). Decision logged: **continue with BK first, finish
+the class, then circle back to even out the others**. SS, BS, WO will
+get their first signature mechanics in subsequent chunks.
+
+**Still queued for Chunk 2:**
+
+* SS orange 0.5s tap-invuln window
+* Audit Thread A pair: red combo stacks (consecutive red +damage / +crit)
+
+---
+
+### v0.15.8 supplement — Unified gray economy + excess pip overflow
+
+Numerical foundation patch shipping in the same commit as the death save
+above. Replaces the prior `_fx('gray', count).hp` reads (over-generous:
+BK T4 yielded 8 pips, walls had matching HP) with a single unified
+formula. Same shape applies to both pip yield (tap-gray armor) and wall
+HP (drag-gray, plus new excess-pip overflow). Ships before SS chunk
+because death save HP outcomes need a grounded pip economy to feel right.
+
+**The locked formula:**
+
+```
+pips(cls, tier)   = max(1, round(1 × affinity × tier))
+wallHp(cls, tier) = pips(cls, tier) × 2
+```
+
+Where `affinity` is `1.25` for sig classes (BK, BS) and `1.0` for all
+others. T1 = 1 pip universally because rounding eats the 1.25 at tier 1
+(matches the "1 tap = 1 pip = T1 floor" rule). Affinity diverges from T2
+onward — sig classes yield more per cast at higher tiers, baseline scales
+linearly. No plateaus: every tier grows for every class.
+
+**Why baseline = 1.0 (not 0.8):**
+
+The universal pipeline has a 0.8 baseline-color penalty (used for damage
+output). For the gray armor/wall economy, baseline must be 1.0 to keep
+the T1 floor honest and avoid T2/T3 plateaus from rounding. Damage still
+uses 0.8 baseline via the standard pipeline; gray economy intentionally
+diverges via the dedicated `getGrayPips` helper.
+
+**Pip yield table (no crit):**
+
+| Class | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 |
+|-------|----|----|----|----|----|----|----|----|----|-----|
+| BS, BK (sig ×1.25) | 1 | 3 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 13 |
+| Others (×1.0)      | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+
+**Wall HP table (no crit):**
+
+| Class | T1 | T2 | T3 | T4 | T5 | T6 | T7 | T8 | T9 | T10 |
+|-------|----|----|----|----|----|----|----|----|----|-----|
+| BS, BK | 2 | 6 | 8 | 10 | 12 | 16 | 18 | 20 | 22 | 26 |
+| Others | 2 | 4 | 6 | 8 | 10 | 12 | 14 | 16 | 18 | 20 |
+
+**BK = BS numerically.** Same affinity, same yield. Mechanical
+differentiation only:
+
+* BK gray = death save (built above)
+* BS gray = mid-fight pip regen + arc wall variant on overflow + yellow
+  taunt synergy (deferred to BS chunk)
+
+**Excess-pip overflow (NEW — universal mechanic):**
+
+When tap-gray pips would exceed armor cap, surplus pips overflow into a
+defensive wall around the nearest entity. Wall HP = surplus × 2 (matches
+universal pip:wall ratio). Universal version ships now — BS will get a
+special variant later (arc wall in front of player instead of around
+entity), deferred to BS chunk.
+
+Example: BK at full armor (cap = 4) casts T4 gray → 5 pips. 0 go to
+armor (already capped), 5 surplus → 10 HP wall around nearest entity.
+
+**Death save outcomes realigned to new economy:**
+
+| BK cast at | Pips banked | Save HP (ceil × 0.5) |
+|------------|-------------|----------------------|
+| T1 (1 brick) | 1 | 1 |
+| T2 | 3 | 2 |
+| T4 | 5 | 3 |
+| Crit T4 | 10 | 5 |
+| Multi-cast banked (e.g. 7 armor) | 7 | 4 |
+| Near cap (15 armor) | 15 | 8 |
+
+Tighter than the prior broken-generous economy, more honest. Players
+now need to bank armor across multiple casts to set up a strong save.
+
+**Architecture:**
+
+* characters.js: two new helpers `getGrayPips(cls, tier)` and
+  `getGrayWallHp(cls, tier)`. No new per-class data fields — uses the
+  signature affinity from existing `signature` array on each character.
+  Gray-specific affinity override (1.0 baseline instead of 0.8) is
+  encapsulated inside `getGrayPips`.
+* Both helpers exported to window + module.exports.
+* rumble.js: replaced `_fx('gray', count).hp` reads in `fireOverloadGray`
+  (pip path) and `startGrayWall` (wall HP path) with the new helpers.
+  Wall radius continues to use `_fx` since it's a spatial/presentation
+  property, not a power scale.
+* Excess-pip overflow logic added to both `fireOverloadGray` and
+  `startGrayArmor` — surplus pips beyond armor cap spawn a wall around
+  the nearest entity (universal). When no entities present, surplus is
+  simply dropped (no wall).
+
+**Net diff (combined v0.15.8 push):**
+
+* characters.js: +52 lines (grayProfile data + getGrayProfile +
+  getGrayPips + getGrayWallHp + exports)
+* rumble.js: +120 lines (death save module: tryDeathSave + updateDeathSave
+  + _globalFreeze; bleed completion hook; pre-rumble reset; cleanup in
+  _internalEnd; fireOverloadGray rewrite with overflow; startGrayArmor
+  rewrite with overflow; startGrayWall HP source change)
+* NOTES.md: this entry + supplement
+
+**Class baseline parity audit (post v0.15.8):**
+
+Per the "every class should have same amount of class specificity at
+start" standard:
+
+| Class | Pre-rumble passive | Affinity | Signature mechanics shipped |
+|-------|--------------------|----------|------------------------------|
+| Breaker | First Strike | red, gray (×1.25) | red package (v0.15.5/7), **gray death save + unified economy (v0.15.8)** |
+| Formwright | Charge | blue, purple, black (×1.25) | purple teleport warp (v0.15.1/2) |
+| Snapstep | First Step | orange, red (×1.25) | none yet |
+| Blocksmith | Builder's Guard | gray, yellow (×1.25) | none yet (gray economy benefits BS too via shared sig) |
+| Fixer | Mend Ready | white, black (×1.25) | white redesign (v0.15.0) |
+| Wild One | Blight Mark | green, yellow (×1.25) | none yet |
+
+BK now has 2 signature mechanics shipped — ahead of FW, FX (1 each) and
+SS, BS, WO (0 each). Decision logged: **continue with BK first, finish
+the class, then circle back to even out the others**. SS, BS, WO will
+get their first signature mechanics in subsequent chunks.
+
+**Still queued for Chunk 2:**
+
+* SS orange 0.5s tap-invuln window
+* Audit Thread A pair: red combo stacks (consecutive red +damage / +crit)
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
@@ -3854,6 +4106,226 @@ that don't fit a current chunk but should not be lost. Each entry includes
 the seed idea + initial design unpacking so future sessions can pick up
 without starting cold. When an idea is ready to build, move it to a chunk
 in the relevant build's roadmap section.
+
+### Fusion system — 3x3 grid skill creation (logged S015 v0.15.5)
+
+**Seed:** the universal skill-creation system. A 3x3 grid is the canvas
+where players arrange colored bricks in patterns to create new passive
+and active skills. Every domain — offense, defense, utility, mobility,
+healing, status, environmental — gets expressed as fusion combinations.
+Armor is one lane within this system, not the whole system.
+
+The 0.16.5 Fusion slot (per S014 handoff) is where this lives. Class
+Identity at the brick-bar level (0.15.0 / 0.16.0) builds the *baseline*;
+fusion is where players go beyond baseline and create their personal
+build. Step-changes from fusion is what the v0.15.0 tier-curve
+compression reserves headroom for.
+
+**Architectural skeleton:**
+
+* **The grid:** 3x3 cells, 9 slots. Each slot holds one brick of a single
+  color. Empty cells valid for many patterns.
+* **The pattern grammar:** which arrangements of filled cells count as a
+  recognized fusion. Lines, corners, diagonals, plus, diamond, square,
+  frame, full — each pattern maps to a category of effect.
+* **The color language:** the brick colors filling those cells determine
+  the *kind* of skill. Same pattern + different colors = different skills.
+* **Class identity overlay:** which patterns a class can recognize, what
+  bonuses they get on certain colors, what cost discounts apply.
+
+**Pattern → effect category mapping (initial sketch):**
+
+| Pattern | Cells | Effect category |
+|---------|-------|-----------------|
+| Single | 1 | Augment (small modifier) |
+| Line (row/col) | 3 | Direct effect of dominant color |
+| Diagonal | 3 | Reflect / redirect — kinetic recoil |
+| Corners | 4 | Coverage — affects in all directions |
+| Plus | 5 | Burst — radial single-trigger effect |
+| Diamond | 4 | Surround — defensive/positional |
+| Square | 4 | Compact — small but durable buff |
+| Frame | 8 | Aura — sustained zone effect |
+| Full | 9 | Transformation — temporary form change |
+
+These are starting hooks, not locked. Each maps loosely to "what does the
+*shape* feel like" — diagonals deflect because they're vectors, plus
+because it's radial, frame because it bounds a space.
+
+---
+
+### Color language — thoughts per color and per class
+
+Each color has a domain it expresses. Fusion lets these domains combine
+in unexpected ways. Below is a primer for how each color *could* read
+inside the fusion system, and how each class might naturally bend that
+expression. These are seed notes for design, not commitments.
+
+**RED (impact, motion, attack)**
+* Solo fusion: kinetic skills — dashes, charges, impact AOEs
+* Per class: BK = body-check spike (line + 3 red = lunge with knockback);
+  SS = phase-step (diagonal + red = teleport-strike); FW = projectile
+  red (red + purple = magic bolt instead of charge)
+* Pairs naturally with: gray (armored charge), orange (trap-charge),
+  yellow (confusing strike)
+
+**GRAY (defense, structure, persistence)**
+* Solo fusion: pure armor patterns (the "armor lane" sketched in
+  earlier entries — typed resist, nullification, healing redirect)
+* Per class: BS = unlocks advanced patterns + cost discount; BK =
+  spike-shield (gray + red corners = damage attackers on contact);
+  FX = healing armor (gray + white = HP regen while equipped)
+* Pairs naturally with: every color (gray is the universal binder —
+  "stability for the volatile color")
+
+**WHITE (heal, restore, support)**
+* Solo fusion: regen patterns — slow heal over time, HP cap raise,
+  cleanse on tick
+* Per class: FX = unlocks ally-targeted fusion (white frame = party-wide
+  aura); BK = self-heal-on-hit (white plus = small heal per impact);
+  WO = poison-cleanse on tick (white + green = nullify own poison stacks)
+* Pairs naturally with: black (drain becomes heal), red (combat regen),
+  gray (durable healing armor)
+
+**BLUE (slow, control, magic)**
+* Solo fusion: slow zones, freeze-on-hit, time-skew effects
+* Per class: FW = unlocks projectile fusion (blue line = magic missile);
+  SS = slow-immune diamond (blue diamond = SS becomes immune to slows);
+  BS = wall-slow (blue + gray = walls slow attackers)
+* Pairs naturally with: purple (control + AOE = mass freeze), white
+  (slowed enemies heal you), green (slow-bleed combo)
+
+**PURPLE (AOE, magic, displacement)**
+* Solo fusion: zones — AOE blast, teleport pads, area denial
+* Per class: FW = unlocks rare patterns (signature class — full grid
+  unlocks at lower cost); BK = "shoulder slam" (purple plus + red =
+  knockback AOE); WO = poison cloud (purple + green = AOE poison)
+* Pairs naturally with: blue (control AOE), black (curse zone), yellow
+  (confusion AOE)
+
+**BLACK (curse, drain, sacrifice)**
+* Solo fusion: drain effects, witherbolt enhancement, life-steal
+* Per class: FW = curse signature (Scholar's Eye — black cost halved);
+  FX = bargain master (black for healing); BK = pain-channel (black +
+  red = damage taken increases damage dealt)
+* Pairs naturally with: white (drain heals you), green (poison-curse),
+  red (blood for power)
+
+**GREEN (poison, growth, decay)**
+* Solo fusion: poison stacks, viral spread, slow rot
+* Per class: WO = signature unlock (viral patterns at half cost);
+  FX = poison conversion (green + white = poison damage heals); BK =
+  weaponized poison (green + red = poison weapon)
+* Pairs naturally with: yellow (stat debuff stack), purple (cloud),
+  black (necrosis)
+
+**YELLOW (confuse, distract, taunt)**
+* Solo fusion: enemy AI manipulation — confuse, redirect, taunt zones
+* Per class: BS = signature unlock (taunt patterns); WO = whistle
+  pattern (yellow + green = beast call); SS = phase-confuse (yellow +
+  red diagonal = enemies miss the next attack)
+* Pairs naturally with: green (debuff stack), blue (control mind),
+  orange (confused enemies trigger traps)
+
+**ORANGE (trap, environmental, damage-over-zone)**
+* Solo fusion: trap variants, sustained zone damage, terrain shaping
+* Per class: SS = trap-chain signature (orange line = connected traps);
+  BS = wall-trap fusion (orange + gray = walls explode on break); BK
+  = explosive lunge (orange + red = trap-laying dash)
+* Pairs naturally with: red (lay-and-charge), green (poison floor),
+  yellow (confusion mine)
+
+---
+
+**Class identity in fusion (mechanism, not just flavor):**
+
+Each class gets:
+1. **One signature color domain** they unlock advanced patterns in
+2. **One cost discount** for fusions matching their signature affinity
+3. **One unique pattern** unavailable to other classes (signature
+   passive, e.g. FW's "signature spell page")
+
+Class signature mappings (matches existing affinity from characters.js):
+
+* Breaker (red, gray) — body-check signatures, spike-armor patterns
+* Formwright (blue, purple, black) — projectile + zone + curse signatures
+* Snapstep (orange, red) — trap-chain + phase-step signatures
+* Blocksmith (gray, yellow) — armor mastery + taunt signatures
+* Fixer (white, black) — heal + bargain signatures
+* Wild One (green, yellow) — viral + summon signatures
+
+---
+
+**Open design questions before this builds:**
+
+1. **Combinatorics control:** 9 colors × 9 cells × 8+ patterns is
+   astronomical. How many combinations have meaningful distinct effects
+   vs. overlap? Probably need a curated set of ~50-100 named fusions,
+   not "every combo does something unique."
+2. **Discovery model:** how do players learn what fusions exist? Recipe
+   book / class progression unlock / experimentation with hints?
+3. **Persistence:** fusions live until disassembled? Until used X times?
+   Until next zone? Different per category?
+4. **Slots:** how many fusions can a player have active at once? Per
+   class limit? Stacking rules?
+5. **Cost balance:** brick economy already tight (S013 economy fix).
+   Fusion shouldn't trivialize brick supply or starve normal cast economy.
+6. **Active vs passive:** are some fusions "always-on" (passive) and
+   others "trigger when used" (active)? How does the player know which?
+7. **Forge timing:** board-phase only? Mid-rumble assembly? Some
+   categories rumble-only, others board-only?
+8. **Class progression:** does Blocksmith *start* with armor mastery,
+   or does it unlock at level X? Tied to the existing skill system?
+9. **UI:** 3x3 grid as a separate panel in player dashboard? On Fusion
+   tab (currently a stub at 0.16.5)? Drag bricks from inventory into
+   cells? Confirm to forge?
+
+---
+
+**Architectural placement when this builds:**
+
+* Data: `FUSIONS` table in game.js or new `fusions.js`
+  * `{ id, pattern, colorRequirement, effect, category, classGate, cost }`
+* Server resolver: validate forge attempt (pattern + colors match a
+  recognized fusion + class allowed + cost paid + slot available)
+* Server state: `player.fusions: [...active fusion ids]` with metadata
+  for durability, charges, etc.
+* Player UI: dedicated Fusion panel — 3x3 grid picker, brick inventory
+  alongside, "Forge" button on valid match. Show recipe book.
+* Rumble layer: `player.fusions` consulted during damage/cast/ability
+  resolution for typed effects.
+
+---
+
+**Roadmap fit:**
+
+* **0.16.5 Fusion** is the locked slot for this. Per S014 handoff,
+  fusion is the "step-change" payoff that the tier-curve compression
+  reserved headroom for. The brick-bar and class-identity work in
+  0.15.0 / 0.16.0 establishes the baseline; fusion is where players
+  go beyond it.
+* This is a **multi-session build** even at v1. Probably:
+  * Session A: schema, ~15 starter fusions across categories,
+    server resolver, minimal UI to forge and equip
+  * Session B: discovery / unlock model, class signatures, balance pass
+  * Session C: more fusions, polish, edge-case handling
+
+---
+
+**Why this matters strategically:**
+
+* Solves the "after baseline class identity, what's next?" question.
+  Fusion is the long arc.
+* Gives every color a deeper expression beyond its baseline cast.
+* Creates synergy webs: every brick can become part of multiple
+  build paths.
+* Establishes a content treadmill — adding new fusions is incremental
+  work that doesn't require new mechanics.
+* Class identity scales naturally — class signatures aren't just flat
+  affinities, they unlock unique build paths.
+* Pairs with brick economy: gives players a long-term goal for hoarding
+  specific colors.
+
+---
 
 ### Forced enemy encounter on dry streak (logged S015)
 

@@ -745,6 +745,23 @@ function update(dt) {
   if (!player) return;
   var bounds = getRumbleBounds();
 
+  // Death save controller — runs unconditionally. Drives the freeze
+  // flag while the BK gray pip-drain cinema is active, then releases
+  // it. See tryDeathSave / updateDeathSave for the sequence logic.
+  updateDeathSave(dt);
+
+  // Global freeze — when death save cinema is playing, halt entity
+  // movement and most engine systems so the player can experience
+  // the rescue beat without dying to the next swing. Particles + crit
+  // visuals continue to update so the cinema still reads visually.
+  if (_globalFreeze) {
+    updatePurpleParticles(dt);
+    updateCritFlash(dt);
+    updateCritBanners(dt);
+    updateCritShockwaves(dt);
+    return;
+  }
+
   // Active-combat accumulator. Counts this frame as "engaged" if the player
   // has dealt damage in the last ACTIVE_COMBAT_WINDOW_MS. Used for time-on-
   // target DPS calculation; excludes idle/travel/dodge gaps.
@@ -2046,13 +2063,31 @@ function fireOverloadGray(count, ox, oy) {
   } else {
     var aMax2 = getArmorMax();
     var prevArmor = player.armor||0;
-    // Tap-gray = armor pips. Uses gray's hp curve (gray's only scaled output)
-    // as the pip count, with crit doubling. GRAY REINFORCE: crit doubles pips.
+    // Tap-gray pips per S015 unified gray economy:
+    //   pips = max(1, round(1 × affinity × tier)) × critMult
+    // Uses getGrayPips helper from characters.js. T1 = 1 pip universally,
+    // sig classes (BK/BS) get larger yield from T2 onward via 1.25 affinity.
     var gcritMult = _currentCrit ? 2.0 : 1.0;
-    var grFx = _fx('gray', count);
-    var pips = Math.max(1, Math.ceil((grFx ? grFx.hp : 1) * gcritMult));
-    player.armor = Math.min(aMax2, prevArmor + pips);
-    var gained = player.armor - prevArmor;
+    var pips = Math.max(1, Math.round(getGrayPips(player.cls, count) * gcritMult));
+    // Apply pips to armor up to cap. Excess pips (beyond cap) overflow into
+    // a defensive wall around the nearest entity. Wall HP = surplus × 2
+    // (matches universal pips:wall ratio). Universal mechanic — BS arc
+    // wall variant deferred to BS chunk.
+    var spaceForArmor = Math.max(0, aMax2 - prevArmor);
+    var pipsToArmor = Math.min(pips, spaceForArmor);
+    var pipsOverflow = pips - pipsToArmor;
+    player.armor = prevArmor + pipsToArmor;
+    var gained = pipsToArmor;
+    if (pipsOverflow > 0 && entities.length > 0) {
+      // Find nearest entity to player and spawn wall there. Wall HP scales
+      // with surplus pip count (1 surplus pip = 2 HP wall by universal ratio).
+      var nearest = entities.reduce(function(a, b) {
+        return Math.hypot(a.x - player.x, a.y - player.y) < Math.hypot(b.x - player.x, b.y - player.y) ? a : b;
+      });
+      // Pass `pipsOverflow` as the tier-equivalent so wall HP = pips × 2 holds.
+      // startGrayWall reads getGrayWallHp(cls, tier) for HP.
+      startGrayWall(nearest.x, nearest.y, pipsOverflow);
+    }
     if (_currentCrit) {
       spawnCritShockwave(player.x, player.y, '#CCCCCC', { r0: 10, maxR: scaleDist(160), thickness: 4, growth: 240 });
       spawnCritFlourish(player.x, player.y, '#DDDDDD', 18);
@@ -6153,7 +6188,11 @@ function applyDamageToPlayer(dmg) {
     player.hp = Math.max(0, Math.round(newHp));
     return;
   }
-  // Killing blow path
+  // Killing blow path. Bleed initiates universally — even for BK with
+  // an unused death save. Save only fires at the END of bleed if HP
+  // actually bottoms out (see updateBleedOut completion). This keeps the
+  // bleed rescue window meaningful — allies healing during bleed can
+  // save BK without consuming the death save.
   if (player.bleedOut) {
     // Already bleeding — stack overflow into existing toHp (drives rescue
     // target deeper). Don't extend duration; existing window plays out.
@@ -6174,6 +6213,96 @@ function applyDamageToPlayer(dmg) {
   };
   showFloatingText(player.x, player.y - 60, '⚠ BLEED', '#b06fef', player);
 }
+
+// ── DEATH SAVE (BK gray signature) ────────────────────────────────────
+// One-per-rumble lethal-blow recovery. Triggers when player would die,
+// has a deathSave-eligible grayProfile, has at least 1 armor pip, and
+// hasn't used the save already this rumble.
+//
+// Flow: start sequence → freeze world → drain pips one-at-a-time over
+// (pip × pipDrainMs) → each pip raises HP by armorToHpRatio (rounded
+// up) → final beat (SAVED floater + flash) → unfreeze.
+//
+// Per design doc §2.3 (BREAKER GRAY: armor absorbs lethal blow once
+// per rumble). Future fusion (0.16.5): refactor to be a forge recipe
+// available to all classes who invest the bricks. Currently a baseline
+// BK passive for immediate gameplay impact.
+function tryDeathSave() {
+  if (!player) return false;
+  var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
+  if (!prof || !prof.deathSave) return false;
+  if (player.deathSaveUsed) return false;
+  if ((player.armor || 0) <= 0) return false;
+  // Save fires. Set HP target up front; sequence ticks pips for the visual.
+  var armorCount = player.armor;
+  var targetHp = Math.max(prof.minHp || 1, Math.ceil(armorCount * (prof.armorToHpRatio || 0.5)));
+  player.deathSave = {
+    armorStart: armorCount,
+    pipsDrained: 0,
+    pipsTotal: armorCount,
+    targetHp: targetHp,
+    hpStart: 0,           // we treat the save as starting at 0 hp; clamp avoids bleed/death
+    pipDrainMs: prof.pipDrainMs || 150,
+    nextPipAt: performance.now(), // first pip fires immediately
+    finished: false,
+  };
+  // Pre-zero hp + clear armor so external systems don't see a partial state.
+  // Pip ticks rebuild hp visibly during the sequence.
+  player.hp = 0;
+  player.armor = 0;
+  player.deathSaveUsed = true;
+  // Global freeze — paused world during the cinematic. Render keeps running.
+  _globalFreeze = true;
+  return true;
+}
+
+function updateDeathSave(dt) {
+  if (!player || !player.deathSave) return;
+  var ds = player.deathSave;
+  if (ds.finished) return;
+  var now = performance.now();
+  // Drain one pip per pipDrainMs. Each drained pip increments HP by the
+  // ratio (ceiling), clamped to targetHp so we don't overshoot.
+  while (ds.pipsDrained < ds.pipsTotal && now >= ds.nextPipAt) {
+    ds.pipsDrained++;
+    var hpGain = Math.ceil(ds.targetHp * (ds.pipsDrained / ds.pipsTotal)) - player.hp;
+    if (hpGain > 0) {
+      player.hp = Math.min(ds.targetHp, player.hp + hpGain);
+    }
+    // Particle burst per pip — gray sparks radiating from player
+    for (var i = 0; i < 8; i++) {
+      var ang = Math.random() * Math.PI * 2;
+      var spd = 60 + Math.random() * 80;
+      purpleParticles.push({
+        x: player.x, y: player.y,
+        vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+        r: 2 + Math.random() * 2,
+        alpha: 0.95,
+        color: '#cccccc',
+      });
+    }
+    // Show the cumulative HP gain inline (small floater per pip)
+    showFloatingText(player.x + (Math.random() - 0.5) * 20, player.y - 20, '+' + hpGain + ' HP', '#ddd', player);
+    ds.nextPipAt = now + ds.pipDrainMs;
+  }
+  if (ds.pipsDrained >= ds.pipsTotal) {
+    // Final beat — big SAVED floater + bright flash
+    showFloatingText(player.x, player.y - 50, '◆ SAVED', '#ffffff', player);
+    spawnCritShockwave(player.x, player.y, '#cccccc', { r0: 14, maxR: scaleDist(120), thickness: 4, growth: 280 });
+    spawnCritFlourish(player.x, player.y, '#ffffff', 22);
+    ds.finished = true;
+    // Unfreeze world after a brief hold so the SAVED beat reads
+    setTimeout(function() {
+      _globalFreeze = false;
+      if (player) player.deathSave = null;
+    }, 250);
+  }
+}
+
+// Global pause flag — when true, gameplay updates skip dt advancement.
+// Used by death save cinema. Render loop runs unaffected so visuals
+// keep playing.
+var _globalFreeze = false;
 
 function applyHealToPlayer(amount) {
   if (!player || amount <= 0) return 0;
@@ -6272,8 +6401,13 @@ function updateBleedOut(dt) {
     player.hp = Math.max(0, Math.round(b.toHp));
     player.bleedOut = null;
     if (player.hp <= 0) {
-      // Death — route through normal respawn/revive flow
-      if (typeof respawnPlayer === 'function') respawnPlayer();
+      // HP bottomed out — the bleed rescue window passed without enough
+      // healing. Try death save (BK gray signature). If it fires, the
+      // pip-drain cinema rebuilds HP from the save's armor pool. If not
+      // (no armor, save used, or non-BK), fall through to respawn.
+      if (!tryDeathSave()) {
+        if (typeof respawnPlayer === 'function') respawnPlayer();
+      }
     }
   }
 }
@@ -7579,11 +7713,23 @@ function startGrayArmor(targetX, targetY, tier) {
     startGrayWall(targetX, targetY, tier || 1);
   } else {
     var aMax = getArmorMax();
-    // Base: 1 armor pip per gray brick, scaled by affinity and inventory.
-    // GRAY REINFORCE: crit doubles the pip count.
+    var prevArmor = player.armor || 0;
+    // Tap-gray pips per S015 unified gray economy. Same formula as
+    // fireOverloadGray uses — getGrayPips(cls, tier) × crit doubler.
+    // Tap = T1 (tier 1) since this path is single-brick consume.
     var critMult = _currentCrit ? 2.0 : 1.0;
-    var pips = Math.max(1, Math.ceil(1 * tapScaleMult('gray') * affinityMult('gray') * critMult));
-    player.armor = Math.min(aMax, (player.armor||0) + pips);
+    var pips = Math.max(1, Math.round(getGrayPips(player.cls, tier || 1) * critMult));
+    // Excess-pip overflow → wall around nearest entity (universal mechanic).
+    var spaceForArmor = Math.max(0, aMax - prevArmor);
+    var pipsToArmor = Math.min(pips, spaceForArmor);
+    var pipsOverflow = pips - pipsToArmor;
+    player.armor = prevArmor + pipsToArmor;
+    if (pipsOverflow > 0 && entities.length > 0) {
+      var nearest = entities.reduce(function(a, b) {
+        return Math.hypot(a.x - player.x, a.y - player.y) < Math.hypot(b.x - player.x, b.y - player.y) ? a : b;
+      });
+      startGrayWall(nearest.x, nearest.y, pipsOverflow);
+    }
     if (_currentCrit) {
       // GRAY flourish: stone-colored shockwave + silvery sparkle burst
       spawnCritShockwave(player.x, player.y, '#CCCCCC', { r0: 8, maxR: scaleDist(140), thickness: 4, growth: 200 });
@@ -7597,9 +7743,10 @@ function startGrayWall(cx, cy, tier) {
   var fx = _fx('gray', tier);
   if (!fx) return;
   var wcritMult = _currentCrit ? 2.0 : 1.0;
-  // Wall radius: arena clamp baked in. The 40%-of-arena-min wall cap
-  // is now handled by clampRadiusToArena (half-min) — strictly tighter
-  // than 40%, so the old 40% rule is subsumed.
+  // Wall radius: arena clamp baked in. Radius keeps reading _fx because
+  // it's a spatial/presentation property, not a power scale. Wall HP
+  // now uses the unified getGrayWallHp helper from characters.js (per
+  // S015 v0.15.8 gray economy unification: HP = pips × 2).
   var maxR = clampRadiusToArena(fx.radiusPx);
   var _bounds = getRumbleBounds();
 
@@ -7632,7 +7779,9 @@ function startGrayWall(cx, cy, tier) {
   cx = Math.max(_bounds.x + maxR, Math.min(_bounds.x + _bounds.w - maxR, cx));
   cy = Math.max(_bounds.y + maxR, Math.min(_bounds.y + _bounds.h - maxR, cy));
 
-  var hp = Math.max(1, Math.ceil(fx.hp * wcritMult));
+  // Wall HP per S015 unified gray economy: HP = getGrayWallHp(cls, tier)
+  // = pips × 2. Per-class differentiation via 1.25 sig affinity (BK/BS).
+  var hp = Math.max(1, Math.round(getGrayWallHp(player.cls, tier) * wcritMult));
   var containedIds = [];
   entities.forEach(function(g, i) {
     if (Math.hypot(g.x-cx, g.y-cy) < maxR) containedIds.push(i);
@@ -8857,6 +9006,13 @@ function _internalStart(config) {
     if (typeof showFloatingText === 'function') {
       showFloatingText(player.x, player.y - 30, '💥 FIRST STRIKE', '#993C1D');
     }
+  }
+
+  // BK gray death save — once per rumble. Reset state here so save is
+  // available again at start of every rumble. Read by tryDeathSave().
+  if (player) {
+    player.deathSaveUsed = false;
+    player.deathSave = null;
   }
 
   // SNAPSTEP: All enemy attacks miss SS for first 3 seconds of rumble.
@@ -10265,6 +10421,14 @@ function _internalEnd(reason) {
     player.warpState = null;
   }
   warpTrails = [];
+  // Cancel any in-flight death save sequence — clears global freeze so
+  // the next battle isn't paused, and clears the per-rumble usage flag.
+  if (player) {
+    player.deathSave = null;
+    // Note: deathSaveUsed is reset at rumble START, not END — leaving
+    // it set here is harmless and ensures it's always reset before play.
+  }
+  _globalFreeze = false;
   // v4: tear down revive minigame if still active
   if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
   _reviveState = null;
