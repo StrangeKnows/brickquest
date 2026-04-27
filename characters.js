@@ -71,7 +71,7 @@ var CHARACTERS = {
     redProfile: {
       rangeBase: 160,            // heavy weight — shorter base reach
       rangeAffinityBonus: 1.25,  // signature red — final ×1.25 to base
-      hitboxScale: 1.2,          // 20% larger hit radius for red dash
+      hitboxScale: 1.3,          // 30% larger hit radius for red dash
       knockbackScale: 2.0,       // 2× knockback velocity on red impact
     },
   },

@@ -3787,14 +3787,24 @@ commit is real, you just don't reach further than your class allows.
 
 **BK signature multipliers:**
 
-* `hitboxScale: 1.2` — hit detection radius is `(player.r + entity.r) × 1.2`,
-  so BK reaches 20% further to land hits even at the same dash endpoint
+* `hitboxScale: 1.3` — hit detection radius is `(player.r + entity.r) × 1.3`,
+  so BK's strike connects from ~30% further out than other classes. Against
+  a standard goblin (entity.r ~12, player.r 14): base hit = 26px, BK = 33.8px
+  (+7.8px). Against larger entities the gap grows — a stone troll (entity.r
+  ~30) gives base = 44px, BK = 57.2px (+13.2px). Signature scales with
+  target size, which fits "the one who can crash into anything."
 * `knockbackScale: 2.0` — bounce velocity multiplied 2.0× on impact;
   combines with crit's existing 2.0× doubler so BK + crit = 4.0× total
   knockback ("send the goblin flying" feel)
 
 Other classes: `hitboxScale` undefined → engine treats as 1.0; same for
 knockbackScale. No code path in non-BK classes affected.
+
+**Tier behavior:** BK's hitbox is FIXED at 1.3× across all tiers. Tier
+scales damage and range (universal pipeline), not hit area. Locked
+deliberately to avoid stacking three axes of tier scaling on a single
+release. Tunable in playtest — if T5 BK feels identical to T1 in feel,
+revisit with a gentle additive grow (~+0.025/tier).
 
 **Visual: red drag indicator updated**
 
