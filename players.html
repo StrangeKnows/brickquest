@@ -344,6 +344,35 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .pip-empty.pulse-fast { animation-duration: 0.6s; }                       /* <5s since use */
 .pip-empty.pulse-med  { animation-duration: 1.0s; }                       /* 5-30s since use */
 .pip-empty.pulse-slow { animation-duration: 1.8s; }                       /* 30s+ / default  */
+
+/* S015 v0.15.25: gray-crit shield FX. Particle drifts outward + fades,
+   flavor text rises + fades. Both anchored absolutely inside the
+   #my-shield-section container (which has position:relative). */
+@keyframes gray-crit-particle {
+  0%   { opacity: 1;   transform: translate(0, 0) scale(1); }
+  100% { opacity: 0;   transform: translate(var(--pdx), var(--pdy)) scale(0.4); }
+}
+@keyframes gray-crit-text {
+  0%   { opacity: 0;   transform: translate(-50%, 0) scale(0.85); }
+  15%  { opacity: 1;   transform: translate(-50%, -8px) scale(1.08); }
+  60%  { opacity: 1;   transform: translate(-50%, -22px) scale(1); }
+  100% { opacity: 0;   transform: translate(-50%, -42px) scale(0.95); }
+}
+.gray-crit-particle {
+  position:absolute; pointer-events:none;
+  width:5px; height:5px; border-radius:50%;
+  background:#cccccc; box-shadow:0 0 6px #ffffff, 0 0 12px #aaaaaa;
+  animation: gray-crit-particle 0.8s ease-out forwards;
+}
+.gray-crit-text {
+  position:absolute; pointer-events:none;
+  left:50%; top:-4px;
+  font-family:Cinzel,serif; font-size:14px; font-weight:700;
+  letter-spacing:.06em; color:#FFFFFF;
+  text-shadow:0 0 8px #ffffff, 0 0 14px #cccccc, 0 1px 3px rgba(0,0,0,0.9);
+  animation: gray-crit-text 1.4s ease-out forwards;
+  white-space:nowrap;
+}
 .modal-overlay{
   display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);
   z-index:100;align-items:center;justify-content:center;padding:20px;
@@ -628,7 +657,15 @@ function connectWS() {
     }
     if (event === 'rewardPopup') {
       var isRiddleYellow = data.kind === 'brick' && data.color === 'yellow' && G && G.activeEvent && G.activeEvent.evType === 'riddle';
-      if (!isRiddleYellow) showRewardPopup(data);
+      // S015 v0.15.25: shield rewards (crit-only) skip the legacy
+      // blue-bordered popup. Trigger gray-crit FX overlay instead —
+      // particle burst at the shield pip bar + rising/fading flavor
+      // text. Player perceives the crit without click friction.
+      if (data.kind === 'shield') {
+        showGrayCritFx(data);
+      } else if (!isRiddleYellow) {
+        showRewardPopup(data);
+      }
     }
     if (event === 'clueDiscovered') {
       // New clue revealed — render so the Dashboard clues section picks it up.
@@ -1099,12 +1136,12 @@ function _dashHeader(me) {
     <div class="hpbar-outer" id="my-hp-bar">
       <div class="hpbar-inner" style="width:${pct}%;background:${hpBg};${hpShadow}"></div>
     </div>
-    <div style="margin-top:10px;">
+    <div style="margin-top:10px;position:relative;" id="my-shield-section">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
         <span style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.06em;color:#888;">🛡 SHIELD</span>
         <span style="font-family:Cinzel,serif;font-size:14px;font-weight:700;color:${(me.armor||0)>0?'#AAAAAA':'#333'};">${me.armor||0}<span style="font-size:10px;color:#555;"> / ${shieldMax}</span></span>
       </div>
-      <div style="display:flex;flex-wrap:wrap;">${shieldPips}</div>
+      <div style="display:flex;flex-wrap:wrap;" id="my-shield-pips">${shieldPips}</div>
     </div>
     <div class="stats-row" style="margin-top:10px;">
       <div class="stat-chip">
@@ -5433,6 +5470,50 @@ function respondTrade(accept) {
 }
 
 // ── DISARM CHAIN ──
+
+// S015 v0.15.25: gray-crit shield FX. Replaces the legacy blue-bordered
+// rewardPopup for kind:'shield'. Spawns a particle burst at the shield
+// pip bar location + a single rising "Shield crit!" text. Auto-cleans
+// after animation completes.
+function showGrayCritFx(data) {
+  var anchor = document.getElementById('my-shield-section');
+  if (!anchor) return;  // dashboard not rendered (player not on dash tab) — silent skip
+  var rect = anchor.getBoundingClientRect();
+  if (rect.width === 0) return;  // hidden
+  // Particles: 14 small white-gray dots drifting outward from the bar's
+  // center. Each gets a randomized direction via CSS custom properties.
+  var pipsEl = document.getElementById('my-shield-pips');
+  var pipsRect = pipsEl ? pipsEl.getBoundingClientRect() : rect;
+  var cx = (pipsRect.left + pipsRect.right) / 2 - rect.left;
+  var cy = (pipsRect.top + pipsRect.bottom) / 2 - rect.top;
+  var PARTICLE_COUNT = 14;
+  for (var i = 0; i < PARTICLE_COUNT; i++) {
+    var p = document.createElement('div');
+    p.className = 'gray-crit-particle';
+    var ang = (Math.PI * 2) * (i / PARTICLE_COUNT) + (Math.random() - 0.5) * 0.4;
+    var dist = 24 + Math.random() * 36;  // 24-60px outward
+    var dx = Math.cos(ang) * dist;
+    var dy = Math.sin(ang) * dist - 6;  // slight upward bias
+    p.style.left = (cx - 2.5) + 'px';
+    p.style.top  = (cy - 2.5) + 'px';
+    p.style.setProperty('--pdx', dx + 'px');
+    p.style.setProperty('--pdy', dy + 'px');
+    // Slight per-particle delay for a livelier burst
+    p.style.animationDelay = (Math.random() * 0.08) + 's';
+    anchor.appendChild(p);
+    setTimeout(function(el){ if (el.parentNode) el.parentNode.removeChild(el); }, 950, p);
+  }
+  // Flavor text: prefer server label, fall back to generic
+  var label = (data && data.label) ? data.label : 'Shield crit!';
+  var txt = document.createElement('div');
+  txt.className = 'gray-crit-text';
+  txt.textContent = '⚡ ' + label;
+  // Center horizontally over the shield bar
+  txt.style.top = (cy - 18) + 'px';
+  anchor.appendChild(txt);
+  setTimeout(function(){ if (txt.parentNode) txt.parentNode.removeChild(txt); }, 1500);
+}
+
 function showRewardPopup(data) {
   var kind = data.kind || 'gold';
   var color, brickDots = '', detail = '';

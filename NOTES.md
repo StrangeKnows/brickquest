@@ -5945,6 +5945,124 @@ switching classes don't relearn the bar.
 
 ---
 
+### v0.15.25 — Shield-crit FX (board): particles + flavor text replace legacy popup
+
+Playtest readout: tapping gray on the board occasionally produced a
+blue-bordered popup with a shield icon and a "Continue →" button. Two
+issues compounded:
+
+1. **Color was wrong.** Shield is gray-family; popup was blue. Visual
+   identity mismatch.
+2. **Popup added no information.** Shield bar already updates to show
+   the new pip count. The popup demanded a click to dismiss for a
+   reward the player could already see.
+
+Diagnosis: server emits a `rewardPopup` event with `kind: 'shield'`
+ONLY on gray-cast crit (server.js line 2618). Client routed it through
+the generic `showRewardPopup` which used `#4db8ff` (blue) for the
+shield case (legacy from when shield rewards were tied to blue events).
+
+Fix: skip the popup entirely for `kind: 'shield'`. Replace with a
+**gray-crit FX overlay** anchored to the shield pip bar:
+- 14 small white-gray particle dots burst outward from the bar center,
+  fading as they drift (~800ms)
+- Single rising/fading flavor text above the bar — uses the server's
+  label (e.g. "Shield crit! +2 armor")
+- No click required, no friction
+
+Crit feels like a crit. Player perceives it without losing flow.
+
+---
+
+**Implementation (players.html + test_players.html):**
+
+CSS keyframes added:
+
+```css
+@keyframes gray-crit-particle {
+  0%   { opacity: 1; transform: translate(0,0) scale(1); }
+  100% { opacity: 0; transform: translate(var(--pdx), var(--pdy)) scale(0.4); }
+}
+@keyframes gray-crit-text {
+  0%   { opacity: 0; transform: translate(-50%, 0) scale(0.85); }
+  15%  { opacity: 1; transform: translate(-50%, -8px) scale(1.08); }
+  60%  { opacity: 1; transform: translate(-50%, -22px) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -42px) scale(0.95); }
+}
+```
+
+DOM anchors:
+- `#my-shield-section` wrapper (set `position: relative` so absolutely-
+  positioned FX nest correctly)
+- `#my-shield-pips` (used to compute the bar's center for particle
+  origin)
+
+`showGrayCritFx(data)` — JS function:
+- Computes shield bar center from the pip element rect
+- Spawns 14 particles at evenly-spaced angles with randomized distance
+  (24-60px outward, slight upward bias). Each particle gets per-element
+  `--pdx`/`--pdy` CSS custom properties for the drift direction.
+- Spawns one rising flavor-text element above the bar with the server's
+  label (defaults to "Shield crit!" if no label provided)
+- Auto-cleans elements after their animation completes (950ms / 1500ms)
+
+Event handler flow:
+
+```js
+if (event === 'rewardPopup') {
+  if (data.kind === 'shield') {
+    showGrayCritFx(data);  // FX overlay, no popup
+  } else if (!isRiddleYellow) {
+    showRewardPopup(data);  // legacy popup for brick/gold rewards
+  }
+}
+```
+
+Both `players.html` and `test_players.html` updated identically. The
+test_players harness has TWO event-handler entry points (lines ~935
+and ~7238); both updated to route shield → FX, others → popup.
+
+---
+
+**Architectural notes:**
+
+- FX runs only when the dashboard is rendered AND the shield section is
+  visible. If player is on a different tab when the crit fires, the FX
+  is silently skipped (the bar will still show the new value when they
+  return). No queueing or delayed playback — crits are local moments.
+- Server unchanged. The `rewardPopup` event still fires; only the
+  client renders it differently.
+- Legacy `_pendingResult` popup path still exists for `kind: 'brick'`
+  and `kind: 'gold'` rewards, where the popup IS informational
+  (announces gained brick color or gold count).
+
+---
+
+**Net diff:**
+* characters.js / rumble.js / game.js: untouched (board UI only)
+* players.html: ~70 lines (CSS keyframes + showGrayCritFx + dispatch
+  branch + shield section IDs)
+* test_players.html: ~70 lines (mirror)
+* NOTES.md: this entry
+
+**Test focus:**
+
+1. **Gray cast on board, normal (non-crit)** — shield bar updates by
+   +1, no popup, no FX. Identical to before.
+2. **Gray cast on board, crit** — shield bar updates by +2, particle
+   burst fires at the pip bar, "⚡ Shield crit! +2 armor" text rises
+   and fades above the bar. No popup, no Continue button.
+3. **Other reward popups still work** — gold from chests/events, brick
+   from riddles, etc. Standard `_pendingResult` panel renders.
+4. **Player on a non-dashboard tab during crit** — FX silently skipped
+   (anchor not in DOM). No errors. Bar shows new value when they
+   return.
+5. **Visual quality** — particles read as a contained burst (not chaos),
+   text is legible against the dark dashboard background, animation
+   feels snappy not laggy.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
@@ -5952,6 +6070,102 @@ that don't fit a current chunk but should not be lost. Each entry includes
 the seed idea + initial design unpacking so future sessions can pick up
 without starting cold. When an idea is ready to build, move it to a chunk
 in the relevant build's roadmap section.
+
+### Unified board FX system — particle/text vocabulary across all colors (logged S015 v0.15.25)
+
+**Seed:** v0.15.25 shipped a one-off gray-crit FX (particle burst +
+rising flavor text at the shield bar, replacing the legacy blue popup).
+White already has its own particle effects on the board for healing
+events. Other colors will need similar feedback as their board
+mechanics flesh out — but right now there's no shared vocabulary or
+infrastructure for it. Each new effect would be built ad-hoc, drift
+apart, and create another v0.15.25-style cleanup later.
+
+**The case for unification:** every color is going to need a way to
+express on-board moments without the legacy "Continue →" popup
+friction. Crits, special outcomes, status applications, healing,
+protection events, etc. The visual language should be:
+* **Color-coherent** (each color reads instantly as that color's family)
+* **Friction-free** (no clicks, just visual feedback that fades)
+* **Anchored to context** (FX appears at the relevant UI element, not
+  some random screen position)
+* **Composable** (particles + text + glow + ring as building blocks
+  that any color can pick from)
+
+---
+
+**Architectural skeleton (proposed):**
+
+A small FX module in players.html (and mirrored to test_players.html)
+exposing primitives:
+
+```js
+// Spawn N particles in a burst from an anchor element
+fxParticleBurst(anchorId, { color, count, distRange, duration, gravity });
+
+// Rising/fading flavor text above an anchor
+fxFloatText(anchorId, label, { color, duration, riseDistance });
+
+// Pulsing glow ring around an anchor (e.g., HP bar on heal)
+fxPulseRing(anchorId, { color, duration, expandTo });
+
+// Color tint flash on an element (e.g., shield pip flash)
+fxColorFlash(anchorId, { color, duration });
+```
+
+Color-coherent palette per family (drawn from existing BRICK_COLORS):
+* red — `#E24B4A` particles, white-hot tail
+* orange — `#F57C00` shrapnel, sparks
+* yellow — `#F5D000` motes, slow drift
+* green — `#1D9E75` glow, organic pulse
+* blue — `#4db8ff` shimmer, water-like
+* purple — `#7B2FBE` arcane sparks, faster
+* white — `#EFEFEF` light motes (current heal FX is the prototype)
+* gray — `#AAAAAA` dust/spark (current shield-crit FX is the prototype)
+* black — `#552288` (purple-tinged) wisp/smoke
+
+Each color picks 1-2 primitives appropriate to its identity. Not every
+color uses every primitive — black might lean glow + smoke, yellow
+might lean motes + text, etc.
+
+---
+
+**Anchor system:**
+
+Standard DOM IDs on key player UI elements so any FX can target them:
+* `#my-hp-bar` (heal events, damage, HP changes) — already exists
+* `#my-shield-section` (gray events) — added in v0.15.25
+* `#my-shield-pips` (specific pip-level FX) — added in v0.15.25
+* `#my-brick-bar` (cast events on bricks)
+* `#my-stats-row` (gold/cheese gains)
+* Per-brick chip element (color-specific cast feedback)
+
+Each FX call takes an anchor ID and computes positions relative to its
+rect. Skips silently if anchor isn't visible (player on different tab).
+
+---
+
+**Migration path when this lands:**
+
+1. Extract the v0.15.25 `showGrayCritFx` into the shared `fxParticleBurst`
+   + `fxFloatText` primitives. Gray-crit becomes a thin caller.
+2. Audit existing white heal FX, refactor to use the same primitives.
+3. Add color-specific helpers (`grayCritFx`, `whiteHealFx`, `redCritFx`,
+   etc.) as thin wrappers that pick the right primitive cocktail per
+   color's identity.
+4. Replace remaining `_pendingResult` popup paths that don't add
+   information (audit each `_pendingResult = ...` site to decide if it's
+   informational or noise).
+
+**Decision deferred to:** when 2+ additional colors need on-board FX
+beyond what white/gray already have. At that point, the cost of
+building the unified system is justified by the savings on those
+colors. Until then, gray-crit and white-heal stand as independent
+prototypes.
+
+**Current state:** v0.15.25 gray-crit FX is INTENTIONALLY one-off. Not
+DRY-extracted yet. When this parking-lot entry activates, it absorbs
+that code into the shared system.
 
 ### Spike aura → fusion-gate candidate (logged S015 v0.15.22)
 
