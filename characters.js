@@ -529,6 +529,32 @@ function tapScaleMult(cls, color, owned) {
 var BASE = 5;
 var BASE_R = 50;
 
+// ── BRICK ORDER (S015 v0.15.24) ─────────────────────────────────────────
+// Master display order shared by ALL UI surfaces (rumble brick bar,
+// players.html assembly, test_players.html). Color wheel with neutrals
+// tail (white, gray, black after the spectrum). Provides muscle memory:
+// every color always appears in the same position regardless of class.
+//
+// Side split convention (rumble bar): index parity drives left/right of
+// the player avatar. Even index → right side, odd index → left side.
+// Class identity affects ONLY styling (border, background tint via
+// uiColor/uiBg), never position.
+//
+// Note: not every class will have a kit-balanced split at battle start
+// (BS starts with gray+orange — both on left; FX starts with white+black
+// — both on right). That's an acceptable trade-off for muscle memory
+// across the full roster. Classes' kits fill in over time.
+var BRICK_ORDER = ['red','orange','yellow','green','blue','purple','white','gray','black'];
+
+// Side a given color renders on per the rumble bar split convention.
+// 'right' for even indexes, 'left' for odd. Returns 'right' if color
+// is somehow not in BRICK_ORDER (shouldn't happen, but defaults safely).
+function brickOrderSide(color) {
+  var idx = BRICK_ORDER.indexOf(color);
+  if (idx < 0) return 'right';
+  return (idx % 2 === 0) ? 'right' : 'left';
+}
+
 // Per-color output profile. Each color uses only the keys relevant to it.
 // All values are FRACTIONS OF BASE — e.g. red.dmg=0.60 means red's base
 // damage is 5×0.60=3 dmg before scaling. Calibrated to preserve current
@@ -709,6 +735,8 @@ if (typeof window !== 'undefined') {
   window.BASE = BASE;
   window.BASE_R = BASE_R;
   window.COLOR_PROFILE = COLOR;
+  window.BRICK_ORDER = BRICK_ORDER;
+  window.brickOrderSide = brickOrderSide;
   window.tierCurve = tierCurve;
   window.effectiveAt = effectiveAt;
   // Compatibility wrapper
@@ -729,6 +757,8 @@ if (typeof module !== 'undefined' && module.exports) {
     brickTier,
     tapScaleMult,
     BASE, BASE_R,
+    BRICK_ORDER,
+    brickOrderSide,
     COLOR_PROFILE: COLOR,
     tierCurve,
     effectiveAt,

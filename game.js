@@ -7,7 +7,16 @@ const BRICK_COLORS = {
   gray:'#AAAAAA', purple:'#7B2FBE', yellow:'#F5D000',
   orange:'#F57C00', black:'#6a5870'
 };
-const BRICK_NAMES = Object.keys(BRICK_COLORS);
+// S015 v0.15.24: derive BRICK_NAMES from characters.js BRICK_ORDER
+// (single source of truth for display order across rumble + players +
+// test_players). Falls back to Object.keys(BRICK_COLORS) if BRICK_ORDER
+// isn't yet available (e.g. in Node before characters.js loads).
+// Browser load order MUST be: characters.js BEFORE game.js.
+const BRICK_NAMES = (typeof window !== 'undefined' && window.BRICK_ORDER)
+  ? window.BRICK_ORDER.slice()
+  : (typeof require !== 'undefined' && require('./characters.js').BRICK_ORDER)
+    ? require('./characters.js').BRICK_ORDER.slice()
+    : Object.keys(BRICK_COLORS);
 
 // PLAYER_META lives in characters.js now (Phase 2 consolidation). In Node,
 // we require it so server.js's existing import pattern keeps working. In the

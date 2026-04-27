@@ -469,8 +469,8 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   <div id="rumble-exit-overlay"></div>
 </div>
 
-<script src="game.js"></script>
 <script src="characters.js"></script>
+<script src="game.js"></script>
 <script src="rumble.js"></script>
 <script>
 // ═══════════════════════════════════════════
@@ -605,7 +605,11 @@ function connectWS() {
       toast(declinerName + ' declined the trade', 'warn');
     }
     if (event === 'snapstepDisarmChain') { handleDisarmChain(data); }
-    if (event === 'error') { toast(data.msg, 'warn'); }
+    if (event === 'error') {
+      // S015 DIAGNOSTIC: tracing full-HP toast investigation
+      console.log('[DIAG error received]', data);
+      toast(data.msg, 'warn');
+    }
     if (event === 'forceGateResult') {
       var gateMsg = data.success
         ? 'Gate forced open! — took 2 damage'
@@ -1455,12 +1459,16 @@ function _holdEnd(cancelled, skipClearOverlay) {
 // content is designed in 0.16+. The gesture mechanic ships now; the
 // payoff math waits for real ability design.
 function _fireTierAction(color, tier, target) {
+  // S015 DIAGNOSTIC: trace white tap path for full-HP toast investigation
+  console.log('[DIAG _fireTierAction]', { color: color, tier: tier, target: target });
   // White actions — target is an ally class id (or null for self)
   if (color === 'white') {
     if (target === null) {
+      console.log('[DIAG] white self-heal → client.healPlayer(' + MY_CLASS + ')');
       // Self heal — single-arg call (source defaults to target)
       client.healPlayer(MY_CLASS);
     } else {
+      console.log('[DIAG] white ally-heal → client.healPlayer(' + target + ', ' + MY_CLASS + ')');
       // Ally heal — pass MY_CLASS as source (I pay), target as target class
       client.healPlayer(target, MY_CLASS);
     }

@@ -5800,6 +5800,151 @@ if (color === 'blue')   fireOverloadBlue(count, oxP, oyP);
 
 ---
 
+### v0.15.24 — Tap-orange radius 0.75× + uniform brick ordering across all surfaces
+
+Two changes in one push:
+
+1. **Tap-orange radius bumped from 0.5× to 0.75×** of the canonical
+   `fx.radiusPx`. Previously felt too small for the trap-at-feet
+   role. 0.75× retains the "sharper than tap-drag, focused at feet"
+   identity but with meaningful coverage area.
+
+2. **Uniform brick ordering across rumble + players + test_players**
+   for muscle memory: same color always lands in the same position,
+   regardless of class.
+
+---
+
+**Tap-orange radius (rumble.js):**
+
+```js
+// startOrangeTrap, tap-at-feet branch
+spawnSpikeTrap(player.x, player.y, clampRadiusToArena(fx.radiusPx * 0.75), ...);
+```
+
+Was 0.5. Single-line change. Affects all classes (no schema gate).
+
+---
+
+**Brick ordering — context:**
+
+Three different orderings had drifted:
+
+| Surface | Order |
+|---|---|
+| rumble.js `ALL_BRICK_COLORS` | red, white, yellow, blue, orange, gray, green, purple, black |
+| game.js `BRICK_NAMES` (via `Object.keys(BRICK_COLORS)`) | red, blue, green, white, gray, purple, yellow, orange, black |
+| rumble.js `_distributeBricks` (sort) | per-class by signature/secondary tier |
+
+players.html consumed `BRICK_NAMES`, rumble consumed `ALL_BRICK_COLORS` for filtering and tier-sort for display. Side splits were class-relative
+(sig on right, sec on left).
+
+**Pain:** muscle memory broken. Each class's brick bar layout differed.
+Switching classes meant relearning where each color lives.
+
+---
+
+**Brick ordering — fix:**
+
+**Single source of truth in characters.js:**
+
+```js
+var BRICK_ORDER = ['red','orange','yellow','green','blue','purple','white','gray','black'];
+
+function brickOrderSide(color) {
+  var idx = BRICK_ORDER.indexOf(color);
+  if (idx < 0) return 'right';
+  return (idx % 2 === 0) ? 'right' : 'left';
+}
+```
+
+Color-wheel sequence (red → purple) with neutrals tail (white, gray,
+black). Index parity drives the side split: even → right, odd → left.
+
+**Consumption:**
+
+* **rumble.js** — `ALL_BRICK_COLORS` now sourced from `window.BRICK_ORDER`
+  (with a hardcoded fallback for load-order safety). `_distributeBricks`
+  rewritten: walks the master order, routes each color to its
+  index-parity side, filters by player kit. Class identity no longer
+  affects POSITION — only styling (uiColor/uiBg already drive class
+  visual identity).
+* **game.js** — `BRICK_NAMES` derives from `window.BRICK_ORDER` (browser)
+  or `require('./characters.js').BRICK_ORDER` (Node). Falls back to
+  `Object.keys(BRICK_COLORS)` if neither is available.
+* **players.html / test_players.html** — `<script>` load order swapped
+  so characters.js loads BEFORE game.js. This makes `window.BRICK_ORDER`
+  available when game.js evaluates its `BRICK_NAMES` derivation.
+
+---
+
+**Battle-start layout per class** (after the change):
+
+| Class | Start kit | Left | Right |
+|---|---|---|---|
+| Breaker | red, gray | gray | red |
+| Formwright | blue, purple | purple | blue |
+| Snapstep | orange, red | orange | red |
+| Blocksmith | gray, orange | orange, gray | (empty) |
+| Fixer | white, black | (empty) | white, black |
+| Wild One | green, yellow | green | yellow |
+
+Trade-off: BS and FX start with both bricks on one side. With three
+overlapping color affinities (red, orange, gray all appear in 2+
+classes' starts), no static order can satisfy "split at start" for all
+six classes simultaneously. We accepted this for muscle-memory
+consistency: every color always lives in the same spot. Players
+switching classes don't relearn the bar.
+
+---
+
+**Architectural notes:**
+
+* `BRICK_ORDER` is a constant, not a function. No premature flexibility.
+* `brickOrderSide(color)` helper added to characters.js for any future
+  code that needs the side computation outside the existing rumble
+  distribution.
+* `Object.keys(BRICK_COLORS)` order is no longer load-bearing for any
+  display surface. The map is just hex-color lookup; iteration is
+  driven by BRICK_ORDER.
+* Load-order swap in HTML files is the single side effect. Verified
+  game.js's `var PLAYER_META;` doesn't reset `window.PLAYER_META`
+  written earlier by characters.js (var declaration after assignment
+  preserves the value).
+
+---
+
+**Net diff:**
+* characters.js: ~30 lines (BRICK_ORDER constant + brickOrderSide
+  helper + window/module exports)
+* rumble.js: ~25 lines (ALL_BRICK_COLORS now derived; _distributeBricks
+  rewritten to use master-order index parity; tap-orange 0.5→0.75)
+* game.js: ~7 lines (BRICK_NAMES derivation rewrite)
+* players.html: 2 lines (script tag order swap)
+* test_players.html: 2 lines (script tag order swap)
+
+**Test focus:**
+
+1. **Tap-orange feels meaningfully bigger.** Tap-at-feet trap has 1.5×
+   the previous radius (0.5 → 0.75). Should be visually obvious.
+2. **Switch between classes (BK, FW, SS) and observe brick bar.**
+   Same color should always be in the same position. Red always
+   right; orange always left; yellow always right; etc.
+3. **BS or FX starting layout** — both bricks on one side at battle
+   start. Not balanced but each color is still in its expected
+   master-order position.
+4. **players.html dashboard** — `_dashBrickBar` now iterates in
+   master order (BRICK_NAMES = BRICK_ORDER). Visual order matches
+   rumble.
+5. **No regressions on PLAYER_META, CHARACTERS, or any other
+   characters.js global** — the load order swap is the only structural
+   change to script tags.
+6. **Architectural verification:** edit `BRICK_ORDER` in characters.js.
+   Both rumble and players UIs should change order consistently with
+   no other edits.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

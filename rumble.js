@@ -2445,7 +2445,13 @@ function drawOverloadCharge() {
 //   • Additional bricks (baseline colors carried in) alternate right/left
 // Sort priority: tier (sig > sec > base) then alphabetical inside each tier.
 // ═══════════════════════════════════════════════════
-var ALL_BRICK_COLORS = ['red','white','yellow','blue','orange','gray','green','purple','black'];
+// S015 v0.15.24: ALL_BRICK_COLORS is now derived from characters.js
+// BRICK_ORDER (master display order) so rumble + players + test_players
+// share a single source of truth. Fallback array preserved for cases
+// where characters.js hasn't loaded yet (load-order safety net).
+var ALL_BRICK_COLORS = (typeof window !== 'undefined' && window.BRICK_ORDER)
+  ? window.BRICK_ORDER.slice()
+  : ['red','orange','yellow','green','blue','purple','white','gray','black'];
 var TEST_BRICKS  = ALL_BRICK_COLORS; // kept for legacy refs
 
 var blueDragActive = false;
@@ -2471,18 +2477,24 @@ var whiteDragPos = null;
 // Rule E (sig right, sec left, alternate beyond that).
 function _distributeBricks(colors) {
   if (!player) return { left: [], right: [] };
-  var cls = player.cls;
-  var tierRank = { signature: 0, secondary: 1, baseline: 2 };
-  var sorted = colors.slice().sort(function(a, b) {
-    var ta = tierRank[brickTier(cls, a)];
-    var tb = tierRank[brickTier(cls, b)];
-    if (ta !== tb) return ta - tb;
-    return a < b ? -1 : a > b ? 1 : 0;
-  });
-  // sig (first in sorted) goes right; sec (second) goes left; then alternate.
+  // S015 v0.15.24: muscle-memory layout. Each color renders on a fixed
+  // side determined by its index in BRICK_ORDER (master sequence in
+  // characters.js). Even index → right, odd → left. Class affinity no
+  // longer affects POSITION — only styling (uiColor/uiBg already drive
+  // the visual class identity per-color).
+  //
+  // Filter by player kit AFTER side assignment so positions stay stable
+  // when a color is missing (no shifting). The colors array passed in is
+  // already filtered to brickMax > 0; we just route each to its side.
   var right = [], left = [];
-  sorted.forEach(function(c, i) {
-    // i=0 → right, i=1 → left, i=2 → right, i=3 → left, ...
+  // Walk the master order so output is sorted by BRICK_ORDER index.
+  // (Even though `colors` is already filtered, we loop the master order
+  // and pick out the present ones — guarantees deterministic output.)
+  var order = (typeof window !== 'undefined' && window.BRICK_ORDER)
+    ? window.BRICK_ORDER
+    : ALL_BRICK_COLORS;
+  order.forEach(function(c, i) {
+    if (colors.indexOf(c) < 0) return;  // not in player's kit
     if (i % 2 === 0) right.push(c);
     else             left.push(c);
   });
@@ -8546,8 +8558,10 @@ function startOrangeTrap(ox, oy, tier) {
   if (isDrag) {
     spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, crit, chainOpts);
   } else {
-    // Tap-on-self trap is half-radius (sharper, focused at feet) but full damage.
-    spawnSpikeTrap(player.x, player.y, clampRadiusToArena(fx.radiusPx * 0.5), fx.dmg, false, crit, chainOpts);
+    // Tap-on-self trap is 0.75-radius (sharper than tap-drag, focused at
+    // feet) but full damage. Was 0.5 in earlier sessions — felt too small
+    // for the trap's spatial role; bumped to 0.75 in S015 v0.15.24.
+    spawnSpikeTrap(player.x, player.y, clampRadiusToArena(fx.radiusPx * 0.75), fx.dmg, false, crit, chainOpts);
   }
 }
 
