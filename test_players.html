@@ -896,7 +896,8 @@ function connectWS() {
       G = data;
       // Clear pending trade if server has no active trade (accepted, declined, or expired)
       if (_pendingTradeSent && !G.pendingTrade) _pendingTradeSent = null;
-      // Rumble runtime hook — see rumble-manager block after this function.
+      // Rumble runtime hook: sync the local Rumble instance to the server's
+      // rumbleBattle state. See rumble-manager block below for transition logic.
       syncRumbleFromState(G);
       render();
     }
@@ -937,8 +938,9 @@ function connectWS() {
     }
     if (event === 'rewardPopup') {
       var isRiddleYellow = data.kind === 'brick' && data.color === 'yellow' && G && G.activeEvent && G.activeEvent.evType === 'riddle';
-      // Shield rewards skip the legacy popup — boardFx fires a particle
-      // burst + rising flavor text over the shield pip bar instead.
+      // Shield rewards (crit-only) skip the legacy blue-bordered popup —
+      // boardFx fires a particle burst + rising flavor text over the
+      // shield pip bar. Player perceives the crit without click friction.
       if (data.kind === 'shield') {
         BoardFx.fire('shieldCrit', '#my-shield-section', data);
       } else if (!isRiddleYellow) {
@@ -1230,25 +1232,25 @@ function render() {
 // updateGrayResult removed — gray result shown via restoreActiveEvent/showLandingResult
 
 function restoreActiveEvent() {
-  if (!G || !G.activeEvent) return;
+  if (!G || !G.activeEvent) { return; }
   // If this is a monster event and we have a pending rumble battle for this player,
   // the rumble card handles the display instead. Skip the generic landing-result card.
-  if (G.activeEvent.evType === 'monster' && G.pendingRumbleBattle && G.pendingRumbleBattle.cls === MY_CLASS) return;
+  if (G.activeEvent.evType === 'monster' && G.pendingRumbleBattle && G.pendingRumbleBattle.cls === MY_CLASS) { return; }
   // Also skip during an active rumble battle — rumble card shows the state.
-  if (G.rumbleBattle && G.rumbleBattle.cls === MY_CLASS) return;
+  if (G.rumbleBattle && G.rumbleBattle.cls === MY_CLASS) { return; }
   var isRiddleEvent = G.activeEvent.evType === 'riddle';
   var isRedTrialEvent = G.activeEvent.redVariant === 'trial_of_hand';
-  if (!isRiddleEvent && !isRedTrialEvent && G.activeEvent.cls !== MY_CLASS) return;
+  if (!isRiddleEvent && !isRedTrialEvent && G.activeEvent.cls !== MY_CLASS) { return; }
   // Allow re-render even if resolved:true, as long as there's a result to show
   if (G.activeEvent.resolved
       && !G.activeEvent.blueResult && !G.activeEvent.trapResult && !G.activeEvent.goldResult
       && !G.activeEvent.goldVariant && !G.activeEvent.riddleActive && !G.activeEvent.riddleWinner
       && !G.activeEvent.riddleExpired && !G.activeEvent.grayRubbleResult
       && !G.activeEvent.redResult && !G.activeEvent.purpleResult && !G.activeEvent.whiteResult
-      && !G.activeEvent.blackResult && !G.activeEvent.greenResult) return;
+      && !G.activeEvent.blackResult && !G.activeEvent.greenResult) { return; }
   var ev = G.activeEvent;
   var el = document.getElementById('landing-result');
-  if (!el) return;
+  if (!el) { return; }
 
   // v4: No early-return on cached content — always re-render. Previously a guard checked
   // el.innerHTML.includes('roll-display') which short-circuited gray/red/purple/white/black/green
@@ -1277,8 +1279,9 @@ function restoreActiveEvent() {
     var burstKey = (ev.cls||'') + '|' + (ev.roll||'') + '|' + (ev.evType||'');
     if (_burstFiredFor !== burstKey) {
       _burstFiredFor = burstKey;
-      burstParticles(evData.type || 'monster');
+      burstParticles(evData.type || 'nothing');
     }
+  } else {
   }
 }
 
@@ -4813,14 +4816,15 @@ function startTorchGame() {
     ctx.font = (OBJ_R*1.8)+'px serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    if (obj.type === 'coin')   ctx.fillText('🪙', obj.x, obj.y);
-    else                       ctx.fillText('🧀', obj.x, obj.y);
+    if (obj.type === 'coin') ctx.fillText('🪙', obj.x, obj.y);
+    else                     ctx.fillText('🧀', obj.x, obj.y);
     ctx.restore();
   }
 
   function endGame(wrongTap) {
     done = true;
     cancelAnimationFrame(animFrame);
+    // Fade the canvas out so the 500-800ms gap before the result card isn't a black stare
     if (canvas) {
       canvas.style.transition = 'opacity 0.3s';
       canvas.style.opacity = '0';
@@ -5528,15 +5532,22 @@ function showGateResult(msg, success) {
 }
 
 function showDashResult(data) {
+  // Summarize outcome: any gate events, damage, final destination
   var events = data.gateEvents || [];
   var hadBreak = events.some(function(g){ return g.kind === 'break_success'; });
   var hadFail  = events.some(function(g){ return g.kind === 'break_fail'; });
   var hadKeyStop = events.some(function(g){ return g.kind === 'key_stop'; });
   var flavor = data.flavor || {};
   var lines = [];
-  if (hadKeyStop) lines.push('A locked magical gate bars the way. The dash ends.');
-  if (hadBreak)   lines.push(flavor.success || 'Crashed through!');
-  if (hadFail)    lines.push(flavor.fail || 'The gate held.');
+  if (hadKeyStop) {
+    lines.push('A locked magical gate bars the way. The dash ends.');
+  }
+  if (hadBreak) {
+    lines.push(flavor.success || 'Crashed through!');
+  }
+  if (hadFail) {
+    lines.push(flavor.fail || 'The gate held.');
+  }
   if (!events.length) {
     lines.push((data.forcedByDM ? '[DM forced] ' : '') + 'Dashed ' + (data.end - data.start) + ' space' + ((data.end-data.start)===1?'':'s') + '.');
   }

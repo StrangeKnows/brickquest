@@ -2444,22 +2444,13 @@ function buildPrepareActions(me) {
 // Action registry — called when a leaf's Use button is pressed
 var _actionRegistry = null;
 function runAction(id) {
-  if (!_actionRegistry) {
-    _actionRegistry = {};
-    var me0 = G && G.players ? G.players[MY_CLASS] : null;
-    if (me0) {
-      var list = buildPrepareActions(me0);
-      var walk = function(arr) { arr.forEach(function(a){ _actionRegistry[a.id] = a.onUse; if (a.children) walk(a.children); }); };
-      walk(list);
-    }
-  }
   // Rebuild registry each call — availability may have changed
   _actionRegistry = {};
   var me = G && G.players ? G.players[MY_CLASS] : null;
   if (me) {
     var actions = buildPrepareActions(me);
-    var walk2 = function(arr) { arr.forEach(function(a){ _actionRegistry[a.id] = a.onUse; if (a.children) walk2(a.children); }); };
-    walk2(actions);
+    var walk = function(arr) { arr.forEach(function(a){ _actionRegistry[a.id] = a.onUse; if (a.children) walk(a.children); }); };
+    walk(actions);
   }
   var fn = _actionRegistry[id];
   if (fn) fn();
@@ -4547,7 +4538,7 @@ function startTorchGame() {
   var numDecoys = totalCoins + 2 + Math.floor(Math.random() * 2);
   var objects = [];
   for (var i = 0; i < totalCoins; i++) objects.push({ type:'coin', found:false, tapped:false, x:0, y:0 });
-  for (var i = 0; i < numDecoys; i++) objects.push({ type: 'cheese', found:false, tapped:false, x:0, y:0 });
+  for (var i = 0; i < numDecoys; i++) objects.push({ type: DECOY_POOL[i % DECOY_POOL.length], found:false, tapped:false, x:0, y:0 });
   for (var i = objects.length-1; i>0; i--) {
     var j = Math.floor(Math.random()*(i+1)); var t=objects[i]; objects[i]=objects[j]; objects[j]=t;
   }

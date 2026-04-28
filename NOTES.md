@@ -6801,6 +6801,156 @@ This decision drives the canonical version in v0.15.33.
 
 ---
 
+### v0.15.33 — Spine extract step 2: reconcile divergence
+
+Pre-extract validation push. Apply the canonical version of each
+SEMANTIC function from the v0.15.32 catalog. Goal: shared-spine
+byte-identical at the function-body level for all 187 shared
+function definitions (after normalization).
+
+**Goal achieved:**
+- IDENTICAL functions (first-occurrence): **187** (up from 179)
+- SEMANTIC functions remaining: **0**
+- players.html-only functions: **0** (was 1: `walk2`, retired)
+- test_players.html-only functions: **1** (`testSwitch`, legit harness)
+
+---
+
+**Reconciliations applied:**
+
+1. **`runAction` (players.html)** — bug fix. Removed the dead
+   duplicate registry-build block (`if (!_actionRegistry) { ... }`)
+   that ran into `_actionRegistry = {};` immediately afterward.
+   Test_players.html version is now canonical: build registry
+   fresh each call, no duplicate. **`walk2` retired** as a side
+   effect (it only existed inside the dead duplicate block).
+
+2. **`startTorchGame` (both files)** — bug fix in players.html
+   (DECOY_POOL was declared but unused, line hardcoded `'cheese'`).
+   Players now uses `DECOY_POOL[i % DECOY_POOL.length]`. Cosmetic
+   alignment in test_players reverted to players canonical
+   (multi-comment, no whitespace alignment in if/else lines).
+
+3. **`restoreActiveEvent` (test_players.html)** — reconcile to
+   players canonical: brace-style returns + `'nothing'` fallback
+   for `burstParticles(evData.type || ...)`. Decision recorded:
+   `'nothing'` lets upstream-missing-type bugs surface visibly
+   rather than masking them with a `'monster'` default.
+
+4. **`showDashResult` (test_players.html)** — reconcile to players
+   canonical: multi-line if-blocks with explanatory comment.
+
+5. **`connectWS` first-occurrence (test_players.html)** — comment
+   text reconciled to players canonical (rumble runtime hook
+   description and shield rewards description). Code itself was
+   identical; only comment phrasing differed.
+
+---
+
+**Findings during reconciliation:**
+
+The catalog only inspected first-occurrence function definitions.
+Looking deeper revealed test_players.html has **duplicate function
+definitions** for `connectWS`, `setConn`, `buildTabs`, and
+`switchTab` — once at the first-occurrence position (~line 889-1170,
+identical to spine) and again in the harness section (~line
+7085-7170, with var/function-style and harness-specific behavior).
+
+In JavaScript, the LAST function declaration in a scope wins. So
+the runtime versions in test_players.html are the harness-section
+overrides at ~line 7085+, not the first-occurrence spine versions.
+
+**This is acceptable but worth flagging:** the harness override
+pattern is silent and could surprise future edits. A future v0.15.x
+patch could clean it up by deleting the second-occurrence
+definitions (after verifying the harness doesn't rely on the
+override behavior). For v0.15.33 we're leaving the pattern intact
+because:
+- Removing overrides risks harness behavior change (especially
+  `setConn` becoming a real function instead of no-op)
+- The first-occurrence definitions are identical to spine — they
+  WILL extract cleanly to players-core.js in v0.15.34
+- The override pattern is contained to a small region in test_players
+
+**Action item for v0.15.34:** when extracting, the shared body
+contains the first-occurrence (spine) versions. test_players' shell
+keeps the harness-section overrides. Both load players-core.js;
+test_players' harness section then re-defines what it needs.
+
+---
+
+**Files changed in v0.15.33:**
+
+- `players.html` — `runAction` dead duplicate removed (−10 lines);
+  `startTorchGame` DECOY_POOL fix (1-line bug fix)
+- `test_players.html` — `startTorchGame` cosmetic re-align +
+  comment restoration; `restoreActiveEvent` reconciled to players
+  brace style + `'nothing'` fallback; `showDashResult` reconciled
+  to players multi-line style; `connectWS` first-occurrence comment
+  text reconciled
+- `NOTES.md` — this entry
+
+UNTOUCHED:
+- `boardFx.js`, `boardFx.css`, `rumble.js`, `characters.js`,
+  `game.js`, `server.js`, `rumble.css`, `dm_screen.html`,
+  `rumble_test.html`, `arena_test.html`, `serve.sh`, `save.sh`
+
+---
+
+**Test focus:**
+
+This is a no-behavior-change push. Functional surface should be
+identical to v0.15.32. Specifically test:
+
+1. **`runAction` still works** — try multiple board actions in a row
+   (the previous duplicate registry-build was redundant but
+   functional; the simplified version runs the rebuild on every call,
+   same as before).
+
+2. **`startTorchGame` (gold game / torch event)** — drop into a gold
+   event with a torch game. Decoys should still appear as cheese
+   (since `DECOY_POOL = ['cheese']` currently). When DECOY_POOL is
+   later expanded, both files will pick up new decoys
+   automatically — that's the actual benefit of this fix.
+
+3. **`restoreActiveEvent`** — land on any board event. Behavior
+   identical to before. `'nothing'` fallback only triggers if
+   `evData.type` is missing (would be an upstream bug); fallback
+   should produce the generic-burst behavior in `burstParticles`.
+
+4. **`showDashResult`** — fire a red dash. Result card identical to
+   before in both files.
+
+5. **`connectWS` (test_players)** — connect the test harness, switch
+   between class tabs, verify per-class connection dots still update
+   (the harness override at line ~7085+ is what runs; the spine
+   version at line ~889 is dead code in test_players runtime).
+
+If any of these regress, the reconciliation has a problem and we
+fix before v0.15.34 extraction.
+
+---
+
+**Pre-extract checkpoint validation:**
+
+```
+$ python3 _recheck.py
+IDENTICAL (first-occurrence): 187
+SEMANTIC  (first-occurrence): 0
+players.html-only: []
+test_players.html-only: ['testSwitch']
+```
+
+187 functions in the shared spine, byte-identical (after
+normalization). v0.15.34 extraction is now bounded to:
+- Move identical first-occurrence function definitions to
+  `players-core.js`
+- Keep harness-section overrides + `testSwitch` in
+  test_players.html shell
+- Both HTMLs become shells loading the new core
+
+---
+
 
 ### Session 015 Process Retrospective
 
