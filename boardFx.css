@@ -1,0 +1,41 @@
+/* ═══════════════════════════════════════════════════
+ * boardFx.css — styles for boardFx.js presets
+ *
+ * All FX nodes are children of #board-fx-overlay (a position:fixed
+ * viewport-spanning container appended to document.body by the JS).
+ * Children use position:absolute; left/top are set in viewport pixels
+ * by the JS at fire time. The translate(-50%) in text keyframes
+ * horizontally centers the node on its left coordinate.
+ *
+ * To add styles for a new preset: add keyframes + class here, point
+ * the preset function at the className.
+ * ═══════════════════════════════════════════════════ */
+
+/* ── shieldCrit preset ──
+ * Particle drifts outward + fades. Flavor text rises + fades.
+ * Migrated from players.html / test_players.html inline <style>
+ * blocks (formerly v0.15.25). Behavior unchanged. */
+@keyframes gray-crit-particle {
+  0%   { opacity: 1;   transform: translate(0, 0) scale(1); }
+  100% { opacity: 0;   transform: translate(var(--pdx), var(--pdy)) scale(0.4); }
+}
+@keyframes gray-crit-text {
+  0%   { opacity: 0;   transform: translate(-50%, 0) scale(0.85); }
+  15%  { opacity: 1;   transform: translate(-50%, -8px) scale(1.08); }
+  60%  { opacity: 1;   transform: translate(-50%, -22px) scale(1); }
+  100% { opacity: 0;   transform: translate(-50%, -42px) scale(0.95); }
+}
+.gray-crit-particle {
+  position: absolute; pointer-events: none;
+  width: 5px; height: 5px; border-radius: 50%;
+  background: #cccccc; box-shadow: 0 0 6px #ffffff, 0 0 12px #aaaaaa;
+  animation: gray-crit-particle 0.8s ease-out forwards;
+}
+.gray-crit-text {
+  position: absolute; pointer-events: none;
+  font-family: Cinzel, serif; font-size: 14px; font-weight: 700;
+  letter-spacing: .06em; color: #FFFFFF;
+  text-shadow: 0 0 8px #ffffff, 0 0 14px #cccccc, 0 1px 3px rgba(0,0,0,0.9);
+  animation: gray-crit-text 1.4s ease-out forwards;
+  white-space: nowrap;
+}

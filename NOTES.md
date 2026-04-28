@@ -6247,6 +6247,215 @@ v0.15.26 redDashDiag removal precedent.
 
 ---
 
+### v0.15.29 — boardFx scaffold + gray-crit fix (one push)
+
+The v0.15.28 diagnostic confirmed the hypothesis from S015 close: the
+gray-crit FX nodes were being orphaned by `renderDashboard()` ~1ms
+after attach. Every state broadcast wipes `#pane-dashboard.innerHTML`,
+which destroys the `#my-shield-section` subtree the FX was attached to.
+Particles continued running their CSS animations in detached DOM
+fragments — invisible to the user, eventually GC'd.
+
+The fix is the unification scaffold itself: a new module that owns a
+viewport-fixed overlay container outside the render-wipe zone. FX
+attaches there, completes its full animation lifecycle regardless of
+how often render() fires.
+
+**Architectural commitment:** this is the first of four planned board
+modules unifying the cross-cutting client subsystems that currently
+sprawl across players.html and test_players.html. Roadmap:
+
+| Module | Status | Scope |
+|---|---|---|
+| `boardFx.js`     | **v0.15.29 — shipping** | ambient feedback (particles, rising text, fly-icon, toast) |
+| `boardModal.js`  | next | must-click cards (results, prompts, bargains) |
+| `boardSocial.js` | next | trade / gift / party flows |
+| `boardEvents.js` | next | event minigames (torch, vine, cipher, etc.) |
+
+After all four land, players.html drops ~1500-2500 lines and every
+cross-cutting concern has a single home. Class identity work resumes
+on cleaned ground; new FX/modals land as preset entries, not new
+ad-hoc functions.
+
+---
+
+**What ships in v0.15.29 (locked scope):**
+
+NEW FILES:
+- `boardFx.js` — schema-driven FX module
+- `boardFx.css` — preset styles (gray-crit migrated)
+
+MODIFIED FILES:
+- `players.html` — load new files; remove inline gray-crit CSS,
+  showGrayCritFx, _grayCritDiag flag/state/logging block in
+  renderDashboard; redirect shield dispatch to `BoardFx.fire`
+- `test_players.html` — same as players.html (paired, rule #3).
+  Both dispatch sites updated (the verbose one ~line 938 and the
+  compact one-liner ~line 7316)
+- `package.json` / `package-lock.json` — bump 0.15.28 → 0.15.29
+- `NOTES.md` — this entry
+
+UNTOUCHED:
+- `dm_screen.html`, `rumble.js`, `characters.js`, `game.js`,
+  `server.js`, `rumble.css`, `serve.sh`, `save.sh`,
+  `rumble_test.html`, `arena_test.html`
+
+**Why dm_screen.html stays out:** DM doesn't fire FX in v0.15.29.
+Adding the script tag now would be speculative flexibility (rule #14
+anti-elegance pattern). When DM-side FX actually surfaces, we add the
+tag then.
+
+---
+
+**boardFx.js architecture:**
+
+Single IIFE attaching `BoardFx` to `window`. Internal state: one
+overlay element `#board-fx-overlay`, lazily created on first `fire()`
+call, appended to `document.body`. Overlay is `position:fixed; inset:0;
+pointer-events:none; z-index:90; overflow:visible` — covers the
+viewport, never blocks input, never affects layout.
+
+**Public API (v0.15.29 minimal):**
+```js
+BoardFx.fire(presetName, anchor, data)
+  // anchor: Element OR selector string
+  // data:   optional { label, ... } payload from caller
+BoardFx.PRESETS  // schema map; presets[name] is fn(pos, data)
+```
+
+**Internal primitives** (reusable across presets):
+- `_particleBurst(cx, cy, opts)` — N particles at (cx,cy), CSS
+  custom properties `--pdx` / `--pdy` per particle, animation in CSS
+- `_risingText(cx, cy, text, opts)` — single text node, animation
+  in CSS handles fade-in / float-up / fade-out
+- `_anchorCenter(anchor)` — resolves anchor (element or selector),
+  returns viewport-space center coords or null if missing/hidden
+
+**Bug-fix-by-construction:** FX nodes are attached to the OVERLAY,
+not to the anchor. Anchor is read for coordinates only
+(`getBoundingClientRect()` at fire time). Whatever happens to the
+anchor's parent subtree afterward — wipe, rerender, scroll, anything —
+the FX nodes are unaffected. They live in document.body's direct
+descendant chain via the overlay, completing their animations.
+
+**Coordinate model:** previous inline implementation used
+`position:absolute` relative to `#my-shield-section` (which is
+`position:relative`). New model: FX nodes are `position:absolute`
+inside the viewport-fixed overlay, positioned via
+`left: <viewport-x>px; top: <viewport-y>px`. The `gray-crit-text`
+keyframes' `translate(-50%)` still horizontally centers the node on
+its `left` coordinate, just now relative to viewport instead of anchor.
+
+---
+
+**shieldCrit preset:**
+
+Replaces showGrayCritFx 1:1. Same particle count (14), same lifetimes
+(950ms particles, 1500ms text), same colors, same keyframes, same
+flavor-text format (`⚡ ${data.label}` with fallback `Shield crit!`).
+Centers on `#my-shield-pips` when found, falls back to anchor center.
+
+The visual is identical to what we briefly saw in the diagnostic
+screenshot before the wipe — just no longer wiped.
+
+---
+
+**Dispatch site change (both HTMLs):**
+
+```diff
+- if (data.kind === 'shield') {
+-   showGrayCritFx(data);
+- }
++ if (data.kind === 'shield') {
++   BoardFx.fire('shieldCrit', '#my-shield-section', data);
++ }
+```
+
+**Server side untouched** — still emits `rewardPopup` with
+`kind:'shield'`. The `rewardPopup` → `boardFx` server-event rename
+is v0.15.30 work when brick/gold migrate (one server change covers
+all three migrations).
+
+---
+
+**Diagnostic removal (paired with the fix per rule #6 / S015 v0.15.26
+redDashDiag precedent):**
+
+- `_grayCritDiag` flag deleted from both HTMLs
+- `_grayCritDiagRenderCount` deleted
+- All 17 `[gray-crit-diag]` log calls per HTML deleted
+- The `if (_grayCritDiag) { ... }` block at top of renderDashboard
+  deleted (both HTMLs)
+- `showGrayCritFx` function entirely deleted (both HTMLs) — replaced
+  by single `BoardFx.fire('shieldCrit', ...)` call site
+- Inline `<style>` block containing `.gray-crit-particle` /
+  `.gray-crit-text` keyframes deleted from both HTMLs (now lives in
+  boardFx.css)
+
+Per the lesson from the diagnostic data: future "is element visible"
+checks should use `document.body.contains(el)` rather than
+`!!el.parentNode`. The diagnostic correctly logged `stillInDOM=true`
+because parentNode existed (the orphaned shield section) — but the
+parent itself was detached. Noted for future diagnostics.
+
+---
+
+**Standards audit (rule #17 — third audit point in S015 continuation):**
+
+Restating rule #11 (file placement). boardFx.js is a new top-level
+module. Schema (PRESETS map) lives inside the module, not in
+characters.js — because the presets are *board UI behavior* not
+*class identity*. characters.js stays focused on character data.
+
+The COLOR table in characters.js will feed into preset data
+eventually (e.g., a future `brickGained` preset reads
+`COLOR[brick.color].hex`), but that's read-side coupling, not
+write-side. Schema source-of-truth lives where the schema's domain
+lives. **Confirmed held: ✓**
+
+Also restating rule #14 (UNITY/ELEGANCE/EFFICIENCY). Three checks
+on this push:
+
+- **UNITY:** all FX flows through one entry point (`BoardFx.fire`).
+  No more "showXFx" + "showYFx" + "showZFx" with separate signatures.
+  Adding a new FX = one preset entry. ✓
+- **ELEGANCE:** schema > function > system. The presets map IS the
+  schema; `fire()` is the system. New FX never grows the system
+  surface; only the data. ✓
+- **EFFICIENCY:** ~70 lines of duplicated showGrayCritFx code (one
+  copy per HTML) → one shared module. CSS deduplicated similarly.
+  Net: -200ish lines from HTMLs, +180ish in new files; gain is the
+  end of duplication going forward. ✓
+
+---
+
+**Test focus:**
+
+1. **Hard refresh both browsers** (Ctrl+Shift+R / Cmd+Shift+R) to
+   force `boardFx.js` and `boardFx.css` to load fresh.
+2. **Open DevTools console.** Should see no `[gray-crit-diag]` logs
+   ever — the diagnostic is gone.
+3. **Drop a gray brick on the board** (no rumble active). Crit RNG
+   ~10%, may take several attempts.
+4. **When crit fires:** particle burst + "⚡ Shield crit! +2 armor"
+   text both visible at the shield pip bar, both complete their full
+   animation. No flicker. No instant-disappear.
+5. **Inspect DOM mid-FX:** `#board-fx-overlay` should be a child of
+   `<body>`, containing 14× `.gray-crit-particle` + 1× `.gray-crit-text`.
+   Should NOT be inside `#pane-dashboard`.
+6. **Trigger several state pushes during FX** (move on board, etc.).
+   FX should be unaffected — particles complete, text completes.
+7. **Sanity:** brick-gained and gold-gained popups still work as
+   before (those still use the legacy `showRewardPopup` — migration
+   is v0.15.30).
+
+If the FX doesn't render at all, check:
+- `boardFx.js` 404 in Network tab (path issue, server/cache)
+- `BoardFx is not defined` in console (script load order)
+- Overlay not in DOM after first fire (selector issue in `_resolveAnchor`)
+
+---
+
 ### Session 015 Process Retrospective
 
 S015 was a long, productive session — but several standing rules

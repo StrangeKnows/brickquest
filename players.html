@@ -6,6 +6,7 @@
 <title>Brick Quest — Player</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="rumble.css">
+<link rel="stylesheet" href="boardFx.css">
 <style>
 /* ── RESET & BASE ── */
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
@@ -345,34 +346,6 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .pip-empty.pulse-med  { animation-duration: 1.0s; }                       /* 5-30s since use */
 .pip-empty.pulse-slow { animation-duration: 1.8s; }                       /* 30s+ / default  */
 
-/* S015 v0.15.25: gray-crit shield FX. Particle drifts outward + fades,
-   flavor text rises + fades. Both anchored absolutely inside the
-   #my-shield-section container (which has position:relative). */
-@keyframes gray-crit-particle {
-  0%   { opacity: 1;   transform: translate(0, 0) scale(1); }
-  100% { opacity: 0;   transform: translate(var(--pdx), var(--pdy)) scale(0.4); }
-}
-@keyframes gray-crit-text {
-  0%   { opacity: 0;   transform: translate(-50%, 0) scale(0.85); }
-  15%  { opacity: 1;   transform: translate(-50%, -8px) scale(1.08); }
-  60%  { opacity: 1;   transform: translate(-50%, -22px) scale(1); }
-  100% { opacity: 0;   transform: translate(-50%, -42px) scale(0.95); }
-}
-.gray-crit-particle {
-  position:absolute; pointer-events:none;
-  width:5px; height:5px; border-radius:50%;
-  background:#cccccc; box-shadow:0 0 6px #ffffff, 0 0 12px #aaaaaa;
-  animation: gray-crit-particle 0.8s ease-out forwards;
-}
-.gray-crit-text {
-  position:absolute; pointer-events:none;
-  left:50%; top:-4px;
-  font-family:Cinzel,serif; font-size:14px; font-weight:700;
-  letter-spacing:.06em; color:#FFFFFF;
-  text-shadow:0 0 8px #ffffff, 0 0 14px #cccccc, 0 1px 3px rgba(0,0,0,0.9);
-  animation: gray-crit-text 1.4s ease-out forwards;
-  white-space:nowrap;
-}
 .modal-overlay{
   display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);
   z-index:100;align-items:center;justify-content:center;padding:20px;
@@ -501,6 +474,7 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 <script src="characters.js"></script>
 <script src="game.js"></script>
 <script src="rumble.js"></script>
+<script src="boardFx.js"></script>
 <script>
 // ═══════════════════════════════════════════
 //  STATE
@@ -516,9 +490,6 @@ var _pendingResult = null;
 var _landingRollSent = false;
 var _burstFiredFor = null; // tracks which activeEvent got the burst — cls+roll key // prevents double-send of auto landing roll
 var _statusOpen = {}; // tracks open/closed state of collapsible status cards // inline result card shown in action pane until dismissed
-// v0.15.28 gray-crit FX diagnostic — remove with v0.15.29 boardFx scaffold fix
-var _grayCritDiag = true;
-var _grayCritDiagRenderCount = 0;
 let lastRoll = null;
 
 // Class UI styles live in characters.js (Phase 2 consolidation).
@@ -660,12 +631,11 @@ function connectWS() {
     }
     if (event === 'rewardPopup') {
       var isRiddleYellow = data.kind === 'brick' && data.color === 'yellow' && G && G.activeEvent && G.activeEvent.evType === 'riddle';
-      // S015 v0.15.25: shield rewards (crit-only) skip the legacy
-      // blue-bordered popup. Trigger gray-crit FX overlay instead —
-      // particle burst at the shield pip bar + rising/fading flavor
-      // text. Player perceives the crit without click friction.
+      // Shield rewards (crit-only) skip the legacy blue-bordered popup —
+      // boardFx fires a particle burst + rising flavor text over the
+      // shield pip bar. Player perceives the crit without click friction.
       if (data.kind === 'shield') {
-        showGrayCritFx(data);
+        BoardFx.fire('shieldCrit', '#my-shield-section', data);
       } else if (!isRiddleYellow) {
         showRewardPopup(data);
       }
@@ -2150,20 +2120,6 @@ function _dashPhaseContext(me) {
 // ────────────────────────────────────────────────────────────────────────
 
 function renderDashboard(me) {
-  if (_grayCritDiag) {
-    _grayCritDiagRenderCount++;
-    var existing = document.getElementById('my-shield-section');
-    if (existing) {
-      var fxNodes = existing.querySelectorAll('.gray-crit-particle, .gray-crit-text');
-      if (fxNodes.length > 0) {
-        console.warn('[gray-crit-diag] RENDER WIPING ACTIVE FX render#=' + _grayCritDiagRenderCount + ' t=' + Date.now() + ' fxNodesPresent=' + fxNodes.length);
-      } else {
-        console.log('[gray-crit-diag] render#=' + _grayCritDiagRenderCount + ' t=' + Date.now() + ' (no active fx in shield section)');
-      }
-    } else {
-      console.log('[gray-crit-diag] render#=' + _grayCritDiagRenderCount + ' t=' + Date.now() + ' (no shield section in DOM)');
-    }
-  }
   const el = document.getElementById('pane-dashboard');
   if (!el) return;
   const isKO = !me.alive || me.hp <= 0;
@@ -5487,73 +5443,6 @@ function respondTrade(accept) {
 }
 
 // ── DISARM CHAIN ──
-
-// S015 v0.15.25: gray-crit shield FX. Replaces the legacy blue-bordered
-// rewardPopup for kind:'shield'. Spawns a particle burst at the shield
-// pip bar location + a single rising "Shield crit!" text. Auto-cleans
-// after animation completes.
-function showGrayCritFx(data) {
-  if (_grayCritDiag) console.log('[gray-crit-diag] ENTRY render#=' + _grayCritDiagRenderCount + ' t=' + Date.now() + ' data=', data);
-  var anchor = document.getElementById('my-shield-section');
-  if (!anchor) {
-    if (_grayCritDiag) console.log('[gray-crit-diag] BAIL no anchor (#my-shield-section missing)');
-    return;  // dashboard not rendered (player not on dash tab) — silent skip
-  }
-  var rect = anchor.getBoundingClientRect();
-  if (rect.width === 0) {
-    if (_grayCritDiag) console.log('[gray-crit-diag] BAIL anchor width=0 (hidden) rect=', rect);
-    return;  // hidden
-  }
-  // Particles: 14 small white-gray dots drifting outward from the bar's
-  // center. Each gets a randomized direction via CSS custom properties.
-  var pipsEl = document.getElementById('my-shield-pips');
-  if (_grayCritDiag) console.log('[gray-crit-diag] anchor=ok pipsEl=' + (pipsEl ? 'ok' : 'MISSING') + ' anchorRect=', rect);
-  var pipsRect = pipsEl ? pipsEl.getBoundingClientRect() : rect;
-  var cx = (pipsRect.left + pipsRect.right) / 2 - rect.left;
-  var cy = (pipsRect.top + pipsRect.bottom) / 2 - rect.top;
-  var PARTICLE_COUNT = 14;
-  var _diagRenderAtAttach = _grayCritDiagRenderCount;
-  for (var i = 0; i < PARTICLE_COUNT; i++) {
-    var p = document.createElement('div');
-    p.className = 'gray-crit-particle';
-    var ang = (Math.PI * 2) * (i / PARTICLE_COUNT) + (Math.random() - 0.5) * 0.4;
-    var dist = 24 + Math.random() * 36;  // 24-60px outward
-    var dx = Math.cos(ang) * dist;
-    var dy = Math.sin(ang) * dist - 6;  // slight upward bias
-    p.style.left = (cx - 2.5) + 'px';
-    p.style.top  = (cy - 2.5) + 'px';
-    p.style.setProperty('--pdx', dx + 'px');
-    p.style.setProperty('--pdy', dy + 'px');
-    // Slight per-particle delay for a livelier burst
-    p.style.animationDelay = (Math.random() * 0.08) + 's';
-    anchor.appendChild(p);
-    setTimeout(function(el, idx, attachRender){
-      if (_grayCritDiag) {
-        var stillIn = !!el.parentNode;
-        var nowRender = _grayCritDiagRenderCount;
-        var rendersSince = nowRender - attachRender;
-        console.log('[gray-crit-diag] particle#' + idx + ' timeout-cleanup t=' + Date.now() + ' stillInDOM=' + stillIn + ' rendersSinceAttach=' + rendersSince);
-      }
-      if (el.parentNode) el.parentNode.removeChild(el);
-    }, 950, p, i, _diagRenderAtAttach);
-  }
-  if (_grayCritDiag) console.log('[gray-crit-diag] AFTER particle-loop attached=' + PARTICLE_COUNT + ' anchor.children=' + anchor.children.length);
-  // Flavor text: prefer server label, fall back to generic
-  var label = (data && data.label) ? data.label : 'Shield crit!';
-  var txt = document.createElement('div');
-  txt.className = 'gray-crit-text';
-  txt.textContent = '⚡ ' + label;
-  // Center horizontally over the shield bar
-  txt.style.top = (cy - 18) + 'px';
-  anchor.appendChild(txt);
-  if (_grayCritDiag) console.log('[gray-crit-diag] AFTER text-attach anchor.children=' + anchor.children.length + ' label="' + label + '"');
-  setTimeout(function(){
-    if (_grayCritDiag) {
-      console.log('[gray-crit-diag] text timeout-cleanup t=' + Date.now() + ' stillInDOM=' + (!!txt.parentNode));
-    }
-    if (txt.parentNode) txt.parentNode.removeChild(txt);
-  }, 1500);
-}
 
 function showRewardPopup(data) {
   var kind = data.kind || 'gold';
