@@ -6063,6 +6063,170 @@ and ~7238); both updated to route shield → FX, others → popup.
 
 ---
 
+### v0.15.26 — Remove red dash diagnostic overlay entirely
+
+`redDashDiag` was added in S015 v0.15.10 as a debug visualization for
+the red-dash family while the dash work was in active development. It
+served its purpose (helped diagnose the v0.15.11 buffer-distance bug
+and the v0.15.12 hit-termination bug) and shipped quietly afterward,
+still rendering on every dash.
+
+Now that red-dash work is shipped and stable, the diag overlay is
+dead weight: it's no longer informative, and it leaks into normal
+playtest feedback. Initial plan was to gate it behind a debug-panel
+toggle (parked under "Debug overlay toggles" in the parking lot).
+Reconsidered: simpler to remove it entirely. Future class-sig
+diagnostics during their build phase can follow the same lifecycle —
+either get removed when the build is done, OR get added to the
+toggle system (which we'll build the next time a diagnostic survives
+past its build phase).
+
+---
+
+**Removed (rumble.js):**
+
+* `redDashDiag` state object
+* `snapshotRedDashStart()` — populated start-of-dash data
+* `finalizeRedDashDiag()` — captured end-of-dash state
+* `updateRedDashDiag()` — TTL/fade tick
+* `drawRedDashDiag()` — rendering function (~90 lines of canvas drawing)
+* Two callers in red-dash entry paths
+* Four callers at dash-termination sites (range-cap, timeout,
+  target-reached, entity-hit)
+* Main loop call to `updateRedDashDiag(dt)`
+* Render loop call to `drawRedDashDiag()`
+* Diag-only fields on `brickAction`: `_blastX`, `_blastY`, `_blastR`,
+  `_stopReason`
+
+**Kept (still load-bearing):**
+
+* `brickAction._hitSet` — used by Model 2 (BK) blast for primary-target
+  AOE dedup. NOT diag-only.
+
+---
+
+**Architectural notes:**
+
+* All call sites used defensive `if (typeof X === 'function')` guards,
+  so the file would have continued working even with the function
+  declarations gone (silent no-op). Removed the guards too — dead
+  code is dead code.
+* No data structures or behaviors changed. This is pure removal.
+* File shrunk by ~184 lines (~11849 → 11665).
+
+---
+
+**Net diff:**
+* characters.js / game.js / players.html / test_players.html: untouched
+* rumble.js: −184 lines (clean removal)
+* NOTES.md: this entry + parking-lot debug-toggle entry updated to
+  reflect the precedent for future diagnostic lifecycle decisions
+
+**Test focus:**
+
+1. **Cast red dash on any class** — dash works normally, no diag
+   overlay anywhere on screen.
+2. **BK Model 2 blast still dedups primary target** — `_hitSet`
+   retention means the first-hit entity doesn't take both primary
+   damage AND blast damage on top.
+3. **Other classes' dashes (Model 3 with return phase) unchanged.**
+4. **No console errors or undefined references when red is cast.**
+
+---
+
+### Session 015 Process Retrospective
+
+S015 was a long, productive session — but several standing rules
+drifted along the way. Capturing this so the pattern doesn't repeat
+in S016+ and so future sessions can see what works and what doesn't.
+
+**Drift incidents:**
+
+1. **Diagnostic-first (rule #6) bent on yellow confuse fix.** The
+   reported bug was "confused enemies don't attack each other." The
+   bug was visible in the code at first read: a `pat === 'touch'`
+   gate on the wrong-target attack block. Instead of leading with
+   that, the response buried it in a list of diagnostic possibilities
+   and proposed instrumentation. User pushed back. Rule #6 held; the
+   response didn't.
+
+   **Reinforcement:** rule #6 now explicitly says: when finding a
+   clear gating restriction in bug code that contradicts design
+   intent, promote it to TOP of response — never bury in diagnostic
+   list. Diagnostic-first is the default, but lead-with-the-bug is
+   the exception when the bug is right there.
+
+2. **Version bumping (rule #13) bent on SS push.** The SS chain trap
+   work was meant to be v0.15.20. Used `-V` (minor bump) at push
+   time, save.sh jumped to v0.16.0. v0.16.0 was reserved for the
+   class-baseline-parity milestone (all 6 classes done), not a
+   single-class push. Recovered via `git commit --amend` + manual
+   package.json edit + `git push --force-with-lease`. Force-push
+   workflow proven safe for solo-project version-label corrections.
+
+   **Reinforcement:** rule #13 unchanged in spirit but now annotated
+   with the recovery pattern. Version flag check should fire AT THE
+   PUSH MOMENT, not just at session start.
+
+3. **Don't-fragment (rule #10) bent on yellow confuse.** Asked
+   clarifying questions when the answer was visible in the code
+   already. Same root cause as #1.
+
+**Recovery lessons that worked:**
+
+- **Force-push amend workflow** for version label corrections: amend
+  the commit (with corrected message + manual file edits) → force-push
+  with `--force-with-lease` → verify with `git log --oneline -3`. Done
+  twice in S015, both clean.
+- **The handoff phrase "pull the repo at github.com/StrangeKnows/brickquest
+  (public) and scan the current file structure"** reliably triggers
+  GitHub fetch in environments where direct raw URL fetching gets
+  blocked. Logged in memory rule #7.
+
+**Standards reinforcement applied at session end:**
+
+New memory rules added:
+- **Rule #14** — Design philosophy: UNITY, ELEGANCE, EFFICIENCY (overrides
+  tactical decisions). The lens for every architectural choice.
+- **Rule #15** — Handoff hygiene: pull repo, scan tree, read full NOTES
+  + ROADMAP + DESIGN DOC + AUDIT PROPOSAL + HANDOFF, read rules back
+  to user as confirmation before code work begins.
+- **Rule #16** — rumble.js code-shape landmines list (two-draw pattern,
+  showDamageNumber merge gate, profile scope, source argument).
+- **Rule #17** — Standards audit cadence: pause every 3-4 pushes, restate
+  a rule, confirm followed.
+
+Rule #6 modified to add lead-with-the-bug exception + WAIT for user
+prompt and confirmation before writing fix code.
+
+**What worked well in S015 (preserve these patterns):**
+
+- Per-color profile architecture (redProfile, purpleProfile,
+  blueProfile, orangeProfile in characters.js as class-scoped schemas;
+  COLOR table fields like mergeWindowMs as color-scoped). Engine
+  reads via getXProfile(cls), no class-name checks. Adding a color's
+  identity to a new class = data change.
+- Schema-driven gating (e.g., blueProfile.hasImpactAOE, orangeProfile.
+  trapsChainOnTrigger) — features turn on/off via boolean field, no
+  scattered conditionals.
+- Single-source-of-truth constants (BRICK_ORDER in characters.js
+  shared by rumble.js, game.js, players.html, test_players.html via
+  proper load order).
+- Diagnostic lifecycle: ship as part of the build, then EITHER remove
+  entirely (v0.15.26 redDashDiag) OR add to the toggle system (parked).
+  Don't leak development noise into shipped state.
+
+**What to bring forward to S016:**
+
+1. Read this retrospective alongside the standing memory rules.
+2. SS unifying-thread question is OPEN (deferred from S015 for playtest
+   feedback). Class identity not done.
+3. Pending bug: v0.15.25 gray-crit FX on board "not functioning as
+   expected" — diagnose first, don't speculate.
+4. Three ready-to-build entries in Design Parking Lot.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
@@ -6166,6 +6330,107 @@ prototypes.
 **Current state:** v0.15.25 gray-crit FX is INTENTIONALLY one-off. Not
 DRY-extracted yet. When this parking-lot entry activates, it absorbs
 that code into the shared system.
+
+### Debug overlay toggles in waves-debug panel (logged S015, ready to build)
+
+**Seed:** developer diagnostic overlays (`yellowDiag`, future class-sig
+diagnostics) currently render unconditionally during playtest. They
+served their initial debug purpose but now leak into normal play
+feedback. Need a way to gate them on/off without code changes.
+
+(`redDashDiag` was the original example here — removed entirely in
+v0.15.26 since red dash work is shipped and the diag overlay was no
+longer wanted, even gated. Future class diagnostics shipped during
+active development should follow the same lifecycle: start as a
+diagnostic during the build, then EITHER remove entirely OR add to
+this toggle system once the work is done.)
+
+**Existing infrastructure:** rumble_test.html already has a working
+debug-panel system anchored to a circular icon at the bottom-left
+viewport gutter (`#waves-debug-icon`, ~line 348). Tap → panel
+(`#waves-live-debug`, ~line 383) expands upward, anchored to arena
+bounds. Updated each frame by `updateLiveDebug()` (~line 1419) which
+reads from `Rumble.getDebugInfo()`. Panel uses a clean class
+vocabulary (`.lbl`, `.val`, `.hi`, `.warn`).
+
+**Design:**
+
+Add a section to the debug panel with toggle checkboxes for each
+diagnostic overlay. Each toggle writes to a flag namespaced under
+`window.DBG_FLAGS` (or similar), and the rendering code in rumble.js
+checks the flag before drawing. Defaults: all OFF — debug overlays
+are opt-in. State persists in localStorage so it survives reloads.
+
+Flags to add (initial set):
+* `DBG_FLAGS.yellowConfuse` — gates the yellow confuse diagnostic
+  shipped in v0.15.18 (`yellowDiag` rendering in rumble.js)
+* Reserve namespace pattern for future class diagnostics (e.g.
+  `DBG_FLAGS.orangeChainNetwork`, `DBG_FLAGS.blueDropPoint`, etc.)
+
+Pattern in rumble.js render path:
+```js
+if (window.DBG_FLAGS && window.DBG_FLAGS.yellowConfuse && yellowDiag) {
+  // existing yellow diag render code
+}
+```
+
+UI in panel (HTML structure):
+```html
+<div class="dbg-toggles">
+  <h4>Debug Overlays</h4>
+  <label><input type="checkbox" data-flag="redDashOverlay"> Red dash trajectory</label>
+  <label><input type="checkbox" data-flag="yellowConfuse"> Yellow confuse state</label>
+  <!-- future toggles append here -->
+</div>
+```
+
+Wire-up (in updateLiveDebug or a one-time init):
+```js
+panel.querySelectorAll('input[data-flag]').forEach(function(cb) {
+  var flag = cb.getAttribute('data-flag');
+  // Initial state from localStorage
+  var saved = localStorage.getItem('dbg.' + flag) === '1';
+  cb.checked = saved;
+  window.DBG_FLAGS = window.DBG_FLAGS || {};
+  window.DBG_FLAGS[flag] = saved;
+  cb.addEventListener('change', function() {
+    window.DBG_FLAGS[flag] = cb.checked;
+    localStorage.setItem('dbg.' + flag, cb.checked ? '1' : '0');
+  });
+});
+```
+
+**Architectural notes:**
+
+* Flag-gating only — overlay code itself unchanged, just wrapped in a
+  conditional. No behavior changes when flags are OFF beyond hiding
+  the visualization.
+* localStorage key prefix `dbg.` keeps the namespace clean. Could use
+  a single JSON blob if the count grows past ~10.
+* Panel currently anchors to arena bounds. Toggle section should sit
+  in a fixed position within the panel so it doesn't shift as live
+  diag info updates.
+* Consider grouping toggles by category (Cast diagnostics / Movement /
+  AI / etc.) once the count grows past 5-6.
+
+**Net diff estimate:**
+* rumble_test.html: ~30 lines (CSS for toggle section + HTML markup +
+  init/wire-up code)
+* rumble.js: ~10 lines (wrap each diag overlay render in `if
+  (window.DBG_FLAGS && window.DBG_FLAGS.X)`)
+
+**Test focus:**
+1. Open debug panel via icon. Verify toggle section appears.
+2. All toggles default OFF. Red dash and yellow confuse overlays
+   should NOT show in normal play.
+3. Toggle red dash overlay ON → diag overlay reappears on next dash.
+4. Reload page → toggle state preserved (localStorage worked).
+5. Toggle OFF → overlay disappears immediately on next render.
+6. Verify no console errors when flags are missing or undefined
+   (defensive `window.DBG_FLAGS && ...` checks hold up).
+
+**Decision deferred to:** ready to build. Next chat task after
+gray-crit diagnostic.
 
 ### Spike aura → fusion-gate candidate (logged S015 v0.15.22)
 

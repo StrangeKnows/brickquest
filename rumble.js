@@ -988,7 +988,6 @@ function update(dt) {
   updateConfuseParticles(dt);
   updateRegen(dt);
   updateBleedOut(dt);
-  updateRedDashDiag(dt);
   updateYellowDiag(dt);
   updateDrain(dt);
   entities.forEach(function(g) {
@@ -3518,7 +3517,6 @@ draw = function() {
   drawCritShockwaves();
   drawCritFlash();
   drawCritBanners();
-  drawRedDashDiag();
   drawYellowDiag();
   // S015 v0.15.13 fix: paired with ctx.save+translate at top of this
   // function (NOT inside _origDraw — that's a different function scope).
@@ -6287,155 +6285,6 @@ function useBrickAction(color) {
 
 // ── RED — Charge ──────────────────────────────────
 
-// ── RED DASH DIAGNOSTIC (S015 v0.15.10) ──────────────────────────────────
-// Captures full state on every red dash for visual replay. Helps identify
-// why dashes stop short of expected positions (range cap, hit detection,
-// wall block, target-buffer early-out, arena edge clamp). Persists for
-// 2.5s after dash ends so the player can read what happened.
-//
-// State per snapshot:
-//   startX, startY     — where dash began
-//   intendedX, intendedY — drag drop point (where player aimed)
-//   clampedX, clampedY — endpoint after maxRange clamp (what the indicator shows)
-//   maxRange           — class+inventory effective range
-//   actualX, actualY   — where dash actually stopped
-//   stopReason         — 'range-cap' | 'entity-hit' | 'wall-block' | 'target-reached' | 'timeout' | 'arena-edge'
-//   traveled           — px actually moved
-//   intendedDist       — px from start to clampedX/Y
-//   capturedAt         — performance.now() at dash end
-//   ttl                — fade-out timer (2500ms)
-var redDashDiag = null;
-
-function snapshotRedDashStart(intendedX, intendedY, clampedX, clampedY, maxRange) {
-  redDashDiag = {
-    startX: player.x, startY: player.y,
-    intendedX: intendedX, intendedY: intendedY,
-    clampedX: clampedX, clampedY: clampedY,
-    maxRange: maxRange,
-    actualX: null, actualY: null,
-    stopReason: 'in-progress',
-    traveled: 0,
-    intendedDist: Math.hypot(clampedX - player.x, clampedY - player.y),
-    capturedAt: 0,
-    ttl: 0,
-    state: 'live',
-  };
-}
-
-function finalizeRedDashDiag(reason) {
-  if (!redDashDiag || redDashDiag.state !== 'live') return;
-  redDashDiag.actualX = player.x;
-  redDashDiag.actualY = player.y;
-  redDashDiag.stopReason = reason;
-  redDashDiag.traveled = Math.hypot(player.x - redDashDiag.startX, player.y - redDashDiag.startY);
-  redDashDiag.capturedAt = performance.now();
-  redDashDiag.ttl = 2500;
-  redDashDiag.state = 'persist';
-  // S015 v0.15.13: capture hit list and (if BK) blast meta for diagnostic.
-  // brickAction may already be null by the time finalize is called for
-  // late-terminating paths; pull from it if still present.
-  if (typeof brickAction !== 'undefined' && brickAction) {
-    redDashDiag.hitSet = (brickAction._hitSet || []).slice();
-    redDashDiag.blastX = brickAction._blastX;
-    redDashDiag.blastY = brickAction._blastY;
-    redDashDiag.blastR = brickAction._blastR;
-  } else {
-    redDashDiag.hitSet = [];
-  }
-}
-
-function updateRedDashDiag(dt) {
-  if (!redDashDiag || redDashDiag.state !== 'persist') return;
-  redDashDiag.ttl -= dt * 1000;
-  if (redDashDiag.ttl <= 0) {
-    redDashDiag = null;
-  }
-}
-
-function drawRedDashDiag() {
-  if (!redDashDiag || redDashDiag.state !== 'persist' || !ctx) return;
-  var d = redDashDiag;
-  var fade = Math.min(1, d.ttl / 800); // fade in last 800ms
-  ctx.save();
-  ctx.globalAlpha = fade * 0.85;
-
-  // Max-range arc (faint dashed)
-  ctx.strokeStyle = '#FFCC44';
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 8]);
-  ctx.beginPath(); ctx.arc(d.startX, d.startY, d.maxRange, 0, Math.PI*2); ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Intended path: line from start to clampedX/Y (where indicator pointed)
-  ctx.strokeStyle = '#88AAFF';
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(d.startX, d.startY); ctx.lineTo(d.clampedX, d.clampedY); ctx.stroke();
-
-  // Actual path: line from start to actualX/Y (where dash actually went)
-  ctx.strokeStyle = '#FF4444';
-  ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.moveTo(d.startX, d.startY); ctx.lineTo(d.actualX, d.actualY); ctx.stroke();
-
-  // Markers
-  ctx.fillStyle = '#88FF88'; // start = green
-  ctx.beginPath(); ctx.arc(d.startX, d.startY, 4, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle = '#88AAFF'; // intended = blue
-  ctx.beginPath(); ctx.arc(d.clampedX, d.clampedY, 5, 0, Math.PI*2); ctx.fill();
-  ctx.strokeStyle = '#88AAFF'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(d.clampedX, d.clampedY, 9, 0, Math.PI*2); ctx.stroke();
-  ctx.fillStyle = '#FF4444'; // actual = red
-  ctx.beginPath(); ctx.arc(d.actualX, d.actualY, 5, 0, Math.PI*2); ctx.fill();
-
-  // BK Model 2 blast circle (S015 v0.15.13). Renders as a faint orange
-  // dashed ring at the impact location showing the blast radius. Helps
-  // post-mortem visualize "this is the AOE that fired."
-  if (d.blastR && d.blastX !== undefined && d.blastY !== undefined) {
-    ctx.strokeStyle = '#FFAA00';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([3, 4]);
-    ctx.beginPath();
-    ctx.arc(d.blastX, d.blastY, d.blastR, 0, Math.PI*2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // Text panel near actual stop point
-  var pct = d.intendedDist > 0 ? Math.round(100 * d.traveled / d.intendedDist) : 0;
-  var lines = [
-    'reason: ' + d.stopReason,
-    'traveled: ' + Math.round(d.traveled) + ' / ' + Math.round(d.intendedDist) + ' px (' + pct + '%)',
-    'max range: ' + Math.round(d.maxRange) + ' px',
-  ];
-  // Hit list (S015 v0.15.13): one line summarizing per-entity hits.
-  // Format: 'hits: g1×1 g2×1 g3×1' — each entity in the dash's hit set
-  // gets a label (g1, g2, ...) and count. Per-entity count is always 1
-  // in current models (each entity hit at most once per dash via _hitSet
-  // dedup), but the format leaves room for future per-entity multi-hit
-  // designs (e.g., piercing dashes that re-hit on return phase).
-  if (d.hitSet && d.hitSet.length > 0) {
-    var parts = [];
-    for (var _hsi = 0; _hsi < d.hitSet.length; _hsi++) {
-      parts.push('g' + (_hsi + 1) + '×1');
-    }
-    lines.push('hits: ' + parts.join(' '));
-  } else {
-    lines.push('hits: none');
-  }
-  ctx.font = '11px monospace';
-  ctx.textAlign = 'left';
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  var pad = 4;
-  var lh = 14;
-  var tx = d.actualX + 12;
-  var ty = d.actualY - 10;
-  // Box behind text
-  var maxW = 0;
-  lines.forEach(function(l){ maxW = Math.max(maxW, ctx.measureText(l).width); });
-  ctx.fillRect(tx - pad, ty - lh - pad, maxW + pad*2, lines.length * lh + pad*2);
-  ctx.fillStyle = '#FFCC44';
-  lines.forEach(function(l, i){ ctx.fillText(l, tx, ty + i * lh - lh + 2); });
-  ctx.restore();
-}
 
 // ─── YELLOW CONFUSE DIAGNOSTIC (S015 v0.15.18) ─────────────────────
 // Goal: capture why confused entities sometimes don't attack each
@@ -6628,10 +6477,6 @@ function startRedChargeTo(dmgMult, tx, ty) {
   var endDist = Math.min(dist, maxRange);
   var endX = startX + nx * endDist;
   var endY = startY + ny * endDist;
-  // Snapshot for diagnostic — captures intended drop point + clamped end.
-  if (typeof snapshotRedDashStart === 'function') {
-    snapshotRedDashStart(tx, ty, endX, endY, maxRange);
-  }
   brickAction = {
     type: 'red', phase: 'charge',
     startX: startX, startY: startY,
@@ -6666,13 +6511,6 @@ function startRedCharge(dmgMult, targetEntity) {
   var maxRange = (typeof getRedRange === 'function')
     ? getRedRange(player.cls, ownedRed)
     : 1e9;
-  // Snapshot for diagnostic — auto-target uses entity position as intended.
-  // No clamping in this path; range cap enforced during charge update loop.
-  if (typeof snapshotRedDashStart === 'function') {
-    var clampX = startX + nx * Math.min(dist, maxRange);
-    var clampY = startY + ny * Math.min(dist, maxRange);
-    snapshotRedDashStart(entity.x, entity.y, clampX, clampY, maxRange);
-  }
   brickAction = {
     type: 'red',
     phase: 'charge',
@@ -7405,7 +7243,6 @@ function updateBrickAction(dt, bounds) {
         // dash termination + finalize (no return phase).
         step = Math.max(0, brickAction.maxRange - traveled);
         brickAction.hit = true;
-        brickAction._stopReason = 'range-cap';
       }
       // Wall sweep: test the line segment from current position to the
       // intended next position against each gray wall. If it intersects,
@@ -7437,7 +7274,6 @@ function updateBrickAction(dt, bounds) {
         player.y = player.y + dym * tStop;
         blocked = true;
         brickAction.hit = true; // terminates dash this frame (v0.15.12)
-        brickAction._stopReason = 'wall-block';
       }
       if (!blocked) {
         player.x = nextX;
@@ -7459,8 +7295,8 @@ function updateBrickAction(dt, bounds) {
       //
       // Bubble radius for first-hit detection: (player.r + 14) × hitboxScale.
       // Same as drag indicator visual. For BK, also serves as blast radius.
-      // brickAction._hitSet tracks per-dash hits (used by diagnostic, and
-      // ensures Model 2's AOE doesn't double-hit the primary target).
+      // brickAction._hitSet ensures Model 2's AOE doesn't double-hit the
+      // primary target.
       if (!brickAction.hit) {
         if (!brickAction._hitSet) brickAction._hitSet = [];
         var hbR = (player.r + 14) * hitboxScale;
@@ -7560,10 +7396,6 @@ function updateBrickAction(dt, bounds) {
           // visuals defined gets them automatically. null = no blast viz.
           if (isBlastModel && dashProfile.blastVisual) {
             var bv = dashProfile.blastVisual;
-            // Capture blast meta for diagnostic to render later.
-            brickAction._blastX = player.x;
-            brickAction._blastY = player.y;
-            brickAction._blastR = blastR;
             // Shockwave rings — one per color in ringColors array.
             var ringColors = bv.ringColors || ['#E24B4A'];
             if (ringColors[0]) {
@@ -7591,12 +7423,9 @@ function updateBrickAction(dt, bounds) {
           if (crit && dashProfile.critScreenShake && typeof triggerScreenShake === 'function') {
             triggerScreenShake(dashProfile.critScreenShake.mag, dashProfile.critScreenShake.ms);
           }
-          // Terminate dash. Set hit flag + stop reason so the unified
-          // termination block below handles cleanup.
+          // Terminate dash. Set hit flag so the unified termination
+          // block below handles cleanup.
           brickAction.hit = true;
-          if (!brickAction._stopReason) {
-            brickAction._stopReason = isBlastModel ? 'entity-blast' : 'entity-hit';
-          }
           // Recoil decision reads dashProfile.recoilOnHit. true = enter
           // return phase (Model 3 default); false = end at impact (BK).
           if (dashProfile.recoilOnHit) {
@@ -7617,14 +7446,8 @@ function updateBrickAction(dt, bounds) {
       //     'charge', hit flag set → terminate immediately.
       // The phase check is the discriminator.
       if (brickAction && brickAction.hit && brickAction.phase === 'charge') {
-        if (typeof finalizeRedDashDiag === 'function') {
-          finalizeRedDashDiag(brickAction._stopReason || 'range-cap');
-        }
         brickAction = null;
       } else if (brickAction && brickAction.chargeTimer >= 2.0) {
-        if (typeof finalizeRedDashDiag === 'function') {
-          finalizeRedDashDiag(brickAction._stopReason || 'timeout');
-        }
         brickAction = null;
       } else if (brickAction && brickAction.usePoint && brickAction.phase === 'charge') {
         var ptDist = Math.hypot(player.x - brickAction.targetX, player.y - brickAction.targetY);
@@ -7634,9 +7457,6 @@ function updateBrickAction(dt, bounds) {
         // 92% travel ratio universally — bug confirmed. New 2px buffer
         // is just float-precision tolerance; dash now reaches the marker.
         if (ptDist < 2) {
-          if (typeof finalizeRedDashDiag === 'function') {
-            finalizeRedDashDiag(brickAction._stopReason || 'target-reached');
-          }
           brickAction = null;
         }
       }
@@ -7670,9 +7490,6 @@ function updateBrickAction(dt, bounds) {
       var distToEntity = nearestForReturn ? Math.hypot(player.x-nearestForReturn.x, player.y-nearestForReturn.y) : 9999;
       brickAction.returnTimer = (brickAction.returnTimer||0) + dt;
       if (distToEntity >= safeStop || rd <= 8 || brickAction.returnTimer >= 3.0) {
-        if (typeof finalizeRedDashDiag === 'function') {
-          finalizeRedDashDiag(brickAction._stopReason || 'entity-hit');
-        }
         brickAction = null;
       } else {
         var rs = Math.min((player.speed * 2) * dt, rd);
