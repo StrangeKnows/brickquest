@@ -6669,6 +6669,138 @@ dm_screen.html, rumble_test.html, arena_test.html, serve.sh, save.sh.
 
 ---
 
+### v0.15.32 — Spine extract step 1: diff catalog (no code changes)
+
+**No code changes.** This patch documents the function-by-function
+divergence between players.html and test_players.html, classifying
+each as IDENTICAL / COSMETIC / SEMANTIC / HARNESS-ONLY. Output of
+this catalog drives v0.15.33 reconciliation, then v0.15.34 extract.
+
+**Methodology:** scripted comparison after light normalization
+(strip comments, collapse whitespace, equate `var`/`let`/`const`).
+Every COSMETIC categorization gets a sample diff; anything looking
+suspicious gets promoted to SEMANTIC for human review.
+
+**Caveat acknowledged:** light normalization could mask a
+1-character semantic diff (e.g., `>` vs `>=`). To mitigate, the
+SEMANTIC bucket gets full diffs; readers checking the COSMETIC
+bucket should still spot-check.
+
+---
+
+**Headline numbers:**
+
+| Bucket | Count | Notes |
+|---|---|---|
+| Total functions in players.html | 188 | |
+| Total functions in test_players.html | 188 | |
+| Shared (same name, both files) | 187 | |
+| players.html-only | 1 | `walk2` (dead-code byproduct of a `runAction` bug — see below) |
+| test_players.html-only | 1 | `testSwitch` (legit harness — multi-class tab switcher) |
+| **IDENTICAL** | **179** | 96% of shared. Extract verbatim. |
+| **COSMETIC** | 0 | (none, after normalization passed everything that was pure-cosmetic into IDENTICAL) |
+| **SEMANTIC** | **8** | Detailed below |
+
+**Outsized finding:** the catalog surfaced **two real bugs** in
+players.html that test_players.html has fixed. Reconciliation will
+fix players.html as a side effect of canonicalization. This is
+exactly the kind of latent-bug surfacing flagged in the v0.15.31
+push-through note.
+
+---
+
+**SEMANTIC bucket — detailed:**
+
+| Function | Type | Verdict | Action in v0.15.33 |
+|---|---|---|---|
+| `buildTabs` | Cosmetic + harness divergence (var/let, arrow fns, `function()` style) | Players canonical for body; harness divergence none | Reconcile to players.html style |
+| `connectWS` | **True harness divergence** — players: single client for MY_CLASS; test_players: loops over PLAYER_META, multi-client | Stay split | Keep both; reconciliation only at the per-event handler level (see "Stay-split residue" below) |
+| `setConn` | **True harness divergence** — players does real work; test_players is `function setConn() {}` no-op | Stay split | Keep both |
+| `switchTab` | Cosmetic + minor defensive style | Players canonical | Reconcile to players.html style; the test_players `if (btn)` and `if (G)` defensives subsumed by players' `?.` and `try/catch` |
+| `runAction` | **Bug in players.html** — duplicates the registry-build block. The first build runs into dead code immediately overwritten by the rebuild. `walk2` exists only to support the dead duplicate. | Test_players canonical | Reconcile to test_players.html version. **Retires `walk2`** as a side effect. |
+| `showDashResult` | Cosmetic — brace style + a removed comment | Players canonical | Reconcile to players.html version |
+| `restoreActiveEvent` | Cosmetic + **ONE real fallback decision** — `burstParticles(evData.type \|\| 'nothing')` (players) vs `\|\| 'monster'` (test_players) | **Decision needed from Ross** | See decision section |
+| `startTorchGame` | Cosmetic + **drift bug in players.html** — declares `var DECOY_POOL = ['cheese']` but doesn't use it (hardcodes `'cheese'`). test_players uses `DECOY_POOL[i % DECOY_POOL.length]` correctly. | Test_players canonical | Reconcile to test_players.html version. When DECOY_POOL grows past `['cheese']`, both files pick up new decoys. |
+
+---
+
+**Stay-split residue — `connectWS` and `setConn`:**
+
+These are legitimately different in shape between production and
+harness. test_players' `connectWS` creates one `GameClient` per
+class (multi-perspective testing); players.html creates one for
+MY_CLASS. test_players' `setConn` is a no-op because connection
+display is per-class-dot in the harness.
+
+**Recommended approach for v0.15.34:** these stay in their
+respective HTML shells, NOT in players-core.js. Players-core.js
+gets only the shared body. Both shells then load players-core.js
+and define their own `connectWS`/`setConn`. That's the cleanest
+read of the harness/production divergence.
+
+The per-event handlers inside `connectWS` (the `if (event === ...)`
+chain) are *largely* shared, but the dispatch wrapping is
+different. **Could** refactor by extracting an `_handleEvent(event,
+data)` shared function and having each `connectWS` call it inside
+their own per-class loop. **Decision deferred to v0.15.33** — for
+catalog purposes, both `connectWS` bodies are noted as harness-only.
+
+---
+
+**Decision needed from you (Ross):**
+
+**`restoreActiveEvent` burst-particle fallback:**
+
+```js
+// players.html
+burstParticles(evData.type || 'nothing');
+// test_players.html
+burstParticles(evData.type || 'monster');
+```
+
+Context: this fires when a player lands on an active event space.
+`evData.type` is the event type (`'monster'`, `'riddle'`, `'red'`,
+etc.). The fallback only triggers if `evData.type` is missing,
+which would be a bug upstream — but the fallback still needs to
+be sane.
+
+**Choose:**
+- `'nothing'` — generic burst (presumably a low-key non-event particle pattern)
+- `'monster'` — defaults to the monster burst regardless of actual event type
+- Some other value (e.g., default-as-error fallback)
+
+This decision drives the canonical version in v0.15.33.
+
+---
+
+**Action items for v0.15.33 (reconciliation push):**
+
+1. Decide on `restoreActiveEvent` fallback (above)
+2. Apply canonical version of each SEMANTIC function to both files
+   (or just to the wrong-version file, depending on direction):
+   - `buildTabs` → players style in both
+   - `switchTab` → players style in both
+   - `showDashResult` → players style in both
+   - `runAction` → test_players style in both (BUG FIX)
+   - `startTorchGame` → test_players DECOY_POOL fix in both (BUG FIX)
+   - `restoreActiveEvent` → reconciled style + the fallback choice
+3. `walk2` retired automatically by `runAction` reconciliation
+4. `connectWS` and `setConn` stay split — confirm the per-event
+   handler refactor is in scope or parking-lot
+5. Verify post-reconciliation: `diff` between shared regions of
+   both files should be near-zero (excluding `connectWS`/`setConn`/
+   `testSwitch`/HTML/inline-style/title)
+
+**Action items for v0.15.34 (extract push):**
+
+1. Extract shared body to `players-core.js`
+2. Both HTMLs become shells loading characters.js, game.js,
+   rumble.js, boardFx.js, players-core.js + their own per-shell JS
+   (connectWS/setConn for players; harness suite for test_players)
+3. Verify both files boot, render, and behave identically to v0.15.32
+
+---
+
 
 ### Session 015 Process Retrospective
 
