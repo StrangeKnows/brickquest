@@ -6134,6 +6134,119 @@ past its build phase).
 
 ---
 
+### v0.15.28 — Gray-crit FX board diagnostic
+
+Diagnostic-only patch to confirm the suspected cause of the v0.15.25
+gray-crit FX bug ("not functioning as expected"). No fix code.
+Per rule #6 (diagnostic-first), ship the diag, gather real output,
+then design the fix.
+
+**Hypothesis** (from code reading, awaiting real-data confirmation):
+
+The gray-crit FX attaches particles + flavor text to `#my-shield-section`
+inside the player dashboard. Every server state broadcast triggers
+`renderDashboard()`, which rebuilds `#pane-dashboard.innerHTML` from
+scratch — wiping the entire shield section subtree, including any
+in-flight FX nodes. The `addShield` handler in server.js (line 2598-
+2620) emits the `rewardPopup` and then falls through to the global
+`broadcastState()` at the bottom of the message handler. Result: the
+state push arrives at the client immediately after the popup message,
+render() fires, the FX DOM is destroyed before the 800ms-1500ms
+animations can complete. From the user's perspective: a flash for a
+few frames, or nothing at all depending on browser timing.
+
+**Why diagnostic-first instead of writing the fix:**
+
+Hypothesis is strong by code reading but residual uncertainty exists:
+- Crit chance may be too low to fire reliably during normal play
+- There may be a layered second issue (CSS animation cut short,
+  particle-removal logic firing early, anchor not present at fire time)
+- The fix path matters: if render-wipe is the only cause, attach to
+  document.body solves it; if anchor-not-present is also a factor,
+  we need a different solution
+
+The diag confirms which causes are real before we design around them.
+
+---
+
+**What the diagnostic logs:**
+
+A flag `_grayCritDiag` (default `true`) gates all logging. A counter
+`_grayCritDiagRenderCount` increments on every renderDashboard call.
+
+In `showGrayCritFx`:
+1. **ENTRY** — log render counter, timestamp, data payload
+2. **BAIL no anchor** — `#my-shield-section` not in DOM at fire time
+3. **BAIL anchor width=0** — anchor present but hidden
+4. **anchor=ok pipsEl=...** — both anchors found, log rect
+5. **AFTER particle-loop** — particle count attached, total anchor.children
+6. **AFTER text-attach** — anchor.children after text node added
+7. **particle#N timeout-cleanup** — for each of the 14 particles, log
+   t, stillInDOM (true/false), rendersSinceAttach
+8. **text timeout-cleanup** — log t, stillInDOM
+
+In `renderDashboard`:
+- Increments counter
+- If `#my-shield-section` exists AND contains `.gray-crit-particle` or
+  `.gray-crit-text` nodes → `console.warn` with **RENDER WIPING ACTIVE FX**
+- Otherwise just logs the render count quietly
+
+All logs prefixed `[gray-crit-diag]` for easy grep/filter in DevTools.
+
+---
+
+**Reading the output:**
+
+Hypothesis confirmed if you see, in order:
+```
+[gray-crit-diag] ENTRY render#=N ...
+[gray-crit-diag] anchor=ok pipsEl=ok ...
+[gray-crit-diag] AFTER particle-loop attached=14 anchor.children=...
+[gray-crit-diag] AFTER text-attach anchor.children=...
+[gray-crit-diag] RENDER WIPING ACTIVE FX render#=N+1 ... fxNodesPresent=15  ← this is the key
+[gray-crit-diag] particle#0 timeout-cleanup ... stillInDOM=false rendersSinceAttach=1+
+... (more particle cleanups, all stillInDOM=false)
+[gray-crit-diag] text timeout-cleanup ... stillInDOM=false
+```
+
+If `RENDER WIPING ACTIVE FX` fires within ~100ms of attach: render-wipe
+is the cause. Fix is to attach to a stable parent (boardFx scaffold
+will own a `document.body`-attached overlay container).
+
+Alternative outcomes to watch for:
+- `BAIL no anchor` → dashboard isn't rendered; the FX is firing on a
+  different tab. Different fix.
+- `BAIL anchor width=0` → anchor exists but is hidden. Different fix.
+- `AFTER text-attach` logs but no `RENDER WIPING ACTIVE FX` and the
+  user still doesn't see the FX → CSS animation issue, not DOM issue.
+
+---
+
+**Net diff:**
+* `players.html`: +flag + render counter in renderDashboard + 8 log
+  points in showGrayCritFx
+* `test_players.html`: identical mirror (paired files, rule #3)
+* `rumble.js` / `characters.js` / `game.js` / `server.js`: untouched
+* No CSS changes, no schema changes
+
+**Removal target:** v0.15.29 (boardFx scaffold). All `_grayCritDiag`
+references and the flag itself get removed in the same patch where
+`showGrayCritFx` migrates into `boardFx.js`. Pattern follows the
+v0.15.26 redDashDiag removal precedent.
+
+**Test focus:**
+
+1. **Drop a gray brick on the board with no rumble active.** Watch
+   console output. Crit chance is RNG (~10%); may need 5-15 attempts.
+2. **Once a crit fires:** confirm at least one of the predicted log
+   sequences appears.
+3. **Capture and paste the log output** for hypothesis confirmation.
+4. **Sanity:** non-crit gray drops should produce no `[gray-crit-diag]`
+   logs except the per-render counter ticks (those fire on every
+   state push regardless of crit).
+
+---
+
 ### Session 015 Process Retrospective
 
 S015 was a long, productive session — but several standing rules
