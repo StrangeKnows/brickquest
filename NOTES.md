@@ -6521,6 +6521,154 @@ If particles render but paths look straight (no curve):
 
 ---
 
+### v0.15.31 — boardFx absorbs heal + casterAck; gray-crit firework redesign
+
+Three things in one push, all under the UNITY/ELEGANCE/EFFICIENCY lens:
+
+1. **`_fireHealFeedback` migrated to `BoardFx.fire('heal', ...)`** — the
+   ~70-line inline function plus `injectHealCss` IIFE (with 4 keyframes)
+   move into boardFx as the `heal` preset and boardFx.css. Detection
+   loop (`_detectHealsAndFire`, `_prevHpByCls`) stays — that's
+   render-loop coupling, not FX. The dispatcher shrinks to one line:
+   `if (p.cls === MY_CLASS) BoardFx.fire('heal', '#my-hp-bar', { delta });`
+
+2. **`_fireCasterAck` migrated to `BoardFx.fire('casterAck', rect)`** —
+   the ~22-line function and the `casterAck` keyframe move into
+   boardFx. Two call sites in each HTML simplify. Anchor accepts a
+   captured `DOMRect` directly (the ally icon may dismount before fire
+   time, so the rect is captured at drag-release). New `_resolveAnchor`
+   branch handles rect-shaped objects alongside elements and selectors.
+
+3. **shieldCrit firework redesign** — particles now per-particle
+   sizzle (1500-2800ms randomized lifetime, ~2× v0.15.30), high initial
+   velocity (CSS keyframes push 70% of distance by 30% of life),
+   gravity arc late in life (Y drops by +16px from endpoint), variable
+   sizes (4-7px) for visual depth. NO bow paths — pure radial firework.
+   Text gets diagonal trajectory above horizon: random horizontal
+   travel `tdx` of -40 to +40px, always upward, so successive crits
+   don't all go dead-vertical.
+
+---
+
+**Architectural wins:**
+
+- **Three retired duplications**: `_fireHealFeedback` (×2 HTMLs),
+  `_fireCasterAck` (×2 HTMLs), `injectHealCss` (×2 HTMLs). All gone.
+- **Two retired DOM containers**: `#heal-feedback-layer` no longer
+  exists. boardFx's `#board-fx-overlay` (z-index bumped 90 → 1001 to
+  match the retired layer's stacking) is the single FX home.
+- **Three retired CSS keyframe pairs in HTML**: `healFloater`,
+  `healRing`, `healSparkle`, `casterAck` migrated to boardFx.css.
+- **Primitives generalized**:
+  - `_particleBurst` gains `lifeMsMin`/`lifeMsMax` (per-particle
+    sizzle), `sizeMin`/`sizeMax` (variable size), `symbol` (text
+    particles), `pickColor` (palette per particle), `delayMaxMs`.
+  - `_risingText` gains `tdx` (diagonal trajectory via `--tdx` CSS
+    var) and treats anchor as element OR selector OR rect.
+  - New `_ring` primitive — used by both `heal` and `casterAck`.
+- **prior-art duplication ended**: white-heal had its own injected
+  CSS pattern; gray-crit had inline-style; both now route through
+  the same primitive layer.
+
+---
+
+**Gray-crit firework physics (CSS keyframes):**
+
+```
+0%   — origin, scale 0.6, opacity 0 (about to bloom)
+8%   — scale 1.3 (flash bigger), opacity 1, ~25% of distance
+30%  — at ~70% of distance, scale 1.0 (the "punch")
+60%  — at ~95% of distance + 4px gravity drop, scale 0.9
+85%  — at endpoint + 8px gravity drop, opacity 0.6, scale 0.7
+100% — past endpoint + 16px gravity drop, opacity 0, scale 0.4
+```
+
+Combined with per-particle randomized lifetime (1500-2800ms), the
+result is a recognizable firework signature where the burst happens
+together but particles die at staggered times — visually rich without
+randomizing the burst's overall shape.
+
+---
+
+**Diagonal text keyframe** (gray-crit-text):
+
+Uses `--tdx` CSS variable set inline at fire time. Default 0 = straight
+up (legacy behavior preserved for any caller not setting tdx).
+shieldCrit sets tdx randomly per fire.
+
+```
+0%   — translate(-50%, 0)              scale(0.85), opacity 0
+15%  — translate(-50% + tdx*0.2, -10)  scale(1.08), opacity 1
+60%  — translate(-50% + tdx*0.7, -28)  scale(1),    opacity 1
+100% — translate(-50% + tdx, -52)      scale(0.95), opacity 0
+```
+
+Successive crits travel at varied angles above horizon, never
+overlapping into a stacked vertical line.
+
+---
+
+**Files changed in v0.15.31:**
+
+- `boardFx.js` — three primitives enhanced (`_particleBurst`,
+  `_risingText`, `_ring`); three presets (`shieldCrit` redesigned,
+  `heal` and `casterAck` added); rect-shape anchor support in
+  `_resolveAnchor`; overlay z-index 90 → 1001
+- `boardFx.css` — gray-crit keyframes redesigned for firework physics
+  + diagonal text trajectory; `heal-floater`/`heal-ring`/`heal-sparkle`/
+  `caster-ack-ring` keyframes + classes added (migrated from injected
+  CSS); class names follow boardFx kebab-case convention rather than
+  the previous camelCase (cleaner, no behavior change)
+- `players.html` — strip `_fireHealFeedback` (88 lines), strip
+  `_fireCasterAck` (22 lines), strip `injectHealCss` IIFE (29 lines),
+  collapse `_detectHealsAndFire`'s body to one BoardFx.fire call,
+  redirect both `_fireCasterAck` call sites in the hold-to-charge
+  spotlight system. Net: −121 lines.
+- `test_players.html` — same as players.html (paired, rule #3).
+  Net: −121 lines.
+- `NOTES.md` — this entry
+
+UNTOUCHED: rumble.js, characters.js, game.js, server.js, rumble.css,
+dm_screen.html, rumble_test.html, arena_test.html, serve.sh, save.sh.
+
+---
+
+**Test focus:**
+
+1. **Hard refresh both browsers.**
+
+2. **Gray-crit (drop gray brick on board, wait for crit RNG):**
+   - Particles explode OUT fast (high initial velocity, not lazy drift)
+   - Variable sizes (4-7px) — closer/farther particles
+   - Particles die at DIFFERENT times (1.5-2.8s range, randomized)
+   - Late in life: gravity arc — particles drop slightly
+   - Text travels at varied angles above horizon — fire 5+ crits in a
+     row, text should go LEFT, RIGHT, slight-left, etc., never the
+     same direction twice in a row visually
+   - Flavor pool still works (no immediate repeats, +N armor parsed)
+
+3. **Heal feedback (any HP increase on the dashboard player — eat
+   cheese, white pilgrim heal, mender events):**
+   - Floater "+N HP" appears, drifts up, fades
+   - Ring pulse expands and fades (white/pink palette)
+   - Sparkles (✧ or ✦ for big heals) shoot outward, randomized
+     pinks/whites, sizzle at staggered times
+   - Behavior should look IDENTICAL to v0.15.30 — this is a pure
+     migration, not a redesign
+
+4. **CasterAck (drag-release on an ally icon during purple/white
+   ally-target hold):**
+   - Brief white ring flashes at the ally icon position
+   - Behavior should look IDENTICAL to v0.15.30
+
+5. **DOM inspection:**
+   - `#board-fx-overlay` exists (z-index 1001)
+   - `#heal-feedback-layer` does NOT exist (retired)
+   - `<style id="heal-css">` does NOT exist (retired)
+   - All FX nodes are children of `#board-fx-overlay`
+
+---
+
 
 ### Session 015 Process Retrospective
 

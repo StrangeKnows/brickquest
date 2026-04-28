@@ -2,53 +2,132 @@
  * boardFx.css — styles for boardFx.js presets
  *
  * All FX nodes are children of #board-fx-overlay (a position:fixed
- * viewport-spanning container appended to document.body by the JS).
- * Children use position:absolute; left/top are set in viewport pixels
- * by the JS at fire time. The translate(-50%) in text keyframes
- * horizontally centers the node on its left coordinate.
+ * viewport-spanning container appended to document.body by the JS,
+ * z-index 1001 — above modals and dashboard).
+ * Children use position:absolute; left/top set in viewport pixels
+ * by the JS at fire time.
  *
  * To add styles for a new preset: add keyframes + class here, point
  * the preset function at the className.
+ *
+ * Per-particle randomization (lifetime, size, color) is set inline
+ * by the JS; keyframes describe the *shape* of the animation, not
+ * its duration or appearance. Keep keyframes pure-shape so any
+ * preset can borrow them.
  * ═══════════════════════════════════════════════════ */
 
-/* ── shieldCrit preset ──
- * Particle drifts outward along a curved path: starts at origin,
- * passes through a perpendicular bow waypoint at 50% (--pbx/--pby),
- * arrives at radial endpoint at 100% (--pdx/--pdy). CSS linearly
- * interpolates position between keyframes — bow + endpoint together
- * produce an arcing path, not a straight line.
+/* ── shieldCrit preset (v0.15.31 firework redesign) ──────────────
+ * Particle: explodes outward from origin with high initial velocity
+ * (covers ~70% of distance by 30%, slows to gravity-arc end), variable
+ * scale to mimic a sizzling firework. Per-particle lifetime is set
+ * inline by JS — keyframe is pure shape.
  *
- * Opacity: fade-in 0→1 over 0-15%, hold visible through travel,
- * fade-out 1→0 over 75-100%. Visible across most of the lifetime;
- * less abrupt than the v0.15.25 fade-out-only behavior.
- *
- * Migrated from players.html / test_players.html inline <style>
- * (formerly v0.15.25). v0.15.29 polish: bow paths, fade-in,
- * 1.4s duration (was 0.8s), 18 particles per fire (was 14). */
+ * Path:
+ *   0%   — origin, scale 0.6, opacity 0 (about to bloom)
+ *   8%   — flash bigger (scale 1.3), opacity 1, ~25% of distance
+ *   30%  — at ~70% of distance, scale 1.0, opacity 1 (the "punch")
+ *   60%  — at ~95% of distance + slight gravity drop, scale 0.9
+ *   85%  — at endpoint with extra gravity drop (+8px Y), scale 0.7
+ *   100% — past endpoint with more gravity, opacity 0, scale 0.4
+ */
 @keyframes gray-crit-particle {
   0%   { opacity: 0; transform: translate(0, 0) scale(0.6); }
-  15%  { opacity: 1; transform: translate(calc(var(--pbx, 0px) * 0.3), calc(var(--pby, 0px) * 0.3)) scale(1); }
-  50%  { opacity: 1; transform: translate(var(--pbx, 0px), var(--pby, 0px)) scale(1); }
-  75%  { opacity: 1; }
-  100% { opacity: 0; transform: translate(var(--pdx), var(--pdy)) scale(0.4); }
+  8%   { opacity: 1; transform: translate(calc(var(--pdx) * 0.25), calc(var(--pdy) * 0.25)) scale(1.3); }
+  30%  { opacity: 1; transform: translate(calc(var(--pdx) * 0.7),  calc(var(--pdy) * 0.7))  scale(1.0); }
+  60%  { opacity: 1; transform: translate(calc(var(--pdx) * 0.95), calc(var(--pdy) * 0.95 + 4px)) scale(0.9); }
+  85%  { opacity: 0.6; transform: translate(var(--pdx), calc(var(--pdy) + 8px)) scale(0.7); }
+  100% { opacity: 0; transform: translate(var(--pdx), calc(var(--pdy) + 16px)) scale(0.4); }
 }
+
+/* Text: diagonal travel above horizon. --tdx is set inline by JS
+ * (random -40 to +40px); always travels UP (negative Y), but with
+ * variable horizontal drift so successive crits feel different.
+ * Keyframe accommodates --tdx without needing different classes. */
 @keyframes gray-crit-text {
-  0%   { opacity: 0;   transform: translate(-50%, 0) scale(0.85); }
-  15%  { opacity: 1;   transform: translate(-50%, -8px) scale(1.08); }
-  60%  { opacity: 1;   transform: translate(-50%, -22px) scale(1); }
-  100% { opacity: 0;   transform: translate(-50%, -42px) scale(0.95); }
+  0%   { opacity: 0; transform: translate(-50%, 0) scale(0.85); }
+  15%  { opacity: 1; transform: translate(calc(-50% + var(--tdx, 0px) * 0.2), -10px) scale(1.08); }
+  60%  { opacity: 1; transform: translate(calc(-50% + var(--tdx, 0px) * 0.7), -28px) scale(1); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--tdx, 0px)), -52px) scale(0.95); }
 }
+
 .gray-crit-particle {
   position: absolute; pointer-events: none;
   width: 5px; height: 5px; border-radius: 50%;
   background: #cccccc; box-shadow: 0 0 6px #ffffff, 0 0 12px #aaaaaa;
-  animation: gray-crit-particle 1.4s ease-out forwards;
+  animation-name: gray-crit-particle;
+  animation-timing-function: ease-out;
+  animation-fill-mode: forwards;
+  /* duration set inline per particle (sizzle) */
 }
 .gray-crit-text {
   position: absolute; pointer-events: none;
   font-family: Cinzel, serif; font-size: 14px; font-weight: 700;
   letter-spacing: .06em; color: #FFFFFF;
   text-shadow: 0 0 8px #ffffff, 0 0 14px #cccccc, 0 1px 3px rgba(0,0,0,0.9);
-  animation: gray-crit-text 1.4s ease-out forwards;
+  animation: gray-crit-text 1.8s ease-out forwards;
   white-space: nowrap;
+}
+
+
+/* ── heal preset (migrated from _fireHealFeedback v0.15.31) ──────
+ * Multi-component: floater + ring + sparkles. Per-particle sparkle
+ * lifetime randomized inline (the "sizzle" prior art).
+ */
+@keyframes heal-floater {
+  0%   { transform: translate(-50%, 0)     scale(0.8); opacity: 0; }
+  15%  { transform: translate(-50%, -8px)  scale(1.1); opacity: 1; }
+  100% { transform: translate(-50%, -60px) scale(1);   opacity: 0; }
+}
+@keyframes heal-ring {
+  0%   { width: 40px;  height: 40px;  opacity: 0; border-width: 4px; }
+  20%  { opacity: 1; }
+  100% { width: 180px; height: 180px; opacity: 0; border-width: 1px; }
+}
+@keyframes heal-sparkle {
+  0%   { transform: translate(-50%, -50%); opacity: 0; }
+  15%  { opacity: 1; }
+  100% { transform: translate(calc(-50% + var(--pdx)), calc(-50% + var(--pdy))); opacity: 0; }
+}
+
+.heal-floater {
+  position: absolute; pointer-events: none;
+  transform: translate(-50%, 0);
+  font-family: Cinzel, serif; font-size: 28px; font-weight: 700;
+  color: #ffeeee;
+  text-shadow: 0 0 12px #ffe0f0, 0 0 20px #ffddff, 0 2px 4px rgba(0,0,0,.8);
+  letter-spacing: .04em;
+  animation: heal-floater 1.2s ease-out forwards;
+  white-space: nowrap;
+}
+.heal-ring {
+  position: absolute; pointer-events: none;
+  transform: translate(-50%, -50%);
+  width: 40px; height: 40px; border-radius: 50%;
+  border: 3px solid #ffeeee;
+  box-shadow: 0 0 20px #ffe0f0, inset 0 0 10px #ffddff66;
+  animation: heal-ring 0.9s ease-out forwards;
+}
+.heal-sparkle {
+  position: absolute; pointer-events: none;
+  transform: translate(-50%, -50%);
+  text-shadow: 0 0 8px currentColor;
+  animation-name: heal-sparkle;
+  animation-timing-function: ease-out;
+  animation-fill-mode: forwards;
+  /* duration, font-size, color set inline per particle */
+}
+
+/* ── casterAck preset (migrated from _fireCasterAck v0.15.31) ──── */
+@keyframes caster-ack-ring {
+  0%   { width: 30px;  height: 30px;  opacity: 0; }
+  30%  { width: 60px;  height: 60px;  opacity: 1; }
+  100% { width: 100px; height: 100px; opacity: 0; }
+}
+.caster-ack-ring {
+  position: absolute; pointer-events: none;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 3px solid #ffeeee;
+  box-shadow: 0 0 20px #ffffff, inset 0 0 12px #ffddff88;
+  animation: caster-ack-ring 0.5s ease-out forwards;
 }

@@ -1349,7 +1349,7 @@ function _holdUp(e) {
     // Ally heal — keep overlay alive for spotlight, fire action + ack, then cleanup
     _holdEnd(false, true);                              // skip immediate clear
     _fireTierAction(s.color, s.tier, allyTargetCls);
-    if (allyIconRect) _fireCasterAck(allyIconRect);
+    if (allyIconRect) BoardFx.fire('casterAck', allyIconRect);
     _spotlightCleanup('[data-ally-target="' + allyTargetCls + '"]');
   } else if (onOption) {
     // Option fired — symmetric with ally path. Spotlight on the option, fire
@@ -1357,7 +1357,7 @@ function _holdUp(e) {
     // behaviors land in v0.15/0.16; for now this toasts via _fireTierAction.
     _holdEnd(false, true);
     _fireTierAction(s.color, s.tier, optionLabel);
-    if (optionIconRect) _fireCasterAck(optionIconRect);
+    if (optionIconRect) BoardFx.fire('casterAck', optionIconRect);
     _spotlightCleanup('[data-option-target="' + optionLabel + '"]');
   } else if (releasedOnOwnChip) {
     // Self heal — keep overlay alive briefly, fade everything together
@@ -1370,30 +1370,11 @@ function _holdUp(e) {
   }
 }
 
-// Caster acknowledgment flash — brief white ring that pops at the position an
-// ally icon was when drag-released. Lives ~400ms then fades.
-function _fireCasterAck(rect) {
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-  let layer = document.getElementById('heal-feedback-layer');
-  if (!layer) {
-    layer = document.createElement('div');
-    layer.id = 'heal-feedback-layer';
-    layer.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;'
-      + 'pointer-events:none;z-index:1001;';
-    document.body.appendChild(layer);
-  }
-  const flash = document.createElement('div');
-  flash.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;
-    transform:translate(-50%, -50%);
-    width:50px;height:50px;border-radius:50%;
-    border:3px solid #ffeeee;
-    box-shadow:0 0 20px #ffffff, inset 0 0 12px #ffddff88;
-    pointer-events:none;
-    animation:casterAck 500ms ease-out forwards;`;
-  layer.appendChild(flash);
-  setTimeout(() => flash.remove(), 550);
-}
+// Caster acknowledgment flash — brief white ring at the position an
+// ally icon was when drag-released. v0.15.31: migrated to boardFx as
+// the 'casterAck' preset. Call sites use BoardFx.fire('casterAck', rect)
+// directly — the rect (captured at drag-release time, since the icon
+// may dismount before fire) is passed straight to the preset's anchor.
 
 // Spotlight cleanup — reusable mechanic for clean post-cast overlay tear-down.
 //
@@ -1860,12 +1841,13 @@ function _renderAllyRadialFan(s) {
 // ═══════════════════════════════════════════════════════════════════════
 // HEAL FEEDBACK — visual reward when the dashboard player's HP increases.
 // ═══════════════════════════════════════════════════════════════════════
-// Detects HP increases on any player during render() and fires feedback for
-// MY_CLASS specifically (I only see my own dashboard — ally heals show on
-// their own screen when their state propagates).
+// Detects HP increases on any player during render() and fires the heal
+// preset for MY_CLASS specifically (I only see my own dashboard — ally
+// heals show on their own screen when their state propagates).
 //
-// Palette mirrors rumble's heal visuals: white + pink (#ffffff, #ffeeee,
-// #ffe0f0, #ffddff). Symbols ✧ / ✦ for sparkle particles.
+// The FX itself (floater + ring + sparkles) lives in boardFx.js as the
+// 'heal' preset. CSS keyframes live in boardFx.css. v0.15.31 migration
+// retired _fireHealFeedback / injectHealCss / #heal-feedback-layer.
 
 let _prevHpByCls = {};
 
@@ -1875,114 +1857,11 @@ function _detectHealsAndFire() {
     const prev = _prevHpByCls[p.cls];
     if (prev !== undefined && p.hp > prev) {
       const delta = p.hp - prev;
-      if (p.cls === MY_CLASS) _fireHealFeedback(delta);
+      if (p.cls === MY_CLASS) BoardFx.fire('heal', '#my-hp-bar', { delta });
     }
     _prevHpByCls[p.cls] = p.hp;
   });
 }
-
-function _fireHealFeedback(delta) {
-  const hpBar = document.getElementById('my-hp-bar');
-  if (!hpBar) return;
-  const rect = hpBar.getBoundingClientRect();
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-
-  // Overlay layer (reuse the hold-overlay pattern — fixed-position, non-interactive)
-  let layer = document.getElementById('heal-feedback-layer');
-  if (!layer) {
-    layer = document.createElement('div');
-    layer.id = 'heal-feedback-layer';
-    layer.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;'
-      + 'pointer-events:none;z-index:1001;';
-    document.body.appendChild(layer);
-  }
-
-  const HEAL_COLORS = ['#ffffff', '#ffeeee', '#ffe0f0', '#ffddff'];
-  const pickColor = () => HEAL_COLORS[Math.floor(Math.random() * HEAL_COLORS.length)];
-
-  // 1. FLOATER — "+N HP" text drifts upward from HP bar, fades
-  const floater = document.createElement('div');
-  floater.textContent = '+' + delta + ' HP';
-  floater.style.cssText = `position:absolute;left:${cx}px;top:${cy - 12}px;
-    transform:translate(-50%, 0);
-    font-family:Cinzel,serif;font-size:28px;font-weight:700;
-    color:#ffeeee;text-shadow:0 0 12px #ffe0f0, 0 0 20px #ffddff, 0 2px 4px rgba(0,0,0,.8);
-    pointer-events:none;letter-spacing:.04em;
-    animation:healFloater 1200ms ease-out forwards;`;
-  layer.appendChild(floater);
-
-  // 2. RING PULSE — expanding circle over the HP bar, fades
-  const ring = document.createElement('div');
-  ring.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;
-    transform:translate(-50%, -50%);
-    width:40px;height:40px;border-radius:50%;
-    border:3px solid #ffeeee;
-    box-shadow:0 0 20px #ffe0f0, inset 0 0 10px #ffddff66;
-    pointer-events:none;
-    animation:healRing 900ms ease-out forwards;`;
-  layer.appendChild(ring);
-
-  // 3. PARTICLES — sparkles radiate outward, count scales with delta (capped)
-  const particleCount = Math.min(20, 3 + delta);
-  const symbol = delta >= 10 ? '✦' : '✧';
-  for (let i = 0; i < particleCount; i++) {
-    const angle = (Math.PI * 2 * i) / particleCount + (Math.random() - 0.5) * 0.4;
-    const distance = 40 + Math.random() * 40;
-    const dx = Math.cos(angle) * distance;
-    const dy = Math.sin(angle) * distance - 20; // slight upward bias
-    const sparkle = document.createElement('div');
-    sparkle.textContent = symbol;
-    sparkle.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;
-      transform:translate(-50%, -50%);
-      font-size:${14 + Math.random() * 8}px;
-      color:${pickColor()};
-      text-shadow:0 0 8px currentColor;
-      pointer-events:none;
-      --dx:${dx}px;--dy:${dy}px;
-      animation:healSparkle ${800 + Math.random() * 400}ms ease-out forwards;`;
-    layer.appendChild(sparkle);
-  }
-
-  // Cleanup after max animation duration
-  setTimeout(() => {
-    floater.remove();
-    ring.remove();
-    layer.querySelectorAll('div').forEach(el => {
-      if (el !== floater && el !== ring) el.remove();
-    });
-  }, 1250);
-}
-
-// CSS for heal feedback animations — injected once
-(function injectHealCss() {
-  if (document.getElementById('heal-css')) return;
-  const s = document.createElement('style');
-  s.id = 'heal-css';
-  s.textContent = `
-    @keyframes healFloater {
-      0%   { transform:translate(-50%, 0) scale(0.8); opacity:0; }
-      15%  { transform:translate(-50%, -8px) scale(1.1); opacity:1; }
-      100% { transform:translate(-50%, -60px) scale(1); opacity:0; }
-    }
-    @keyframes healRing {
-      0%   { width:40px; height:40px; opacity:0; border-width:4px; }
-      20%  { opacity:1; }
-      100% { width:180px; height:180px; opacity:0; border-width:1px; }
-    }
-    @keyframes healSparkle {
-      0%   { transform:translate(-50%, -50%); opacity:0; }
-      15%  { opacity:1; }
-      100% { transform:translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))); opacity:0; }
-    }
-    @keyframes casterAck {
-      0%   { width:30px; height:30px; opacity:0; }
-      30%  { width:60px; height:60px; opacity:1; }
-      100% { width:100px; height:100px; opacity:0; }
-    }
-  `;
-  document.head.appendChild(s);
-})();
 
 // ── BRICK BAR ── horizontal chip row (rumble-style: icon + embedded pips).
 // One chip per owned color. Inside each chip: 22×22 color square icon above a
