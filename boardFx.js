@@ -71,17 +71,20 @@
   /* ── Primitive: particle burst ───────────────────────────────────
    * Spawn N particles drifting outward in a rough circle from (cx,cy).
    * Each particle gets randomized direction via CSS custom properties
-   * --pdx/--pdy. Caller provides the className that styles + animates
-   * the particle (animation declared in boardFx.css). */
+   * --pdx/--pdy (radial endpoint) and --pbx/--pby (perpendicular bow
+   * waypoint at midpoint, used by keyframes for arcing paths). Caller
+   * provides the className that styles + animates the particle
+   * (animation declared in boardFx.css). */
   function _particleBurst(cx, cy, opts) {
-    var overlay = _ensureOverlay();
-    var count    = opts.count    || 14;
-    var minDist  = opts.minDist  || 24;
-    var maxDist  = opts.maxDist  || 60;
-    var upBias   = opts.upBias   || 6;
+    var overlay  = _ensureOverlay();
+    var count    = opts.count     || 14;
+    var minDist  = opts.minDist   || 24;
+    var maxDist  = opts.maxDist   || 60;
+    var upBias   = opts.upBias    || 6;
+    var bowAmt   = opts.bowAmount || 0;   // 0 = straight; >0 = arcing
     var className = opts.className;
-    var lifeMs   = opts.lifeMs   || 950;
-    var size     = opts.size     || 5;
+    var lifeMs   = opts.lifeMs    || 950;
+    var size     = opts.size      || 5;
 
     for (var i = 0; i < count; i++) {
       var p = document.createElement('div');
@@ -94,6 +97,25 @@
       p.style.top  = (cy - size / 2) + 'px';
       p.style.setProperty('--pdx', dx + 'px');
       p.style.setProperty('--pdy', dy + 'px');
+      // Perpendicular bow waypoint for the 50% keyframe — gives the
+      // particle an arcing path instead of a straight line. Direction
+      // (left vs right of the radial) is randomized per particle.
+      // Magnitude is bowAmt × random(0.5–1.0) of the radial distance.
+      if (bowAmt > 0) {
+        var sign = (Math.random() < 0.5) ? -1 : 1;
+        var mag  = bowAmt * (0.5 + Math.random() * 0.5);
+        // perpendicular to (dx,dy) is (-dy,dx); normalize then scale
+        var len = Math.sqrt(dx*dx + dy*dy) || 1;
+        var bx  = (-dy / len) * mag * sign;
+        var by  = ( dx / len) * mag * sign;
+        // Midpoint position = halfway to endpoint + perpendicular bow
+        p.style.setProperty('--pbx', (dx * 0.5 + bx) + 'px');
+        p.style.setProperty('--pby', (dy * 0.5 + by) + 'px');
+      } else {
+        // straight-line midpoint (no bow)
+        p.style.setProperty('--pbx', (dx * 0.5) + 'px');
+        p.style.setProperty('--pby', (dy * 0.5) + 'px');
+      }
       p.style.animationDelay = (Math.random() * 0.08) + 's';
       overlay.appendChild(p);
       setTimeout(function(el){
@@ -128,6 +150,39 @@
    * { x, y, rect } in viewport coords; data is the payload from the
    * caller (typically server-emitted reward info). Add new presets by
    * dropping an entry here. */
+
+  // Per-preset flavor state. Tracks last-used index per pool to avoid
+  // immediate repeats. Keyed by pool name.
+  var _lastFlavorIdx = {};
+  function _pickFlavor(poolName, pool) {
+    if (!pool || pool.length === 0) return '';
+    if (pool.length === 1) return pool[0];
+    var last = _lastFlavorIdx[poolName];
+    var idx;
+    do { idx = Math.floor(Math.random() * pool.length); } while (idx === last);
+    _lastFlavorIdx[poolName] = idx;
+    return pool[idx];
+  }
+
+  // shieldCrit flavor pool — Lego/dungeon dad-joke vibe. Each line is
+  // short enough to fit on one row under the shield bar. The "+N armor"
+  // amount is parsed from the server label and appended separately so
+  // the flavor stays variable while the count info is preserved.
+  var SHIELD_CRIT_FLAVORS = [
+    "Brick wall!",
+    "Click! Locked in!",
+    "Studs up!",
+    "Built different!",
+    "Plate armor — literally!",
+    "Snap! Stronger!",
+    "Stack 'em high!",
+    "That'll hold!",
+    "Brick by brick!",
+    "Reinforced!",
+    "Hold the line!",
+    "Solid as a rock!"
+  ];
+
   var PRESETS = {
     shieldCrit: function(pos, data) {
       // Center on the shield-pip row specifically (sub-element of the
@@ -143,14 +198,26 @@
           cy = pr.top  + pr.height / 2;
         }
       }
+      // Particles: consistent shape per fire (recognizable signature),
+      // per-particle randomization (angle/distance/delay/bow direction)
+      // for visual richness. 18 particles, 1.4s life, bow paths.
       _particleBurst(cx, cy, {
-        count:     14,
-        className: 'gray-crit-particle',
-        lifeMs:    950,
-        size:      5
+        count:      18,
+        className:  'gray-crit-particle',
+        lifeMs:     1425,
+        size:       5,
+        bowAmount:  18    // perpendicular waypoint magnitude in px
       });
-      var label = (data && data.label) ? data.label : 'Shield crit!';
-      _risingText(cx, cy, '⚡ ' + label, {
+      // Text: variable per fire. Pull a flavor line, append the armor
+      // amount if the server label carries it (regex match "+N armor").
+      // Falls back to "Shield crit!" if data has no label at all.
+      var serverLabel = (data && data.label) ? data.label : '';
+      var armorMatch  = serverLabel.match(/\+(\d+)\s*armor/i);
+      var flavor      = _pickFlavor('shieldCrit', SHIELD_CRIT_FLAVORS);
+      var text        = '⚡ ' + flavor;
+      if (armorMatch) text += ' +' + armorMatch[1] + ' armor';
+      else if (!flavor) text = '⚡ ' + (serverLabel || 'Shield crit!');
+      _risingText(cx, cy, text, {
         className: 'gray-crit-text',
         lifeMs:    1500,
         yOffset:   -18

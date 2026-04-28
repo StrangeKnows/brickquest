@@ -12,12 +12,25 @@
  * ═══════════════════════════════════════════════════ */
 
 /* ── shieldCrit preset ──
- * Particle drifts outward + fades. Flavor text rises + fades.
+ * Particle drifts outward along a curved path: starts at origin,
+ * passes through a perpendicular bow waypoint at 50% (--pbx/--pby),
+ * arrives at radial endpoint at 100% (--pdx/--pdy). CSS linearly
+ * interpolates position between keyframes — bow + endpoint together
+ * produce an arcing path, not a straight line.
+ *
+ * Opacity: fade-in 0→1 over 0-15%, hold visible through travel,
+ * fade-out 1→0 over 75-100%. Visible across most of the lifetime;
+ * less abrupt than the v0.15.25 fade-out-only behavior.
+ *
  * Migrated from players.html / test_players.html inline <style>
- * blocks (formerly v0.15.25). Behavior unchanged. */
+ * (formerly v0.15.25). v0.15.29 polish: bow paths, fade-in,
+ * 1.4s duration (was 0.8s), 18 particles per fire (was 14). */
 @keyframes gray-crit-particle {
-  0%   { opacity: 1;   transform: translate(0, 0) scale(1); }
-  100% { opacity: 0;   transform: translate(var(--pdx), var(--pdy)) scale(0.4); }
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.6); }
+  15%  { opacity: 1; transform: translate(calc(var(--pbx, 0px) * 0.3), calc(var(--pby, 0px) * 0.3)) scale(1); }
+  50%  { opacity: 1; transform: translate(var(--pbx, 0px), var(--pby, 0px)) scale(1); }
+  75%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--pdx), var(--pdy)) scale(0.4); }
 }
 @keyframes gray-crit-text {
   0%   { opacity: 0;   transform: translate(-50%, 0) scale(0.85); }
@@ -29,7 +42,7 @@
   position: absolute; pointer-events: none;
   width: 5px; height: 5px; border-radius: 50%;
   background: #cccccc; box-shadow: 0 0 6px #ffffff, 0 0 12px #aaaaaa;
-  animation: gray-crit-particle 0.8s ease-out forwards;
+  animation: gray-crit-particle 1.4s ease-out forwards;
 }
 .gray-crit-text {
   position: absolute; pointer-events: none;

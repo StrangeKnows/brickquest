@@ -6267,19 +6267,24 @@ sprawl across players.html and test_players.html. Roadmap:
 
 | Module | Status | Scope |
 |---|---|---|
-| `boardFx.js`     | **v0.15.29 — shipping** | ambient feedback (particles, rising text, fly-icon, toast) |
+| `boardFx.js`     | **shipped v0.15.29** | ambient feedback (particles, rising text, fly-icon, toast) |
 | `boardModal.js`  | next | must-click cards (results, prompts, bargains) |
 | `boardSocial.js` | next | trade / gift / party flows |
 | `boardEvents.js` | next | event minigames (torch, vine, cipher, etc.) |
 
-After all four land, players.html drops ~1500-2500 lines and every
-cross-cutting concern has a single home. Class identity work resumes
-on cleaned ground; new FX/modals land as preset entries, not new
-ad-hoc functions.
+Plus a separate spine refactor before the next module extractions:
+`players-core.js` shared core, ending the players.html / test_players.html
+duplication that motivated the whole cleanup arc.
+
+After all modules + the core extract land, players.html and
+test_players.html become thin shells over a shared core, every
+cross-cutting concern has a single home, and edits stop being
+double-handled. Class identity work resumes on cleaned ground; new
+FX/modals land as preset entries, not new ad-hoc functions.
 
 ---
 
-**What ships in v0.15.29 (locked scope):**
+**What shipped in v0.15.29 (scaffold + bug fix only):**
 
 NEW FILES:
 - `boardFx.js` — schema-driven FX module
@@ -6348,15 +6353,17 @@ its `left` coordinate, just now relative to viewport instead of anchor.
 
 ---
 
-**shieldCrit preset:**
+**shieldCrit preset (v0.15.29 initial — pre-polish):**
 
-Replaces showGrayCritFx 1:1. Same particle count (14), same lifetimes
-(950ms particles, 1500ms text), same colors, same keyframes, same
-flavor-text format (`⚡ ${data.label}` with fallback `Shield crit!`).
+1:1 replacement of showGrayCritFx. Same particle count (14), same
+lifetimes (950ms particles, 1500ms text), same colors, same keyframes,
+same flavor-text format (`⚡ ${data.label}` with fallback "Shield crit!").
 Centers on `#my-shield-pips` when found, falls back to anchor center.
 
 The visual is identical to what we briefly saw in the diagnostic
-screenshot before the wipe — just no longer wiped.
+screenshot before the wipe — just no longer wiped. Polish (more
+particles, longer life, bow paths, fade-in/out, flavor pool) shipped
+next as v0.15.30.
 
 ---
 
@@ -6373,8 +6380,8 @@ screenshot before the wipe — just no longer wiped.
 
 **Server side untouched** — still emits `rewardPopup` with
 `kind:'shield'`. The `rewardPopup` → `boardFx` server-event rename
-is v0.15.30 work when brick/gold migrate (one server change covers
-all three migrations).
+is later work when brick/gold migrate (one server change covers
+all migrations).
 
 ---
 
@@ -6400,61 +6407,120 @@ parent itself was detached. Noted for future diagnostics.
 
 ---
 
-**Standards audit (rule #17 — third audit point in S015 continuation):**
+### v0.15.30 — boardFx polish: 18 particles, bow paths, fade-in/out, flavor pool
 
-Restating rule #11 (file placement). boardFx.js is a new top-level
-module. Schema (PRESETS map) lives inside the module, not in
-characters.js — because the presets are *board UI behavior* not
-*class identity*. characters.js stays focused on character data.
+The v0.15.29 scaffold shipped a 1:1 port of showGrayCritFx — bug
+fixed, but visually identical to the (briefly-glimpsed) original.
+v0.15.30 applies the polish brief: more particles, longer life, curved
+travel paths, full fade-in / hold / fade-out, and a 12-line flavor
+pool with no-immediate-repeat selection.
 
-The COLOR table in characters.js will feed into preset data
-eventually (e.g., a future `brickGained` preset reads
-`COLOR[brick.color].hex`), but that's read-side coupling, not
-write-side. Schema source-of-truth lives where the schema's domain
-lives. **Confirmed held: ✓**
+**Design call:** particles look the same shape every fire (recognizable
+class signature), only the *text* varies per fire. Per-particle
+randomization (angle/distance/delay/bow-direction) lives at the
+particle level for visual richness; the burst as a whole is consistent.
 
-Also restating rule #14 (UNITY/ELEGANCE/EFFICIENCY). Three checks
-on this push:
+---
 
-- **UNITY:** all FX flows through one entry point (`BoardFx.fire`).
-  No more "showXFx" + "showYFx" + "showZFx" with separate signatures.
-  Adding a new FX = one preset entry. ✓
-- **ELEGANCE:** schema > function > system. The presets map IS the
-  schema; `fire()` is the system. New FX never grows the system
-  surface; only the data. ✓
-- **EFFICIENCY:** ~70 lines of duplicated showGrayCritFx code (one
-  copy per HTML) → one shared module. CSS deduplicated similarly.
-  Net: -200ish lines from HTMLs, +180ish in new files; gain is the
-  end of duplication going forward. ✓
+**Particle changes (`_particleBurst` primitive + `gray-crit-particle`
+keyframes):**
+
+- 14 → 18 particles (+~30%)
+- 950ms → 1425ms lifetime (+50%) — completes ~together with the 1500ms
+  text, no more "particles vanish 550ms before text"
+- New `bowAmount` opt on `_particleBurst` (set to 18 for shieldCrit):
+  each particle passes through a perpendicular bow waypoint at the
+  50% keyframe. Bow direction (left vs right of radial) randomized
+  per particle. Magnitude randomized 50%-100% of bowAmount. Result:
+  arcing curves, not straight radial lines.
+- Two new CSS custom properties per particle: `--pbx` / `--pby`
+  (perpendicular bow waypoint at 50%). Existing `--pdx` / `--pdy`
+  unchanged (radial endpoint at 100%).
+- Opacity: fade-in 0→1 over 0-15%, hold visible through travel,
+  fade-out 1→0 over 75-100%. Was fade-out only (popped in at full
+  opacity, faded only on exit).
+- Animation duration in CSS: 0.8s → 1.4s (matches the JS lifeMs).
+
+**bowAmount math** (in `_particleBurst`):
+- Perpendicular to (dx,dy) is (-dy,dx); normalized then scaled by
+  `bowAmount × random(0.5..1.0)` and signed left/right.
+- Midpoint position = (dx*0.5, dy*0.5) + perpendicular offset.
+- CSS interpolates linearly: 0% origin → 50% midpoint → 100% endpoint.
+  Bow + endpoint together produce a curve, not a straight line.
+
+---
+
+**Text changes (`shieldCrit` preset):**
+
+12-line flavor pool, Lego/dungeon dad-joke vibe. Pool lives inline in
+the preset for now; extracts to `flavor.js` when a second preset needs
+a pool.
+
+```
+"Brick wall!"           "Stack 'em high!"
+"Click! Locked in!"     "That'll hold!"
+"Studs up!"             "Brick by brick!"
+"Built different!"      "Reinforced!"
+"Plate armor —          "Hold the line!"
+ literally!"            "Solid as a rock!"
+"Snap! Stronger!"
+```
+
+**Selection logic:** `_pickFlavor(poolName, pool)` helper in boardFx.js.
+Tracks last-used index per pool in `_lastFlavorIdx`. Re-rolls if the
+new pick matches the last. Result: same line never appears twice in a
+row, but can reappear after at least one other line.
+
+**Armor amount preserved:** server emits `'Shield crit! +2 armor'`.
+The preset regex-matches `\+(\d+)\s*armor` from the label. If matched,
+the rendered text is `⚡ <flavor> +<N> armor`. If the server label
+doesn't match the pattern, falls back to `⚡ <serverLabel>`. Server
+can override flavor by sending custom labels with no `+N armor`
+suffix.
+
+---
+
+**Files changed in v0.15.30:**
+- `boardFx.js` — `_particleBurst` gets bowAmount opt; new
+  `_pickFlavor` helper; `_lastFlavorIdx` state; `SHIELD_CRIT_FLAVORS`
+  pool; shieldCrit preset rewritten to use bow + flavor + label parse
+- `boardFx.css` — gray-crit-particle keyframes get 50% bow waypoint
+  + fade-in keyframes; duration 0.8s → 1.4s
+- `NOTES.md` — this entry
+- `package.json` / `package-lock.json` — bump 0.15.29 → 0.15.30
+
+`players.html` and `test_players.html` UNTOUCHED — the polish is
+entirely contained in boardFx.js + boardFx.css (the scaffold pays off
+on its first iteration: visual changes don't touch the HTMLs).
 
 ---
 
 **Test focus:**
 
-1. **Hard refresh both browsers** (Ctrl+Shift+R / Cmd+Shift+R) to
-   force `boardFx.js` and `boardFx.css` to load fresh.
-2. **Open DevTools console.** Should see no `[gray-crit-diag]` logs
-   ever — the diagnostic is gone.
-3. **Drop a gray brick on the board** (no rumble active). Crit RNG
-   ~10%, may take several attempts.
-4. **When crit fires:** particle burst + "⚡ Shield crit! +2 armor"
-   text both visible at the shield pip bar, both complete their full
-   animation. No flicker. No instant-disappear.
-5. **Inspect DOM mid-FX:** `#board-fx-overlay` should be a child of
-   `<body>`, containing 14× `.gray-crit-particle` + 1× `.gray-crit-text`.
-   Should NOT be inside `#pane-dashboard`.
-6. **Trigger several state pushes during FX** (move on board, etc.).
-   FX should be unaffected — particles complete, text completes.
-7. **Sanity:** brick-gained and gold-gained popups still work as
-   before (those still use the legacy `showRewardPopup` — migration
-   is v0.15.30).
+1. **Hard refresh** to load v0.15.30 boardFx.js + boardFx.css.
+2. **Drop gray brick on board.** Crit RNG ~10%, may take attempts.
+3. **When crit fires, visual checklist:**
+   - 18 particles bloom in (fade-in, not pop-in)
+   - Particles travel in curved arcs (not straight lines)
+   - Particles fade out near their endpoints
+   - Animation lasts ~1.4s — slower, more readable than v0.15.29
+   - Text shows `⚡ <flavor> +2 armor` where flavor is one of 12
+   - No flicker, no instant-disappear
+4. **Fire several crits in sequence.** Flavor text should NOT repeat
+   the same line consecutively. Same line may reappear after at
+   least one other line has fired.
+5. **Inspect particle in DevTools mid-FX:** should have `--pbx`,
+   `--pby`, `--pdx`, `--pdy` CSS custom properties set.
+6. **Confirm `boardFx.css` is the v0.15.30 version** — search for
+   "50%" in the gray-crit-particle keyframe; should find a bow
+   waypoint reference there.
 
-If the FX doesn't render at all, check:
-- `boardFx.js` 404 in Network tab (path issue, server/cache)
-- `BoardFx is not defined` in console (script load order)
-- Overlay not in DOM after first fire (selector issue in `_resolveAnchor`)
+If particles render but paths look straight (no curve):
+- Check `--pbx` / `--pby` are non-zero in DevTools → Computed
+- Confirm boardFx.css loaded the v0.15.30 version (cache bypass)
 
 ---
+
 
 ### Session 015 Process Retrospective
 
