@@ -7441,6 +7441,213 @@ start, even when scoping makes the wrong shape technically valid.
 
 ---
 
+### v0.15.37 — Collect button on resolution cards; ends WAITING-FOR-DM dead zone
+
+**Discovery during v0.15.36 playtest:** event resolution showed a card
+("YOU WON 🏆 — red brick yours, waiting for DM") with no FX and no
+player-actionable affordance. The player wins, the card appears, and
+gameplay halts until the DM marks resolved on their side. Silent dead
+zone. Ross's design call:
+
+> "reward card with collect* button <Flavor text, pool of collect
+> words phrases> when player clicks the animation and fx fires,
+> regardless of DM interaction"
+
+The fix: turn the must-click moment into a *productive* click. Card
+gets a Collect button; player taps; brickGained / goldGained / etc.
+boardFx fires from the button position; card hides; gameplay resumes.
+DM marking resolved is decoupled bookkeeping that no longer gates the
+player's experience.
+
+---
+
+**Architectural finding during scoping:**
+
+Initially scoped this as a `boardModal.js` scaffold push — assuming
+resolution cards were scattered `_pendingResult` setters that needed
+unification. **The codebase already has that unification.** Every
+event's "completed-result" state renders through `buildResolutionCard`
+(in `players-core.js`). 10 call sites across the spine (red trial,
+gray rubble, gold game, riddle, purple, green, white, blue, trap-
+disarmed, trap-sprung). Predates this session.
+
+So the v0.15.37 work isn't a new module — it's an enhancement to the
+existing single source of truth. Add `spec` parameter to
+`buildResolutionCard`, render Collect button when spec has rewards,
+pass `spec` through at each of the 10 call sites. boardModal.js
+scaffold is deferred — `buildResolutionCard` already provides the
+centralization that boardModal would have provided. If a future
+patch needs *standalone* (non-event-context) modal cards, that's
+when boardModal.js gets built.
+
+This is the intuition rule earning its keep: the "right move" wasn't
+the bigger architectural rebuild I initially proposed; it was the
+small enhancement that the existing architecture already supported.
+
+---
+
+**Implementation:**
+
+1. **`spec` param added to `buildResolutionCard`.** When present and
+   non-empty (has bricks / coins / cheese / shield), the card renders
+   a Collect button instead of the "WAITING FOR DM" footer. Cards
+   with no rewards (trial cancelled, did not join, gate held without
+   reward) keep the WAITING footer — they have nothing to collect.
+
+2. **`REWARD_COLLECT_FLAVORS` pool** — 15-line dad-joke vibe pool:
+   "Mine!" / "Snagged!" / "Pocket it!" / "Stack it!" / "Earned!" /
+   "Claimed!" / "Locked in!" / "Sweet!" / "Got it!" / "Yoink!" /
+   "Tucked away!" / "Heck yes!" / "Pay day!" / "Cha-ching!" /
+   "Loot it!". Uses no-immediate-repeat logic via
+   `_pickResolutionCollectFlavor` (mirrors shieldCrit pool primitive).
+
+3. **`_collectResolutionReward(specJson, btnId)`** — global handler
+   wired to button onclick. For each reward type in the spec:
+   - `bricks: { color: N }` → fires `brickGained` boardFx N times,
+     staggered 60ms per brick + 80ms per color
+   - `coins: N` → fires `goldGained` once with amount N (the pile-and-
+     flow preset handles multi-coin animation internally)
+   - `cheese: N` → fires `goldGained` (cheese reuses goldGained until
+     a `cheeseGained` preset exists; visually close enough — both
+     warm-yellow flow-to-inventory)
+   - `shield: true` → fires `shieldCrit` at the shield section
+   - Sends `client.send('collectReward', { spec })` server message
+     (defensive — server may or may not handle it; ack-only)
+   - Hides the containing card via `data-resolution-card` selector +
+     opacity transition
+
+4. **`spec` passed through all 10 call sites.** Mostly straightforward
+   (the spec variable was already in scope at each call site, just
+   wasn't being forwarded). One call site (trap-disarmed at ~line
+   2274) had inline spec that needed extraction to a variable.
+
+---
+
+**Behavioral change:**
+
+Pre-v0.15.37 trial-of-hand resolution flow:
+```
+Trial completes → "🏆 YOU WON" card appears with reward icons
+   → "WAITING FOR DM" footer
+   → Player waits (silent, frozen) until DM marks resolved
+   → Server fires rewardPopup
+   → goldGained/brickGained FX plays
+```
+
+Post-v0.15.37:
+```
+Trial completes → "🏆 YOU WON" card appears with reward icons
+   → "✋ Mine!" (or variant) Collect button
+   → Player taps → brickGained + goldGained FX fires
+   → Card hides; gameplay resumes
+   → DM marks resolved later (bookkeeping, no UX effect)
+```
+
+The win moment now feels like *winning* — tap, sparks fly, you keep
+playing. Not a forced waiting room.
+
+---
+
+**Files changed in v0.15.37:**
+
+- `players-core.js`:
+  - `REWARD_COLLECT_FLAVORS` pool + `_pickResolutionCollectFlavor`
+    helper added (~30 lines)
+  - `_collectResolutionReward` global handler added (~50 lines)
+  - `buildResolutionCard` enhanced — `spec` param + Collect-vs-WAITING
+    branching (+~25 lines net)
+  - 10 call sites updated to pass `spec` through
+- `NOTES.md` — this entry + parking-lot entries for cheese-modal
+  market redesign and shield discrepancy (REPORTED)
+
+UNTOUCHED: boardFx.js, boardFx.css, players.html, test_players.html.
+The flavor pool, helpers, button, and FX dispatch all live in the
+spine because that's where buildResolutionCard already lived — single
+source of truth maintained.
+
+---
+
+**Deferred items (parking lot, captured at end of NOTES.md):**
+
+- **Cheese-modal-as-market-inspiration** — visual language for market
+  redesign with coin iconography and tactile click rhythm. Deferred:
+  needs boardModal extract first (cheese modal IS a must-click card
+  that boardModal would own). Captured at end of NOTES.
+- **Shield amount discrepancy rumble vs board** — REPORTED, NOT
+  DIAGNOSED. Players-core.js anchor: `shieldMax = me.hpMax`. Rumble
+  side unknown without rumble.js / characters.js. Captured at end of
+  NOTES.
+- **`cheeseGained` preset** — currently cheese reuses goldGained.
+  When a cheese-specific FX is desired, a new boardFx preset can
+  carry it (similar to brickGained's per-color treatment). No
+  immediate need; cheese-as-gold visually works for now.
+
+---
+
+**Test focus:**
+
+1. **Hard refresh** to load new spine code.
+
+2. **Trigger any event resolution with rewards** — easiest is a forced
+   monster fight (DM forces) or a trial of hand. The "YOU WON" or
+   equivalent card should now show:
+   - Reward icons (red brick, cheese — same as before)
+   - **"✋ <flavor>" Collect button** instead of "WAITING FOR DM"
+   - Themed button background matching the card's themeColor
+
+3. **Tap the Collect button.** Verify:
+   - brickGained FX fires (colored particle burst + rising "+1 N
+     brick" text). For multi-color reward, multiple bursts cascade.
+   - goldGained FX fires for cheese/coins (pile-and-flow if amount > 3,
+     individual coins if ≤3)
+   - Card fades out (~250ms opacity transition) and hides
+   - Gameplay continues — no waiting
+
+4. **Tap multiple resolution cards in sequence** (across multiple
+   events). Flavor text on the button should vary; same word should
+   not appear twice in a row.
+
+5. **Trial cancelled / no winner / did not join** cards — these have
+   NO rewards. Verify they still show "WAITING FOR DM" footer (not
+   the Collect button). They're not collectable.
+
+6. **Server-side check (optional, no fix needed):** the client now
+   sends `collectReward` action when player taps. If server doesn't
+   handle it, no error (ack-only). If server later wants to use this
+   for auto-resolve or reward-grant timing, the message is there.
+
+If Collect button appears but FX doesn't fire on tap:
+- Check console for errors in `_collectResolutionReward`
+- Verify boardFx.js loaded and `BoardFx.fire` is callable
+- Verify spec was passed correctly (check `data-resolution-card`
+  attr on the card div in DevTools)
+
+---
+
+**Standards audit (rule #17 — push #10 in S015 continuation):**
+
+Restating rule #19 (intuition rule). This push is the strongest
+example of intuition correctly de-scoping a proposed bigger move:
+
+I initially proposed v0.15.37 as a `boardModal.js` scaffold — new
+module, sibling to boardFx, full module-extract pattern. Felt right
+on first glance because "must-click cards need a unified module."
+
+**The intuition check** (UNITY/ELEGANCE/EFFICIENCY): is unification
+actually missing? When I looked, `buildResolutionCard` was already
+the unified surface. Building boardModal would have *re-unified*
+something already unified, AND would have moved the centralized
+function out of the spine for no real benefit. Smaller scope wins.
+
+The intuition rule says don't menu when philosophy makes the answer
+clear. Same rule: don't scaffold a new module when the centralization
+already exists. Trust the existing architecture; enhance it instead.
+
+**No drift incidents this push.** Built in one focused arc, tested
+parse + structure, all 10 call sites updated cleanly.
+
+---
+
 
 ### Session 015 Process Retrospective
 
@@ -8146,5 +8353,67 @@ per-player counter, 2-turn threshold, reset on rumble entry, next-landing
 override, visible counter chip, uniform threshold across classes.
 
 **Build estimate:** small to medium chunk, mostly server.js.
+
+---
+
+## Parking lot — v0.15.36 close
+
+### Market redesign — cheese-modal visual language + coin icon
+
+**Source:** Ross during v0.15.36 playtest:
+> "cheese modal - use for inspiration for new market using coin icon"
+
+**Read:** the cheese-grab modal has UI shape worth carrying into the
+market. Migration would unify the market visual language with the
+rest of the dashboard's reward iconography (🪙 coins explicit,
+not text "gold"). Could combine with:
+- Tactile click rhythm (similar to brick-chip taps elsewhere)
+- Coin-flow FX on purchase (BoardFx `goldGained` plays in reverse —
+  coins fly FROM gold display TO market item being bought)
+- Cheese-modal layout for purchase confirmation (single tap to confirm,
+  not multi-card)
+
+**Build estimate:** medium chunk. Touches market-tab rendering in
+players-core.js (`renderMarket` and related), gold-display anchoring
+(would benefit from `id="my-gold-display"` finally being added —
+see goldGained TODO above), and possibly new boardFx preset for the
+reverse-flow purchase confirmation.
+
+**Dependencies:** none blocking, but boardModal.js extract first
+would make this cleaner since the cheese modal is a must-click card
+that boardModal would own. Suggest sequencing: boardModal extract →
+market redesign.
+
+**Roadmap fit:** §10 "Polish" range. Player-experience patch.
+
+---
+
+### [REPORTED] Shield amount discrepancy — rumble vs board
+
+**Source:** Ross during v0.15.36 playtest:
+> "shield amount discrepancy rumble and board, max?"
+
+**Status:** REPORTED, NOT YET DIAGNOSED. Player observed shield/armor
+amounts differing between board context (dashboard pip display) and
+rumble context (rumble HUD). Possible causes:
+- Different MAX_SHIELD constant in two places (one in players-core.js
+  vs one in rumble.js or characters.js)
+- Cap applied at one layer but not the other (gain capped on board,
+  not capped in rumble — or vice versa)
+- Display divergence (server state has one value, rumble UI shows another)
+
+**Players-core.js anchor:** `const shieldMax = me.hpMax;` (line ~530
+in render). Shield cap = max HP (i.e., shield can absorb up to one
+full HP-bar's worth before being maxed).
+
+**Rumble side:** unknown — needs scan of rumble.js for shield/armor
+display logic and any independent max calculation.
+
+**Diagnostic next step:** scan rumble.js + characters.js for shield
+max/cap logic. Compare against players-core.js. If a divergence
+exists, surface it with both code paths visible before fixing.
+
+**Build estimate:** small (likely a one-line constant fix or a
+single-source-of-truth refactor moving max into characters.js).
 
 ---

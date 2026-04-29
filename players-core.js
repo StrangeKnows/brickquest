@@ -2074,6 +2074,7 @@ function showLandingResult(ev, r, zone) {
         bgColor: grBg,
         title: grTitle,
         rewardIcons: renderRewardIcons(grSpec),
+        spec: grSpec,
         flavor: grFlav,
         showerTint: grTheme,
         shower: foundAmt2 > 0 || grCheese > 0,
@@ -2144,6 +2145,7 @@ function showLandingResult(ev, r, zone) {
         bgColor: '#020a14',
         title: blueTitle,
         rewardIcons: renderRewardIcons(spec) || '<span style="color:var(--text-faint);font-size:12px;">—</span>',
+        spec: spec,
         flavor: resolveFlav,
         linger: !blueResult.success ? '✨ Arcane energy remains here' : '',
         extra: fwBanner,
@@ -2267,6 +2269,7 @@ function showLandingResult(ev, r, zone) {
     var trapResult = G.activeEvent && G.activeEvent.trapResult;
     if (trapResult) {
       if (trapResult.disarmed) {
+        var disarmSpec = { bricks: { orange: 1 } };
         var disarmIcons = renderRewardIcons({ bricks: { orange: 1 }, custom: '<span style="font-size:18px;color:var(--text-dim);margin:0 6px;">(from</span>' + '<span style="width:22px;height:22px;border-radius:3px;background:#AAAAAA;display:inline-block;vertical-align:middle;box-shadow:0 1px 4px rgba(0,0,0,.5);margin:0 2px;"></span><span style="font-size:18px;color:var(--text-dim);">)</span>' });
         extra = buildResolutionCard({
           themeColor: '#9adb9a',
@@ -2274,6 +2277,7 @@ function showLandingResult(ev, r, zone) {
           bgColor: '#0a1200',
           title: '🔧 DISARMED',
           rewardIcons: disarmIcons,
+          spec: disarmSpec,
           flavor: 'Defused. The fortress concedes one brick.',
           showerTint: '#9adb9a',
         });
@@ -2342,6 +2346,7 @@ function showLandingResult(ev, r, zone) {
           bgColor: trapBg,
           title: trapResult.dmg === 0 ? '✓ DODGED' : '🗡 SPRUNG',
           rewardIcons: renderRewardIcons(trapRewardSpec),
+          spec: trapRewardSpec,
           flavor: trapFlav,
           extra: dodgedNote,
           showerTint: trapThemeColor,
@@ -4797,11 +4802,112 @@ function handleDisarmChain(data) {
 //   bgColor     — dark themed background (e.g. '#020a14' for blue, '#1a0a10' for red)
 //   title       — big Cinzel title text (e.g. '✨ BLESSED ✨' or '🏆 PERFECT')
 //   rewardIcons — HTML string from renderRewardIcons (or empty for text-only results)
+//   spec        — structured reward spec passed to renderRewardIcons; when present
+//                 with at least one reward (bricks/coins/cheese/shield), the card
+//                 renders a Collect button that fires boardFx + sends server msg.
+//                 v0.15.37: pairs with rewardIcons. spec drives the FX dispatch;
+//                 rewardIcons drives the visual preview. Both should be passed.
 //   flavor      — italic flavor text shown below the icons
 //   linger      — optional small italic note (e.g. "✨ energy remains here")
 //   extra       — optional HTML appended inside the z-index wrapper (buttons etc)
 //   shower      — whether to show the confetti shower canvas (default true)
 //   showerTint  — tint color for shower particles (default themeColor)
+
+// v0.15.37 — Collect button flavor pool. Dad-joke vibe, matches shieldCrit
+// pool's tone. Single-tap puns and triumphant claims that vary per click
+// to keep the moment fresh across an evening of play. Uses no-immediate-
+// repeat logic via _pickResolutionCollectFlavor.
+var REWARD_COLLECT_FLAVORS = [
+  "Mine!",
+  "Snagged!",
+  "Pocket it!",
+  "Stack it!",
+  "Earned!",
+  "Claimed!",
+  "Locked in!",
+  "Sweet!",
+  "Got it!",
+  "Yoink!",
+  "Tucked away!",
+  "Heck yes!",
+  "Pay day!",
+  "Cha-ching!",
+  "Loot it!"
+];
+var _lastCollectFlavorIdx = null;
+function _pickResolutionCollectFlavor() {
+  if (REWARD_COLLECT_FLAVORS.length <= 1) return REWARD_COLLECT_FLAVORS[0] || 'Collect';
+  var idx;
+  do { idx = Math.floor(Math.random() * REWARD_COLLECT_FLAVORS.length); }
+  while (idx === _lastCollectFlavorIdx);
+  _lastCollectFlavorIdx = idx;
+  return REWARD_COLLECT_FLAVORS[idx];
+}
+
+// v0.15.37 — Collect handler. Triggered by Collect button onclick. Fires
+// boardFx for each reward type in the spec (so brick goes brickGained,
+// gold goes goldGained, etc.), sends collectReward server message so the
+// server can record acknowledgment if/when it grows handling for it, and
+// hides the card visually so the FX has stage. The actual reward grant
+// in player state depends on server flow (DM mark-resolved or auto-grant);
+// the FX firing here is the player's experiential acknowledgment.
+//
+// btnId is the unique DOM id of the Collect button — used to find the
+// containing card and hide it after FX fires.
+function _collectResolutionReward(specJson, btnId) {
+  var spec;
+  try { spec = JSON.parse(specJson); } catch(e) { spec = {}; }
+  var btn = document.getElementById(btnId);
+  // Anchor selector: prefer the Collect button itself (FX origin = where the
+  // player tapped). Falls back to the card or landing-result if missing.
+  var anchorEl = btn || document.getElementById('landing-result');
+  var anchor = null;
+  if (anchorEl) {
+    var rect = anchorEl.getBoundingClientRect();
+    if (rect.width > 0) anchor = rect;
+  }
+  // Fire boardFx per reward type.
+  if (spec.bricks && typeof spec.bricks === 'object') {
+    var brickColors = Object.keys(spec.bricks);
+    brickColors.forEach(function(color, idx) {
+      var n = spec.bricks[color] || 0;
+      for (var i = 0; i < n; i++) {
+        // Stagger by a short delay so multiple bricks burst sequentially.
+        setTimeout(function(c){ BoardFx.fire('brickGained', anchor || '#landing-result', { brickColor: c }); }, idx * 80 + i * 60, color);
+      }
+    });
+  }
+  if (spec.coins && spec.coins > 0) {
+    BoardFx.fire('goldGained', anchor || '#landing-result', { amount: spec.coins });
+  }
+  if (spec.cheese && spec.cheese > 0) {
+    // Cheese reuses goldGained until a cheese-specific preset exists. Visually
+    // close enough (yellow-ish flow-to-inventory). Future: cheeseGained preset.
+    BoardFx.fire('goldGained', anchor || '#landing-result', { amount: spec.cheese });
+  }
+  // Shield rewards in resolution cards rare; if present, fire shieldCrit.
+  if (spec.shield) {
+    BoardFx.fire('shieldCrit', '#my-shield-section', { label: 'Shield!' });
+  }
+  // Server message — ack-only. Server may or may not handle it. If server
+  // doesn't have a collectReward handler, this is silently ignored, which
+  // is fine: the FX/dismiss already played for the player.
+  if (typeof client !== 'undefined' && client && typeof client.send === 'function') {
+    try { client.send('collectReward', { spec: spec }); } catch(e) {}
+  }
+  // Hide the card so FX has visual stage. The card's containing element
+  // is the nearest ancestor with `landing-result` as id, or the card div.
+  // Simpler: walk up from the button to the card and hide it.
+  if (btn) {
+    var card = btn.closest('[data-resolution-card]');
+    if (card) {
+      card.style.transition = 'opacity 0.25s ease-out';
+      card.style.opacity = '0';
+      setTimeout(function(){ if (card.parentNode) card.style.display = 'none'; }, 280);
+    }
+  }
+}
+
 function buildResolutionCard(opts) {
   opts = opts || {};
   var themeColor  = opts.themeColor  || '#9adb9a';
@@ -4809,6 +4915,7 @@ function buildResolutionCard(opts) {
   var bgColor     = opts.bgColor     || '#0a0a1a';
   var title       = opts.title       || '';
   var rewardIcons = opts.rewardIcons || '';
+  var spec        = opts.spec        || null;
   var flavor      = opts.flavor      || '';
   var linger      = opts.linger      || '';
   var extra       = opts.extra       || '';
@@ -4834,7 +4941,18 @@ function buildResolutionCard(opts) {
       .trim();
   }
 
-  var html = '<div style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;">';
+  // v0.15.37 — Collect button. Renders when the spec has any tangible reward
+  // (bricks/coins/cheese/shield). Replaces the "WAITING FOR DM" footer.
+  // Player tap → boardFx fires for each reward, server collectReward sent,
+  // card hides. Decouples player experience from DM-mark-resolved bookkeeping.
+  var hasReward = spec && (
+    (spec.bricks && Object.keys(spec.bricks).length > 0) ||
+    (spec.coins && spec.coins > 0) ||
+    (spec.cheese && spec.cheese > 0) ||
+    spec.shield
+  );
+
+  var html = '<div data-resolution-card style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;">';
   if (shower) {
     html += '<canvas id="result-shower" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;opacity:0.2;"></canvas>';
   }
@@ -4854,7 +4972,19 @@ function buildResolutionCard(opts) {
   if (extra) {
     html += extra;
   }
-  html += '<div style="font-size:10px;color:var(--text-faint);margin-top:6px;font-family:Cinzel,serif;letter-spacing:.04em;">WAITING FOR DM</div>';
+  if (hasReward) {
+    var collectFlavor = _pickResolutionCollectFlavor();
+    var btnId = 'collect-btn-' + Math.random().toString(36).slice(2, 9);
+    var specJson = JSON.stringify(spec).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+    html += '<button id="' + btnId + '" '
+      +    'class="btn collect-btn" '
+      +    'style="margin-top:10px;padding:12px 28px;background:'+themeColor+';color:'+bgColor+';border:none;border-radius:10px;font-family:Cinzel,serif;font-size:16px;font-weight:700;letter-spacing:.06em;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.4);" '
+      +    'onclick="_collectResolutionReward(\'' + specJson + '\', \'' + btnId + '\')">'
+      +      '✋ ' + collectFlavor
+      +    '</button>';
+  } else {
+    html += '<div style="font-size:10px;color:var(--text-faint);margin-top:6px;font-family:Cinzel,serif;letter-spacing:.04em;">WAITING FOR DM</div>';
+  }
   html += '</div></div>';
 
   // Kick off shower animation on next tick (after DOM inserted)
@@ -4991,6 +5121,7 @@ function renderPurpleFatedChoice(ev, me) {
     return lingerHeader + buildResolutionCard({
       themeColor, borderColor, bgColor, title,
       rewardIcons: renderRewardIcons(spec),
+      spec,
       flavor: msg,
       linger,
       extra: extraBtns,
@@ -5046,6 +5177,7 @@ function renderWhitePilgrimsRest(ev, me, G) {
     return lingerHeader + buildResolutionCard({
       themeColor, borderColor, bgColor, title,
       rewardIcons: renderRewardIcons(spec),
+      spec,
       flavor: msg,
       showerTint: themeColor,
     });
@@ -5143,6 +5275,7 @@ function renderBlackShadowBargain(ev, me, G) {
     return lingerHeader + buildResolutionCard({
       themeColor, borderColor, bgColor, title,
       rewardIcons: renderRewardIcons(spec),
+      spec,
       flavor: msg,
       showerTint: themeColor,
     });
@@ -5322,6 +5455,7 @@ function renderGreenVinePath(ev, me, G) {
     return lingerHeader + buildResolutionCard({
       themeColor, borderColor, bgColor, title,
       rewardIcons: renderRewardIcons(spec),
+      spec,
       flavor: msg,
       showerTint: themeColor,
     });
@@ -5568,6 +5702,7 @@ function renderRedTrialOfHand(ev, me, G) {
     return lingerHeader + buildResolutionCard({
       themeColor, borderColor, bgColor, title,
       rewardIcons: renderRewardIcons(spec),
+      spec,
       flavor,
       showerTint: themeColor,
       shower: isWinner, // only shower on victory
@@ -5743,6 +5878,7 @@ function renderGrayRubbleStacking(ev, me, G) {
     return lingerHeader + buildResolutionCard({
       themeColor, borderColor, bgColor, title,
       rewardIcons: renderRewardIcons(spec),
+      spec,
       flavor: msg,
       extra: matchLine,
       showerTint: themeColor,
