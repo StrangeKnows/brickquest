@@ -2001,76 +2001,18 @@ function renderLandPanel(me) {
 }
 
 
-var EVENT_BURST_COLORS = {
-  gold:       ['#F5D000','#E8A23E','#FFF8DC'],
-  gray:       ['#AAAAAA','#CCCCCC','#F0EED8'],
-  blue:       ['#006DB7','#4db8ff','#7B2FBE'],
-  riddle:     ['#F5D000','#FFE87C','#E8A23E'],
-  trap:       ['#F57C00','#E24B4A','#FFE87C'],
-  doubletrap: ['#F57C00','#E24B4A','#FFE87C'],
-  monster:    ['#E24B4A','#D01012','#F57C00'],
-  purple:     ['#7B2FBE','#9B6FD4','#4db8ff'],
-  green:      ['#1D9E75','#5DA831','#FFE87C'],
-  red:        ['#D01012','#E24B4A','#F5D000'],
-  white:      ['#EFEFEF','#FFFFFF','#CCCCCC'],
-  black:      ['#1a1a1a','#555555','#7B2FBE'],
-  boss:       ['#D01012','#7B2FBE','#F5D000']
-};
-
+// burstParticles — fires the canvas-based event-landing burst.
+// v0.15.36: migrated to boardFx as 'eventBurst' preset; this remains
+// as a thin dispatcher so existing call sites don't need to change.
+// Origin is computed from the event card's icon element (or fallback
+// to the card center) — the boardFx preset receives the rect-anchor.
 function burstParticles(evType) {
   var el = document.getElementById('landing-result');
   if (!el) return;
-  // Try to originate from the event icon/brick element
   var originEl = el.querySelector('.event-icon-origin') || el.querySelector('span[style*="border-radius"]') || el;
   var rect = originEl.getBoundingClientRect();
-  // Fallback to container center if element has no size
   if (rect.width === 0) rect = el.getBoundingClientRect();
-  var cx = rect.left + rect.width / 2;
-  var cy = rect.top + rect.height / 2;
-  var colors = EVENT_BURST_COLORS[evType] || EVENT_BURST_COLORS.nothing;
-  var canvas = document.createElement('canvas');
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999;';
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-  document.body.appendChild(canvas);
-  var ctx = canvas.getContext('2d');
-  // Randomize count 1.3-2.7x base of 32
-  var baseCount = 32;
-  var count = Math.round(baseCount * (1.3 + Math.random() * 1.4));
-  var primaryCount = Math.round(count * 0.75);
-  var particles = [];
-  for (var i = 0; i < count; i++) {
-    var angle = Math.random() * Math.PI * 2;
-    var speed = 1.5 + Math.random() * 3.5;
-    var isPrimary = i < primaryCount;
-    particles.push({
-      x: cx, y: cy,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed - Math.random() * 1.5,
-      r: isPrimary ? 3 + Math.random() * 4 : 1.5 + Math.random() * 2,
-      color: colors[Math.floor(Math.random() * colors.length)],
-      alpha: isPrimary ? 1 : 0.5,
-    });
-  }
-  var start = null;
-  var DURATION = 420 * (1 + Math.random() * 1.7); // 420ms to ~1134ms
-  function frame(ts) {
-    if (!start) start = ts;
-    var progress = Math.min((ts - start) / DURATION, 1);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    particles.forEach(function(p) {
-      p.x += p.vx; p.y += p.vy; p.vy += 0.12;
-      var life = 1 - progress;
-      ctx.globalAlpha = p.alpha * life * life;
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fill();
-    });
-    if (progress < 1) requestAnimationFrame(frame);
-    else canvas.remove();
-  }
-  requestAnimationFrame(frame);
+  BoardFx.fire('eventBurst', rect, { evType: evType });
 }
 
 function showLandingResult(ev, r, zone) {
@@ -4759,32 +4701,23 @@ function respondTrade(accept) {
 
 // ── DISARM CHAIN ──
 
+// showRewardPopup — fallback for unknown reward kinds. Brick/gold/shield
+// rewards now flow through boardFx (v0.15.36). This function only fires
+// if the server emits a rewardPopup with a kind we haven't migrated yet
+// (defensive — currently no such kind exists). When that happens, shows
+// a minimal must-click card with the kind as a label so the reward isn't
+// silently lost. New reward kinds should ideally migrate to boardFx
+// directly rather than land here.
 function showRewardPopup(data) {
-  var kind = data.kind || 'gold';
-  var color, brickDots = '', detail = '';
-  if (kind === 'brick') {
-    color = data.brickColor || '#888';
-    var bdr = data.brickColor === 'white' ? 'border:1px solid #ccc;' : '';
-    brickDots = '<span style="width:26px;height:26px;border-radius:4px;background:'+color+';'+bdr+'display:inline-block;vertical-align:middle;margin:3px;box-shadow:0 1px 4px rgba(0,0,0,.5);"></span>';
-  } else if (kind === 'shield') {
-    color = '#4db8ff';
-    brickDots = '<span style="font-size:28px;line-height:1;display:inline-block;vertical-align:middle;margin:3px;">🛡</span>';
-  } else {
-    // gold — show N coin icons
-    color = '#F5D000';
-    var amt = data.amount || 1;
-    for (var ci=0; ci<amt; ci++) {
-      brickDots += '<span style="font-size:30px;line-height:1;display:inline-block;vertical-align:middle;margin:3px;">🪙</span>';
-    }
-  }
+  var kind = data.kind || 'reward';
   _pendingResult = {
-    border: color,
+    border: '#888',
     title: '',
     icon: '',
     mainNum: null,
     detail: '',
     kind: 'victory',
-    brickDots: brickDots
+    brickDots: '<span style="font-size:13px;color:#aaa;">+1 ' + kind + '</span>'
   };
   render();
 }

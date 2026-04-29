@@ -7237,6 +7237,210 @@ all others.
 
 ---
 
+### v0.15.36 — boardFx absorbs eventBurst + brickGained + goldGained; ends reward click-friction
+
+**The boardFx unification arc completes.** All three remaining reward
+FX subsystems migrate into boardFx as presets. Brick and gold rewards
+shift from must-click cards to ambient FX, ending the click-friction
+that made small frequent rewards feel like interruptions.
+
+**Three presets added:**
+
+1. **`eventBurst`** — migrates `burstParticles` (canvas-based event
+   landing burst). Architectural-only migration; visual is identical.
+   The canvas approach stays (DOM/CSS particles don't perform at
+   50+ particle density on mobile); boardFx gains a `_canvasBurst`
+   primitive so the API surface is unified even though the rendering
+   technique varies per preset.
+
+2. **`brickGained`** — replaces brick-gained must-click cards.
+   12-particle burst in the brick's color + rising "+1 N brick"
+   text with diagonal trajectory. Fires at the event-card position.
+   Fast (1.2s total), lightweight, frequent-reward rhythm.
+
+3. **`goldGained`** — replaces gold-gained must-click cards.
+   *Showpiece preset.* Per Ross's direction:
+   > "Larger stacks shown as piles of gold, the coins flowing
+   > from the stack into player inventory, this will solve the
+   > earlier highlighted issue"
+   - **Amount ≤ 3:** individual coins arc one-by-one from origin
+     to gold-display position, ~70ms staggered.
+   - **Amount > 3:** a coin pile materializes briefly at origin
+     (visible ~600ms, fades), THEN up to 12 individual coins flow
+     out in a staggered stream into the gold-display destination.
+     Pile shrinks visually as coins leave.
+   - **No destination found** (player on different tab): coins
+     drift upward and fade — the +N gold floater still confirms
+     the amount.
+
+**Destination-finding for goldGained:**
+
+`_findGoldDestination()` looks for `#my-gold-display` first (stable
+ID, doesn't currently exist — leaving the hook for future
+addition). Falls back to scanning the active dashboard pane for
+the `.stat-num` element containing the 🪙 emoji.
+
+This is a "good enough" approach: the destination is found when
+the player is on the dashboard tab, missed when they're elsewhere
+(in which case coins drift up and fade — graceful degradation). A
+future patch could add `id="my-gold-display"` to the gold stat-num
+element for guaranteed targeting.
+
+---
+
+**Click-friction philosophy:**
+
+Pre-v0.15.36 reward flow:
+```
+Server fires rewardPopup → showRewardPopup → _pendingResult set
+   → render() shows must-click card in action pane
+   → Player taps to dismiss → action pane returns to normal
+```
+
+Post-v0.15.36:
+```
+Server fires rewardPopup → BoardFx.fire(<presetType>, anchor, data)
+   → ambient FX plays for ~1.2-1.5s → player keeps playing
+```
+
+Frequent small rewards (every brick, every coin) used to halt
+gameplay until acknowledged. Now they pass like real-world reward
+moments — visible, satisfying, but non-blocking. Player attention
+stays on board state instead of on dismissing cards.
+
+`showRewardPopup` is preserved as a fallback for unknown reward
+kinds (defensive — currently no kind reaches it). If the server
+later emits a new reward type, that type lands in the fallback as
+a minimal must-click card with the kind label, making the new type
+visible and prompting migration.
+
+---
+
+**Architectural notes:**
+
+- **boardFx.js gains 3 new primitives:** `_canvasBurst` (transient
+  canvas + gravity sim), `_coinPile` (cluster emoji with fade),
+  `_flyingCoin` (single coin arcing from src to dest with bow
+  waypoint). The flying-coin keyframe uses CSS variables (`--cdx`,
+  `--cdy` for endpoint, `--cbx`, `--cby` for arc waypoint) for the
+  travel path — same pattern as gray-crit-particle.
+- **Preset count:** 6 total — `shieldCrit`, `heal`, `casterAck`,
+  `eventBurst`, `brickGained`, `goldGained`. The boardFx file is
+  now ~600 lines; healthy and not approaching unwieldy.
+- **Reorganization for ELEGANCE:** the new helpers + palettes
+  + canvas primitive moved ABOVE the PRESETS declaration so the
+  file reads top-down naturally (overlay → primitives → helpers →
+  palettes → presets → fire).
+- **`EVENT_BURST_COLORS` retired from spine** — now lives only in
+  boardFx.js where it belongs (FX color data, used by FX preset).
+  Players-core.js no longer carries the FX palette.
+- **`showRewardPopup` body shrunk dramatically** (~30 lines → ~12
+  lines) since brick/gold/shield branches are dead code now.
+
+---
+
+**Files changed in v0.15.36:**
+
+- `boardFx.js` — three new presets, three new primitives,
+  `_findGoldDestination` helper, `BRICK_HEX`/`BRICK_GLOW`/
+  `EVENT_BURST_COLORS` palettes; reorganized so helpers/primitives
+  precede PRESETS section. Net: +242 lines.
+- `boardFx.css` — keyframes for `brick-gained-particle`,
+  `brick-gained-text`, `gold-gained-text`, `coin-pile`,
+  `flying-coin`, `flying-coin-no-dest` + class styling. Net: +93 lines.
+- `players-core.js` — `burstParticles` collapsed to 8-line dispatcher
+  (was ~55 lines). `EVENT_BURST_COLORS` removed (~14 lines).
+  `showRewardPopup` body simplified to fallback (~30 → 12 lines).
+  Net: −67 lines.
+- `players.html` shell — rewardPopup dispatch branches added for
+  `brick` and `gold` kinds. Net: +4 lines.
+- `test_players.html` shell — same as players.html (paired). Net: 0
+  line count change (one-line dispatch line just got longer).
+- `NOTES.md` — this entry.
+
+UNTOUCHED:
+- `rumble.js`, `characters.js`, `game.js`, `server.js`,
+  `rumble.css`, `dm_screen.html`, `rumble_test.html`,
+  `arena_test.html`, `serve.sh`, `save.sh`.
+
+---
+
+**Test focus:**
+
+1. **Hard refresh** to load new boardFx.js + boardFx.css.
+
+2. **Land on a board event** (any color). The eventBurst preset
+   should fire — colorful particle explosion at the event card
+   position, identical to v0.15.35 behavior. No regression here:
+   pure migration.
+
+3. **Brick reward** — earn a brick (pick up from board, brick reward
+   from event). Visual: 12-particle colored burst in the brick's
+   color + "+1 <color> brick" text rising diagonally. **No must-click
+   card.** Game continues immediately.
+
+4. **Gold reward small (1-3 coins)** — earn 1-3 gold. Visual:
+   individual coins arc from event card position to the gold display
+   on the dashboard. "+N 🪙" floater rises briefly. No pile.
+
+5. **Gold reward big (4+ coins)** — earn 4+ gold (gold event with
+   high amount, monster reward, etc.). Visual: pile of coins
+   materializes briefly at the event position, then individual
+   coins stream out (up to 12) and flow to the gold display.
+   "+N 🪙" floater confirms the count.
+
+6. **Gold reward off-tab** — earn gold while on a tab other than
+   Dashboard. Visual: coins should drift upward and fade (no
+   destination); +N floater still appears. Switch to Dashboard and
+   verify gold count is correct.
+
+7. **Yellow brick during riddle** — earn a yellow brick during an
+   active riddle event. The brickGained FX should NOT fire (it's
+   suppressed by `isRiddleYellow` check; the riddle event UI handles
+   the brick reveal). This was already the behavior pre-v0.15.36;
+   verify it still holds.
+
+8. **Shield crit** — verify shield-crit firework still works as
+   expected (no regression — same path as v0.15.31+).
+
+9. **DOM inspection** — `#board-fx-overlay` should now contain
+   the goldGained / brickGained nodes during animation. The
+   eventBurst canvas should also appear at z-index 1001 (matched
+   to the overlay).
+
+If any reward type is now silently dropped (no FX, no must-click
+card), the boardFx silent-skip is firing because the anchor was
+missing. Check that the server is still emitting `rewardPopup`
+events with the right `kind` field.
+
+---
+
+**Standards audit (rule #17 — push #9 in S015 continuation):**
+
+Restating rule #14 (UNITY/ELEGANCE/EFFICIENCY).
+
+- **UNITY:** all 6 ambient FX presets now live in one module with
+  one API. Every FX call is `BoardFx.fire(presetName, anchor, data)`.
+  No more inline FX implementations scattered across the spine.
+  Color palettes (BRICK_HEX, EVENT_BURST_COLORS, HEAL_COLORS) all
+  live in boardFx.js where they're used.
+- **ELEGANCE:** boardFx.js reads top-down naturally now (overlay
+  → primitives → palettes/helpers → presets → fire). The
+  reward-routing dispatch in shell connectWS is one if-else chain
+  per kind; no special-case logic in the spine.
+- **EFFICIENCY:** future reward types are a one-preset addition
+  (~40 lines in boardFx.js + ~20 lines in boardFx.css), no spine
+  changes needed. Adding a new ambient FX is now strictly faster
+  than it was pre-S015.
+
+**Drift incidents this push:** initially put the new helpers/
+palettes AFTER the PRESETS declaration. JavaScript scoping made
+it work, but the file didn't read top-down. Caught in self-review,
+relocated. Lesson: write the structural shape you want from the
+start, even when scoping makes the wrong shape technically valid.
+
+---
+
 
 ### Session 015 Process Retrospective
 

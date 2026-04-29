@@ -547,12 +547,17 @@ function connectWS() {
     }
     if (event === 'rewardPopup') {
       var isRiddleYellow = data.kind === 'brick' && data.color === 'yellow' && G && G.activeEvent && G.activeEvent.evType === 'riddle';
-      // Shield rewards (crit-only) skip the legacy blue-bordered popup —
-      // boardFx fires a particle burst + rising flavor text over the
-      // shield pip bar. Player perceives the crit without click friction.
+      // Reward FX routing — all ambient via boardFx (v0.15.36 finished
+      // the migration). Anchor is the event card (#landing-result); if
+      // absent, boardFx silently skips (which is fine for ambient FX).
       if (data.kind === 'shield') {
         BoardFx.fire('shieldCrit', '#my-shield-section', data);
+      } else if (data.kind === 'brick' && !isRiddleYellow) {
+        BoardFx.fire('brickGained', '#landing-result', data);
+      } else if (data.kind === 'gold') {
+        BoardFx.fire('goldGained', '#landing-result', data);
       } else if (!isRiddleYellow) {
+        // Fallback for unknown kinds — keep the legacy must-click card.
         showRewardPopup(data);
       }
     }

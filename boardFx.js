@@ -249,6 +249,167 @@
     "Solid as a rock!"
   ];
 
+  // Helper: find gold-display element on the dashboard. Returns
+  // {x, y} viewport coords if found, null otherwise.
+  function _findGoldDestination() {
+    // Prefer a stable id-based selector if one exists; otherwise look for
+    // the .stat-num element styled with the gold color in the dashboard.
+    var el = document.getElementById('my-gold-display');
+    if (!el) {
+      // Fallback: scan dashboard pane for any element containing 🪙 emoji
+      // followed by a number (the gold display)
+      var pane = document.getElementById('pane-dashboard');
+      if (pane && pane.classList.contains('active')) {
+        var candidates = pane.querySelectorAll('.stat-num');
+        for (var i = 0; i < candidates.length; i++) {
+          if (candidates[i].textContent.indexOf('🪙') >= 0) {
+            el = candidates[i];
+            break;
+          }
+        }
+      }
+    }
+    if (!el) return null;
+    var r = el.getBoundingClientRect();
+    if (r.width === 0) return null;
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+
+  // Brick color palette — used by brickGained preset. Mirrors the
+  // server-emitted brickColor strings to a hex value. Keep in sync with
+  // characters.js BRICK_PALETTE if that ever centralizes.
+  var BRICK_HEX = {
+    gray:   '#AAAAAA', blue:   '#006DB7', white:  '#EFEFEF',
+    yellow: '#F5D000', orange: '#F57C00', red:    '#D01012',
+    purple: '#7B2FBE', green:  '#237841', black:  '#1a1a1a'
+  };
+  var BRICK_GLOW = {
+    gray:   '#FFFFFF', blue:   '#4db8ff', white:  '#FFFFFF',
+    yellow: '#FFE87C', orange: '#FFC078', red:    '#E24B4A',
+    purple: '#9B6FD4', green:  '#5DA831', black:  '#555555'
+  };
+
+  // Event burst color palette — migrated from burstParticles. Used by
+  // eventBurst preset only.
+  var EVENT_BURST_COLORS = {
+    nothing:    ['#888888','#AAAAAA','#CCCCCC'],
+    gold:       ['#F5D000','#E8A23E','#FFF8DC'],
+    gray:       ['#AAAAAA','#CCCCCC','#F0EED8'],
+    blue:       ['#006DB7','#4db8ff','#7B2FBE'],
+    riddle:     ['#F5D000','#FFE87C','#E8A23E'],
+    trap:       ['#F57C00','#E24B4A','#FFE87C'],
+    doubletrap: ['#F57C00','#E24B4A','#FFE87C'],
+    monster:    ['#E24B4A','#D01012','#F57C00'],
+    purple:     ['#7B2FBE','#9B6FD4','#4db8ff'],
+    green:      ['#1D9E75','#5DA831','#FFE87C'],
+    red:        ['#D01012','#E24B4A','#F5D000'],
+    white:      ['#EFEFEF','#FFFFFF','#CCCCCC'],
+    black:      ['#1a1a1a','#555555','#7B2FBE'],
+    boss:       ['#D01012','#7B2FBE','#F5D000']
+  };
+
+  // ── Primitive: canvas-based particle burst ──────────────────────
+  // Used by eventBurst (50+ particles with gravity sim — too heavy
+  // for DOM/CSS). Creates a transient canvas, runs requestAnimationFrame
+  // loop with custom gravity, removes itself when done.
+  function _canvasBurst(cx, cy, opts) {
+    var colors = opts.colors || ['#FFF'];
+    var canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1001;';
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    document.body.appendChild(canvas);
+    var ctx = canvas.getContext('2d');
+    var baseCount = 32;
+    var count = Math.round(baseCount * (1.3 + Math.random() * 1.4));
+    var primaryCount = Math.round(count * 0.75);
+    var particles = [];
+    for (var i = 0; i < count; i++) {
+      var angle = Math.random() * Math.PI * 2;
+      var speed = 1.5 + Math.random() * 3.5;
+      var isPrimary = i < primaryCount;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - Math.random() * 1.5,
+        r: isPrimary ? 3 + Math.random() * 4 : 1.5 + Math.random() * 2,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        alpha: isPrimary ? 1 : 0.5
+      });
+    }
+    var start = null;
+    var DURATION = 420 * (1 + Math.random() * 1.7);
+    function frame(ts) {
+      if (!start) start = ts;
+      var progress = Math.min((ts - start) / DURATION, 1);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      particles.forEach(function(p) {
+        p.x += p.vx; p.y += p.vy; p.vy += 0.12;
+        var life = 1 - progress;
+        ctx.globalAlpha = p.alpha * life * life;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      if (progress < 1) requestAnimationFrame(frame);
+      else { ctx.globalAlpha = 1; canvas.remove(); }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // ── Primitive: coin pile ───────────────────────────────────────
+  // Cluster of coin emoji at (cx,cy) that fades out over lifeMs. Used
+  // by goldGained as visual cue for "stack to drain."
+  function _coinPile(cx, cy, opts) {
+    var overlay = _ensureOverlay();
+    var lifeMs  = opts.lifeMs || 600;
+    var pile = document.createElement('div');
+    pile.className = 'coin-pile';
+    pile.textContent = '🪙🪙🪙';
+    pile.style.left = cx + 'px';
+    pile.style.top  = cy + 'px';
+    pile.style.animationDuration = lifeMs + 'ms';
+    overlay.appendChild(pile);
+    setTimeout(function(){
+      if (pile.parentNode) pile.parentNode.removeChild(pile);
+    }, lifeMs + 50);
+  }
+
+  // ── Primitive: flying coin ─────────────────────────────────────
+  // Single coin emoji that arcs from (sx,sy) to dest. If dest is null,
+  // the coin drifts upward and fades (no destination — usually because
+  // the player is on a different tab). Uses CSS variables for the
+  // travel path so keyframes can interpolate.
+  function _flyingCoin(sx, sy, dest, opts) {
+    var overlay = _ensureOverlay();
+    var delayMs = opts.delayMs || 0;
+    var lifeMs  = opts.lifeMs  || 850;
+    var coin = document.createElement('div');
+    coin.className = dest ? 'flying-coin' : 'flying-coin no-dest';
+    coin.textContent = '🪙';
+    coin.style.left = sx + 'px';
+    coin.style.top  = sy + 'px';
+    if (dest) {
+      var dx = dest.x - sx;
+      var dy = dest.y - sy;
+      coin.style.setProperty('--cdx', dx + 'px');
+      coin.style.setProperty('--cdy', dy + 'px');
+      // Bow waypoint at 50% — arc upward then come down (gives the
+      // coin a "tossed" feel rather than a straight line).
+      var bowY = -Math.abs(dx) * 0.3 - 30;  // higher arc for longer distances
+      coin.style.setProperty('--cbx', (dx * 0.5) + 'px');
+      coin.style.setProperty('--cby', (dy * 0.5 + bowY) + 'px');
+    }
+    coin.style.animationDelay    = delayMs + 'ms';
+    coin.style.animationDuration = lifeMs + 'ms';
+    overlay.appendChild(coin);
+    setTimeout(function(){
+      if (coin.parentNode) coin.parentNode.removeChild(coin);
+    }, delayMs + lifeMs + 50);
+  }
+
+
   /* ── Presets ───────────────────────────────────────────────────── */
   var PRESETS = {
     // shieldCrit — firework redesign (v0.15.31).
@@ -343,8 +504,90 @@
         className: 'caster-ack-ring',
         lifeMs:    500
       });
+    },
+
+    // eventBurst — migrated from burstParticles in v0.15.36. Canvas-based
+    // colorful particle explosion when a player lands on an event space.
+    // Uses _canvasBurst primitive (canvas-rendered for 50+ particles with
+    // gravity sim — DOM particles don't perform well at this density on
+    // mobile). Color palette per evType from EVENT_BURST_COLORS.
+    eventBurst: function(pos, data) {
+      var evType = (data && data.evType) || 'nothing';
+      var colors = EVENT_BURST_COLORS[evType] || EVENT_BURST_COLORS.nothing;
+      _canvasBurst(pos.x, pos.y, { colors: colors });
+    },
+
+    // brickGained — replaces the brick-gained must-click reward card with
+    // ambient FX. Particle burst in the brick's color + rising "+1 brick"
+    // text. Fast, frequent reward feedback that doesn't halt gameplay.
+    brickGained: function(pos, data) {
+      var brickColor = (data && data.brickColor) || 'gray';
+      var hex = BRICK_HEX[brickColor] || '#888';
+      var glow = BRICK_GLOW[brickColor] || hex;
+      _particleBurst(pos.x, pos.y, {
+        count:        12,
+        className:    'brick-gained-particle',
+        minDist:      30,
+        maxDist:      70,
+        upBias:       16,
+        lifeMsMin:    700,
+        lifeMsMax:    1100,
+        sizeMin:      4,
+        sizeMax:      7,
+        pickColor:    function(){ return Math.random() < 0.7 ? hex : glow; },
+        delayMaxMs:   40
+      });
+      _risingText(pos.x, pos.y, '+1 ' + brickColor + ' brick', {
+        className: 'brick-gained-text',
+        lifeMs:    1200,
+        yOffset:   -16,
+        tdx:       (Math.random() * 60) - 30
+      });
+    },
+
+    // goldGained — replaces the gold-gained must-click reward card with
+    // ambient flow-to-inventory FX. Showpiece preset.
+    //
+    // For amount <= 3: individual coins arc from origin to gold-display
+    //                  position, ~80ms staggered.
+    // For amount > 3:  pile of coins materializes briefly at origin,
+    //                  then up to 12 individual coins flow out in a
+    //                  staggered stream. Pile shrinks as coins leave.
+    // The "+N gold" text rises briefly above the origin to confirm
+    // the amount being awarded.
+    //
+    // Destination: tries to find the gold-display element on the dashboard.
+    // If unavailable (player on different tab), the FX still plays at
+    // the origin with the floater text — coins just drift up and fade
+    // instead of flowing somewhere specific.
+    goldGained: function(pos, data) {
+      var amount = (data && data.amount) || 1;
+      var cx = pos.x, cy = pos.y;
+      // Find destination: gold display in dashboard. If absent (tab off-screen
+      // or render-loop wiped), fall back to upward drift.
+      var dest = _findGoldDestination();
+      var coinCount = Math.min(12, Math.max(1, amount));
+      // Floater text — confirms the +N amount even if no coins reach destination
+      _risingText(cx, cy, '+' + amount + ' 🪙', {
+        className: 'gold-gained-text',
+        lifeMs:    1400,
+        yOffset:   -22
+      });
+      // Pile (only for amount > 3) — shows briefly at origin, fades as
+      // coins flow out. Visual cue that there's a stack to drain.
+      if (amount > 3) {
+        _coinPile(cx, cy, { lifeMs: 600 });
+      }
+      // Individual coin flow — each coin staggered, arcs from origin to dest
+      for (var i = 0; i < coinCount; i++) {
+        _flyingCoin(cx, cy, dest, {
+          delayMs:  i * 70,
+          lifeMs:   850
+        });
+      }
     }
   };
+
 
   function fire(presetName, anchor, data) {
     var fn = PRESETS[presetName];

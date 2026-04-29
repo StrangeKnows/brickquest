@@ -509,7 +509,7 @@ function connectWS() {
         console.log('[DIAG error received - test]', data);
         toast(data.msg, 'warn');
       }
-      if (event === 'rewardPopup') { var isRiddleYellow = data.kind==='brick' && data.color==='yellow' && G && G.activeEvent && G.activeEvent.evType==='riddle'; if (data.kind === 'shield') { BoardFx.fire('shieldCrit', '#my-shield-section', data); } else if (!isRiddleYellow) { showRewardPopup(data); } }
+      if (event === 'rewardPopup') { var isRiddleYellow = data.kind==='brick' && data.color==='yellow' && G && G.activeEvent && G.activeEvent.evType==='riddle'; if (data.kind === 'shield') { BoardFx.fire('shieldCrit', '#my-shield-section', data); } else if (data.kind === 'brick' && !isRiddleYellow) { BoardFx.fire('brickGained', '#landing-result', data); } else if (data.kind === 'gold') { BoardFx.fire('goldGained', '#landing-result', data); } else if (!isRiddleYellow) { showRewardPopup(data); } }
       if (event === 'forceGateResult') showGateResult(data.success?'Gate forced!':'Gate held — 2 dmg', data.success);
       if (event === 'dashDenied' && data.cls===MY_CLASS) toast('Dash not possible — '+(data.reason||'denied'),'warn');
       if (event === 'dashResult' && data.cls===MY_CLASS) showDashResult(data);
