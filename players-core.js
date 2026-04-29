@@ -53,6 +53,28 @@ function _activeEventCollectKey() {
   return (ev.cls||'') + '|' + (ev.roll||'') + '|' + (ev.evType||'');
 }
 
+// v0.15.42 — Drained-tokens state. As each reward icon drains during Collect,
+// its token is added to the set for the active event key. renderRewardIcons
+// checks this set and renders drained icons as faded-out shells (preserves
+// layout but visually removed). This makes the per-icon fade survive renders
+// triggered by delta increments — without it, the card is rebuilt with fresh
+// icons every render and the visual drain effect is invisible.
+//
+// Shape: { eventKey: { token: true, ... } }
+// Cleared when activeEvent changes.
+var _drainedTokens = {};
+
+// v0.15.42 — Card-fading flag. Set when the post-drain card fade-out begins.
+// buildResolutionCard renders the card with opacity:0 if this flag is set
+// for the active event key, so subsequent renders preserve the fading state
+// instead of reverting the card to full opacity. After the fade transition
+// completes, _collectedResolutions flag is set which collapses the panel
+// entirely.
+//
+// Shape: { eventKey: true }
+// Cleared when activeEvent changes.
+var _cardFading = {};
+
 // v0.15.39 — Display-delta override for inventory counts.
 // When the player taps Collect, the server has already credited the rewards.
 // To preserve "increment-on-arrival" feel, the dashboard reads displayed
@@ -492,6 +514,8 @@ function render() {
   if (!G.activeEvent) {
     _resolutionDeltasArmed = {};
     _pendingResolutionSpecs = {};
+    _drainedTokens = {};
+    _cardFading = {};
   }
   renderPhaseBanner(me);
   renderDashboard(me);
@@ -5093,11 +5117,22 @@ function _collectResolutionReward(specJson, btnId) {
   var STEP_DURATION   = ICON_FADE_MS + FX_TRAVEL_MS;  // ~1000ms per element
   var INTER_STEP_MS   = 100;   // small pause between elements
 
-  // Helper: drain a single icon by token. Fades icon, fires FX from icon
-  // position to inventory destination, schedules delta increment.
+  // Helper: drain a single icon by token.
+  // v0.15.42: Sequence per element:
+  //   1. Find icon in card (still present from previous renders)
+  //   2. Pre-drain highlight (scale up + glow) for 200ms — visual beat
+  //      saying "this one's draining now"
+  //   3. Fade out (opacity 0 + scale 0.5) over 350ms
+  //   4. Fire FX from icon's recorded position
+  //   5. Mark token as drained — _drainedTokens[key][token] = true so
+  //      subsequent renders skip this icon (renderRewardIcons checks it)
+  //   6. At FX arrival time, run deltaIncrementFn (which calls render())
+  //      — render rebuilds the card without this icon (drained-state
+  //      preserved), and chipPulse fires at destination
   function _drainIcon(token, fxFireFn, deltaIncrementFn, fireDelay) {
     setTimeout(function(){
       var icon = card.querySelector('[data-reward-token="'+token+'"]');
+      var dKey = _activeEventCollectKey();
       if (!icon) {
         _bqLog('drain-no-icon', { token: token });
         // Still fire FX from card center as fallback so the delta gets
@@ -5105,20 +5140,46 @@ function _collectResolutionReward(specJson, btnId) {
         var fallbackRect = card.getBoundingClientRect();
         var fallbackPos = { left: fallbackRect.left + fallbackRect.width/2 - 10, top: fallbackRect.top + fallbackRect.height/2 - 10, right: 0, bottom: 0, width: 20, height: 20 };
         fxFireFn(fallbackPos);
+        if (dKey) {
+          if (!_drainedTokens[dKey]) _drainedTokens[dKey] = {};
+          _drainedTokens[dKey][token] = true;
+        }
         setTimeout(deltaIncrementFn, FX_TRAVEL_MS);
         return;
       }
       var iconRect = icon.getBoundingClientRect();
       _bqLog('drain-icon', { token: token, from: { x: iconRect.left, y: iconRect.top } });
-      // Fade the icon
-      icon.style.opacity = '0';
-      icon.style.transform = 'scale(0.5)';
-      // Fire FX from icon position (small delay to let the fade start)
+
+      // Step 1: Pre-drain highlight — scale up briefly + brighten.
+      // Visual cue saying "this one's draining now."
+      icon.style.transform = 'scale(1.4)';
+      icon.style.filter = 'brightness(1.6) drop-shadow(0 0 8px currentColor)';
+      icon.style.zIndex = '10';
+
+      // Step 2: After highlight, fade out
+      setTimeout(function(){
+        icon.style.opacity = '0';
+        icon.style.transform = 'scale(0.5)';
+        icon.style.filter = '';
+      }, 200);
+
+      // Step 3: Fire FX from icon position (mid-fade, position still valid)
       setTimeout(function(){
         fxFireFn(iconRect);
-      }, 100);
-      // Increment delta at travel-arrival time
-      setTimeout(deltaIncrementFn, FX_TRAVEL_MS + 100);
+      }, 250);
+
+      // Step 4: Mark drained AFTER fade completes (so render() preserves
+      // the absence and doesn't bring the icon back at full opacity)
+      setTimeout(function(){
+        if (dKey) {
+          if (!_drainedTokens[dKey]) _drainedTokens[dKey] = {};
+          _drainedTokens[dKey][token] = true;
+        }
+        _bqLog('drain-marked', { token: token, key: dKey });
+      }, 550);
+
+      // Step 5: At travel-arrival time, increment delta and render
+      setTimeout(deltaIncrementFn, FX_TRAVEL_MS + 250);
     }, fireDelay);
   }
 
@@ -5269,13 +5330,19 @@ function _collectResolutionReward(specJson, btnId) {
   // dismissal flag so restoreActiveEvent wipes the panel on next render.
   // The card has CSS transition:opacity 0.6s already, so setting opacity
   // to 0 starts the fade. After 600ms, set the flag and trigger render.
+  // v0.15.42: also set _cardFading flag so subsequent renders preserve
+  // the fading state (otherwise card pops back to full opacity).
   var totalDrainMs = t;
   var CARD_FADE_MS = 600;
   setTimeout(function(){
+    if (collectKey) _cardFading[collectKey] = true;
     if (card && card.parentNode) {
       card.style.opacity = '0';
-      _bqLog('card-fade-start', { totalDrainMs: totalDrainMs });
+      _bqLog('card-fade-start', { totalDrainMs: totalDrainMs, key: collectKey });
     }
+    // Trigger a render so any state-driven re-render (e.g., the next
+    // server tick) sees the fading flag and renders the card at opacity:0.
+    try { render(); } catch(e) {}
   }, totalDrainMs);
   setTimeout(function(){
     if (collectKey) _collectedResolutions[collectKey] = true;
@@ -5432,7 +5499,13 @@ function buildResolutionCard(opts) {
   // shouldn't be possible, but defensive).
   var keyAttr = armKey ? ' data-event-key="' + armKey.replace(/"/g, '&quot;') + '"' : '';
 
-  var html = '<div data-resolution-card' + keyAttr + ' style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;transition:opacity 0.6s ease-out;">';
+  // v0.15.42: if the card is in its fade-out window (after drain complete,
+  // before _collectedResolutions kicks in), render with opacity:0 baked in.
+  // Without this, render() during the fade window restores the card to full
+  // opacity and the user sees the card "drop abruptly" when the wipe fires.
+  var fadingStyle = (armKey && _cardFading[armKey]) ? 'opacity:0;' : '';
+
+  var html = '<div data-resolution-card' + keyAttr + ' style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;transition:opacity 0.6s ease-out;'+fadingStyle+'">';
   if (shower) {
     html += '<canvas id="result-shower" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;opacity:0.2;"></canvas>';
   }
@@ -5495,10 +5568,22 @@ function renderRewardIcons(spec) {
   // icons as their FX fires. Token format: "brick:<color>:<i>" / "coin:<i>" /
   // "cheese:<i>" / "shield:0". Per-element targeting is needed for the
   // "icons drain from card" effect.
+  //
+  // v0.15.42: also checks _drainedTokens for the active event key. Drained
+  // icons render as visible-but-faded shells (opacity:0, scale:0.5, but
+  // still occupying layout space) so the icon row preserves layout as
+  // tokens drain. Without this, render() during drain rebuilds the card
+  // with full-opacity icons and the visual fade is invisible.
+  var dKey = (typeof _activeEventCollectKey === 'function') ? _activeEventCollectKey() : null;
+  var drained = (dKey && _drainedTokens && _drainedTokens[dKey]) || {};
+  var fadedStyle = 'opacity:0;transform:scale(0.5);';
+
   var BSQ = function(color, idx) {
     var c = BRICK_SQUARE_COLORS[color] || '#888';
     var border = color === 'white' ? 'border:1px solid #ccc;' : '';
-    return '<span data-reward-token="brick:'+color+':'+idx+'" style="width:22px;height:22px;border-radius:3px;background:'+c+';'+border+'display:inline-block;vertical-align:middle;box-shadow:0 1px 4px rgba(0,0,0,.5);margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;"></span>';
+    var token = 'brick:'+color+':'+idx;
+    var extra = drained[token] ? fadedStyle : '';
+    return '<span data-reward-token="'+token+'" style="width:22px;height:22px;border-radius:3px;background:'+c+';'+border+'display:inline-block;vertical-align:middle;box-shadow:0 1px 4px rgba(0,0,0,.5);margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;'+extra+'"></span>';
   };
   // Bricks
   if (spec.bricks && typeof spec.bricks === 'object') {
@@ -5511,25 +5596,32 @@ function renderRewardIcons(spec) {
   if (spec.coins && spec.coins > 0) {
     if (spec.coins <= 5) {
       for (var ci = 0; ci < spec.coins; ci++) {
-        html += '<span data-reward-token="coin:'+ci+'" style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;">🪙</span>';
+        var coinToken = 'coin:'+ci;
+        var coinExtra = drained[coinToken] ? fadedStyle : '';
+        html += '<span data-reward-token="'+coinToken+'" style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;'+coinExtra+'">🪙</span>';
       }
     } else {
-      html += '<span data-reward-token="coin:0" style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;"><span style="font-size:20px;line-height:1;">🪙</span><span style="font-size:14px;color:#F5D000;font-weight:700;">×'+spec.coins+'</span></span>';
+      var coinExtra2 = drained['coin:0'] ? fadedStyle : '';
+      html += '<span data-reward-token="coin:0" style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;'+coinExtra2+'"><span style="font-size:20px;line-height:1;">🪙</span><span style="font-size:14px;color:#F5D000;font-weight:700;">×'+spec.coins+'</span></span>';
     }
   }
   // Cheese
   if (spec.cheese && spec.cheese > 0) {
     if (spec.cheese <= 5) {
       for (var chi = 0; chi < spec.cheese; chi++) {
-        html += '<span data-reward-token="cheese:'+chi+'" style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;">🧀</span>';
+        var cheeseToken = 'cheese:'+chi;
+        var cheeseExtra = drained[cheeseToken] ? fadedStyle : '';
+        html += '<span data-reward-token="'+cheeseToken+'" style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;'+cheeseExtra+'">🧀</span>';
       }
     } else {
-      html += '<span data-reward-token="cheese:0" style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;"><span style="font-size:20px;line-height:1;">🧀</span><span style="font-size:14px;color:#FFD96A;font-weight:700;">×'+spec.cheese+'</span></span>';
+      var cheeseExtra2 = drained['cheese:0'] ? fadedStyle : '';
+      html += '<span data-reward-token="cheese:0" style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;'+cheeseExtra2+'"><span style="font-size:20px;line-height:1;">🧀</span><span style="font-size:14px;color:#FFD96A;font-weight:700;">×'+spec.cheese+'</span></span>';
     }
   }
   // Shield
   if (spec.shield) {
-    html += '<span data-reward-token="shield:0" style="font-size:20px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;">🛡</span>';
+    var shieldExtra = drained['shield:0'] ? fadedStyle : '';
+    html += '<span data-reward-token="shield:0" style="font-size:20px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;'+shieldExtra+'">🛡</span>';
   }
   // HP change (+ or -)
   if (typeof spec.hp === 'number' && spec.hp !== 0) {

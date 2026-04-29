@@ -696,7 +696,11 @@
       return;
     }
     var pos = _anchorCenter(anchor);
-    if (!pos) return;
+    if (!pos) {
+      try { console.log('[bq:fx-no-pos@' + (Date.now()%100000) + ']', { preset: presetName, anchor: anchor }); } catch(e){}
+      return;
+    }
+    try { console.log('[bq:fx-fire@' + (Date.now()%100000) + ']', { preset: presetName, pos: { x: pos.x, y: pos.y }, data: data }); } catch(e){}
     fn(pos, data || {});
   }
 

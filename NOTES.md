@@ -8442,6 +8442,116 @@ existing ones are sufficient.
 
 ---
 
+### v0.15.42 — Drain visuals survive renders; pre-drain highlight; FX firing trace
+
+**v0.15.41 playtest revealed the root cause** of why icons didn't
+visibly fade: render() during drain rebuilds the resolution card,
+restoring icons to full opacity. The fade is set, then immediately
+overwritten on the next state-driven re-render. Same for the card
+fade-out — opacity:0 is set, then a render rebuilds the card at
+full opacity, and when _collectedResolutions wipes the panel it
+looks like an abrupt drop.
+
+> "there is no fade at all, brick highlights on card and highlights
+> in inv; should fade after card highlight; no cheese highlight on
+> card, no fade on card, only highlight in inv when landing and
+> increment; card does not fade out when empty, just closes
+> abruptly"
+
+---
+
+**Fix 1 — `_drainedTokens[eventKey][token]` state.** As each icon
+drains, its token is added to the set. `renderRewardIcons` checks
+this set and renders drained icons with `opacity:0;transform:scale(0.5)`
+inline so the visual fade survives subsequent renders. Layout
+preserved (icon shell still occupies space) so the row doesn't
+re-flow during drain.
+
+**Fix 2 — `_cardFading[eventKey]` flag.** Set when the post-drain
+card fade-out begins. `buildResolutionCard` checks at top: if set
+for the active key, renders card with `opacity:0` baked into the
+inline style. Subsequent renders preserve the fading state. After
+the 600ms transition, `_collectedResolutions` flag fires which
+collapses the panel — but the card is already faded out, so the
+collapse is invisible. No abrupt drop.
+
+**Fix 3 — Pre-drain highlight pulse.** Before fade, each icon
+briefly scales up (1.4x) + brightens with drop-shadow glow for
+200ms. Visual beat saying "this one's draining now." Solves the
+asymmetry where bricks had a perceived highlight (their colored
+box stands out) but cheese 🧀 didn't (flat emoji, no perceived
+moment).
+
+Sequence per element now:
+- 0ms: highlight (scale 1.4 + brightness 1.6 + glow)
+- 200ms: fade begins (opacity 0 + scale 0.5)
+- 250ms: FX fires from icon position
+- 550ms: token marked drained (renders preserve faded state)
+- 750ms (+250 fire delay): delta increments + chipPulse on dest
+
+**Fix 4 — Boardfx.fire trace.** Added `[bq:fx-fire@<ts>]` console
+log when any preset fires, with the preset name + computed position
++ data. Also `[bq:fx-no-pos]` when anchor resolution fails. Lets us
+see if FX is firing but invisible (position issue) vs not firing at
+all (anchor issue).
+
+---
+
+**Why v0.15.41 had hidden behavior:** the v0.15.40-introduced
+delta-increment renders fired correctly and inventory ticked up,
+but the resolution card was being rebuilt mid-drain. I assumed the
+inline `opacity:0` set at drain time would persist. It didn't —
+because render() creates fresh icons. The state-survival pattern I
+used for `_collectedResolutions` (panel-level dismissal) needed to
+extend to icon-level state too. v0.15.42 is that extension.
+
+**Pre-existing visual debt:** card transition CSS was already set
+to 0.6s — the abrupt drop was purely the render-restoration issue,
+not a missing transition.
+
+---
+
+**Files changed:**
+
+- `players-core.js`:
+  - `_drainedTokens` + `_cardFading` state added
+  - State reset extended for both
+  - `_drainIcon` adds pre-drain highlight + token-drained marking
+  - `renderRewardIcons` checks `_drainedTokens` to preserve fade
+  - `buildResolutionCard` checks `_cardFading` to preserve fade
+  - Card fade-out path sets `_cardFading` flag + triggers render
+- `boardFx.js`:
+  - `fire()` adds debug logging — `[bq:fx-fire]` per call,
+    `[bq:fx-no-pos]` when anchor fails
+
+UNTOUCHED: boardFx.css, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. Trigger reward event, tap Collect.
+3. **Watch console** — should see `[bq:fx-fire]` for every brick
+   drain (preset: 'flyingBrick'), every cheese drain
+   (preset: 'goldGained'), every coin drain (preset: 'goldGained'),
+   every chipPulse arrival.
+4. **Watch icons** — each icon scales up + glows briefly
+   (highlight), then fades out + shrinks. Stays faded across
+   subsequent drains (doesn't pop back).
+5. **Watch FX** — between icon fade and chipPulse, a brick square
+   (or coin/cheese emoji) should arc from card position to
+   inventory chip. **If you don't see this**, the `[bq:fx-fire]`
+   logs will tell us where it's firing from.
+6. **Watch card fade** — after last drain, card slowly fades
+   over 600ms. Doesn't drop abruptly.
+
+**If FX still invisible**, the `[bq:fx-fire]` logs will show the
+position the FX fired at. Compare to where the icon was visually
+on screen. If position is way off, anchor handling has a bug.
+
+---
+
 
 ### Session 015 Process Retrospective
 
