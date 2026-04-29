@@ -128,11 +128,14 @@ function _armResolutionDeltas(eventKey, spec) {
   _bqLog('arm-deltas', { key: eventKey, spec: spec, deltas: _displayDeltas });
 }
 
-// v0.15.40 — Console debug logger. Toggle via window._brickQuestDebug = true
-// in DevTools to enable. Off by default to avoid noise in production play.
+// v0.15.40/.41 — Console debug logger. Always fires during S015 development
+// so the Collect drain flow is fully traceable. Once the flow is locked in,
+// can be converted to flagged version (window._brickQuestDebug) or stripped.
+// Tags: arm-deltas, collect-tap, drain-icon, brick-arrived, cheese-arrived,
+// coin-arrived, card-fade-start, card-collected, drain-no-icon (warning),
+// collect-fallback (warning).
 function _bqLog(tag, data) {
-  if (typeof window === 'undefined') return;
-  if (!window._brickQuestDebug) return;
+  if (typeof console === 'undefined') return;
   try {
     var ts = (Date.now() % 100000);
     console.log('[bq:' + tag + '@' + ts + ']', data);
@@ -5129,11 +5132,30 @@ function _collectResolutionReward(specJson, btnId) {
         var token = 'brick:' + color + ':' + i;
         var fireAt = t;
         _drainIcon(token,
-          (function(c){ return function(originRect){ BoardFx.fire('brickGained', originRect, { brickColor: c }); }; })(color),
+          // v0.15.41: use flyingBrick with destination chip lookup so the
+          // brick visibly arcs from card icon to inventory chip. Falls back
+          // to no-dest drift if chip not found (rare — happens when first
+          // brick of a color hasn't created the chip yet).
+          (function(c){ return function(originRect){
+            var dest = _findBrickChipDest(c);
+            BoardFx.fire('flyingBrick', originRect, {
+              brickColor: c,
+              dest: dest ? { x: dest.x, y: dest.y } : null
+            });
+          }; })(color),
           (function(c){ return function(){
             if (_displayDeltas.bricks[c]) _displayDeltas.bricks[c]++;
             _bqLog('brick-arrived', { color: c, delta: _displayDeltas.bricks });
             try { render(); } catch(e) {}
+            // v0.15.41: arrival highlight — pulse the chip after render
+            // (next tick, so the chip exists if it was newly created).
+            setTimeout(function(){
+              var dest = _findBrickChipDest(c);
+              if (dest && dest.rect) {
+                var hex = (typeof BRICK_COLORS !== 'undefined' && BRICK_COLORS[c]) || '#FFFFFF';
+                BoardFx.fire('chipPulse', dest.rect, { color: hex });
+              }
+            }, 30);
           }; })(color),
           fireAt
         );
@@ -5158,6 +5180,11 @@ function _collectResolutionReward(specJson, btnId) {
             if (_displayDeltas.cheese < 0) _displayDeltas.cheese++;
             _bqLog('cheese-arrived', { delta: _displayDeltas.cheese });
             try { render(); } catch(e) {}
+            // v0.15.41: arrival highlight on cheese chip
+            setTimeout(function(){
+              var dest = _findCheeseChipDest();
+              if (dest && dest.rect) BoardFx.fire('chipPulse', dest.rect, { color: '#FFD96A' });
+            }, 30);
           },
           fireAt
         );
@@ -5171,6 +5198,10 @@ function _collectResolutionReward(specJson, btnId) {
           _displayDeltas.cheese = Math.min(0, _displayDeltas.cheese + cheeseAmount);
           _bqLog('cheese-stack-arrived', { delta: _displayDeltas.cheese });
           try { render(); } catch(e) {}
+          setTimeout(function(){
+            var dest = _findCheeseChipDest();
+            if (dest && dest.rect) BoardFx.fire('chipPulse', dest.rect, { color: '#FFD96A' });
+          }, 30);
         },
         t
       );
@@ -5192,6 +5223,11 @@ function _collectResolutionReward(specJson, btnId) {
             if (_displayDeltas.gold < 0) _displayDeltas.gold++;
             _bqLog('coin-arrived', { delta: _displayDeltas.gold });
             try { render(); } catch(e) {}
+            // v0.15.41: arrival highlight on gold chip
+            setTimeout(function(){
+              var dest = _findGoldChipDest();
+              if (dest && dest.rect) BoardFx.fire('chipPulse', dest.rect, { color: '#F5D000' });
+            }, 30);
           },
           fireAt
         );
@@ -5205,6 +5241,11 @@ function _collectResolutionReward(specJson, btnId) {
           _displayDeltas.gold = Math.min(0, _displayDeltas.gold + coinAmount);
           _bqLog('coin-stack-arrived', { delta: _displayDeltas.gold });
           try { render(); } catch(e) {}
+          // v0.15.41: arrival highlight on gold chip
+          setTimeout(function(){
+            var dest = _findGoldChipDest();
+            if (dest && dest.rect) BoardFx.fire('chipPulse', dest.rect, { color: '#F5D000' });
+          }, 30);
         },
         t
       );
@@ -5255,6 +5296,73 @@ function _findCheeseDest() {
       var r = candidates[i].getBoundingClientRect();
       if (r.width === 0) return null;
       return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+  }
+  return null;
+}
+
+// v0.15.41 — Find brick-chip destination for a given color. Used by the
+// flyingBrick preset so each brick visibly transits to its inventory chip.
+// Returns viewport coords + the rect (so chipPulse can size to the chip).
+// Falls back to null if dashboard pane isn't active or chip doesn't exist
+// yet (player owns no bricks of that color — first-of-color situation).
+function _findBrickChipDest(color) {
+  var pane = document.getElementById('pane-dashboard');
+  if (!pane || !pane.classList.contains('active')) return null;
+  var chip = pane.querySelector('[data-brick-chip="'+color+'"]');
+  if (!chip) {
+    // First-of-color: no chip exists yet (player will get one after delta
+    // increments). Fall back to the brick-charges card area as the dest.
+    var cardTitles = pane.querySelectorAll('.card-title');
+    for (var i = 0; i < cardTitles.length; i++) {
+      if (cardTitles[i].textContent.indexOf('Brick Charges') >= 0) {
+        var titleR = cardTitles[i].getBoundingClientRect();
+        if (titleR.width === 0) return null;
+        return {
+          x: titleR.left + titleR.width / 2,
+          y: titleR.top + titleR.height + 30,  // below the title, in the chip area
+          rect: null
+        };
+      }
+    }
+    return null;
+  }
+  var r = chip.getBoundingClientRect();
+  if (r.width === 0) return null;
+  return {
+    x: r.left + r.width / 2,
+    y: r.top + r.height / 2,
+    rect: r
+  };
+}
+
+// v0.15.41 — Find gold-display destination with rect (for chipPulse arrival).
+// Mirrors boardFx's _findGoldDestination but returns rect so chipPulse can
+// size the glow ring to the chip.
+function _findGoldChipDest() {
+  var pane = document.getElementById('pane-dashboard');
+  if (!pane || !pane.classList.contains('active')) return null;
+  var candidates = pane.querySelectorAll('.stat-num');
+  for (var i = 0; i < candidates.length; i++) {
+    if (candidates[i].textContent.indexOf('🪙') >= 0) {
+      var r = candidates[i].getBoundingClientRect();
+      if (r.width === 0) return null;
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, rect: r };
+    }
+  }
+  return null;
+}
+
+// v0.15.41 — Find cheese-display destination with rect (for chipPulse arrival).
+function _findCheeseChipDest() {
+  var pane = document.getElementById('pane-dashboard');
+  if (!pane || !pane.classList.contains('active')) return null;
+  var candidates = pane.querySelectorAll('.stat-num');
+  for (var i = 0; i < candidates.length; i++) {
+    if (candidates[i].textContent.indexOf('🧀') >= 0) {
+      var r = candidates[i].getBoundingClientRect();
+      if (r.width === 0) return null;
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, rect: r };
     }
   }
   return null;

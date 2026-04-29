@@ -595,8 +595,98 @@
           glyph:    glyph
         });
       }
+    },
+
+    // v0.15.41 — flyingBrick. Arcs a brick-colored square from origin
+    // (pos) to destination (data.dest), arriving over ~lifeMs. Used by
+    // the Collect drain pattern so each brick visibly flies from the
+    // resolution card icon to its inventory chip. Larger and more
+    // visible than the brickGained particle burst — this is "the brick
+    // travels," not "a brick happened."
+    //
+    // data:
+    //   brickColor — color name ('red', 'blue', etc.) — required
+    //   dest       — { x, y } viewport coords; falls back to upward drift
+    //   lifeMs     — total flight time (default 650)
+    flyingBrick: function(pos, data) {
+      var brickColor = (data && data.brickColor) || 'gray';
+      var hex  = BRICK_HEX[brickColor]  || '#888';
+      var glow = BRICK_GLOW[brickColor] || hex;
+      var dest = data && data.dest;
+      var lifeMs = (data && data.lifeMs) || 650;
+      _flyingBrickElement(pos.x, pos.y, dest, hex, glow, brickColor, lifeMs);
+    },
+
+    // v0.15.41 — chipPulse. Briefly scales + glows an inventory chip
+    // when a reward lands. Used by Collect drain on arrival to visually
+    // confirm "this is where it landed." Subtle but satisfying.
+    //
+    // anchor: an element selector or DOMRect (the chip itself).
+    // data:
+    //   color   — accent color (e.g. brick hex, gold yellow, cheese yellow)
+    //   lifeMs  — total pulse duration (default 500)
+    chipPulse: function(pos, data) {
+      var color = (data && data.color) || '#FFFFFF';
+      var lifeMs = (data && data.lifeMs) || 500;
+      _chipPulseElement(pos.x, pos.y, pos.rect, color, lifeMs);
     }
   };
+
+  // ── Primitive: flying brick ────────────────────────────────────
+  // Single colored square that arcs from (sx,sy) to dest over lifeMs.
+  // CSS keyframes interpolate the path via --bdx/--bdy (endpoint) and
+  // --bbx/--bby (mid-arc waypoint). Bordered for visibility on dark
+  // backgrounds, color-glow shadow for the brick's hue.
+  function _flyingBrickElement(sx, sy, dest, hex, glow, brickColor, lifeMs) {
+    var overlay = _ensureOverlay();
+    var brick = document.createElement('div');
+    brick.className = dest ? 'flying-brick' : 'flying-brick no-dest';
+    brick.style.left = sx + 'px';
+    brick.style.top  = sy + 'px';
+    brick.style.background = hex;
+    var borderStyle = brickColor === 'white' ? '1px solid #ccc' : '1px solid rgba(255,255,255,0.3)';
+    brick.style.border = borderStyle;
+    brick.style.boxShadow = '0 0 12px ' + glow + ', 0 2px 6px rgba(0,0,0,0.6)';
+    if (dest) {
+      var dx = dest.x - sx;
+      var dy = dest.y - sy;
+      brick.style.setProperty('--bdx', dx + 'px');
+      brick.style.setProperty('--bdy', dy + 'px');
+      // Arc waypoint at 50% — gentle upward bow
+      var bowY = -Math.abs(dx) * 0.25 - 25;
+      brick.style.setProperty('--bbx', (dx * 0.5) + 'px');
+      brick.style.setProperty('--bby', (dy * 0.5 + bowY) + 'px');
+    }
+    brick.style.animationDuration = lifeMs + 'ms';
+    overlay.appendChild(brick);
+    setTimeout(function(){
+      if (brick.parentNode) brick.parentNode.removeChild(brick);
+    }, lifeMs + 50);
+  }
+
+  // ── Primitive: chip pulse ──────────────────────────────────────
+  // Renders a glow-ring at (cx,cy) sized to fit the chip rect. Used
+  // for arrival highlight when a reward lands at its destination.
+  // The ring expands + fades, giving a "thunk landed here" beat.
+  function _chipPulseElement(cx, cy, rect, color, lifeMs) {
+    var overlay = _ensureOverlay();
+    var ring = document.createElement('div');
+    ring.className = 'chip-pulse';
+    // Size to fit the chip rect (with padding)
+    var w = (rect && rect.width)  ? rect.width  + 12 : 56;
+    var h = (rect && rect.height) ? rect.height + 12 : 32;
+    ring.style.left = (cx - w/2) + 'px';
+    ring.style.top  = (cy - h/2) + 'px';
+    ring.style.width  = w + 'px';
+    ring.style.height = h + 'px';
+    ring.style.borderColor = color;
+    ring.style.boxShadow = '0 0 14px ' + color + ', inset 0 0 14px ' + color + '88';
+    ring.style.animationDuration = lifeMs + 'ms';
+    overlay.appendChild(ring);
+    setTimeout(function(){
+      if (ring.parentNode) ring.parentNode.removeChild(ring);
+    }, lifeMs + 50);
+  }
 
 
   function fire(presetName, anchor, data) {

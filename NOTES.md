@@ -8281,6 +8281,167 @@ it feels too slow, the constants are clearly named and easy to halve.
 
 ---
 
+### v0.15.41 — flyingBrick + chipPulse + always-on debug logs
+
+**Three issues from v0.15.40 playtest, all addressed.**
+
+> "nice flow, did not see fx from card to element. when they land,
+> highlight element they hit and show increment as already doing"
+> "still seeing nothing in console for this rewards process, lets
+> have output here so we can properly debug the process"
+
+---
+
+**Issue 1: Brick FX not visible from card to inventory chip.**
+
+**Root cause:** the brick drain was using `brickGained` (a particle
+burst preset). brickGained shows particles + rising "+1 N brick"
+text expanding *outward* from the origin — the brick itself doesn't
+travel anywhere. Coins/cheese had `goldGained` (which has flow-to-
+destination via `_flyingCoin`), but bricks had no equivalent.
+
+**Fix:** new `flyingBrick` preset. Arcs a brick-colored 22px square
+from origin to destination chip over ~650ms. Bordered for visibility,
+color-matched glow shadow. CSS keyframes via `--bdx/--bdy` (endpoint)
+and `--bbx/--bby` (mid-arc bow waypoint), same pattern as flying-coin.
+If destination not found (player on different tab, or first-of-color
+chip doesn't exist yet), brick drifts upward and fades.
+
+**`brickGained` preserved** for non-Collect uses — `rewardPopup` server
+events still fire brickGained (the old "ambient brick celebration"
+path). flyingBrick is the "Collect drain" path. Two presets, two
+visual moments.
+
+---
+
+**Issue 2: No arrival highlight when reward lands.**
+
+When delta increments and inventory count ticks up, there's no
+visual "thunk" at the destination. The count just changes silently.
+Player has to track the FX to know what landed where.
+
+**Fix:** new `chipPulse` preset. Renders a glow ring at the
+destination chip, sized to the chip rect, expanding from scale 0.7
+→ 1.4 with opacity 0 → 1 → 0 over 500ms. Border + box-shadow
+inherit color from inline style — brick chip gets brick color,
+gold chip gets gold yellow, cheese chip gets cheese yellow.
+
+**Wiring:** every drain arrival callback (brick/coin/cheese, both
+individual and stacked variants) fires chipPulse on the destination
+chip after a 30ms delay (so render() has time to create the chip
+if it's a first-of-color brick situation).
+
+---
+
+**Issue 3: Console logging not appearing.**
+
+The v0.15.40 `_bqLog` had a flag check (`if (!window._brickQuestDebug)
+return;`). Default off. User had to set the flag in DevTools every
+session. Easy to forget.
+
+**Fix:** removed the flag check. `_bqLog` always logs during S015
+development. Logs are tagged `[bq:*]` so DevTools console filters
+can isolate them, and the default-on can be flipped back to flagged
+or stripped entirely once Collect feels right.
+
+---
+
+**New helpers in spine:**
+
+- `_findBrickChipDest(color)` — locates `[data-brick-chip="<color>"]`
+  in the active dashboard pane. Returns `{ x, y, rect }`. Falls
+  back to "below Brick Charges card title" if no chip exists yet
+  (first-of-color situation — chip will be created after delta
+  increment).
+- `_findGoldChipDest()` — like _findGoldDestination (in boardFx.js)
+  but returns rect too (for chipPulse sizing). Spine-side helper.
+- `_findCheeseChipDest()` — same shape, for cheese chip.
+
+---
+
+**Files changed in v0.15.41:**
+
+- `boardFx.js`:
+  - `flyingBrick` preset + `_flyingBrickElement` primitive
+  - `chipPulse` preset + `_chipPulseElement` primitive
+- `boardFx.css`:
+  - `@keyframes flying-brick` + `flying-brick-no-dest` + `.flying-brick`
+    class
+  - `@keyframes chip-pulse` + `.chip-pulse` class
+- `players-core.js`:
+  - `_bqLog` flag check removed (always-on)
+  - `_findBrickChipDest`, `_findGoldChipDest`, `_findCheeseChipDest`
+    added
+  - `_collectResolutionReward` brick branch uses flyingBrick + dest
+  - All arrival callbacks (brick/cheese/coin) fire chipPulse on
+    destination
+- `NOTES.md` — this entry
+
+UNTOUCHED: players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. **Hard refresh** to load new boardFx.js + boardFx.css.
+
+2. **Console should immediately show `[bq:*]` logs** — no flag
+   needed. When you trigger a reward event, you'll see
+   `[bq:arm-deltas]` log with the spec.
+
+3. **Win Trial of Hand** (or any reward event):
+   - Card appears with brick + cheese icons + Collect button
+   - Inventory still shows pre-resolution counts (v0.15.40 reservoir
+     model preserved)
+   - Tap Collect
+
+4. **Verify the brick FX is now visible:**
+   - Brick icon fades from card
+   - **A colored brick square arcs from card position to brick
+     chip in inventory** — this is the new flyingBrick FX
+   - Brick lands at the chip; chip pulses (chipPulse glow ring)
+   - Inventory brick count ticks up
+   - Console shows: `drain-icon`, then `brick-arrived` after
+     ~1 sec
+
+5. **Verify cheese flow** — cheese FX flies to cheese stat (not
+   gold; v0.15.40 fix). Cheese chip pulses on arrival.
+
+6. **Verify coin flow** — coins flow to gold stat. Gold chip
+   pulses on arrival.
+
+7. **Multi-element reward** — bricks fire one-by-one in
+   BRICK_NAMES order, each chip pulses individually as bricks
+   land. Then cheese drain. Then coins. Card fades after all
+   drained.
+
+8. **Edge case: first brick of a color.** Trial gives +1 yellow
+   brick; you don't own any yellows. No chip exists at drain time.
+   The flyingBrick falls back to "below Brick Charges card title"
+   destination. After arrival + render, the new yellow chip
+   appears, then chipPulse fires on the (now existing) chip. Slight
+   timing miss is acceptable.
+
+---
+
+**Standards audit (rule #17 — push #15 in S015 continuation):**
+
+This push is a polish patch — three small surgical fixes, no
+architectural rework. Followed the "small bounded scope" intuition:
+saw the gold-game finish migration was tempting to bundle in but
+recognized it as orthogonal. Flagged it for v0.15.42 instead. Kept
+this push focused on what playtest actually surfaced.
+
+**Drift acknowledgment:** I should have caught the brickGained-vs-
+flow-to-dest mismatch when designing v0.15.40. The reservoir model
+required the FX to TRANSIT, not BURST. brickGained being a burst
+preset was the wrong shape. Caught only after playtest. **Lesson:**
+when designing a new pattern (reservoir drain), verify the FX
+presets actually match the visual shape needed. Don't assume the
+existing ones are sufficient.
+
+---
+
 
 ### Session 015 Process Retrospective
 
