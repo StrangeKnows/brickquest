@@ -572,16 +572,21 @@
       // own destination). If absent, fall back to gold-display auto-find.
       // Also `glyph` overrides the coin emoji ('🪙' default), and
       // `floaterText` overrides the +N text.
+      // v0.15.43: `noFloater:true` suppresses the rising text. Used by
+      // Collect drain — the icon already visibly travels from card to chip,
+      // so the +N floater is redundant.
       var dest = (data && data.dest) || _findGoldDestination();
       var glyph = (data && data.glyph) || '🪙';
       var floaterText = (data && data.floaterText) || ('+' + amount + ' ' + glyph);
       var coinCount = Math.min(12, Math.max(1, amount));
       // Floater text — confirms the +N amount even if no coins reach destination
-      _risingText(cx, cy, floaterText, {
-        className: 'gold-gained-text',
-        lifeMs:    1400,
-        yOffset:   -22
-      });
+      if (!(data && data.noFloater)) {
+        _risingText(cx, cy, floaterText, {
+          className: 'gold-gained-text',
+          lifeMs:    1400,
+          yOffset:   -22
+        });
+      }
       // Pile (only for amount > 3) — shows briefly at origin, fades as
       // coins flow out. Visual cue that there's a stack to drain.
       if (amount > 3) {

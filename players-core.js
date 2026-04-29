@@ -488,6 +488,23 @@ function render() {
   if (!G || !MY_CLASS) return;
   const me = G.players[MY_CLASS];
   if (!me) return;
+  // v0.15.43 — diagnostic log at top of every render. Shows the raw server
+  // state for inventory + the display-deltas at this moment + the
+  // computed displayed values. Lets us see (a) when server credits a
+  // reward (raw count jumps), (b) when arm-deltas catches up (delta
+  // becomes negative), and (c) the gap between those — that gap is
+  // when the pre-tap increment "flash" appears.
+  try {
+    var __activeKey = (typeof _activeEventCollectKey === 'function') ? _activeEventCollectKey() : null;
+    var __armed = !!(__activeKey && _resolutionDeltasArmed[__activeKey]);
+    _bqLog('render-top', {
+      raw: { gold: me.gold||0, cheese: me.cheese||0, bricks: Object.assign({}, me.bricks||{}) },
+      deltas: { gold: _displayDeltas.gold, cheese: _displayDeltas.cheese, bricks: Object.assign({}, _displayDeltas.bricks||{}) },
+      armed: __armed,
+      activeKey: __activeKey,
+      hasActiveEvent: !!G.activeEvent
+    });
+  } catch (e) {}
   // Detect HP increases on any player and fire heal feedback visuals for MY_CLASS.
   // (Ally heals show on their own screen when their state propagates.)
   try { _detectHealsAndFire(); } catch (e) {}
@@ -1601,6 +1618,21 @@ function _dashPhaseContext(me) {
 function renderDashboard(me) {
   const el = document.getElementById('pane-dashboard');
   if (!el) return;
+  // v0.15.43 — diagnostic log: what _displayed actually returns at this
+  // moment. Compare to render-top's `raw` to see if the override is in
+  // effect or being bypassed.
+  try {
+    var displayedBricks = {};
+    if (typeof BRICK_NAMES !== 'undefined') {
+      BRICK_NAMES.forEach(function(c){
+        var v = _displayedBricks(me, c);
+        if (v > 0 || (me.bricks && me.bricks[c])) displayedBricks[c] = v;
+      });
+    }
+    _bqLog('dashboard-rendering', {
+      displayed: { gold: _displayed(me,'gold'), cheese: _displayed(me,'cheese'), bricks: displayedBricks }
+    });
+  } catch(e) {}
   const isKO = !me.alive || me.hp <= 0;
   if (isKO) {
     el.innerHTML = `<div class="card" style="border-color:var(--red);">
@@ -5129,15 +5161,25 @@ function _collectResolutionReward(specJson, btnId) {
   //   6. At FX arrival time, run deltaIncrementFn (which calls render())
   //      — render rebuilds the card without this icon (drained-state
   //      preserved), and chipPulse fires at destination
+  //
+  // v0.15.43: re-query card before each drain. The `card` reference
+  // captured at tap time becomes STALE after any render() rebuilds the
+  // resolution card DOM — `card.querySelector(...)` then finds detached
+  // nodes whose getBoundingClientRect returns 0×0, causing boardFx to
+  // silently drop the FX (fx-no-pos). Fresh document-level query each
+  // drain dodges this.
   function _drainIcon(token, fxFireFn, deltaIncrementFn, fireDelay) {
     setTimeout(function(){
-      var icon = card.querySelector('[data-reward-token="'+token+'"]');
+      // v0.15.43: re-query the live card from document (not stale `card`).
+      var liveCard = document.querySelector('[data-resolution-card]');
+      var icon = liveCard ? liveCard.querySelector('[data-reward-token="'+token+'"]') : null;
       var dKey = _activeEventCollectKey();
       if (!icon) {
-        _bqLog('drain-no-icon', { token: token });
+        _bqLog('drain-no-icon', { token: token, hasLiveCard: !!liveCard });
         // Still fire FX from card center as fallback so the delta gets
         // incremented and the player isn't stuck.
-        var fallbackRect = card.getBoundingClientRect();
+        var fbHost = liveCard || card;
+        var fallbackRect = fbHost ? fbHost.getBoundingClientRect() : { left: 100, top: 100, width: 200, height: 100 };
         var fallbackPos = { left: fallbackRect.left + fallbackRect.width/2 - 10, top: fallbackRect.top + fallbackRect.height/2 - 10, right: 0, bottom: 0, width: 20, height: 20 };
         fxFireFn(fallbackPos);
         if (dKey) {
@@ -5148,7 +5190,7 @@ function _collectResolutionReward(specJson, btnId) {
         return;
       }
       var iconRect = icon.getBoundingClientRect();
-      _bqLog('drain-icon', { token: token, from: { x: iconRect.left, y: iconRect.top } });
+      _bqLog('drain-icon', { token: token, from: { x: iconRect.left, y: iconRect.top, w: iconRect.width, h: iconRect.height } });
 
       // Step 1: Pre-drain highlight — scale up briefly + brighten.
       // Visual cue saying "this one's draining now."
@@ -5158,12 +5200,18 @@ function _collectResolutionReward(specJson, btnId) {
 
       // Step 2: After highlight, fade out
       setTimeout(function(){
-        icon.style.opacity = '0';
-        icon.style.transform = 'scale(0.5)';
-        icon.style.filter = '';
+        // v0.15.43: re-query in case render rebuilt the card mid-highlight
+        var freshCard = document.querySelector('[data-resolution-card]');
+        var freshIcon = freshCard ? freshCard.querySelector('[data-reward-token="'+token+'"]') : null;
+        var target = freshIcon || icon;
+        target.style.opacity = '0';
+        target.style.transform = 'scale(0.5)';
+        target.style.filter = '';
       }, 200);
 
-      // Step 3: Fire FX from icon position (mid-fade, position still valid)
+      // Step 3: Fire FX from icon's recorded position (rect captured before
+      // any render-rebuild, so its viewport coords stay valid even if the
+      // icon DOM is replaced)
       setTimeout(function(){
         fxFireFn(iconRect);
       }, 250);
@@ -5236,7 +5284,7 @@ function _collectResolutionReward(specJson, btnId) {
         var ctoken = 'cheese:' + ci;
         var fireAt = t;
         _drainIcon(ctoken,
-          (function(){ return function(originRect){ BoardFx.fire('goldGained', originRect, { amount: 1, dest: _findCheeseDest(), glyph: '🧀', floaterText: '+1 🧀' }); }; })(),
+          (function(){ return function(originRect){ BoardFx.fire('goldGained', originRect, { amount: 1, dest: _findCheeseDest(), glyph: '🧀', noFloater: true }); }; })(),
           function(){
             if (_displayDeltas.cheese < 0) _displayDeltas.cheese++;
             _bqLog('cheese-arrived', { delta: _displayDeltas.cheese });
@@ -5254,7 +5302,7 @@ function _collectResolutionReward(specJson, btnId) {
     } else {
       // One stacked cheese icon, drains all at once
       _drainIcon(cheeseToken,
-        function(originRect){ BoardFx.fire('goldGained', originRect, { amount: cheeseAmount, dest: _findCheeseDest(), glyph: '🧀', floaterText: '+' + cheeseAmount + ' 🧀' }); },
+        function(originRect){ BoardFx.fire('goldGained', originRect, { amount: cheeseAmount, dest: _findCheeseDest(), glyph: '🧀', noFloater: true }); },
         function(){
           _displayDeltas.cheese = Math.min(0, _displayDeltas.cheese + cheeseAmount);
           _bqLog('cheese-stack-arrived', { delta: _displayDeltas.cheese });
@@ -5279,7 +5327,7 @@ function _collectResolutionReward(specJson, btnId) {
         var coToken = 'coin:' + coi;
         var fireAt = t;
         _drainIcon(coToken,
-          (function(){ return function(originRect){ BoardFx.fire('goldGained', originRect, { amount: 1 }); }; })(),
+          (function(){ return function(originRect){ BoardFx.fire('goldGained', originRect, { amount: 1, noFloater: true }); }; })(),
           function(){
             if (_displayDeltas.gold < 0) _displayDeltas.gold++;
             _bqLog('coin-arrived', { delta: _displayDeltas.gold });
@@ -5297,7 +5345,7 @@ function _collectResolutionReward(specJson, btnId) {
     } else {
       // Stacked coin icon, drains all at once
       _drainIcon('coin:0',
-        function(originRect){ BoardFx.fire('goldGained', originRect, { amount: coinAmount }); },
+        function(originRect){ BoardFx.fire('goldGained', originRect, { amount: coinAmount, noFloater: true }); },
         function(){
           _displayDeltas.gold = Math.min(0, _displayDeltas.gold + coinAmount);
           _bqLog('coin-stack-arrived', { delta: _displayDeltas.gold });
@@ -5490,6 +5538,19 @@ function buildResolutionCard(opts) {
   // spec. Inventory shows pre-resolution counts the entire time the card is
   // up — no jump-up-then-jump-down flicker. Idempotent across re-renders.
   var armKey = _activeEventCollectKey();
+  // v0.15.43: log every time buildResolutionCard runs with a spec so we
+  // can see when it fires relative to render-top's state-arrived log.
+  // The gap between server state arrival (render-top with raw counts up)
+  // and arm-deltas firing (buildResolutionCard with spec) is the pre-tap
+  // increment flash window.
+  if (hasReward) {
+    _bqLog('build-card', {
+      key: armKey,
+      armed: !!(armKey && _resolutionDeltasArmed[armKey]),
+      hasReward: hasReward,
+      spec: spec
+    });
+  }
   if (hasReward && armKey) {
     _armResolutionDeltas(armKey, spec);
   }

@@ -8552,6 +8552,149 @@ on screen. If position is way off, anchor handling has a bug.
 
 ---
 
+### v0.15.43 — Stale-card-reference fix; suppress redundant floater; pre-tap diagnostic logs
+
+**v0.15.42 playtest revealed three issues, all addressed.** Quote
+from Ross:
+
+> "the initial +1 is not necessary, just the fade out and particle
+> travel to inv elemtn, saw for first cheese but not second, also,
+> still seeing increment before button tap. brick travel was nice."
+
+> "add pretap increment to console this round, lets get it all in
+> one pass"
+
+---
+
+**Bug 1 (stale card reference): "saw for first cheese but not second."**
+
+Console showed `[bq:fx-no-pos] preset: goldGained, anchor: DOMRect`
+for the second cheese drain. The DOMRect was passed but had width
+and height of zero — `_anchorCenter` returned null and FX was
+silently dropped.
+
+**Root cause:** `_collectResolutionReward` captured the resolution
+card via `var card = btn.closest('[data-resolution-card]');` at
+tap time. Then each delta-increment called `render()`, which
+rebuilds `#landing-result` and the resolution card inside it. The
+captured `card` reference becomes a *detached* DOM node.
+
+When `_drainIcon` for the second cheese called
+`card.querySelector('[data-reward-token="cheese:1"]')`, it found
+an icon — but a stale one in the detached card. Detached nodes
+return zero-dimensioned rects from `getBoundingClientRect()`.
+
+**Fix:** re-query the live card from `document` before each drain:
+`var liveCard = document.querySelector('[data-resolution-card]');`
+Drains find icons in whichever card is currently in the DOM.
+
+Same bug pattern existed for first-of-color brick situations and
+any drain after a render: anything after the first drain was
+operating on detached refs. The cheese:0 worked because no render
+had fired yet at that point.
+
+---
+
+**Bug 2 (redundant floater): "the initial +1 is not necessary."**
+
+The goldGained preset always rendered a "+1 🪙" rising-text floater
+above the FX origin. During Collect drain, the icon itself visibly
+travels from card to inventory chip — the floater is redundant.
+Worse, it visually competes with the icon's transit.
+
+**Fix:** new `noFloater: true` option on goldGained preset. Drain
+sites in `_collectResolutionReward` pass it (4 call sites: per-coin,
+stacked coin, per-cheese, stacked cheese). Non-Collect callers
+(rewardPopup events) still get the floater by default.
+
+---
+
+**Bug 3 (pre-tap increment flash): "still seeing increment before
+button tap."**
+
+This one is harder to confirm without the trace. Hypothesis: server
+credits the reward → state broadcast → render() runs and dashboard
+shows the new count → buildResolutionCard runs and `_armResolutionDeltas`
+fires (but on the SAME render cycle). The display has already
+shown the incremented count by the time the deltas arm.
+
+**Fix (this push): comprehensive diagnostic logging to confirm
+the timing.** Three new log tags:
+
+- `[bq:render-top]` — fires at top of every `render()`, logs raw
+  server inventory + current display deltas + whether deltas are
+  armed for the active event. Lets us see the gap between server
+  arrival and arm-deltas timing.
+- `[bq:dashboard-rendering]` — fires at top of `renderDashboard`,
+  logs `_displayed` values that are about to render. Compare to
+  `render-top` raw to see if override is in effect.
+- `[bq:build-card]` — fires when `buildResolutionCard` runs with
+  a non-empty spec. Logs whether deltas were already armed,
+  whether reward present, the spec itself. This is when arm-deltas
+  fires.
+
+After playtest, the log sequence will show whether arm-deltas
+runs in time. Likely sequence if hypothesis is right:
+
+```
+[bq:render-top] raw: { brick.red: 1 }, deltas: { brick.red: 0 }, armed: false
+[bq:dashboard-rendering] displayed: { brick.red: 1 }   ← FLASH visible here
+[bq:build-card] spec: { bricks: { red: 1 } }, armed: false
+[bq:arm-deltas] sets brick.red delta to -1
+(NEXT render:)
+[bq:render-top] raw: { brick.red: 1 }, deltas: { brick.red: -1 }, armed: true
+[bq:dashboard-rendering] displayed: { brick.red: 0 }   ← drops back
+```
+
+If that's the pattern, fix candidates for v0.15.44:
+- Arm deltas EARLIER, before dashboard renders (e.g. detect from
+  G.activeEvent state at top of render before renderDashboard)
+- Or two-pass render: arm-deltas pass first, then visual render
+- Or: snapshot pre-resolution state on first server arrival of an
+  event, use snapshot for display until Collect
+
+This push lands the diagnostics. v0.15.44 lands the fix.
+
+---
+
+**Files changed:**
+
+- `players-core.js`:
+  - `_drainIcon`: re-queries live card from document before drain;
+    fade step also re-queries (defensive against mid-highlight
+    re-renders)
+  - `render()`: adds `[bq:render-top]` log at top
+  - `renderDashboard()`: adds `[bq:dashboard-rendering]` log at top
+  - `buildResolutionCard`: adds `[bq:build-card]` log when called
+    with reward
+  - 4 goldGained call sites in Collect drain: pass `noFloater: true`
+- `boardFx.js`:
+  - `goldGained` preset accepts `noFloater: true` to skip rising text
+
+UNTOUCHED: boardFx.css, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. Trigger reward event.
+3. **Watch for the pre-tap flash:** does the inventory show the
+   new count BEFORE you tap Collect? If yes, paste the
+   `[bq:render-top]` logs from the moment the card appears — the
+   raw vs deltas vs armed values will tell us exactly what's
+   happening.
+4. **Tap Collect:** verify second cheese now has FX (the v0.15.43
+   stale-ref fix). Console should show `[bq:fx-fire]` for ALL
+   drained elements, no more `[bq:fx-no-pos]`.
+5. **Verify no "+1 🪙" floater** during Collect drain. The icon
+   should travel without the redundant text.
+6. Other behaviors from v0.15.42 should still work: pre-drain
+   highlight, fade, drained-state survives renders, card slow-fades
+   after empty.
+
+---
+
 
 ### Session 015 Process Retrospective
 
