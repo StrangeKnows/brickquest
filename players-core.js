@@ -535,22 +535,25 @@ function render() {
     _cardFading = {};
   }
   renderPhaseBanner(me);
-  // v0.15.44: restoreActiveEvent() runs BEFORE renderDashboard(me). The
-  // resolution card's buildResolutionCard call arms display deltas
-  // (_armResolutionDeltas) — those deltas need to be set BEFORE
-  // renderDashboard reads inventory counts via _displayed/_displayedBricks.
-  // Old order (dashboard → restoreActiveEvent) caused a one-frame "flash"
-  // of the incremented count before the deltas armed: dashboard rendered
-  // raw server count, then the resolution card armed -1 delta, but the
-  // flash had already painted. Swapping order so deltas arm first
-  // eliminates the flash entirely.
+  // v0.15.44 reverted in v0.15.45 — restoreActiveEvent MUST run after
+  // renderDashboard. The active-event host element #landing-result is
+  // created BY renderDashboard as part of _dashTopSlot's HTML output
+  // (~line 1581). If restoreActiveEvent runs first, document.getElementById
+  // returns null and the event card silently fails to render — players
+  // can't see their landing events at all.
   //
-  // Safety: restoreActiveEvent renders into #landing-result; renderDashboard
-  // renders into #pane-dashboard — independent DOM panes, no cross-deps.
-  restoreActiveEvent();
+  // The pre-tap increment flash that v0.15.44 attempted to fix is now a
+  // known issue. Fix candidates:
+  // - Extract spec computation from per-event-type renders into a top-of-
+  //   render arm-deltas pass (requires touching red trial, riddle, gold
+  //   game, etc. — broader refactor)
+  // - Read pre-resolution snapshot at first server arrival of an event,
+  //   use snapshot until Collect tap
+  // Neither is small enough to bundle with a critical revert. Parking-lot.
   renderDashboard(me);
   renderParty();
   renderFusion();
+  restoreActiveEvent();
   // Start riddle timer tick if active, stop if not
   if (G.activeEvent && G.activeEvent.riddleActive && !_riddleTimerInterval) {
     _riddleTimerInterval = setInterval(_tickRiddleTimer, 500);

@@ -8815,6 +8815,127 @@ remain as parking-lot items.
 
 ---
 
+### v0.15.45 — REVERT v0.15.44: event card not rendering for player
+
+**v0.15.44 broke event-card rendering for the player.** Critical
+bug. Quote from Ross's playtest:
+
+> "not seeing event card for player"
+
+Screenshot showed: DM had active event flagged ("GRAY BRICK
+(FORCED)" in active landing event panel), player's `G.activeEvent`
+was set (visible in `[bq:render-top]` log: `activeKey:
+'breaker|DM|gray', hasActiveEvent: true`), but no event card on
+the player's pane and no `[bq:fx-fire] eventBurst` or
+`[bq:build-card]` logs — suggesting `restoreActiveEvent` ran but
+silently produced no output.
+
+---
+
+**Root cause:** the v0.15.44 reorder swapped restoreActiveEvent
+before renderDashboard. I asserted in NOTES "restoreActiveEvent
+renders into `#landing-result`; renderDashboard renders into
+`#pane-dashboard` — independent DOM panes, no cross-deps." That
+assertion was WRONG.
+
+`#landing-result` is **created inside** `renderDashboard` —
+specifically in `_dashTopSlot()` at line 1581:
+```js
+if (hasMyActiveEvent || hasSharedRiddle || hasSharedTrial) {
+  html += '<div id="landing-result"></div>';
+  active = true;
+}
+```
+
+It's appended into the dashboard pane's HTML. When v0.15.44
+moved restoreActiveEvent() before renderDashboard(),
+`document.getElementById('landing-result')` returned null
+because the host hadn't rendered yet. restoreActiveEvent's
+short-circuit on missing host meant: silent failure, no card.
+
+---
+
+**Lesson — Standards drift acknowledgment:**
+
+Rule violation: I asserted DOM independence WITHOUT verifying.
+Should have done a 5-second `grep "id=\"landing-result\"` before
+shipping v0.15.44. Would have caught the dependency immediately.
+
+The diagnostic-first protocol (rule #6) protects against speculative
+fixes for BUGS. It doesn't automatically protect against unverified
+assumptions in REFACTORS. v0.15.44 was framed as a one-line reorder
+"safe swap" — that framing made me skip the verify step.
+
+**New rule candidate (#24): When reordering function calls inside
+render(), grep for cross-call DOM dependencies first. Specifically:
+for each function call moved, search for any DOM element it
+queries via `getElementById` / `querySelector` and verify those
+elements exist at the new call point.**
+
+---
+
+**Fix:** revert the reorder. restoreActiveEvent runs after
+renderDashboard again. The pre-tap increment flash returns as a
+known issue.
+
+**Pre-tap flash — fix candidates for future push:**
+
+- (a) Extract spec computation from per-event-type renders into a
+  top-of-render arm-deltas pass. Requires touching red trial,
+  riddle, gold game, etc. — broader refactor.
+- (b) Read pre-resolution snapshot at first server arrival of an
+  event. Use snapshot for `_displayed` reads until Collect tap.
+  Smaller surface but introduces a new state bucket.
+- (c) Accept the 4ms flash as visually negligible. The Collect
+  drain animation runs immediately after, so the brief flicker is
+  buried in the drain visuals.
+
+Neither (a) nor (b) is small enough to bundle with this revert.
+Parking-lot. Per intuition for future: my read is (b) — snapshot
+on resolution arrival, clean and bounded scope. But verify with
+playtest first whether (c) is acceptable in practice.
+
+---
+
+**Files changed in v0.15.45:**
+
+- `players-core.js`: revert render() reorder. restoreActiveEvent
+  runs after renderDashboard again. Comment block explains why
+  the v0.15.44 reorder was wrong.
+- `NOTES.md` — this entry
+
+UNTOUCHED: boardFx.js, boardFx.css, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. Trigger any landing event (gray rubble, red trial, etc.).
+3. **Verify event card appears** on player's pane. The
+   `[bq:fx-fire] eventBurst` log should fire when the event arrives.
+4. Verify the rest of the Collect flow still works (drain
+   sequence, FX, chipPulse, card fade) — none of that was touched
+   in this push, just sanity checking.
+
+---
+
+**Standards audit (rule #17 — push #18 in S015 continuation):**
+
+Today's drift: shipped v0.15.44 with an unverified DOM-independence
+assumption. Caught only when player playtest revealed the regression.
+The fix here (revert) is correct. The lesson (rule candidate #24)
+gets added to memory.
+
+This is the second time in S015 a "small surgical fix" caused a
+regression — the first was the v0.15.27→.31 working state lost via
+blanket `cp /mnt/user-data/uploads/* /home/claude/bq/`. Both share
+a pattern: assumed safety without verifying. Memory rule #21
+(working-file safety) addressed the first; rule #24 should address
+this one.
+
+---
+
 
 ### Session 015 Process Retrospective
 
