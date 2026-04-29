@@ -7847,6 +7847,207 @@ etc.), grep for symptoms of the old pattern to find inline bypasses.*
 
 ---
 
+### v0.15.39 — Sequenced Collect, increment-on-arrival, full event collapse
+
+Three issues from v0.15.38 playtest, all addressed. Quote from Ross:
+
+> "event card lingers after collect from event; lets collapse this
+> completely after collect, there should be no visable evidence from
+> event after collection; when collecting loot, each reward should
+> have its own timing in order of rarity - bricks - cheese - coins...
+> follow color order of bricks for now - each burst should show one
+> flying to its respective place at which point value increments;
+> at event close the values are jumping up prior to pressing collect,
+> and they each come up at the same time"
+
+---
+
+**Issue 1: Event card lingers after Collect.** Even though the
+resolution card dismissed via `_collectedResolutions` flag, the
+parent active-event panel (the card containing the trial UI, the
+resolution-result, etc.) was still visible. Visual residue.
+
+**Fix:** `restoreActiveEvent` now checks `_collectedResolutions`
+at the top — if set for the current activeEvent key, the entire
+landing-result host element is wiped (`innerHTML = ''`). No leftover
+event evidence after Collect. Re-renders won't restore the panel
+until the event signature changes (new event = new key).
+
+---
+
+**Issue 2: Sequenced reward order by rarity.** Per Ross: bricks →
+cheese → coins. Within bricks, follow color order.
+
+**Fix:** `_collectResolutionReward` now sequences with explicit
+timing instead of firing all reward FX in parallel. Order:
+1. Bricks, in `BRICK_NAMES` canonical order (resolves at runtime
+   to whatever order characters.js / game.js defines).
+2. Cheese.
+3. Coins.
+
+Inter-brick pause: 600ms. Inter-reward-type pause: 200ms. A multi-
+reward Collect (e.g., +2 red + 1 cheese + 3 coins) takes ~3.5s
+total — long but matches the "moment of winning a trial" feel.
+Tunable via `BRICK_LIFE_MS` / `INTER_BRICK_PAUSE_MS` constants.
+
+---
+
+**Issue 3: Increment-on-arrival.** Pre-v0.15.39, server credited
+all rewards at event resolution; client showed full inventory before
+Collect; tap fired FX as decoration. Player saw count "5" → tap →
+animation flies → count stays "5." Theatre.
+
+**Fix:** Client-side display-delta override. New state:
+`_displayDeltas = { gold, cheese, bricks: { color: N } }`. Negative
+values mean "displayed total is lower than server total by this
+amount."
+
+Mechanism:
+1. At Collect tap, populate deltas with negative values matching
+   the server-credited amounts. Display shows pre-resolution counts.
+2. Each burst fires with a paired arrival-decrement timer (matching
+   the burst's animation duration).
+3. On arrival-decrement: increment delta toward zero, trigger render.
+   Display ticks up by 1 (or by burst amount for cheese/coins).
+4. After last burst settles, deltas all zero, displayed = server.
+
+**Hooks:**
+- Dashboard gold (`me.gold`) → `_displayed(me, 'gold')`
+- Dashboard cheese (`me.cheese`) → `_displayed(me, 'cheese')`
+- Brick-charges chip count → `_displayedBricks(me, color)`
+- Brick-charges "owned" filter → uses `_displayedBricks` so chips
+  appear only after first brick of a new color arrives
+- All four sites updated; other places reading `me.bricks` /
+  `me.gold` directly (bricks-tab pip displays, etc.) might still
+  show server counts during animation — acceptable for v1, hooks
+  can extend later
+
+**Safety reset:** when `G.activeEvent` clears (DM marked resolved,
+new round, etc.), any pending deltas force-reset to zero. Prevents
+stale deltas from sticking around if something interrupts the
+animation.
+
+---
+
+**Server-side gating still pending:**
+
+Issue 3 is solved *visually* via the display-delta override. The
+brick is still server-credited at trial-resolution time; the client
+just displays a lower count temporarily. Not real gating — if the
+player navigates away mid-animation or the connection drops, they'd
+see the new count immediately on reconnect (server state is truth).
+
+Real gating (server holds rewards as `pendingRewards`, client tap
+sends `collectReward`, server credits THEN broadcasts) remains in
+the parking lot. The client-side scaffold is ready
+(`client.send('collectReward', ...)` already fires); when server-
+side handler exists, the visual feels exactly the same — but it
+becomes *real* transition not theatre.
+
+---
+
+**Files changed in v0.15.39:**
+
+- `players-core.js`:
+  - `_displayDeltas` state added
+  - `_displayed`, `_displayedBricks`, `_hasPendingDeltas` helpers added
+  - `_activeEventCollectKey` (existed in v0.15.38) reused for full
+    event collapse
+  - `restoreActiveEvent` updated: short-circuits to `innerHTML=''`
+    when key in `_collectedResolutions`
+  - Dashboard render: 4 sites switched to display-helpers (gold,
+    cheese, brick filter, brick qty)
+  - `render()` body: clears `_displayDeltas` when activeEvent ends
+  - `_collectResolutionReward` rewritten: sequenced timing + delta
+    population + per-burst arrival decrement
+- `NOTES.md` — this entry
+
+UNTOUCHED: boardFx.js, boardFx.css, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. **Hard refresh** to load new spine.
+
+2. **Win a Trial of Hand** (or any event with rewards).
+   - Card shows "🏆 YOU WON" with reward icons + Collect button.
+   - **Inventory at this moment shows pre-resolution counts**
+     (NOT incremented yet).
+   - Tap Collect.
+
+3. **Watch the inventory counts during Collect:**
+   - Bricks fire first, in canonical color order.
+   - As each brick lands at the brick chip, the chip's pip count
+     should tick up by one.
+   - After bricks, cheese fires (single goldGained burst representing
+     all cheese at once).
+   - As cheese lands at the dashboard cheese stat, the cheese count
+     ticks up.
+   - Coins fire last, similar pattern.
+   - After all settles, displayed = server.
+
+4. **Confirm event card is fully gone** after Collect. The whole
+   landing-result panel should be empty/gone, not just the
+   resolution card. No leftover trial UI, no "WAITING FOR DM."
+
+5. **Edge cases:**
+   - **No rewards (trial cancelled, did not join):** card shows
+     WAITING FOR DM as before, no Collect button, no display-delta
+     setup. Verify nothing breaks.
+   - **Just a brick (no cheese/coins):** sequence has just brick
+     phase; should complete cleanly.
+   - **Multi-color bricks (rare — riddle gives yellow, trial gives
+     red):** verify bricks fire in BRICK_NAMES order, not spec
+     insertion order.
+
+6. **Race condition test:**
+   - Win an event, tap Collect.
+   - DM marks resolved DURING the animation (between bursts).
+   - Server fires state update with activeEvent cleared.
+   - The render() call clears `_displayDeltas` (safety reset).
+   - Subsequent burst arrival-decrements try to increment cleared
+     deltas — no-op (safe, since deltas are 0).
+   - Inventory ends at correct totals.
+
+If counts don't increment on arrival:
+- Check console for errors in `_collectResolutionReward`.
+- Verify dashboard render is going through `_displayed` /
+  `_displayedBricks` (DevTools → inspect the gold count element,
+  see if it changes during animation).
+
+---
+
+**Standards audit (rule #17 — push #13 in S015 continuation):**
+
+This push followed intuition (rule #19) and diagnostic-first
+(rule #6) cleanly:
+- Read user's screenshot + description carefully BEFORE coding.
+- Identified three distinct issues, scoped each independently.
+- Recognized issue #4 (true server-side gating) as out of scope;
+  parking-lot.
+- Used the existing `_collectedResolutions` flag for issue #1
+  rather than adding new state — extend before invent.
+- Sequenced timing chosen by reasoning about per-burst feel,
+  not by guessing — animations have known durations from previous
+  pushes (boardFx).
+
+**Drift acknowledgment:** I proposed the display-delta architecture
+without first checking whether all `me.bricks` read sites would be
+updated. After the change, the brick chips on the bricks-TAB (not
+dashboard) might still read raw `me.bricks` — meaning during a
+Collect animation, dashboard shows pre-resolution but bricks-tab
+shows server total. **Inconsistency.** For v0.15.39 this is
+acceptable (bricks-tab is rarely viewed during Collect — player
+is on dashboard watching the FX), but a follow-up patch should
+audit all read sites of `me.gold` / `me.cheese` / `me.bricks` and
+route them through helpers.
+
+Captured this as a parking-lot item to address in a v0.15.40-ish
+polish push.
+
+---
+
 
 ### Session 015 Process Retrospective
 
@@ -8679,5 +8880,30 @@ between minigame end and DM resolution remains.
 v0.15.38 riddle migration.
 
 **Roadmap fit:** next polish push. Natural follow-on to v0.15.38.
+
+---
+
+### Display-helper audit — extend _displayed coverage to all inventory read sites
+
+**Source:** v0.15.39 build acknowledgment.
+
+**Status:** Partial coverage. The dashboard gold/cheese stats and
+brick-charges chip use `_displayed()` / `_displayedBricks()` helpers.
+Other read sites (bricks-tab pip displays, party-card brick chips,
+fusion tab counts, possibly trade modal) still read `me.bricks` /
+`me.gold` / `me.cheese` directly, which means during a Collect
+animation those views show the server total while the dashboard
+shows the pre-resolution total. Inconsistency.
+
+**Build scope:** grep for `me.bricks[`, `me.gold`, `me.cheese`,
+`bricks[color]`, `players[cls].gold` etc. across players-core.js.
+Route each through `_displayed` / `_displayedBricks` where the value
+is being *displayed* (vs. used in logic, like "do I have enough?"
+gates which should still read raw server state).
+
+**Build estimate:** small to medium. Mechanical replace + careful
+review of which read sites are display vs. logic.
+
+**Roadmap fit:** §10 polish, sibling to v0.15.39.
 
 ---

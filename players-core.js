@@ -43,10 +43,51 @@ var lastRoll = null;
 // (new key = new entry, never matches old).
 var _collectedResolutions = {};
 
+// v0.15.39 — When _collectedResolutions has the active-event key, the entire
+// active-event panel collapses (not just the resolution card). This lets the
+// FX and the inventory stand on their own without leftover event card.
+// restoreActiveEvent checks this flag and short-circuits.
 function _activeEventCollectKey() {
   if (!G || !G.activeEvent) return null;
   var ev = G.activeEvent;
   return (ev.cls||'') + '|' + (ev.roll||'') + '|' + (ev.evType||'');
+}
+
+// v0.15.39 — Display-delta override for inventory counts.
+// When the player taps Collect, the server has already credited the rewards.
+// To preserve "increment-on-arrival" feel, the dashboard reads displayed
+// values via _displayed() helpers that subtract pending deltas. As each
+// burst lands, the delta is decremented (toward zero). Once all bursts done,
+// displayed = server.
+//
+// Shape: { gold: number, cheese: number, bricks: { color: number } }
+// Negative values mean "the displayed total is lower than the server total
+// by this amount." Always ≤ 0 in normal flow.
+//
+// Cleared when no rewards in flight.
+var _displayDeltas = { gold: 0, cheese: 0, bricks: {} };
+
+function _displayed(me, field) {
+  if (!me) return 0;
+  var raw = me[field] || 0;
+  var delta = _displayDeltas[field] || 0;
+  return Math.max(0, raw + delta);  // delta is negative; clamp at 0
+}
+
+function _displayedBricks(me, color) {
+  if (!me || !me.bricks) return 0;
+  var raw = me.bricks[color] || 0;
+  var delta = (_displayDeltas.bricks && _displayDeltas.bricks[color]) || 0;
+  return Math.max(0, raw + delta);
+}
+
+// Returns true if there is any pending delta (any reward still mid-flight).
+function _hasPendingDeltas() {
+  if (_displayDeltas.gold || _displayDeltas.cheese) return true;
+  for (var c in _displayDeltas.bricks) {
+    if (_displayDeltas.bricks[c]) return true;
+  }
+  return false;
 }
 
 // Class UI styles live in characters.js (Phase 2 consolidation).
@@ -389,6 +430,12 @@ function render() {
   } catch (e) {}
   if (G.phase !== 'land') _landingRollSent = false;
   if (!G.activeEvent) _burstFiredFor = null;
+  // v0.15.39: when activeEvent clears (DM marked resolved, or new round began),
+  // also clear any pending display deltas. Server state is now authoritative
+  // and we don't want stale "displayed lower than server" deltas hanging around.
+  if (!G.activeEvent && _hasPendingDeltas()) {
+    _displayDeltas = { gold: 0, cheese: 0, bricks: {} };
+  }
   renderPhaseBanner(me);
   renderDashboard(me);
   renderParty();
@@ -418,6 +465,18 @@ function render() {
 
 function restoreActiveEvent() {
   if (!G || !G.activeEvent) { return; }
+  // v0.15.39: if the player has tapped Collect on this event's resolution,
+  // collapse the entire active-event panel — not just the resolution card.
+  // No leftover event-card visual evidence after Collect; the inventory
+  // animation and updated counts are the only feedback. Re-renders won't
+  // restore the panel until the activeEvent key changes (new event = new
+  // signature = no entry in _collectedResolutions).
+  var collectKey = _activeEventCollectKey();
+  if (collectKey && _collectedResolutions[collectKey]) {
+    var hostEl = document.getElementById('landing-result');
+    if (hostEl) hostEl.innerHTML = '';
+    return;
+  }
   // If this is a monster event and we have a pending rumble battle for this player,
   // the rumble card handles the display instead. Skip the generic landing-result card.
   if (G.activeEvent.evType === 'monster' && G.pendingRumbleBattle && G.pendingRumbleBattle.cls === MY_CLASS) { return; }
@@ -578,10 +637,10 @@ function _dashHeader(me) {
     </div>
     <div class="stats-row" style="margin-top:10px;">
       <div class="stat-chip">
-        <div class="stat-num" style="color:#F5D000;">🪙 ${me.gold}</div>
+        <div class="stat-num" style="color:#F5D000;">🪙 ${_displayed(me,'gold')}</div>
       </div>
       <div class="stat-chip">
-        <div class="stat-num" style="color:#FFD96A;">🧀 ${me.cheese||0}</div>
+        <div class="stat-num" style="color:#FFD96A;">🧀 ${_displayed(me,'cheese')}</div>
       </div>
     </div>
     ${(statuses || debuffBadge) ? `<div class="status-wrap">${statuses}${debuffBadge}</div>` : ''}
@@ -1336,14 +1395,14 @@ function _dashBrickBar(me) {
   const bricks = me.bricks || {};
   const charged = me.bricksCharged || {};
   const ld = me.lastDropped || {};
-  const owned = BRICK_NAMES.filter(c => (bricks[c] || 0) > 0);
+  const owned = BRICK_NAMES.filter(c => _displayedBricks(me, c) > 0);
   if (!owned.length) {
     return `<div class="card"><div class="card-title">Brick Charges</div>
       <div style="font-size:12px;color:var(--text-dim);padding:6px 0;">No bricks owned.</div></div>`;
   }
   let chips = '';
   owned.forEach(color => {
-    const qty = bricks[color] || 0;
+    const qty = _displayedBricks(me, color);
     const chg = Math.min(qty, charged[color] || 0);
     const bg = BRICK_COLORS[color] || '#555';
     const pulseTier = _pulseTier(ld[color]);
@@ -4901,17 +4960,22 @@ function _pickResolutionCollectFlavor() {
   return REWARD_COLLECT_FLAVORS[idx];
 }
 
-// v0.15.37 — Collect handler. Triggered by Collect button onclick. Fires
-// boardFx for each reward type in the spec (so brick goes brickGained,
-// gold goes goldGained, etc.), sends collectReward server message so the
-// server can record acknowledgment if/when it grows handling for it, and
-// hides the card visually so the FX has stage. The actual reward grant
-// in player state depends on server flow (DM mark-resolved or auto-grant);
-// the FX firing here is the player's experiential acknowledgment.
+// v0.15.37/.38/.39 — Collect handler. Triggered by Collect button onclick.
 //
-// v0.15.38 — Sets _collectedResolutions[key] so the dismissal survives
-// subsequent renders. Without this, the next state broadcast re-renders
-// the active-event card region and the resolution card pops back in.
+// v0.15.39 changes:
+// - Sequenced reward order: bricks (in BRICK_NAMES order) → cheese → coins.
+// - Display-delta override: at tap time, the inventory display "rewinds" to
+//   pre-resolution counts (server has already credited). As each burst lands,
+//   the delta increments toward zero and a render is triggered. Effect:
+//   inventory counts visually tick up *as each burst arrives*, not at server
+//   credit time. This is the increment-on-arrival pattern Ross requested.
+// - Active-event panel collapses entirely after Collect (handled in
+//   restoreActiveEvent via _collectedResolutions check).
+//
+// Timing per burst type (rough, tuned during build):
+//   brickGained: ~1200ms total animation; arrival landing at t≈1200
+//   goldGained (cheese path, ≤3): ~1100ms total
+//   goldGained (coins, pile + flow): ~350ms per coin + 850ms tail
 //
 // btnId is the unique DOM id of the Collect button — used to find the
 // containing card and hide it after FX fires.
@@ -4927,53 +4991,107 @@ function _collectResolutionReward(specJson, btnId) {
     var rect = anchorEl.getBoundingClientRect();
     if (rect.width > 0) anchor = rect;
   }
-  // Fire boardFx per reward type.
+
+  // ── Set display-delta overrides so the inventory shows pre-resolution
+  //    counts at the moment of tap. Each burst's arrival decrements toward 0.
   if (spec.bricks && typeof spec.bricks === 'object') {
-    var brickColors = Object.keys(spec.bricks);
-    brickColors.forEach(function(color, idx) {
-      var n = spec.bricks[color] || 0;
-      for (var i = 0; i < n; i++) {
-        // Stagger by a short delay so multiple bricks burst sequentially.
-        setTimeout(function(c){ BoardFx.fire('brickGained', anchor || '#landing-result', { brickColor: c }); }, idx * 80 + i * 60, color);
-      }
+    Object.keys(spec.bricks).forEach(function(c) {
+      var n = spec.bricks[c] || 0;
+      if (n > 0) _displayDeltas.bricks[c] = (_displayDeltas.bricks[c] || 0) - n;
     });
   }
-  if (spec.coins && spec.coins > 0) {
-    BoardFx.fire('goldGained', anchor || '#landing-result', { amount: spec.coins });
+  if (spec.cheese && spec.cheese > 0) _displayDeltas.cheese -= spec.cheese;
+  if (spec.coins && spec.coins > 0)  _displayDeltas.gold   -= spec.coins;
+
+  // Mark this resolution as collected (survives next render).
+  var collectKey = _activeEventCollectKey();
+  if (collectKey) _collectedResolutions[collectKey] = true;
+
+  // Hide the card immediately so FX has stage. Triggers a render so the
+  // collapsed event panel + display deltas take effect.
+  if (btn) {
+    var card = btn.closest('[data-resolution-card]');
+    if (card) {
+      card.style.transition = 'opacity 0.2s ease-out';
+      card.style.opacity = '0';
+      setTimeout(function(){
+        if (card.parentNode) card.style.display = 'none';
+        try { render(); } catch(e) {}
+      }, 220);
+    } else {
+      try { render(); } catch(e) {}
+    }
+  } else {
+    try { render(); } catch(e) {}
   }
-  if (spec.cheese && spec.cheese > 0) {
-    // Cheese reuses goldGained until a cheese-specific preset exists. Visually
-    // close enough (yellow-ish flow-to-inventory). Future: cheeseGained preset.
-    BoardFx.fire('goldGained', anchor || '#landing-result', { amount: spec.cheese });
-  }
-  // Shield rewards in resolution cards rare; if present, fire shieldCrit.
-  if (spec.shield) {
-    BoardFx.fire('shieldCrit', '#my-shield-section', { label: 'Shield!' });
-  }
+
   // Server message — ack-only. Server may or may not handle it. If server
   // doesn't have a collectReward handler, this is silently ignored, which
   // is fine: the FX/dismiss already played for the player.
   if (typeof client !== 'undefined' && client && typeof client.send === 'function') {
     try { client.send('collectReward', { spec: spec }); } catch(e) {}
   }
-  // v0.15.38: mark the active-event resolution as collected so it survives
-  // the next render. Render functions check _collectedResolutions[key] and
-  // skip the resolution card if set.
-  var key = _activeEventCollectKey();
-  if (key) _collectedResolutions[key] = true;
-  // Hide the card immediately for the visual flourish before the next
-  // render confirms it stays hidden.
-  if (btn) {
-    var card = btn.closest('[data-resolution-card]');
-    if (card) {
-      card.style.transition = 'opacity 0.25s ease-out';
-      card.style.opacity = '0';
-      setTimeout(function(){
-        if (card.parentNode) card.style.display = 'none';
-        // Trigger a render so the spine state-driven hide takes over.
-        try { render(); } catch(e) {}
-      }, 280);
-    }
+
+  // ── Sequence rewards: bricks (BRICK_NAMES order) → cheese → coins.
+  // Each burst's arrival decrements the relevant delta and triggers render.
+  var t = 0;
+  var BRICK_LIFE_MS = 1200;
+  var CHEESE_LIFE_MS = 1300;
+  var COIN_FLOW_PER_COIN_MS = 350;
+  var COIN_TAIL_MS = 900;
+  var INTER_REWARD_PAUSE_MS = 200;
+  var INTER_BRICK_PAUSE_MS = 600;
+
+  // Bricks first, in canonical color order.
+  if (spec.bricks && typeof spec.bricks === 'object') {
+    var orderedColors = (typeof BRICK_NAMES !== 'undefined' ? BRICK_NAMES : Object.keys(spec.bricks))
+      .filter(function(c){ return (spec.bricks[c]||0) > 0; });
+    orderedColors.forEach(function(color) {
+      var n = spec.bricks[color] || 0;
+      for (var i = 0; i < n; i++) {
+        var fireAt = t;
+        setTimeout(function(c){ BoardFx.fire('brickGained', anchor || '#landing-result', { brickColor: c }); }, fireAt, color);
+        // Arrival: decrement delta + render
+        setTimeout(function(c){
+          if (_displayDeltas.bricks[c]) _displayDeltas.bricks[c]++;
+          try { render(); } catch(e) {}
+        }, fireAt + BRICK_LIFE_MS, color);
+        t += INTER_BRICK_PAUSE_MS;
+      }
+    });
+    // Tail of last brick
+    t += (BRICK_LIFE_MS - INTER_BRICK_PAUSE_MS);
+    if (t < 0) t = 0;
+    t += INTER_REWARD_PAUSE_MS;
+  }
+
+  // Cheese second.
+  if (spec.cheese && spec.cheese > 0) {
+    var cheeseAmount = spec.cheese;
+    setTimeout(function(){ BoardFx.fire('goldGained', anchor || '#landing-result', { amount: cheeseAmount }); }, t);
+    setTimeout(function(){
+      _displayDeltas.cheese += cheeseAmount;
+      try { render(); } catch(e) {}
+    }, t + CHEESE_LIFE_MS);
+    t += CHEESE_LIFE_MS + INTER_REWARD_PAUSE_MS;
+  }
+
+  // Coins last.
+  if (spec.coins && spec.coins > 0) {
+    var coinAmount = spec.coins;
+    setTimeout(function(){ BoardFx.fire('goldGained', anchor || '#landing-result', { amount: coinAmount }); }, t);
+    var coinDuration = (Math.min(12, coinAmount) * COIN_FLOW_PER_COIN_MS) + COIN_TAIL_MS;
+    setTimeout(function(){
+      _displayDeltas.gold += coinAmount;
+      try { render(); } catch(e) {}
+    }, t + coinDuration);
+    t += coinDuration + INTER_REWARD_PAUSE_MS;
+  }
+
+  // Shield rewards: rare, fire immediately (no inventory delta — armor isn't
+  // tracked through these helpers; the shield bar updates from server state).
+  if (spec.shield) {
+    BoardFx.fire('shieldCrit', '#my-shield-section', { label: 'Shield!' });
   }
 }
 
