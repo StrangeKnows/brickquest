@@ -359,14 +359,16 @@
   }
 
   // ── Primitive: coin pile ───────────────────────────────────────
-  // Cluster of coin emoji at (cx,cy) that fades out over lifeMs. Used
-  // by goldGained as visual cue for "stack to drain."
+  // Cluster of glyph emoji at (cx,cy) that fades out over lifeMs. Used
+  // by goldGained as visual cue for "stack to drain." v0.15.40: glyph
+  // overrideable so cheese can render '🧀🧀🧀'.
   function _coinPile(cx, cy, opts) {
     var overlay = _ensureOverlay();
     var lifeMs  = opts.lifeMs || 600;
+    var glyph   = opts.glyph  || '🪙';
     var pile = document.createElement('div');
     pile.className = 'coin-pile';
-    pile.textContent = '🪙🪙🪙';
+    pile.textContent = glyph + glyph + glyph;
     pile.style.left = cx + 'px';
     pile.style.top  = cy + 'px';
     pile.style.animationDuration = lifeMs + 'ms';
@@ -377,17 +379,19 @@
   }
 
   // ── Primitive: flying coin ─────────────────────────────────────
-  // Single coin emoji that arcs from (sx,sy) to dest. If dest is null,
-  // the coin drifts upward and fades (no destination — usually because
+  // Single glyph emoji that arcs from (sx,sy) to dest. If dest is null,
+  // the glyph drifts upward and fades (no destination — usually because
   // the player is on a different tab). Uses CSS variables for the
-  // travel path so keyframes can interpolate.
+  // travel path so keyframes can interpolate. v0.15.40: glyph override
+  // so cheese can render '🧀'.
   function _flyingCoin(sx, sy, dest, opts) {
     var overlay = _ensureOverlay();
     var delayMs = opts.delayMs || 0;
     var lifeMs  = opts.lifeMs  || 850;
+    var glyph   = opts.glyph   || '🪙';
     var coin = document.createElement('div');
     coin.className = dest ? 'flying-coin' : 'flying-coin no-dest';
-    coin.textContent = '🪙';
+    coin.textContent = glyph;
     coin.style.left = sx + 'px';
     coin.style.top  = sy + 'px';
     if (dest) {
@@ -563,12 +567,17 @@
     goldGained: function(pos, data) {
       var amount = (data && data.amount) || 1;
       var cx = pos.x, cy = pos.y;
-      // Find destination: gold display in dashboard. If absent (tab off-screen
-      // or render-loop wiped), fall back to upward drift.
-      var dest = _findGoldDestination();
+      // v0.15.40: caller can pass `dest` (viewport coords) to override the
+      // auto-find. Used for cheese (which reuses this preset but needs its
+      // own destination). If absent, fall back to gold-display auto-find.
+      // Also `glyph` overrides the coin emoji ('🪙' default), and
+      // `floaterText` overrides the +N text.
+      var dest = (data && data.dest) || _findGoldDestination();
+      var glyph = (data && data.glyph) || '🪙';
+      var floaterText = (data && data.floaterText) || ('+' + amount + ' ' + glyph);
       var coinCount = Math.min(12, Math.max(1, amount));
       // Floater text — confirms the +N amount even if no coins reach destination
-      _risingText(cx, cy, '+' + amount + ' 🪙', {
+      _risingText(cx, cy, floaterText, {
         className: 'gold-gained-text',
         lifeMs:    1400,
         yOffset:   -22
@@ -576,13 +585,14 @@
       // Pile (only for amount > 3) — shows briefly at origin, fades as
       // coins flow out. Visual cue that there's a stack to drain.
       if (amount > 3) {
-        _coinPile(cx, cy, { lifeMs: 600 });
+        _coinPile(cx, cy, { lifeMs: 600, glyph: glyph });
       }
       // Individual coin flow — each coin staggered, arcs from origin to dest
       for (var i = 0; i < coinCount; i++) {
         _flyingCoin(cx, cy, dest, {
           delayMs:  i * 70,
-          lifeMs:   850
+          lifeMs:   850,
+          glyph:    glyph
         });
       }
     }

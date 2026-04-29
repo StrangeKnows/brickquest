@@ -8048,6 +8048,239 @@ polish push.
 
 ---
 
+### v0.15.40 — Reservoir Collect: card-as-source-of-truth, icon-by-icon drain
+
+**v0.15.39 playtest revealed a bigger UX issue than I'd scoped.**
+Quote from Ross:
+
+> "values are incrementing prior to collect, then after collect they
+> vanish and are readded. event screen should persist until all
+> rewards collected, removing them from reward screen as they flow
+> to inventory, empty event screen fading once all done"
+
+> "one tap, they live on card until drained, fading out as they are
+> collected, give each element about 1 sec to collect from card and
+> increment inventory, fx should last same amt of time"
+
+This is a fundamental rework of how rewards flow client-side, not a
+small patch. The previous mental model (Collect tap = transition
+moment) was wrong. The right model: **the resolution card is a
+visual reservoir of pending rewards.** Each tap drains the
+reservoir element-by-element into inventory.
+
+---
+
+**The flicker problem v0.15.39 had:**
+
+Pre-v0.15.40 sequence:
+1. Server credits all rewards at trial-resolved time
+2. Client renders state — inventory totals JUMP UP (server has them)
+3. Player sees "+1 RED BRICK!" card with reward already in inventory
+4. Player taps Collect
+5. v0.15.39 deltas snap in — inventory totals JUMP DOWN to pre-resolution
+6. FX flies, deltas tick up — inventory totals INCREMENT BACK to true
+7. Card disappears
+
+The double-jump (up then down then back up) was jarring. The card
+was a momentary interstitial; the rewards lived in inventory the
+whole time and the FX was just decoration.
+
+---
+
+**The reservoir model:**
+
+Post-v0.15.40 sequence:
+1. Server credits all rewards at trial-resolved time
+2. Client receives state, renders the card with reward icons
+3. **At first render of card with spec, deltas arm immediately.**
+   Inventory shows pre-resolution counts the entire time the card
+   is up. NO JUMP.
+4. Player sees "+1 RED BRICK!" card; inventory still shows
+   pre-resolution counts (e.g. red bricks: 0, not 1)
+5. Player taps Collect
+6. **Drain sequence:** for each reward:
+   - Find that reward's icon in the card (by data-reward-token)
+   - Capture icon's viewport rect (FX origin)
+   - Fade the icon (opacity 0 + scale 0.5 over 350ms)
+   - Fire boardFx from icon position to inventory destination
+     (~650ms travel)
+   - At 1 sec mark: increment delta by 1, trigger render — inventory
+     count visually ticks up
+   - Move to next reward (~100ms pause)
+7. **Card fade after all drained.** Empty card opacity transitions
+   to 0 over 600ms (CSS transition pre-set on the card div).
+8. After 600ms fade: `_collectedResolutions` flag set. Next render
+   wipes the panel via `restoreActiveEvent` short-circuit.
+
+The card now feels like it CONTAINS the rewards. They visibly
+leave the card and arrive in your inventory. Continuous visual
+narrative, no flicker.
+
+---
+
+**Per-element timing (Ross's "about 1 sec each"):**
+
+- Icon fade: 350ms
+- FX travel: 650ms
+- Total per element: ~1 sec
+- Inter-element pause: 100ms
+- Card fade after drain: 600ms
+
+Per-element drain interpretation: bricks individual (1 brick = 1
+icon = 1 sec). For coins ≤5, individual icons drain individually;
+for coins >5, the stacked icon (`🪙 ×N`) drains as one element with
+goldGained showing internal staggering. Same for cheese.
+
+So a "+2 red brick + 1 cheese + 3 coin" reward takes:
+- 2 bricks × ~1.1s = 2.2s
+- 1 cheese × ~1.1s = 1.1s
+- 3 coins × ~1.1s = 3.3s
+- + 600ms card fade
+- = ~7.2s total drain time
+
+Long for big rewards. Tunable via constants
+(`STEP_DURATION`, `INTER_STEP_MS`, `CARD_FADE_MS`).
+
+---
+
+**Implementation pieces:**
+
+1. **`_armResolutionDeltas(eventKey, spec)`** — idempotent helper
+   that arms display deltas + stashes the spec. Called from the
+   top of `buildResolutionCard` whenever it renders with a non-empty
+   spec. Tracked per event-key in `_resolutionDeltasArmed`.
+
+2. **`_pendingResolutionSpecs[eventKey]`** — stash of the spec for
+   the drain handler to read.
+
+3. **`renderRewardIcons` updated** — every reward icon span gets a
+   `data-reward-token` attribute (e.g. `brick:red:0`, `coin:0`,
+   `cheese:0`, `shield:0`). Each span has CSS transition for
+   opacity + transform so the fade is smooth.
+
+4. **`buildResolutionCard` updated** — wraps the icon row in a
+   `data-reward-icons` div, tags the card itself with
+   `data-event-key` for the drain handler to find. Card has
+   `transition:opacity 0.6s` for the slow fade.
+
+5. **`_collectResolutionReward` rewritten** — reservoir-drain
+   pattern. Internal `_drainIcon(token, fxFireFn,
+   deltaIncrementFn, fireDelay)` helper handles per-element fade
+   + FX + delta increment. Sequenced bricks (BRICK_NAMES) →
+   cheese → coins.
+
+6. **`_findCheeseDest()` added** — mirrors `_findGoldDestination`
+   but targets the cheese stat-num element (contains 🧀 emoji).
+   Fixes the v0.15.39 bug where cheese FX flowed to the gold
+   display by mistake.
+
+7. **`boardFx.js` goldGained preset extended** — accepts optional
+   `dest`, `glyph`, `floaterText` params. Cheese reuses goldGained
+   with these overrides for visual consistency without forking
+   into a separate `cheeseGained` preset.
+
+8. **`_coinPile`, `_flyingCoin` primitives** — accept optional
+   `glyph` param so cheese renders 🧀 instead of 🪙.
+
+9. **`_bqLog(tag, data)` debug logger** — outputs to console only
+   when `window._brickQuestDebug = true`. Tags include `arm-deltas`,
+   `collect-tap`, `drain-icon`, `brick-arrived`, `cheese-arrived`,
+   `coin-arrived`, `card-fade-start`, `card-collected`,
+   `drain-no-icon` (warning), `collect-fallback` (warning). Set
+   the flag in DevTools to trace the sequence during playtest.
+
+10. **State reset extended** — when `G.activeEvent` clears,
+    `_resolutionDeltasArmed` and `_pendingResolutionSpecs` clear
+    alongside `_displayDeltas`.
+
+---
+
+**Files changed in v0.15.40:**
+
+- `players-core.js`:
+  - `_armResolutionDeltas`, `_pendingResolutionSpecs`,
+    `_resolutionDeltasArmed`, `_bqLog`, `_findCheeseDest` added
+  - `buildResolutionCard` updated: arm-deltas hook, key attr,
+    card transition, reward-icons wrapper
+  - `renderRewardIcons` updated: data-reward-token tags + CSS
+    transition on every icon span
+  - `_collectResolutionReward` rewritten: reservoir-drain pattern
+  - State reset extended for new state
+- `boardFx.js`:
+  - `goldGained` preset accepts `dest`, `glyph`, `floaterText`
+  - `_coinPile`, `_flyingCoin` primitives accept `glyph`
+- `NOTES.md` — this entry
+
+UNTOUCHED: boardFx.css, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+Enable debug logging in DevTools console first:
+```javascript
+window._brickQuestDebug = true;
+```
+
+Then refresh and trigger an event with rewards.
+
+1. **Win Trial of Hand** (or any reward-bearing event).
+   - Card appears with reward icons (e.g. "+1 RED + 1 cheese")
+   - **Verify: inventory still shows PRE-resolution counts.**
+     The red brick chip shouldn't appear yet; cheese count shouldn't
+     have ticked up. (The deltas mask the server's credit.)
+   - DevTools console shows `[bq:arm-deltas]` log with the spec.
+
+2. **Tap Collect.**
+   - DevTools shows `[bq:collect-tap]` then per-element drain logs.
+   - **Watch the card:** red brick icon fades and shrinks (~350ms).
+   - **FX fires** from the icon's position, flies to brick chip area.
+   - **At ~1 sec:** the red brick chip appears in inventory (or
+     count ticks up if already owned). Console shows
+     `[bq:brick-arrived]`.
+   - Then cheese drains the same way (1 sec).
+   - After last element: card slowly fades over 600ms.
+   - Card panel disappears entirely after fade.
+
+3. **Cheese flows to cheese display, not gold display.**
+   This is the v0.15.39 bug fix. Verify visually: cheese FX should
+   land at the 🧀 stat, not the 🪙 stat.
+
+4. **Edge cases:**
+   - Big reward (4+ bricks, 3+ cheese, 5+ coins): each element
+     drains individually. Long sequence (~7-10 sec).
+   - Stacked icons (>5 of one type): the stacked icon drains as
+     one element, FX shows the goldGained pile-and-flow internally.
+   - Trial cancelled / no winner / no rewards: card shows WAITING
+     FOR DM as before, no drain, no deltas, no Collect button.
+
+5. **Multi-tap defense:** tapping the Collect button after the first
+   tap should do nothing — button is disabled at tap time.
+
+---
+
+**Standards audit (rule #17 — push #14 in S015 continuation):**
+
+This push is the strongest evidence that diagnostic-first (rule #6)
+matters. The v0.15.39 push solved the *symptom* (jump-down-then-up
+flicker) while missing the *cause* (deltas armed too late). v0.15.40
+fixes the cause: deltas arm at resolution-received time, not tap
+time. Total v0.15.39 → v0.15.40 work was significant because the
+mental model needed to shift, not just the code.
+
+**Drift acknowledgment:** I should have flagged the design question
+("when do deltas activate?") during v0.15.39 build instead of
+defaulting to tap-time activation. That would have caught the flicker
+in design rather than playtest. Adding to memory: *when introducing
+display-side state that mirrors server state, decide carefully when
+the local state activates relative to server timing.*
+
+Also: this push has a long sequence (~7-10s for big rewards). I'm
+shipping with that as default; tuning will come from playtest. If
+it feels too slow, the constants are clearly named and easy to halve.
+
+---
+
 
 ### Session 015 Process Retrospective
 

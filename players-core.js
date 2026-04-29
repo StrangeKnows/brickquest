@@ -90,6 +90,55 @@ function _hasPendingDeltas() {
   return false;
 }
 
+// v0.15.40 — Resolution-arrived delta arming.
+// When buildResolutionCard renders for the first time with a non-empty spec
+// for an event key, arm display deltas with the spec's amounts (negative).
+// This makes inventory show pre-resolution counts the entire time the card
+// is up — no jump-up-then-jump-down flicker between resolution and Collect.
+//
+// Tracked per-event-key. _resolutionDeltasArmed[key] = true once armed.
+// Cleared when activeEvent changes (delta reset alongside).
+var _resolutionDeltasArmed = {};
+
+// v0.15.40 — Pending-resolution spec stash. When buildResolutionCard renders
+// with a spec, stash by event key. The Collect handler reads from the stash
+// to drive the drain sequence. Stash is the source of truth for "what's
+// still in the card waiting to be collected." As each reward icon drains,
+// the stash entry decrements; when fully drained, stash entry cleared.
+//
+// Shape: { eventKey: { bricks: { color: N }, cheese: N, coins: N, shield: bool } }
+var _pendingResolutionSpecs = {};
+
+// Arms display deltas for an event key based on a spec. Idempotent — safe to
+// call repeatedly during re-renders; only fires once per key.
+function _armResolutionDeltas(eventKey, spec) {
+  if (!eventKey || !spec) return;
+  if (_resolutionDeltasArmed[eventKey]) return;
+  _resolutionDeltasArmed[eventKey] = true;
+  // Stash the spec for the drain handler.
+  _pendingResolutionSpecs[eventKey] = JSON.parse(JSON.stringify(spec));
+  if (spec.bricks && typeof spec.bricks === 'object') {
+    Object.keys(spec.bricks).forEach(function(c) {
+      var n = spec.bricks[c] || 0;
+      if (n > 0) _displayDeltas.bricks[c] = (_displayDeltas.bricks[c] || 0) - n;
+    });
+  }
+  if (spec.cheese && spec.cheese > 0) _displayDeltas.cheese -= spec.cheese;
+  if (spec.coins  && spec.coins  > 0) _displayDeltas.gold   -= spec.coins;
+  _bqLog('arm-deltas', { key: eventKey, spec: spec, deltas: _displayDeltas });
+}
+
+// v0.15.40 — Console debug logger. Toggle via window._brickQuestDebug = true
+// in DevTools to enable. Off by default to avoid noise in production play.
+function _bqLog(tag, data) {
+  if (typeof window === 'undefined') return;
+  if (!window._brickQuestDebug) return;
+  try {
+    var ts = (Date.now() % 100000);
+    console.log('[bq:' + tag + '@' + ts + ']', data);
+  } catch(e) {}
+}
+
 // Class UI styles live in characters.js (Phase 2 consolidation).
 // Access via getCharUiStyle(cls) helper.
 
@@ -433,8 +482,13 @@ function render() {
   // v0.15.39: when activeEvent clears (DM marked resolved, or new round began),
   // also clear any pending display deltas. Server state is now authoritative
   // and we don't want stale "displayed lower than server" deltas hanging around.
+  // v0.15.40: also clear armed/stash state for the same reason.
   if (!G.activeEvent && _hasPendingDeltas()) {
     _displayDeltas = { gold: 0, cheese: 0, bricks: {} };
+  }
+  if (!G.activeEvent) {
+    _resolutionDeltasArmed = {};
+    _pendingResolutionSpecs = {};
   }
   renderPhaseBanner(me);
   renderDashboard(me);
@@ -4979,68 +5033,91 @@ function _pickResolutionCollectFlavor() {
 //
 // btnId is the unique DOM id of the Collect button — used to find the
 // containing card and hide it after FX fires.
+//
+// v0.15.40 — Reservoir drain pattern:
+// - Display deltas were already armed when the card first rendered (in
+//   buildResolutionCard via _armResolutionDeltas). Inventory has been
+//   showing pre-resolution counts the entire time the card was up.
+// - Each reward icon in the card has a data-reward-token attribute. We
+//   sequence drain by:
+//   1. Find the icon span (by token) inside this card
+//   2. Capture its viewport rect → use as FX origin
+//   3. Fade the icon (transition opacity 0 + scale 0.5 over 350ms)
+//   4. Fire boardFx from icon position to inventory destination
+//   5. At ~1 sec mark: increment delta by 1 (or amount), trigger render
+//   6. Move to next reward
+// - After all rewards drained: card opacity 0 over 600ms (already set in
+//   the card's transition CSS), then _collectedResolutions flag set so
+//   restoreActiveEvent wipes the panel on next render.
+//
+// Per-element timing target: ~1 sec per reward (icon fade + FX travel
+// + arrival increment).
 function _collectResolutionReward(specJson, btnId) {
   var spec;
   try { spec = JSON.parse(specJson); } catch(e) { spec = {}; }
   var btn = document.getElementById(btnId);
-  // Anchor selector: prefer the Collect button itself (FX origin = where the
-  // player tapped). Falls back to the card or landing-result if missing.
-  var anchorEl = btn || document.getElementById('landing-result');
-  var anchor = null;
-  if (anchorEl) {
-    var rect = anchorEl.getBoundingClientRect();
-    if (rect.width > 0) anchor = rect;
-  }
-
-  // ── Set display-delta overrides so the inventory shows pre-resolution
-  //    counts at the moment of tap. Each burst's arrival decrements toward 0.
-  if (spec.bricks && typeof spec.bricks === 'object') {
-    Object.keys(spec.bricks).forEach(function(c) {
-      var n = spec.bricks[c] || 0;
-      if (n > 0) _displayDeltas.bricks[c] = (_displayDeltas.bricks[c] || 0) - n;
-    });
-  }
-  if (spec.cheese && spec.cheese > 0) _displayDeltas.cheese -= spec.cheese;
-  if (spec.coins && spec.coins > 0)  _displayDeltas.gold   -= spec.coins;
-
-  // Mark this resolution as collected (survives next render).
+  var card = btn ? btn.closest('[data-resolution-card]') : null;
   var collectKey = _activeEventCollectKey();
-  if (collectKey) _collectedResolutions[collectKey] = true;
 
-  // Hide the card immediately so FX has stage. Triggers a render so the
-  // collapsed event panel + display deltas take effect.
-  if (btn) {
-    var card = btn.closest('[data-resolution-card]');
-    if (card) {
-      card.style.transition = 'opacity 0.2s ease-out';
-      card.style.opacity = '0';
-      setTimeout(function(){
-        if (card.parentNode) card.style.display = 'none';
-        try { render(); } catch(e) {}
-      }, 220);
-    } else {
-      try { render(); } catch(e) {}
-    }
-  } else {
+  _bqLog('collect-tap', { key: collectKey, spec: spec });
+
+  // Fall-back path: if card or btn missing (shouldn't happen but defensive),
+  // just credit deltas and bail. The display will sync to server state on
+  // next render.
+  if (!card || !btn) {
+    _bqLog('collect-fallback', { reason: 'no-card-or-btn' });
+    if (collectKey) _collectedResolutions[collectKey] = true;
+    _displayDeltas = { gold: 0, cheese: 0, bricks: {} };
     try { render(); } catch(e) {}
+    return;
   }
 
-  // Server message — ack-only. Server may or may not handle it. If server
-  // doesn't have a collectReward handler, this is silently ignored, which
-  // is fine: the FX/dismiss already played for the player.
+  // Disable the Collect button — single-tap only, no double-fire.
+  btn.disabled = true;
+  btn.style.opacity = '0.4';
+  btn.style.cursor = 'default';
+
+  // Server message — ack-only. Server may or may not handle it.
   if (typeof client !== 'undefined' && client && typeof client.send === 'function') {
     try { client.send('collectReward', { spec: spec }); } catch(e) {}
   }
 
   // ── Sequence rewards: bricks (BRICK_NAMES order) → cheese → coins.
-  // Each burst's arrival decrements the relevant delta and triggers render.
+  // Each reward gets ~1 sec total: 350ms icon fade + 650ms FX travel.
   var t = 0;
-  var BRICK_LIFE_MS = 1200;
-  var CHEESE_LIFE_MS = 1300;
-  var COIN_FLOW_PER_COIN_MS = 350;
-  var COIN_TAIL_MS = 900;
-  var INTER_REWARD_PAUSE_MS = 200;
-  var INTER_BRICK_PAUSE_MS = 600;
+  var ICON_FADE_MS    = 350;   // icon fade-out duration
+  var FX_TRAVEL_MS    = 650;   // FX flight from icon to inventory
+  var STEP_DURATION   = ICON_FADE_MS + FX_TRAVEL_MS;  // ~1000ms per element
+  var INTER_STEP_MS   = 100;   // small pause between elements
+
+  // Helper: drain a single icon by token. Fades icon, fires FX from icon
+  // position to inventory destination, schedules delta increment.
+  function _drainIcon(token, fxFireFn, deltaIncrementFn, fireDelay) {
+    setTimeout(function(){
+      var icon = card.querySelector('[data-reward-token="'+token+'"]');
+      if (!icon) {
+        _bqLog('drain-no-icon', { token: token });
+        // Still fire FX from card center as fallback so the delta gets
+        // incremented and the player isn't stuck.
+        var fallbackRect = card.getBoundingClientRect();
+        var fallbackPos = { left: fallbackRect.left + fallbackRect.width/2 - 10, top: fallbackRect.top + fallbackRect.height/2 - 10, right: 0, bottom: 0, width: 20, height: 20 };
+        fxFireFn(fallbackPos);
+        setTimeout(deltaIncrementFn, FX_TRAVEL_MS);
+        return;
+      }
+      var iconRect = icon.getBoundingClientRect();
+      _bqLog('drain-icon', { token: token, from: { x: iconRect.left, y: iconRect.top } });
+      // Fade the icon
+      icon.style.opacity = '0';
+      icon.style.transform = 'scale(0.5)';
+      // Fire FX from icon position (small delay to let the fade start)
+      setTimeout(function(){
+        fxFireFn(iconRect);
+      }, 100);
+      // Increment delta at travel-arrival time
+      setTimeout(deltaIncrementFn, FX_TRAVEL_MS + 100);
+    }, fireDelay);
+  }
 
   // Bricks first, in canonical color order.
   if (spec.bricks && typeof spec.bricks === 'object') {
@@ -5049,50 +5126,138 @@ function _collectResolutionReward(specJson, btnId) {
     orderedColors.forEach(function(color) {
       var n = spec.bricks[color] || 0;
       for (var i = 0; i < n; i++) {
+        var token = 'brick:' + color + ':' + i;
         var fireAt = t;
-        setTimeout(function(c){ BoardFx.fire('brickGained', anchor || '#landing-result', { brickColor: c }); }, fireAt, color);
-        // Arrival: decrement delta + render
-        setTimeout(function(c){
-          if (_displayDeltas.bricks[c]) _displayDeltas.bricks[c]++;
-          try { render(); } catch(e) {}
-        }, fireAt + BRICK_LIFE_MS, color);
-        t += INTER_BRICK_PAUSE_MS;
+        _drainIcon(token,
+          (function(c){ return function(originRect){ BoardFx.fire('brickGained', originRect, { brickColor: c }); }; })(color),
+          (function(c){ return function(){
+            if (_displayDeltas.bricks[c]) _displayDeltas.bricks[c]++;
+            _bqLog('brick-arrived', { color: c, delta: _displayDeltas.bricks });
+            try { render(); } catch(e) {}
+          }; })(color),
+          fireAt
+        );
+        t += STEP_DURATION + INTER_STEP_MS;
       }
     });
-    // Tail of last brick
-    t += (BRICK_LIFE_MS - INTER_BRICK_PAUSE_MS);
-    if (t < 0) t = 0;
-    t += INTER_REWARD_PAUSE_MS;
   }
 
-  // Cheese second.
+  // Cheese second. The cheese icon (or stacked icon if >5) drains as one
+  // step that increments delta by spec.cheese.
   if (spec.cheese && spec.cheese > 0) {
     var cheeseAmount = spec.cheese;
-    setTimeout(function(){ BoardFx.fire('goldGained', anchor || '#landing-result', { amount: cheeseAmount }); }, t);
-    setTimeout(function(){
-      _displayDeltas.cheese += cheeseAmount;
-      try { render(); } catch(e) {}
-    }, t + CHEESE_LIFE_MS);
-    t += CHEESE_LIFE_MS + INTER_REWARD_PAUSE_MS;
+    var cheeseToken = 'cheese:0';  // first cheese icon (or the stacked single)
+    if (cheeseAmount <= 5) {
+      // Drain each cheese icon individually
+      for (var ci = 0; ci < cheeseAmount; ci++) {
+        var ctoken = 'cheese:' + ci;
+        var fireAt = t;
+        _drainIcon(ctoken,
+          (function(){ return function(originRect){ BoardFx.fire('goldGained', originRect, { amount: 1, dest: _findCheeseDest(), glyph: '🧀', floaterText: '+1 🧀' }); }; })(),
+          function(){
+            if (_displayDeltas.cheese < 0) _displayDeltas.cheese++;
+            _bqLog('cheese-arrived', { delta: _displayDeltas.cheese });
+            try { render(); } catch(e) {}
+          },
+          fireAt
+        );
+        t += STEP_DURATION + INTER_STEP_MS;
+      }
+    } else {
+      // One stacked cheese icon, drains all at once
+      _drainIcon(cheeseToken,
+        function(originRect){ BoardFx.fire('goldGained', originRect, { amount: cheeseAmount, dest: _findCheeseDest(), glyph: '🧀', floaterText: '+' + cheeseAmount + ' 🧀' }); },
+        function(){
+          _displayDeltas.cheese = Math.min(0, _displayDeltas.cheese + cheeseAmount);
+          _bqLog('cheese-stack-arrived', { delta: _displayDeltas.cheese });
+          try { render(); } catch(e) {}
+        },
+        t
+      );
+      t += STEP_DURATION + INTER_STEP_MS;
+    }
   }
 
   // Coins last.
   if (spec.coins && spec.coins > 0) {
     var coinAmount = spec.coins;
-    setTimeout(function(){ BoardFx.fire('goldGained', anchor || '#landing-result', { amount: coinAmount }); }, t);
-    var coinDuration = (Math.min(12, coinAmount) * COIN_FLOW_PER_COIN_MS) + COIN_TAIL_MS;
-    setTimeout(function(){
-      _displayDeltas.gold += coinAmount;
-      try { render(); } catch(e) {}
-    }, t + coinDuration);
-    t += coinDuration + INTER_REWARD_PAUSE_MS;
+    if (coinAmount <= 5) {
+      // Drain each coin icon individually
+      for (var coi = 0; coi < coinAmount; coi++) {
+        var coToken = 'coin:' + coi;
+        var fireAt = t;
+        _drainIcon(coToken,
+          (function(){ return function(originRect){ BoardFx.fire('goldGained', originRect, { amount: 1 }); }; })(),
+          function(){
+            if (_displayDeltas.gold < 0) _displayDeltas.gold++;
+            _bqLog('coin-arrived', { delta: _displayDeltas.gold });
+            try { render(); } catch(e) {}
+          },
+          fireAt
+        );
+        t += STEP_DURATION + INTER_STEP_MS;
+      }
+    } else {
+      // Stacked coin icon, drains all at once
+      _drainIcon('coin:0',
+        function(originRect){ BoardFx.fire('goldGained', originRect, { amount: coinAmount }); },
+        function(){
+          _displayDeltas.gold = Math.min(0, _displayDeltas.gold + coinAmount);
+          _bqLog('coin-stack-arrived', { delta: _displayDeltas.gold });
+          try { render(); } catch(e) {}
+        },
+        t
+      );
+      t += STEP_DURATION + INTER_STEP_MS;
+    }
   }
 
-  // Shield rewards: rare, fire immediately (no inventory delta — armor isn't
-  // tracked through these helpers; the shield bar updates from server state).
+  // Shield (rare in resolution cards). Drain its icon and fire shieldCrit.
   if (spec.shield) {
-    BoardFx.fire('shieldCrit', '#my-shield-section', { label: 'Shield!' });
+    _drainIcon('shield:0',
+      function(originRect){ BoardFx.fire('shieldCrit', '#my-shield-section', { label: 'Shield!' }); },
+      function(){
+        // Shield isn't tracked in display deltas; nothing to increment.
+      },
+      t
+    );
+    t += STEP_DURATION + INTER_STEP_MS;
   }
+
+  // After all drains complete, fade the (now-empty) card and set the
+  // dismissal flag so restoreActiveEvent wipes the panel on next render.
+  // The card has CSS transition:opacity 0.6s already, so setting opacity
+  // to 0 starts the fade. After 600ms, set the flag and trigger render.
+  var totalDrainMs = t;
+  var CARD_FADE_MS = 600;
+  setTimeout(function(){
+    if (card && card.parentNode) {
+      card.style.opacity = '0';
+      _bqLog('card-fade-start', { totalDrainMs: totalDrainMs });
+    }
+  }, totalDrainMs);
+  setTimeout(function(){
+    if (collectKey) _collectedResolutions[collectKey] = true;
+    _bqLog('card-collected', { key: collectKey });
+    try { render(); } catch(e) {}
+  }, totalDrainMs + CARD_FADE_MS);
+}
+
+// v0.15.40 — Find cheese display destination. Mirrors _findGoldDestination
+// in boardFx.js but for cheese. Used by the goldGained preset when the
+// caller passes dest=_findCheeseDest() (cheese reuses goldGained for FX).
+function _findCheeseDest() {
+  var pane = document.getElementById('pane-dashboard');
+  if (!pane || !pane.classList.contains('active')) return null;
+  var candidates = pane.querySelectorAll('.stat-num');
+  for (var i = 0; i < candidates.length; i++) {
+    if (candidates[i].textContent.indexOf('🧀') >= 0) {
+      var r = candidates[i].getBoundingClientRect();
+      if (r.width === 0) return null;
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+  }
+  return null;
 }
 
 function buildResolutionCard(opts) {
@@ -5146,7 +5311,20 @@ function buildResolutionCard(opts) {
     spec.shield
   );
 
-  var html = '<div data-resolution-card style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;">';
+  // v0.15.40: arm display deltas the moment this card first renders with a
+  // spec. Inventory shows pre-resolution counts the entire time the card is
+  // up — no jump-up-then-jump-down flicker. Idempotent across re-renders.
+  var armKey = _activeEventCollectKey();
+  if (hasReward && armKey) {
+    _armResolutionDeltas(armKey, spec);
+  }
+
+  // Tag the card with the event key so the drain handler can find the
+  // reward-icon spans within this specific card (multiple cards on screen
+  // shouldn't be possible, but defensive).
+  var keyAttr = armKey ? ' data-event-key="' + armKey.replace(/"/g, '&quot;') + '"' : '';
+
+  var html = '<div data-resolution-card' + keyAttr + ' style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;transition:opacity 0.6s ease-out;">';
   if (shower) {
     html += '<canvas id="result-shower" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;opacity:0.2;"></canvas>';
   }
@@ -5155,7 +5333,7 @@ function buildResolutionCard(opts) {
     html += '<div style="font-family:Cinzel,serif;font-size:18px;color:'+themeColor+';text-align:center;margin-bottom:8px;letter-spacing:.06em;">'+title+'</div>';
   }
   if (rewardIcons) {
-    html += '<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:8px;padding:6px 0;flex-wrap:wrap;">'+rewardIcons+'</div>';
+    html += '<div data-reward-icons style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:8px;padding:6px 0;flex-wrap:wrap;">'+rewardIcons+'</div>';
   }
   if (flavor) {
     html += '<div style="font-size:13px;color:var(--text-dim);font-style:italic;line-height:1.5;margin-bottom:6px;">'+flavor+'</div>';
@@ -5204,41 +5382,46 @@ const BRICK_SQUARE_COLORS = {
 function renderRewardIcons(spec) {
   spec = spec || {};
   var html = '';
-  var BSQ = function(color) {
+  // v0.15.40: each reward icon gets a data-reward-token attribute so the
+  // drain handler (_collectResolutionReward) can find and fade individual
+  // icons as their FX fires. Token format: "brick:<color>:<i>" / "coin:<i>" /
+  // "cheese:<i>" / "shield:0". Per-element targeting is needed for the
+  // "icons drain from card" effect.
+  var BSQ = function(color, idx) {
     var c = BRICK_SQUARE_COLORS[color] || '#888';
     var border = color === 'white' ? 'border:1px solid #ccc;' : '';
-    return '<span style="width:22px;height:22px;border-radius:3px;background:'+c+';'+border+'display:inline-block;vertical-align:middle;box-shadow:0 1px 4px rgba(0,0,0,.5);margin:0 2px;"></span>';
+    return '<span data-reward-token="brick:'+color+':'+idx+'" style="width:22px;height:22px;border-radius:3px;background:'+c+';'+border+'display:inline-block;vertical-align:middle;box-shadow:0 1px 4px rgba(0,0,0,.5);margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;"></span>';
   };
   // Bricks
   if (spec.bricks && typeof spec.bricks === 'object') {
     Object.keys(spec.bricks).forEach(function(color) {
       var n = spec.bricks[color] || 0;
-      for (var i = 0; i < n; i++) html += BSQ(color);
+      for (var i = 0; i < n; i++) html += BSQ(color, i);
     });
   }
   // Coins — up to 5 icons, then "🪙 ×N"
   if (spec.coins && spec.coins > 0) {
     if (spec.coins <= 5) {
       for (var ci = 0; ci < spec.coins; ci++) {
-        html += '<span style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:0 2px;">🪙</span>';
+        html += '<span data-reward-token="coin:'+ci+'" style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;">🪙</span>';
       }
     } else {
-      html += '<span style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;margin:0 2px;"><span style="font-size:20px;line-height:1;">🪙</span><span style="font-size:14px;color:#F5D000;font-weight:700;">×'+spec.coins+'</span></span>';
+      html += '<span data-reward-token="coin:0" style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;"><span style="font-size:20px;line-height:1;">🪙</span><span style="font-size:14px;color:#F5D000;font-weight:700;">×'+spec.coins+'</span></span>';
     }
   }
   // Cheese
   if (spec.cheese && spec.cheese > 0) {
     if (spec.cheese <= 5) {
       for (var chi = 0; chi < spec.cheese; chi++) {
-        html += '<span style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:0 2px;">🧀</span>';
+        html += '<span data-reward-token="cheese:'+chi+'" style="font-size:20px;line-height:1;display:inline-block;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;">🧀</span>';
       }
     } else {
-      html += '<span style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;margin:0 2px;"><span style="font-size:20px;line-height:1;">🧀</span><span style="font-size:14px;color:#FFD96A;font-weight:700;">×'+spec.cheese+'</span></span>';
+      html += '<span data-reward-token="cheese:0" style="display:inline-flex;align-items:center;gap:2px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;"><span style="font-size:20px;line-height:1;">🧀</span><span style="font-size:14px;color:#FFD96A;font-weight:700;">×'+spec.cheese+'</span></span>';
     }
   }
   // Shield
   if (spec.shield) {
-    html += '<span style="font-size:20px;vertical-align:middle;margin:0 2px;">🛡</span>';
+    html += '<span data-reward-token="shield:0" style="font-size:20px;vertical-align:middle;margin:0 2px;transition:opacity 0.35s ease-out, transform 0.35s ease-out;">🛡</span>';
   }
   // HP change (+ or -)
   if (typeof spec.hp === 'number' && spec.hp !== 0) {
