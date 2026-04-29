@@ -7648,6 +7648,205 @@ parse + structure, all 10 call sites updated cleanly.
 
 ---
 
+### v0.15.38 — Collect dismissal survives render; riddle migrated to buildResolutionCard
+
+**Three v0.15.37 issues surfaced during playtest, all addressed here.**
+
+Ross (with screenshot of gray-rubble Stack-It Collect mid-tap):
+> "rubble stack collect card does not fade out after button press,
+> should close event player side. also riddle did not have collect
+> card, was the same old style as prior. check all events to ensure
+> updates have been applied. do rewards move immediately to inventory
+> on event resolution? should be gated behind button press"
+
+---
+
+**Issue 1: Collect-tap card doesn't dismiss.** Bug. The v0.15.37
+implementation hid the card via inline `display:none`. But the
+resolution card lives inside `#landing-result`, which gets re-rendered
+on every server state broadcast (via `restoreActiveEvent`). The
+inline hide was wiped on the next render, restoring the card.
+
+**Fix:** state-driven dismissal. New `_collectedResolutions` keyed
+map (signature: `cls|roll|evType` — same key shape as `_burstFiredFor`).
+When the player taps Collect, the active-event signature is recorded.
+`buildResolutionCard` checks the flag at the top — if set for the
+current active event, returns empty string (card stays hidden across
+renders). Flag is implicitly cleared when activeEvent changes to a
+new one (different key = no entry in map).
+
+`_collectResolutionReward` now also calls `render()` after the visual
+fade transition completes (~280ms), so the spine state-driven hide
+takes over once the cosmetic transition finishes.
+
+---
+
+**Issue 2: Riddle resolution kept old custom HTML, missed Collect
+button entirely.** Pre-existing inconsistency (not a v0.15.37 bug).
+The v0.15.37 update wired Collect into `buildResolutionCard`, but
+riddle resolution rendered via inline custom HTML — bypassing the
+canonical builder. v0.15.37 spec-threading missed it because there
+was no `buildResolutionCard` call to thread spec into.
+
+**Fix (riddle winner):** migrated to `buildResolutionCard`. Spec is
+`{ bricks: { yellow: 1 } }` for the winner (who gets the +1 yellow
+brick). Loser sees the same card without spec (no Collect button —
+they got nothing to collect). Pending clue (the narrative payload
+beneath the brick) lives in the `extra` field, preserved.
+
+**Fix (riddle expired):** also migrated. No spec since no rewards
+on expiration; renders WAITING FOR DM footer (correct — there's
+nothing to collect).
+
+---
+
+**Audit of remaining custom-HTML resolution paths:**
+
+| Path | Status | Notes |
+|---|---|---|
+| Riddle winner (line ~2186) | ✅ Migrated v0.15.38 | Now uses buildResolutionCard with spec |
+| Riddle expired (line ~2241) | ✅ Migrated v0.15.38 | No spec (WAITING footer) |
+| Gold-game finish (line ~4283) | ⚠ Deferred | Renders into `#gold-game-container` (sibling of landing-result), not via buildResolutionCard. Migration requires routing change beyond scope of this push. Parking-lot. |
+| All 10 buildResolutionCard call sites | ✅ Already covered v0.15.37 | spec threaded through, Collect renders correctly |
+
+The gold-game finish migration is captured in the parking lot at end
+of NOTES.md (gold-game Collect migration entry).
+
+---
+
+**Issue 3: Rewards arrive immediately, not gated behind Collect tap.**
+**This is a server-side architectural question, not a client bug.**
+The current flow is:
+
+```
+Trial winner determined (server)
+  → Server credits brick to winner's bricks count (state update)
+  → Server broadcasts new state with the brick already in inventory
+  → Client renders resolution card showing "+1 brick"
+  → Player taps Collect — but the brick is already there
+  → The boardFx visual is theatre, not a transition
+```
+
+For the FX to represent an actual *gating moment*:
+
+```
+Trial winner determined (server)
+  → Server marks reward "pending" but does NOT credit to inventory
+  → Client renders resolution card showing "+1 brick" (preview)
+  → Player taps Collect → client.send('collectReward', { ... })
+  → Server receives collectReward, credits brick, broadcasts state
+  → Client renders new state with brick now in inventory
+  → boardFx flow-to-inventory animation matches actual transition
+```
+
+This requires:
+- Server state shape: `pendingRewards` per player or per event
+- Server message handler: `collectReward` action processes pending → granted
+- Server broadcast: state update with new totals
+- Server timeout policy: if player never collects (afk), grant after N
+  seconds OR on DM mark-resolved (no rewards lost regardless)
+
+**Captured as `[REPORTED]` in parking lot.** Cannot be fixed from
+client-only patches — needs server.js changes. The v0.15.37/.38
+client-side scaffold is ready: `client.send('collectReward', ...)`
+already fires on tap; server just needs to handle the message.
+
+When server-side gating lands, the visual experience shifts from
+"theatre" (already in inventory, FX is decorative) to "transition"
+(brick arrives BECAUSE you tapped, FX is the literal animation of
+the credit). Worth doing whenever you have time on server.js.
+
+---
+
+**Files changed in v0.15.38:**
+
+- `players-core.js`:
+  - `_collectedResolutions` map + `_activeEventCollectKey()` helper
+    added (state survival across renders)
+  - `_collectResolutionReward` updated: sets dismissal flag, triggers
+    render after fade
+  - `buildResolutionCard` updated: returns empty string when
+    dismissal flag set for current event
+  - Riddle winner card: migrated from custom HTML to
+    `buildResolutionCard` with `spec: { bricks: { yellow: 1 } }` for
+    winner, no spec for loser. Clue payload preserved in `extra`.
+  - Riddle expired card: migrated. No spec, WAITING footer renders.
+  - Gold-game finish: COMMENT added explaining deferral; not migrated.
+- `NOTES.md` — this entry + parking-lot updates (server-side gating,
+  gold-game Collect migration)
+
+UNTOUCHED: boardFx.js, boardFx.css, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. **Hard refresh** to load new spine.
+
+2. **Gray rubble Stack It! resolution** (the v0.15.38 bug).
+   - Land on gray rubble, complete the stacking minigame
+   - Resolution card shows "+1 GRAY BRICK" Collect button
+   - Tap Collect → boardFx fires → card fades and **stays hidden**
+   - DM marks resolved later — no card pop-back
+   - Confirm: card stays away across multiple state broadcasts
+
+3. **Riddle solve as winner.**
+   - Answer correctly first
+   - Resolution card now shows "🏆 ANSWERED CORRECTLY" (or variant)
+     with yellow brick icon + Collect button
+   - Pending clue shown beneath flavor (narrative payload preserved)
+   - Tap Collect → brickGained yellow burst + card hides
+
+4. **Riddle solve as non-winner / loser.**
+   - Someone else answers first
+   - Card shows winner's name + "answered correctly"
+   - No spec, no Collect button → WAITING FOR DM footer
+   - This is correct: you didn't win, nothing to collect
+
+5. **Riddle expired (timer ran out).**
+   - Wait for the timer
+   - Card shows "⏱ TIME EXPIRED" + flavor
+   - WAITING FOR DM footer (no spec, no Collect)
+
+6. **Multiple events in sequence.**
+   - Resolve one event, tap Collect (card hides)
+   - Trigger a new event of any type
+   - Verify the new event renders fresh (the dismissal flag from
+     the previous event doesn't carry over because the key changes)
+
+7. **Gold-game finish (gold event minigame).**
+   - Currently still uses old custom HTML (no Collect button)
+   - This is the deferred case from the audit — verify it still
+     works as before, no regression
+   - Collect-button migration is parking-lot for next session
+
+---
+
+**Standards audit (rule #17 — push #11 in S015 continuation):**
+
+Restating rule #6 (diagnostic-first). This push followed the rule
+cleanly. The user's report mentioned three things; my response was
+to *audit* (find all WAITING-FOR-DM occurrences, verify Collect
+coverage, identify the bug shape) BEFORE writing fix code. The
+audit found a fourth path (gold-game finish) that I deferred rather
+than try to fix in the same push — keeping scope bounded.
+
+**Drift acknowledgment:** v0.15.37 *should* have caught the riddle
+inconsistency. The catalog audit I did during the spine extract
+(v0.15.32) was function-by-function for *shared functions*, not
+event-rendering-pattern-by-pattern. The riddle resolution sits inside
+a render branch, not a top-level function, so my function-level
+catalog never noticed it. **Lesson:** when migrating a pattern (like
+buildResolutionCard usage), grep for the pattern's *symptoms*
+("WAITING FOR DM" string, in this case) to find non-canonical
+implementations of the same shape.
+
+I should have done that grep during v0.15.37 build. Adding to memory:
+*when migrating a centralized function (buildResolutionCard, BoardFx,
+etc.), grep for symptoms of the old pattern to find inline bypasses.*
+
+---
+
 
 ### Session 015 Process Retrospective
 
@@ -8415,5 +8614,70 @@ exists, surface it with both code paths visible before fixing.
 
 **Build estimate:** small (likely a one-line constant fix or a
 single-source-of-truth refactor moving max into characters.js).
+
+---
+
+### [REPORTED] Server-side reward gating — Collect button currently theatre
+
+**Source:** Ross during v0.15.38 playtest:
+> "do rewards move immediately to inventory on event resolution?
+> should be gated behind button press"
+
+**Status:** REPORTED. Client-side scaffold exists (v0.15.37 added
+`client.send('collectReward', ...)` on tap). Server-side handler
+does not exist yet.
+
+**Current behavior:** Server credits reward to player inventory when
+trial winner is determined / event resolved. Client renders Collect
+button + boardFx, but the brick is already in inventory before tap.
+The FX is decorative, not transitional.
+
+**Desired behavior:** Server holds reward as `pendingRewards` per
+player or per event. Client tap fires `collectReward` action. Server
+processes, credits inventory, broadcasts state. The boardFx animation
+becomes the literal animation of the credit.
+
+**Server.js changes needed:**
+1. State shape: add `pendingRewards` field per player or per active
+   event (e.g. `G.players[cls].pendingRewards = [{kind:'brick',color:'yellow',count:1}]`)
+2. Reward resolution paths (riddle winner, trial winner, gold-game
+   finish, etc.) write to pendingRewards instead of directly crediting
+3. `collectReward` action handler: drains pendingRewards, credits
+   actual inventory, broadcasts state
+4. Timeout / DM-mark-resolved fallback: grant pendingRewards
+   automatically if player hasn't collected after N seconds OR DM
+   marks resolved. Prevents reward loss for AFK players.
+
+**Build estimate:** medium chunk, mostly server.js. Touches every
+reward-grant code path.
+
+**Roadmap fit:** §10 polish, but high-value because the visual UX
+relies on this for the FX to feel right.
+
+---
+
+### Gold-game finish Collect migration
+
+**Source:** v0.15.38 audit found gold-game finish still uses custom
+HTML (renders into `#gold-game-container`, sibling of landing-result),
+bypassing buildResolutionCard. So gold-game has no Collect button.
+
+**Current behavior:** Player completes torch/crack minigame; sees
+custom HTML card showing coins + cheese + flavor + "WAITING FOR DM".
+No Collect button. brickGained/goldGained FX still fires when DM
+marks resolved (via rewardPopup server flow), but click-friction
+between minigame end and DM resolution remains.
+
+**Migration scope:**
+- Refactor `finishGoldGame` to render via buildResolutionCard
+- Spec: `{ coins: amount, cheese: cheeseFound, hp: -1 if rat-bite }`
+- Container routing: either render into `#landing-result` (sibling
+  of #gold-game-container) or teach buildResolutionCard to accept
+  a target container
+
+**Build estimate:** small. Mostly mechanical — same pattern as
+v0.15.38 riddle migration.
+
+**Roadmap fit:** next polish push. Natural follow-on to v0.15.38.
 
 ---

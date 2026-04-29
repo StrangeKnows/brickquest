@@ -34,6 +34,21 @@ var _burstFiredFor = null; // tracks which activeEvent got the burst — cls+rol
 var _statusOpen = {}; // tracks open/closed state of collapsible status cards // inline result card shown in action pane until dismissed
 var lastRoll = null;
 
+// v0.15.38 — Resolution-card dismissal state. When the player taps Collect
+// on a buildResolutionCard, the card needs to STAY hidden across the next
+// state broadcast (server still has activeEvent until DM marks resolved).
+// Keyed by event signature (cls + roll + evType) — the same shape used by
+// _burstFiredFor. Render functions check this; if set for the current event,
+// the resolution card is skipped. Reset implicitly when activeEvent changes
+// (new key = new entry, never matches old).
+var _collectedResolutions = {};
+
+function _activeEventCollectKey() {
+  if (!G || !G.activeEvent) return null;
+  var ev = G.activeEvent;
+  return (ev.cls||'') + '|' + (ev.roll||'') + '|' + (ev.evType||'');
+}
+
 // Class UI styles live in characters.js (Phase 2 consolidation).
 // Access via getCharUiStyle(cls) helper.
 
@@ -2176,20 +2191,42 @@ function showLandingResult(ev, r, zone) {
       var RIDDLE_WIN_FLAVORS = LANDING_FLAVOR.riddle || ['Knowledge has its rewards.'];
       var rFlavSeed = (ae.riddleQ||'').length % (RIDDLE_WIN_FLAVORS.length||1);
       var rFlav = RIDDLE_WIN_FLAVORS[rFlavSeed];
-      var borderCol = iWon ? '#F5D00077' : '#F5D00033';
-      var headerColor = iWon ? 'var(--yellow)' : 'var(--text-dim)';
       var RIDDLE_SOLVED_FLAVORS = LANDING_FLAVOR.riddleSolved || ['Knowledge earned is knowledge kept.'];
       var solvedFlav = RIDDLE_SOLVED_FLAVORS[(ae.riddleIdx||0) % RIDDLE_SOLVED_FLAVORS.length];
       var CORRECT_TAGS = ['answered correctly', 'first to the mark', 'sharp mind', 'got there first', 'cracked it'];
       var correctTag = CORRECT_TAGS[(ae.riddleIdx||0) % CORRECT_TAGS.length];
-      var winnerTag = '<span style="font-family:Cinzel,serif;font-size:13px;color:var(--green);letter-spacing:.03em;">' + winnerName + ' — ' + correctTag + '</span>';
-      extra = '<div style="margin-top:10px;padding:16px 14px;background:#0d0d00;border:2px solid '+borderCol+';border-radius:12px;text-align:center;">'
-        + '<div style="margin-bottom:10px;">' + winnerTag + '</div>'
-        + (iWon ? '<div style="font-family:Cinzel,serif;font-size:13px;color:var(--yellow);margin-bottom:6px;">' + solvedFlav + '</div>' : '<div style="font-size:12px;color:var(--text-dim);font-style:italic;margin-bottom:6px;">' + solvedFlav + '</div>')
-        + (iWon ? '<div style="display:flex;align-items:center;justify-content:center;gap:6px;font-family:Cinzel,serif;font-size:28px;color:var(--yellow);margin-bottom:8px;">+1<span style="width:22px;height:22px;border-radius:4px;background:var(--yellow);display:inline-block;vertical-align:middle;box-shadow:0 1px 6px #F5D00066;"></span></div>' : '')
-        + (ae.pendingClue ? (function(clue){ var parts = clue.split(/: (.+)/); var hasTitle = parts.length > 1; var title = hasTitle ? parts[0] : ''; var body = hasTitle ? parts[1] : clue; return '<div style="margin-bottom:10px;padding:10px 14px;background:#0a0a00;border:1px solid #3a3000;border-radius:8px;text-align:center;">' + (hasTitle ? '<div style="font-family:Cinzel,serif;font-size:11px;color:#C8A84B;letter-spacing:.12em;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #3a3000;">'+title+'</div>' : '') + '<div style="font-size:12px;color:#cccc99;line-height:2;">'+body.replace(/\. /g,'.<br>')+'</div>' + '</div>'; })(ae.pendingClue.clue) : '')
-        + '<div style="font-size:9px;color:var(--text-faint);font-family:Cinzel,serif;letter-spacing:.06em;">WAITING FOR DM</div>'
-        + '</div>';
+      // v0.15.38: migrate riddle resolution to buildResolutionCard.
+      // Winner gets +1 yellow brick (gated behind Collect tap if iWon).
+      // Loser sees the same card without spec (no Collect button).
+      // Clue payload (if any) lives in `extra` — narrative payload.
+      var riddleSpec = iWon ? { bricks: { yellow: 1 } } : null;
+      var riddleTheme = iWon ? '#F5D000' : '#888';
+      var riddleBorder = iWon ? '#F5D00077' : '#F5D00033';
+      var riddleTitle = iWon ? '🏆 ' + correctTag.toUpperCase() : winnerName + ' — ' + correctTag;
+      var riddleExtra = '';
+      if (ae.pendingClue) {
+        var clue = ae.pendingClue.clue;
+        var parts = clue.split(/: (.+)/);
+        var hasTitle = parts.length > 1;
+        var clueTitle = hasTitle ? parts[0] : '';
+        var clueBody = hasTitle ? parts[1] : clue;
+        riddleExtra = '<div style="margin-top:10px;margin-bottom:6px;padding:10px 14px;background:#0a0a00;border:1px solid #3a3000;border-radius:8px;text-align:center;">'
+          + (hasTitle ? '<div style="font-family:Cinzel,serif;font-size:11px;color:#C8A84B;letter-spacing:.12em;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #3a3000;">'+clueTitle+'</div>' : '')
+          + '<div style="font-size:12px;color:#cccc99;line-height:2;">'+clueBody.replace(/\. /g,'.<br>')+'</div>'
+          + '</div>';
+      }
+      extra = buildResolutionCard({
+        themeColor: riddleTheme,
+        borderColor: riddleBorder,
+        bgColor: '#0d0d00',
+        title: riddleTitle,
+        rewardIcons: iWon ? renderRewardIcons(riddleSpec) : '',
+        spec: riddleSpec,
+        flavor: solvedFlav,
+        extra: riddleExtra,
+        showerTint: riddleTheme,
+        shower: iWon,
+      });
 
     } else if (ae && ae.riddleActive) {
       // ── ACTIVE — all players see Q + answer buttons ──
@@ -2238,7 +2275,17 @@ function showLandingResult(ev, r, zone) {
         'Time moved faster than the answer.'
       ];
       var expFlav = EXPIRED_FLAVORS[(ae.riddleIdx||0) % EXPIRED_FLAVORS.length];
-      extra = '<div style="margin-top:10px;padding:16px 14px;background:#0d0d00;border:2px solid #3a3000;border-radius:12px;text-align:center;">'        + '<div style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.1em;color:#888;margin-bottom:8px;">TIME EXPIRED</div>'        + '<div style="font-size:13px;color:var(--text-dim);font-style:italic;margin-bottom:10px;">' + expFlav + '</div>'        + '<div style="font-size:9px;color:var(--text-faint);font-family:Cinzel,serif;letter-spacing:.06em;">WAITING FOR DM</div>'        + '</div>';
+      // v0.15.38: migrate to buildResolutionCard. No rewards on expiration,
+      // so WAITING footer renders (correct — no Collect available).
+      extra = buildResolutionCard({
+        themeColor: '#888',
+        borderColor: '#3a3000',
+        bgColor: '#0d0d00',
+        title: '⏱ TIME EXPIRED',
+        flavor: expFlav,
+        showerTint: '#888',
+        shower: false,
+      });
 
     } else {
       // ── INITIATE / WAITING ──
@@ -4240,6 +4287,16 @@ function finishGoldGame(amount, total, wrongTap, cheeseFound) {
     + (flav ? '<div style="font-size:13px;color:var(--text-dim);font-style:italic;line-height:1.5;margin-bottom:6px;">' + flav + '</div>' : '')
     + '<div style="font-size:10px;color:var(--text-faint);font-family:Cinzel,serif;letter-spacing:.04em;">WAITING FOR DM</div>'
     + '</div>';
+  // v0.15.38 NOTE: gold-game finish renders into #gold-game-container (a child
+  // of #landing-result) via this custom HTML rather than buildResolutionCard.
+  // Migration to buildResolutionCard would be cleaner but requires routing
+  // the container to be a sibling of the resolution card area, OR teaching
+  // buildResolutionCard to render into a passed-in container. Deferred —
+  // the gold-game card already shows rewards visually; the v0.15.36
+  // goldGained/brickGained FX still fires through the rewardPopup server
+  // event flow when DM marks resolved. The Collect-button gating is missing
+  // for gold games specifically, but the inventory-flow FX visual is intact.
+  // See parking lot at end of NOTES.md for the gold-game Collect migration.
 }
 
 
@@ -4852,6 +4909,10 @@ function _pickResolutionCollectFlavor() {
 // in player state depends on server flow (DM mark-resolved or auto-grant);
 // the FX firing here is the player's experiential acknowledgment.
 //
+// v0.15.38 — Sets _collectedResolutions[key] so the dismissal survives
+// subsequent renders. Without this, the next state broadcast re-renders
+// the active-event card region and the resolution card pops back in.
+//
 // btnId is the unique DOM id of the Collect button — used to find the
 // containing card and hide it after FX fires.
 function _collectResolutionReward(specJson, btnId) {
@@ -4895,21 +4956,36 @@ function _collectResolutionReward(specJson, btnId) {
   if (typeof client !== 'undefined' && client && typeof client.send === 'function') {
     try { client.send('collectReward', { spec: spec }); } catch(e) {}
   }
-  // Hide the card so FX has visual stage. The card's containing element
-  // is the nearest ancestor with `landing-result` as id, or the card div.
-  // Simpler: walk up from the button to the card and hide it.
+  // v0.15.38: mark the active-event resolution as collected so it survives
+  // the next render. Render functions check _collectedResolutions[key] and
+  // skip the resolution card if set.
+  var key = _activeEventCollectKey();
+  if (key) _collectedResolutions[key] = true;
+  // Hide the card immediately for the visual flourish before the next
+  // render confirms it stays hidden.
   if (btn) {
     var card = btn.closest('[data-resolution-card]');
     if (card) {
       card.style.transition = 'opacity 0.25s ease-out';
       card.style.opacity = '0';
-      setTimeout(function(){ if (card.parentNode) card.style.display = 'none'; }, 280);
+      setTimeout(function(){
+        if (card.parentNode) card.style.display = 'none';
+        // Trigger a render so the spine state-driven hide takes over.
+        try { render(); } catch(e) {}
+      }, 280);
     }
   }
 }
 
 function buildResolutionCard(opts) {
   opts = opts || {};
+  // v0.15.38: if the active-event resolution has been collected, return
+  // empty string so the card stays hidden across renders. The flag is
+  // implicitly cleared when activeEvent changes (new key = no entry).
+  var dismissKey = _activeEventCollectKey();
+  if (dismissKey && _collectedResolutions[dismissKey]) {
+    return '';
+  }
   var themeColor  = opts.themeColor  || '#9adb9a';
   var borderColor = opts.borderColor || themeColor;
   var bgColor     = opts.bgColor     || '#0a0a1a';
