@@ -75,79 +75,162 @@ var _drainedTokens = {};
 // Cleared when activeEvent changes.
 var _cardFading = {};
 
-// v0.15.39 — Display-delta override for inventory counts.
-// When the player taps Collect, the server has already credited the rewards.
-// To preserve "increment-on-arrival" feel, the dashboard reads displayed
-// values via _displayed() helpers that subtract pending deltas. As each
-// burst lands, the delta is decremented (toward zero). Once all bursts done,
-// displayed = server.
+// v0.15.46 — Resolution snapshot model. REPLACES the v0.15.39 _displayDeltas
+// system entirely.
 //
-// Shape: { gold: number, cheese: number, bricks: { color: number } }
-// Negative values mean "the displayed total is lower than the server total
-// by this amount." Always ≤ 0 in normal flow.
+// PROBLEM the old delta system had:
+// _displayDeltas was set when buildResolutionCard fired, which happens INSIDE
+// restoreActiveEvent which runs AFTER renderDashboard. So dashboard read raw
+// values + 0 delta on the same frame the deltas were arming. The browser
+// painted the un-masked count → "pre-tap flash" visible.
 //
-// Cleared when no rewards in flight.
-var _displayDeltas = { gold: 0, cheese: 0, bricks: {} };
+// THE NEW MODEL:
+// Snapshot is taken at TOP OF render(), before any sub-renders. Detects an
+// inventory change since the last render during an active uncollected event
+// (the credit moment) — snapshots the PREVIOUS render's inventory at that
+// moment. _displayed/_displayedBricks read the snapshot if present. Snapshot
+// persists until Collect drain ticks it up to live value, or activeEvent
+// changes.
+//
+// Why this fixes the flash universally:
+// Snapshot is set before renderDashboard runs. Dashboard reads snapshot.
+// No timing race, no flash. Works for ALL event types — the fix is
+// render-order agnostic because it runs at top-of-render.
+//
+// Shape: { eventKey: { gold: N, cheese: N, bricks: { color: N } } }
+// Cleared when activeEvent changes.
+var _resolutionSnapshots = {};
 
+// Previous-render inventory. Compared to current to detect "inventory changed
+// during an uncollected event" — that change is the credit moment, and we
+// snapshot _prevRenderInv as the pre-credit state.
+var _prevRenderInv = null;
+
+// _displayed/_displayedBricks: read snapshot if present for active event,
+// else live value. Snapshot wins because it's pre-credit; the credit is
+// what we want to mask until Collect drain reveals it.
 function _displayed(me, field) {
   if (!me) return 0;
-  var raw = me[field] || 0;
-  var delta = _displayDeltas[field] || 0;
-  return Math.max(0, raw + delta);  // delta is negative; clamp at 0
+  var key = _activeEventCollectKey();
+  if (key && _resolutionSnapshots[key] && _resolutionSnapshots[key][field] !== undefined) {
+    return _resolutionSnapshots[key][field];
+  }
+  return me[field] || 0;
 }
 
 function _displayedBricks(me, color) {
   if (!me || !me.bricks) return 0;
-  var raw = me.bricks[color] || 0;
-  var delta = (_displayDeltas.bricks && _displayDeltas.bricks[color]) || 0;
-  return Math.max(0, raw + delta);
+  var key = _activeEventCollectKey();
+  if (key && _resolutionSnapshots[key] && _resolutionSnapshots[key].bricks && _resolutionSnapshots[key].bricks[color] !== undefined) {
+    return _resolutionSnapshots[key].bricks[color];
+  }
+  return me.bricks[color] || 0;
 }
 
-// Returns true if there is any pending delta (any reward still mid-flight).
-function _hasPendingDeltas() {
-  if (_displayDeltas.gold || _displayDeltas.cheese) return true;
-  for (var c in _displayDeltas.bricks) {
-    if (_displayDeltas.bricks[c]) return true;
-  }
-  return false;
+// Returns true if any snapshot is currently masking real values.
+function _hasActiveSnapshot() {
+  var key = _activeEventCollectKey();
+  return !!(key && _resolutionSnapshots[key]);
 }
 
-// v0.15.40 — Resolution-arrived delta arming.
-// When buildResolutionCard renders for the first time with a non-empty spec
-// for an event key, arm display deltas with the spec's amounts (negative).
-// This makes inventory show pre-resolution counts the entire time the card
-// is up — no jump-up-then-jump-down flicker between resolution and Collect.
+// v0.15.46 — Take snapshot if conditions are right. Called at TOP of render()
+// BEFORE renderDashboard or restoreActiveEvent. Detects "inventory changed
+// during an active uncollected event" — the credit moment. Snapshots the
+// PREVIOUS inventory as the pre-credit state.
 //
-// Tracked per-event-key. _resolutionDeltasArmed[key] = true once armed.
-// Cleared when activeEvent changes (delta reset alongside).
-var _resolutionDeltasArmed = {};
-
-// v0.15.40 — Pending-resolution spec stash. When buildResolutionCard renders
-// with a spec, stash by event key. The Collect handler reads from the stash
-// to drive the drain sequence. Stash is the source of truth for "what's
-// still in the card waiting to be collected." As each reward icon drains,
-// the stash entry decrements; when fully drained, stash entry cleared.
-//
-// Shape: { eventKey: { bricks: { color: N }, cheese: N, coins: N, shield: bool } }
-var _pendingResolutionSpecs = {};
-
-// Arms display deltas for an event key based on a spec. Idempotent — safe to
-// call repeatedly during re-renders; only fires once per key.
-function _armResolutionDeltas(eventKey, spec) {
-  if (!eventKey || !spec) return;
-  if (_resolutionDeltasArmed[eventKey]) return;
-  _resolutionDeltasArmed[eventKey] = true;
-  // Stash the spec for the drain handler.
-  _pendingResolutionSpecs[eventKey] = JSON.parse(JSON.stringify(spec));
-  if (spec.bricks && typeof spec.bricks === 'object') {
-    Object.keys(spec.bricks).forEach(function(c) {
-      var n = spec.bricks[c] || 0;
-      if (n > 0) _displayDeltas.bricks[c] = (_displayDeltas.bricks[c] || 0) - n;
-    });
+// Idempotent: only snapshots once per event key. Subsequent renders no-op.
+// Snapshot is locked until drain clears it or activeEvent changes.
+function _maybeTakeSnapshot(me) {
+  var key = _activeEventCollectKey();
+  if (!key) return;
+  if (_resolutionSnapshots[key]) return;  // already snapshotted
+  if (!_prevRenderInv) return;            // no previous to compare
+  if (_collectedResolutions[key]) return; // already collected
+  // Detect inventory change since previous render
+  var changed = false;
+  if ((me.gold||0) !== (_prevRenderInv.gold||0)) changed = true;
+  if (!changed && (me.cheese||0) !== (_prevRenderInv.cheese||0)) changed = true;
+  if (!changed) {
+    var bricks = me.bricks || {};
+    var pb = _prevRenderInv.bricks || {};
+    var allColors = {};
+    for (var c1 in bricks) allColors[c1] = true;
+    for (var c2 in pb) allColors[c2] = true;
+    for (var c in allColors) {
+      if ((bricks[c]||0) !== (pb[c]||0)) { changed = true; break; }
+    }
   }
-  if (spec.cheese && spec.cheese > 0) _displayDeltas.cheese -= spec.cheese;
-  if (spec.coins  && spec.coins  > 0) _displayDeltas.gold   -= spec.coins;
-  _bqLog('arm-deltas', { key: eventKey, spec: spec, deltas: _displayDeltas });
+  if (!changed) return;
+  // Snapshot the previous inventory as pre-resolution state
+  _resolutionSnapshots[key] = {
+    gold: _prevRenderInv.gold || 0,
+    cheese: _prevRenderInv.cheese || 0,
+    bricks: Object.assign({}, _prevRenderInv.bricks || {})
+  };
+  _bqLog('snapshot-taken', { key: key, snap: _resolutionSnapshots[key] });
+}
+
+// Records the current inventory as the prev-render state for next render's
+// comparison. Called at the END of render() so next render's snapshot detection
+// works against this frame's data.
+function _recordRenderInv(me) {
+  _prevRenderInv = {
+    gold: me.gold || 0,
+    cheese: me.cheese || 0,
+    bricks: Object.assign({}, me.bricks || {})
+  };
+}
+
+// v0.15.46 — Detect inventory increases since previous render and fire
+// chipPulse on the affected dashboard chips. This unifies the
+// "inventory-grew arrival highlight" pattern beyond Collect drain to ALL
+// inventory increase moments — most importantly post-rumble combat where
+// rewards just credit without a Collect button.
+//
+// Skipped when a Collect-resolution snapshot is active: drain's manual
+// chipPulse fires on per-element arrival, and the snapshot mask means
+// `me[field]` rises but `_displayed` lags (drain ticks snapshot up). We
+// don't want auto-pulse to compete with the drain visuals.
+function _detectInvIncreasesAndPulse(me) {
+  if (!_prevRenderInv) return;
+  if (_hasActiveSnapshot()) return;
+  // Gold
+  if ((me.gold||0) > (_prevRenderInv.gold||0)) {
+    var goldDest = _findGoldChipDest();
+    if (goldDest && goldDest.rect) BoardFx.fire('chipPulse', goldDest.rect, { color: '#F5D000' });
+  }
+  // Cheese
+  if ((me.cheese||0) > (_prevRenderInv.cheese||0)) {
+    var cheeseDest = _findCheeseChipDest();
+    if (cheeseDest && cheeseDest.rect) BoardFx.fire('chipPulse', cheeseDest.rect, { color: '#FFD96A' });
+  }
+  // Bricks — pulse each color whose count rose
+  var bricks = me.bricks || {};
+  var pb = _prevRenderInv.bricks || {};
+  for (var c in bricks) {
+    if ((bricks[c]||0) > (pb[c]||0)) {
+      var dest = _findBrickChipDest(c);
+      if (dest && dest.rect) {
+        var hex = (typeof BRICK_COLORS !== 'undefined' && BRICK_COLORS[c]) || '#FFFFFF';
+        BoardFx.fire('chipPulse', dest.rect, { color: hex });
+      }
+    }
+  }
+}
+
+// v0.15.46 — Tick snapshot value upward toward live during Collect drain.
+// Replaces the v0.15.39 _displayDeltas mutations during drain arrivals.
+// Each drain arrival calls this with field+amount; snapshot moves +amount.
+// When snapshot equals live, the snapshot can be cleared (drain complete).
+function _tickSnapshot(field, color, amount) {
+  var key = _activeEventCollectKey();
+  if (!key || !_resolutionSnapshots[key]) return;
+  var snap = _resolutionSnapshots[key];
+  if (field === 'bricks' && color) {
+    snap.bricks[color] = (snap.bricks[color] || 0) + amount;
+  } else {
+    snap[field] = (snap[field] || 0) + amount;
+  }
 }
 
 // v0.15.40/.41 — Console debug logger. Always fires during S015 development
@@ -488,19 +571,24 @@ function render() {
   if (!G || !MY_CLASS) return;
   const me = G.players[MY_CLASS];
   if (!me) return;
-  // v0.15.43 — diagnostic log at top of every render. Shows the raw server
-  // state for inventory + the display-deltas at this moment + the
-  // computed displayed values. Lets us see (a) when server credits a
-  // reward (raw count jumps), (b) when arm-deltas catches up (delta
-  // becomes negative), and (c) the gap between those — that gap is
-  // when the pre-tap increment "flash" appears.
+  // v0.15.46 — TAKE SNAPSHOT before any sub-render. If inventory changed
+  // since last render during an active uncollected event, snapshot the
+  // PREVIOUS inventory as the pre-credit state. Subsequent renderDashboard /
+  // restoreActiveEvent reads will return the snapshot via _displayed/
+  // _displayedBricks. This is what eliminates the pre-tap flash universally.
+  _maybeTakeSnapshot(me);
+  // v0.15.46 — Auto chipPulse on any non-Collect inventory increase (e.g.
+  // post-rumble combat rewards, trade completions). Skipped when a Collect
+  // snapshot is active because drain handles its own per-element pulses.
+  _detectInvIncreasesAndPulse(me);
+  // v0.15.46 — diagnostic log at top of every render. Shows the raw server
+  // state, the active snapshot if any, and what _displayed will return.
   try {
     var __activeKey = (typeof _activeEventCollectKey === 'function') ? _activeEventCollectKey() : null;
-    var __armed = !!(__activeKey && _resolutionDeltasArmed[__activeKey]);
+    var __snap = __activeKey ? _resolutionSnapshots[__activeKey] : null;
     _bqLog('render-top', {
       raw: { gold: me.gold||0, cheese: me.cheese||0, bricks: Object.assign({}, me.bricks||{}) },
-      deltas: { gold: _displayDeltas.gold, cheese: _displayDeltas.cheese, bricks: Object.assign({}, _displayDeltas.bricks||{}) },
-      armed: __armed,
+      snapshot: __snap,
       activeKey: __activeKey,
       hasActiveEvent: !!G.activeEvent
     });
@@ -521,35 +609,21 @@ function render() {
   } catch (e) {}
   if (G.phase !== 'land') _landingRollSent = false;
   if (!G.activeEvent) _burstFiredFor = null;
-  // v0.15.39: when activeEvent clears (DM marked resolved, or new round began),
-  // also clear any pending display deltas. Server state is now authoritative
-  // and we don't want stale "displayed lower than server" deltas hanging around.
-  // v0.15.40: also clear armed/stash state for the same reason.
-  if (!G.activeEvent && _hasPendingDeltas()) {
-    _displayDeltas = { gold: 0, cheese: 0, bricks: {} };
-  }
+  // v0.15.46: when activeEvent clears, drop snapshots + drained-token state
+  // + card-fading state. Server state is now authoritative.
   if (!G.activeEvent) {
-    _resolutionDeltasArmed = {};
-    _pendingResolutionSpecs = {};
+    _resolutionSnapshots = {};
     _drainedTokens = {};
     _cardFading = {};
   }
   renderPhaseBanner(me);
-  // v0.15.44 reverted in v0.15.45 — restoreActiveEvent MUST run after
-  // renderDashboard. The active-event host element #landing-result is
-  // created BY renderDashboard as part of _dashTopSlot's HTML output
-  // (~line 1581). If restoreActiveEvent runs first, document.getElementById
-  // returns null and the event card silently fails to render — players
-  // can't see their landing events at all.
-  //
-  // The pre-tap increment flash that v0.15.44 attempted to fix is now a
-  // known issue. Fix candidates:
-  // - Extract spec computation from per-event-type renders into a top-of-
-  //   render arm-deltas pass (requires touching red trial, riddle, gold
-  //   game, etc. — broader refactor)
-  // - Read pre-resolution snapshot at first server arrival of an event,
-  //   use snapshot until Collect tap
-  // Neither is small enough to bundle with a critical revert. Parking-lot.
+  // restoreActiveEvent MUST run AFTER renderDashboard. The active-event host
+  // element #landing-result is created BY renderDashboard as part of
+  // _dashTopSlot's HTML output (~line 1581). If restoreActiveEvent runs
+  // first, document.getElementById returns null and the event card silently
+  // fails to render. (v0.15.44 attempted reorder, broke event rendering,
+  // reverted in v0.15.45. v0.15.46 solves the flash via snapshot model
+  // instead, leaving render order intact.)
   renderDashboard(me);
   renderParty();
   renderFusion();
@@ -572,6 +646,10 @@ function render() {
   } else if (window._redTrialTimer) {
     clearInterval(window._redTrialTimer); window._redTrialTimer = null;
   }
+  // v0.15.46 — record this frame's inventory for next render's snapshot
+  // detection. Must run AFTER all per-frame work so it captures the
+  // post-render state.
+  _recordRenderInv(me);
 }
 
 // updateGrayResult removed — gray result shown via restoreActiveEvent/showLandingResult
@@ -5140,8 +5218,10 @@ function _collectResolutionReward(specJson, btnId) {
   // next render.
   if (!card || !btn) {
     _bqLog('collect-fallback', { reason: 'no-card-or-btn' });
-    if (collectKey) _collectedResolutions[collectKey] = true;
-    _displayDeltas = { gold: 0, cheese: 0, bricks: {} };
+    if (collectKey) {
+      _collectedResolutions[collectKey] = true;
+      delete _resolutionSnapshots[collectKey];
+    }
     try { render(); } catch(e) {}
     return;
   }
@@ -5268,8 +5348,8 @@ function _collectResolutionReward(specJson, btnId) {
             });
           }; })(color),
           (function(c){ return function(){
-            if (_displayDeltas.bricks[c]) _displayDeltas.bricks[c]++;
-            _bqLog('brick-arrived', { color: c, delta: _displayDeltas.bricks });
+            _tickSnapshot('bricks', c, 1);
+            _bqLog('brick-arrived', { color: c });
             try { render(); } catch(e) {}
             // v0.15.41: arrival highlight — pulse the chip after render
             // (next tick, so the chip exists if it was newly created).
@@ -5301,8 +5381,8 @@ function _collectResolutionReward(specJson, btnId) {
         _drainIcon(ctoken,
           (function(){ return function(originRect){ BoardFx.fire('goldGained', originRect, { amount: 1, dest: _findCheeseDest(), glyph: '🧀', noFloater: true }); }; })(),
           function(){
-            if (_displayDeltas.cheese < 0) _displayDeltas.cheese++;
-            _bqLog('cheese-arrived', { delta: _displayDeltas.cheese });
+            _tickSnapshot('cheese', null, 1);
+            _bqLog('cheese-arrived', {});
             try { render(); } catch(e) {}
             // v0.15.41: arrival highlight on cheese chip
             setTimeout(function(){
@@ -5319,8 +5399,8 @@ function _collectResolutionReward(specJson, btnId) {
       _drainIcon(cheeseToken,
         function(originRect){ BoardFx.fire('goldGained', originRect, { amount: cheeseAmount, dest: _findCheeseDest(), glyph: '🧀', noFloater: true }); },
         function(){
-          _displayDeltas.cheese = Math.min(0, _displayDeltas.cheese + cheeseAmount);
-          _bqLog('cheese-stack-arrived', { delta: _displayDeltas.cheese });
+          _tickSnapshot('cheese', null, cheeseAmount);
+          _bqLog('cheese-stack-arrived', { amount: cheeseAmount });
           try { render(); } catch(e) {}
           setTimeout(function(){
             var dest = _findCheeseChipDest();
@@ -5344,8 +5424,8 @@ function _collectResolutionReward(specJson, btnId) {
         _drainIcon(coToken,
           (function(){ return function(originRect){ BoardFx.fire('goldGained', originRect, { amount: 1, noFloater: true }); }; })(),
           function(){
-            if (_displayDeltas.gold < 0) _displayDeltas.gold++;
-            _bqLog('coin-arrived', { delta: _displayDeltas.gold });
+            _tickSnapshot('gold', null, 1);
+            _bqLog('coin-arrived', {});
             try { render(); } catch(e) {}
             // v0.15.41: arrival highlight on gold chip
             setTimeout(function(){
@@ -5362,8 +5442,8 @@ function _collectResolutionReward(specJson, btnId) {
       _drainIcon('coin:0',
         function(originRect){ BoardFx.fire('goldGained', originRect, { amount: coinAmount, noFloater: true }); },
         function(){
-          _displayDeltas.gold = Math.min(0, _displayDeltas.gold + coinAmount);
-          _bqLog('coin-stack-arrived', { delta: _displayDeltas.gold });
+          _tickSnapshot('gold', null, coinAmount);
+          _bqLog('coin-stack-arrived', { amount: coinAmount });
           try { render(); } catch(e) {}
           // v0.15.41: arrival highlight on gold chip
           setTimeout(function(){
@@ -5389,26 +5469,26 @@ function _collectResolutionReward(specJson, btnId) {
     t += STEP_DURATION + INTER_STEP_MS;
   }
 
-  // After all drains complete, fade the (now-empty) card and set the
-  // dismissal flag so restoreActiveEvent wipes the panel on next render.
-  // The card has CSS transition:opacity 0.6s already, so setting opacity
-  // to 0 starts the fade. After 600ms, set the flag and trigger render.
-  // v0.15.42: also set _cardFading flag so subsequent renders preserve
-  // the fading state (otherwise card pops back to full opacity).
+  // After all drains complete, mark card as fading and trigger render.
+  // The render rebuilds the card with class `bq-card-exit` (set by
+  // buildResolutionCard via _cardFading flag) — CSS handles the
+  // 600ms scale-down + fade-out animation. After 600ms, _collectedResolutions
+  // flag wipes the panel.
+  // v0.15.46: pure CSS-class-based fade. No inline opacity manipulation.
   var totalDrainMs = t;
   var CARD_FADE_MS = 600;
   setTimeout(function(){
     if (collectKey) _cardFading[collectKey] = true;
-    if (card && card.parentNode) {
-      card.style.opacity = '0';
-      _bqLog('card-fade-start', { totalDrainMs: totalDrainMs, key: collectKey });
-    }
-    // Trigger a render so any state-driven re-render (e.g., the next
-    // server tick) sees the fading flag and renders the card at opacity:0.
+    _bqLog('card-fade-start', { totalDrainMs: totalDrainMs, key: collectKey });
+    // Trigger render so card re-renders with `bq-card-exit` class and CSS
+    // animation kicks in.
     try { render(); } catch(e) {}
   }, totalDrainMs);
   setTimeout(function(){
-    if (collectKey) _collectedResolutions[collectKey] = true;
+    if (collectKey) {
+      _collectedResolutions[collectKey] = true;
+      delete _resolutionSnapshots[collectKey];
+    }
     _bqLog('card-collected', { key: collectKey });
     try { render(); } catch(e) {}
   }, totalDrainMs + CARD_FADE_MS);
@@ -5553,21 +5633,17 @@ function buildResolutionCard(opts) {
   // spec. Inventory shows pre-resolution counts the entire time the card is
   // up — no jump-up-then-jump-down flicker. Idempotent across re-renders.
   var armKey = _activeEventCollectKey();
-  // v0.15.43: log every time buildResolutionCard runs with a spec so we
-  // can see when it fires relative to render-top's state-arrived log.
-  // The gap between server state arrival (render-top with raw counts up)
-  // and arm-deltas firing (buildResolutionCard with spec) is the pre-tap
-  // increment flash window.
+  // v0.15.46: snapshot-based model means buildResolutionCard no longer
+  // arms display deltas. The snapshot is taken at top of render() before
+  // any sub-render runs. buildResolutionCard just renders the card; the
+  // mask is automatic via _displayed/_displayedBricks reading the snapshot.
   if (hasReward) {
     _bqLog('build-card', {
       key: armKey,
-      armed: !!(armKey && _resolutionDeltasArmed[armKey]),
       hasReward: hasReward,
-      spec: spec
+      spec: spec,
+      hasSnapshot: !!(armKey && _resolutionSnapshots[armKey])
     });
-  }
-  if (hasReward && armKey) {
-    _armResolutionDeltas(armKey, spec);
   }
 
   // Tag the card with the event key so the drain handler can find the
@@ -5575,13 +5651,16 @@ function buildResolutionCard(opts) {
   // shouldn't be possible, but defensive).
   var keyAttr = armKey ? ' data-event-key="' + armKey.replace(/"/g, '&quot;') + '"' : '';
 
-  // v0.15.42: if the card is in its fade-out window (after drain complete,
-  // before _collectedResolutions kicks in), render with opacity:0 baked in.
-  // Without this, render() during the fade window restores the card to full
-  // opacity and the user sees the card "drop abruptly" when the wipe fires.
-  var fadingStyle = (armKey && _cardFading[armKey]) ? 'opacity:0;' : '';
+  // v0.15.46: card animations via CSS classes (defined in boardFx.css).
+  // Entrance: `bq-card-enter` runs on first render — 250ms scale 0.85→1.0
+  // + opacity 0→1. Dismissal: when _cardFading flag set, swap to
+  // `bq-card-exit` — 600ms scale 1.0→0.85 + opacity 1→0. State-driven
+  // class swap means renders during fade preserve the exit animation.
+  var cardClass = 'bq-resolution-card';
+  if (armKey && _cardFading[armKey]) cardClass += ' bq-card-exit';
+  else cardClass += ' bq-card-enter';
 
-  var html = '<div data-resolution-card' + keyAttr + ' style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;transition:opacity 0.6s ease-out;'+fadingStyle+'">';
+  var html = '<div data-resolution-card class="'+cardClass+'"' + keyAttr + ' style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;">';
   if (shower) {
     html += '<canvas id="result-shower" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;opacity:0.2;"></canvas>';
   }

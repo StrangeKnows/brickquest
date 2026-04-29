@@ -274,3 +274,29 @@
   animation-timing-function: ease-out;
   animation-fill-mode: forwards;
 }
+
+
+/* ── Resolution card animations (v0.15.46) ──────────────────────
+ * Entrance: scale from 0.85 + fade in over 250ms when card first appears.
+ * Dismissal: scale to 0.85 + fade out over 600ms when bq-card-exit applied.
+ * Both have transform-origin:center so card scales from its center,
+ * giving the "shrink and pop" feel Ross asked for.
+ */
+@keyframes bq-card-enter {
+  0%   { opacity: 0; transform: scale(0.85); }
+  100% { opacity: 1; transform: scale(1.0); }
+}
+@keyframes bq-card-exit {
+  0%   { opacity: 1; transform: scale(1.0); }
+  100% { opacity: 0; transform: scale(0.85); }
+}
+.bq-resolution-card {
+  transform-origin: center center;
+  will-change: transform, opacity;
+}
+.bq-card-enter {
+  animation: bq-card-enter 250ms ease-out forwards;
+}
+.bq-card-exit {
+  animation: bq-card-exit 600ms ease-in forwards;
+}
