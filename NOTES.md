@@ -8695,6 +8695,126 @@ UNTOUCHED: boardFx.css, players.html, test_players.html.
 
 ---
 
+### v0.15.44 — Pre-tap flash fix: restoreActiveEvent before renderDashboard
+
+**v0.15.43 diagnostic logs nailed the timing.** Pattern A confirmed
+from the playtest console capture:
+
+```
+[bq:render-top@29189]    armed: false   ← server credited reward
+[bq:dashboard-rendering@29189] displayed:{...}  ← FLASH PAINTED HERE
+[bq:build-card@29192]    hasReward: true, armed: false  ← about to arm
+[bq:arm-deltas@29193]    deltas now set  ← too late, flash already shown
+```
+
+4ms gap of "flash" between dashboard rendering raw server count
+and arm-deltas firing.
+
+**Root cause:** render order. The function ran:
+1. renderDashboard(me)   ← reads _displayed values (deltas not armed)
+2. ...
+3. restoreActiveEvent()  ← calls buildResolutionCard → arm-deltas
+
+Dashboard rendered with raw server count (incremented from reward),
+then the deltas armed for the NEXT render. Browser painted
+between the two — that paint is the visible flash.
+
+---
+
+**Fix:** swap the order. `restoreActiveEvent()` now runs BEFORE
+`renderDashboard(me)`. arm-deltas fires during buildResolutionCard
+which runs as part of restoreActiveEvent — by the time dashboard
+reads `_displayed` / `_displayedBricks`, the deltas are armed and
+the displayed values are correctly masked.
+
+Single-line reorder. No new state, no new helper, no new logic.
+Just sequence change.
+
+**Safety check:** restoreActiveEvent renders into `#landing-result`,
+renderDashboard renders into `#pane-dashboard`. Independent DOM
+panes — no cross-dependencies. renderDashboard reads from G state
+only (via `_dashTopSlot(me)`), not from restoreActiveEvent's output.
+Safe swap.
+
+---
+
+**Why this wasn't the original design:** the order
+(dashboard-then-event-pane) made sense before display deltas
+existed — dashboard was just rendering server state directly. The
+deltas (introduced in v0.15.39) broke the assumption: dashboard now
+*depends on* state (deltas armed) that was being set later in the
+same render cycle.
+
+This is a classic "added new state without auditing the read/write
+order" issue. The lesson: when introducing display-side overrides
+that mirror server state, the WHEN matters — overrides must be set
+before any read site runs in the same frame.
+
+---
+
+**Files changed in v0.15.44:**
+
+- `players-core.js`: render() reorders restoreActiveEvent before
+  renderDashboard
+- `NOTES.md` — this entry
+
+UNTOUCHED: boardFx.js, boardFx.css, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. Trigger reward event.
+3. **Watch the inventory:** when the resolution card appears, the
+   counts should NOT jump. Inventory shows pre-resolution counts
+   throughout the entire time the card is up.
+4. Console logs should now show:
+
+```
+[bq:render-top]    armed: false (first render, before arm)
+[bq:build-card]    hasReward: true, armed: false  ← arm-deltas runs INSIDE buildResolutionCard
+[bq:arm-deltas]    deltas now set
+[bq:dashboard-rendering] displayed: pre-resolution counts ← masks flash
+```
+
+The order should now be: render-top → build-card → arm-deltas →
+dashboard-rendering. The dashboard render now sees armed deltas.
+No more pre-tap increment flash.
+
+5. Tap Collect — drain still works as in v0.15.43 (icon fade,
+   FX travel, increment-on-arrival, chipPulse, card slow-fade).
+
+---
+
+**Standards audit (rule #17 — push #17 in S015 continuation):**
+
+This push followed the diagnostic-first protocol cleanly. v0.15.43
+shipped the trace, captured the pattern from playtest, v0.15.44
+fixes the exact issue surfaced. No speculation, no over-fix —
+single-line reorder grounded in the log evidence.
+
+**Sequence retrospective for the Collect arc (v0.15.37 → v0.15.44):**
+
+- v0.15.37 — Collect button + flavor pool
+- v0.15.38 — riddle migration + dismissal survival
+- v0.15.39 — sequenced collect + display deltas (introduces the
+  state that v0.15.44 finishes integrating)
+- v0.15.40 — reservoir model: arm at resolution-received
+- v0.15.41 — flyingBrick + chipPulse + always-on debug
+- v0.15.42 — drain visuals survive renders + pre-drain highlight
+- v0.15.43 — stale-card-ref fix + suppress floater + diagnostic logs
+- v0.15.44 — pre-tap flash fix (this push)
+
+Eight pushes for the full Collect drain story. Each push surfaced
+something the previous didn't anticipate — the visual model needed
+several iterations of playtest before it locked in. v0.15.44 should
+close out the Collect drain implementation. Future polish (gold-game
+finish migration, server-side reward gating, display-helper audit)
+remain as parking-lot items.
+
+---
+
 
 ### Session 015 Process Retrospective
 

@@ -535,10 +535,22 @@ function render() {
     _cardFading = {};
   }
   renderPhaseBanner(me);
+  // v0.15.44: restoreActiveEvent() runs BEFORE renderDashboard(me). The
+  // resolution card's buildResolutionCard call arms display deltas
+  // (_armResolutionDeltas) — those deltas need to be set BEFORE
+  // renderDashboard reads inventory counts via _displayed/_displayedBricks.
+  // Old order (dashboard → restoreActiveEvent) caused a one-frame "flash"
+  // of the incremented count before the deltas armed: dashboard rendered
+  // raw server count, then the resolution card armed -1 delta, but the
+  // flash had already painted. Swapping order so deltas arm first
+  // eliminates the flash entirely.
+  //
+  // Safety: restoreActiveEvent renders into #landing-result; renderDashboard
+  // renders into #pane-dashboard — independent DOM panes, no cross-deps.
+  restoreActiveEvent();
   renderDashboard(me);
   renderParty();
   renderFusion();
-  restoreActiveEvent();
   // Start riddle timer tick if active, stop if not
   if (G.activeEvent && G.activeEvent.riddleActive && !_riddleTimerInterval) {
     _riddleTimerInterval = setInterval(_tickRiddleTimer, 500);
