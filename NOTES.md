@@ -6951,6 +6951,231 @@ normalization). v0.15.34 extraction is now bounded to:
 
 ---
 
+### v0.15.34 — Spine extract step 3: players-core.js shipped
+
+**The spine refactor lands.** Both HTMLs collapse to thin shells over
+a shared `players-core.js`. Permanent end of players/test_players
+duplication.
+
+---
+
+**Numbers:**
+
+| File | v0.15.33 | v0.15.34 | Δ |
+|---|---|---|---|
+| `players.html`     | 333k chars / 6731 lines | 24k chars / 582 lines | **−93%** |
+| `test_players.html`| 327k chars / 7358 lines | 24k chars / 530 lines | **−93%** |
+| `players-core.js`  | (didn't exist) | 305k chars / 6164 lines | NEW |
+| **Total system**   | **14089 lines** | **7276 lines** | **−48%** |
+
+The spine is now **the** source of truth. Edits to game logic touch
+ONE file. Shell-specific concerns (production class-selector,
+multi-class harness) stay in their respective shells.
+
+---
+
+**Architecture:**
+
+```
+characters.js     ← schema (data)
+game.js           ← shared constants
+rumble.js         ← rumble engine
+boardFx.js        ← board FX module
+players-core.js   ← shared player-side spine (NEW)
+   ↑ loaded by both ↓
+players.html shell           test_players.html shell
+  - production buildSelector   - harness state (_testClients,
+    IIFE                          _testConnected, TAB_DEFS)
+  - production connectWS       - testSwitch (multi-class switcher)
+    (single MY_CLASS client)   - harness connectWS (loops PLAYER_META)
+  - production setConn(on)     - setConn() {} (no-op override)
+                               - window.load → testSwitch + buildTabs
+                                 + connectWS bootstrap
+```
+
+Load order in shells: `characters.js → game.js → rumble.js →
+boardFx.js → players-core.js → (inline shell bootstrap)`.
+
+---
+
+**What's in players-core.js (the spine):**
+
+- 184 shared functions (was 187 shared at function-name level; minus
+  the 3 shell-extracted: production `connectWS`, production
+  `setConn`, `buildSelector`)
+- Top-level shared state: `MY_CLASS`, `client`, `G`,
+  `pendingTradeOffer`, `_pendingTradeSent`, `_marketOpen`,
+  `_pendingResult`, `_landingRollSent`, `_burstFiredFor`,
+  `_statusOpen`, `lastRoll`, `_holdState`, `_holdTicker`,
+  `_prevHpByCls`, etc.
+- Top-level constants: `TAB_DEFS` (and others)
+- Spine-level IIFEs (initFontSize, mobile-header-scroll, fc-pill
+  triple-tap font reset)
+
+**Naming convention going forward:** anything used across both shells
+goes in `players-core.js`. Anything unique to production (class-select
+flow, single-client connection) stays in `players.html` shell.
+Anything unique to the test harness (multi-client orchestration, tab
+switcher, debug bootstrap) stays in `test_players.html` shell.
+
+---
+
+**Two latent bugs surfaced during extract — both fixed:**
+
+1. **`let`/`var` declaration conflict between spine and harness.**
+   players.html canonical used `let MY_CLASS = null;`. The harness
+   section in test_players.html uses `var MY_CLASS = 'breaker';` to
+   bootstrap the test default class. When concatenated, this becomes
+   `Identifier 'MY_CLASS' has already been declared`. SyntaxError.
+   Same issue with `client`, `G`, `pendingTradeOffer`, `lastRoll`,
+   and `TAB_DEFS` (`const`).
+
+   **Fix:** these vars in the spine moved from `let`/`const` to `var`.
+   `var` redeclaration is permitted in JavaScript; `let`/`const` is
+   not. Vars that may be re-bound by shell bootstrap need `var`.
+
+   This was hidden behind the duplication for a long time — both
+   files independently chose `let` and `var` and never collided. The
+   spine extract forces both shells to share scope, surfacing the
+   conflict.
+
+2. **Duplicate `buildTabs` and `switchTab` in test_players.html
+   harness section** (~lines 7141-7170 in v0.15.33). These were
+   `function`-declaration overrides of the spine versions; JavaScript
+   declares all `function` decls at scope top, so the LAST one wins
+   at runtime. Test_players actually used the harness-section
+   versions, not the spine versions, despite the spine versions being
+   identical to players canonical.
+
+   **Fix:** stripped the duplicates from the harness section. With
+   both shells now loading the spine version of `buildTabs` and
+   `switchTab` from `players-core.js`, behavior unifies. Test harness
+   continues to keep `setConn() {}` no-op override (legitimate
+   harness divergence — multi-class harness has its own per-class
+   connection display via `dot-${cls}`, doesn't use the single
+   conn-pill).
+
+---
+
+**Validation:**
+
+- `players-core.js` parses standalone (Node.js `new Function`).
+- `players.html` shell + spine combined parses cleanly.
+- `test_players.html` shell + spine combined parses cleanly.
+- Spot check: 14 commonly-referenced spine functions all resolve
+  in both shells (`render`, `buildTabs`, `switchTab`,
+  `showDashResult`, `restoreActiveEvent`, `runAction`, `selectClass`,
+  `showRewardPopup`, `showLandingResult`, `syncRumbleFromState`,
+  `_dashHeader`, `_holdEnd`, `animBurst`, plus `BSQ` as a
+  `var`-assigned function expression).
+
+---
+
+**Files changed in v0.15.34:**
+
+- **NEW:** `players-core.js` (305k chars, 6164 lines)
+- `players.html` → trimmed to 582 lines (production shell + HTML markup)
+- `test_players.html` → trimmed to 530 lines (harness shell + HTML markup)
+- `NOTES.md` → this entry
+
+UNTOUCHED:
+- `boardFx.js`, `boardFx.css`, `rumble.js`, `characters.js`,
+  `game.js`, `server.js`, `rumble.css`, `dm_screen.html`,
+  `rumble_test.html`, `arena_test.html`, `serve.sh`, `save.sh`
+
+---
+
+**Test focus:**
+
+This is the riskiest patch in the spine arc. Despite passing parse
+validation, runtime behavior could surprise in spots the catalog
+didn't cover. Test these in order, hard-refreshing between each:
+
+1. **Spin up `serve.sh`, open `players.html`** in mobile browser.
+   - Class select screen renders (the `buildSelector` IIFE in shell)
+   - Pick a class → game screen appears, connects to server
+   - Connection pill turns "online"
+   - Set player name, verify it propagates
+
+2. **Tabs work** — click between Dashboard / Bricks / Party / Fusion.
+   - Active tab highlights
+   - Pane content renders for each tab
+
+3. **Brick interactions** — drop a brick on the board, fire actions
+   from the brick chips, verify pip animations.
+
+4. **Heal feedback** — eat cheese, verify floater + ring + sparkles
+   (the boardFx 'heal' preset still fires; nothing about that path
+   changed in this patch).
+
+5. **Gray-crit firework** — drop gray brick, wait for crit RNG,
+   verify the firework FX (boardFx.fire 'shieldCrit'). Same path,
+   nothing changed.
+
+6. **Open `test_players.html` in another browser tab.**
+   - Class switcher at top renders (5 class buttons)
+   - Click a class → testSwitch fires, MY_CLASS updates, connection
+     pill switches to that class's GameClient
+   - Switch between classes — each maintains its own state
+   - Per-class connection dots update independently
+
+7. **Both HTMLs together** — connect both at once (production +
+   test harness on different machines or browser windows). Trade
+   between them. Trade modal works on both.
+
+8. **Rumble entry** — trigger a monster event on the board, enter
+   rumble. Rumble UI loads, brick bar shows, syncRumbleFromState
+   fires correctly. Exit rumble, back to board.
+
+If anything regresses:
+- Console errors on page load → likely a missing function (some
+  edge-case decl pattern the extract didn't catch). Roll back from
+  `.bak` files (still present in /home/claude/bq) if needed, or
+  identify the missing piece and patch.
+- Player loads but actions don't work → likely the inline shell
+  isn't seeing spine vars/functions. Check load order in shell HTML.
+- Test harness loads but per-class state is scrambled → the harness
+  connectWS logic. Compare to v0.15.33 backup.
+
+---
+
+**Standards audit (rule #17 — push #7 in S015 continuation):**
+
+Restating rule #14 (UNITY/ELEGANCE/EFFICIENCY). This push is the
+strongest UNITY win of the session by far:
+
+- **UNITY:** there is now ONE definition of every shared function.
+  Edits to spine logic happen in one file. The two-file mirroring
+  problem is permanently solved.
+- **ELEGANCE:** the shell pattern is the simplest expression of
+  "shared core + per-shell bootstrap." Adding a future shell
+  (e.g., `dm_companion.html`) is straightforward: load the spine,
+  add shell-specific bootstrap.
+- **EFFICIENCY:** −48% lines across the system. Future edits are
+  half-cost. The investment compounds across every subsequent patch.
+
+---
+
+**What this enables:**
+
+The remaining session 015 work is now MUCH cheaper to ship:
+
+- **Class identity audit + per-class chunk work** — every class
+  that needs new behavior involves changes in characters.js + spine
+  + (rarely) shell. Shell changes essentially never required.
+- **boardModal.js / boardSocial.js / boardEvents.js extracts** —
+  these now extract from `players-core.js` (single source) instead
+  of from two duplicated files. Each future module extract is half
+  the work it would have been.
+- **Rule #3 (paired files)** is technically obsolete for the
+  players/test_players pair because they're now structurally
+  different (shells, not duplicates). When delivering changes that
+  affect spine logic, deliver `players-core.js` only. When changes
+  affect a shell specifically, deliver that shell. test_players is
+  no longer a "mirror" — it's a harness shell.
+
+---
+
 
 ### Session 015 Process Retrospective
 
