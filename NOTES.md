@@ -7176,6 +7176,67 @@ The remaining session 015 work is now MUCH cheaper to ship:
 
 ---
 
+### v0.15.35 — fc-pill (zoom slider) viewport-fixed positioning fix
+
+**Pre-existing bug surfaced by post-extract playtest.** The font-size
+zoom pill (`#fc-pill`) in `players.html` was positioned as `static`
+relative to the page rather than fixed to the viewport — scrolling
+the dashboard moved the pill with the content. Test_players.html
+worked correctly.
+
+**Root cause:** `#fc-pill` had `position: fixed` in CSS, but the div
+was placed *inside* `#zoom-root`, the wrapper that gets `transform`
+applied to it by `applyFontSize()`. CSS gotcha: any ancestor with a
+`transform` (or `transform-origin`, sometimes) creates a new
+containing block, which breaks `position: fixed` for descendants —
+they become "fixed relative to the transformed ancestor" rather than
+the viewport.
+
+In test_players.html, fc-pill was already correctly placed *outside*
+`#zoom-root` (because the harness was built later with the zoom
+wrapper in mind from the start). In players.html, the wrapper was
+added after fc-pill existed, and the fc-pill was never relocated.
+
+**Not a v0.15.34 regression** — the bug existed in v0.15.33 and
+earlier. The spine extract didn't touch HTML markup. Surfaced now
+because the post-spine playtest covered the production zoom flow at
+length for the first time in a while.
+
+**Fix:** moved the `<style>` block + `<div id="fc-pill">` markup
+from inside `#zoom-root` (around line 425-443) to immediately after
+`<body>` (lines 391-413), before the `#zoom-root` opener. fc-pill is
+now a direct body child, viewport-anchored correctly, identical
+structure to test_players.html.
+
+Added an HTML comment at the new location explaining the constraint
+so this doesn't get reverted by accident later:
+
+```html
+<!-- Font-control pill (zoom slider). MUST live OUTSIDE #zoom-root —
+     the wrapper has transform-origin set, which creates a new
+     containing block and breaks position:fixed for descendants.
+     fc-pill needs to stay viewport-anchored regardless of zoom. -->
+```
+
+**Files changed:**
+- `players.html` — fc-pill markup relocated (no JS change)
+- `NOTES.md` — this entry
+
+UNTOUCHED: `players-core.js`, `test_players.html` (already correct),
+all others.
+
+**Test focus:**
+1. Open players.html, pick a class, get into the dashboard.
+2. Scroll the tab content vertically — fc-pill should stay fixed
+   in the bottom-right, not move with scroll.
+3. Triple-tap fc-pill → font resets to default.
+4. Hold fc-pill → slider opens, drag to zoom; pill stays fixed
+   while content scales. (When zoomed in, scrolling the zoomed
+   content shouldn't drag fc-pill with it.)
+5. test_players.html behavior unchanged.
+
+---
+
 
 ### Session 015 Process Retrospective
 

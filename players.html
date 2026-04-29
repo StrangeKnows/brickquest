@@ -389,6 +389,30 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 </head>
 <body>
 
+<!-- Font-control pill (zoom slider). MUST live OUTSIDE #zoom-root —
+     the wrapper has transform-origin set, which creates a new
+     containing block and breaks position:fixed for descendants.
+     fc-pill needs to stay viewport-anchored regardless of zoom. -->
+<style>
+#fc-pill{position:fixed;bottom:14px;right:14px;z-index:9999;display:flex;align-items:center;background:transparent;border:none;border-radius:22px;height:44px;padding:0 6px;overflow:hidden;width:44px;transition:width 0.3s ease,background 0.3s,border 0.25s;}
+#fc-pill.open{width:200px;background:rgba(0,0,0,0.72);border:1.5px solid rgba(255,255,255,0.15);}
+#fc-pill.pressing{background:rgba(0,0,0,0.5);border:1.5px solid rgba(77,184,255,0.6);}#fc-pill.pressing #fc-mag,#fc-pill.open #fc-mag{background:rgba(255,255,255,0.08);}
+#fc-mag{width:32px;height:32px;border-radius:50%;background:transparent;display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;position:relative;user-select:none;-webkit-user-select:none;transition:background 0.2s;}
+#fc-ring{position:absolute;inset:-5px;border-radius:50%;border:2px solid transparent;pointer-events:none;}
+#fc-ring.active{border-color:rgba(77,184,255,0.6);animation:fcring 1.5s linear forwards;}
+@keyframes fcring{0%{transform:scale(0.6);opacity:0;}50%{transform:scale(1);opacity:1;border-color:rgba(77,184,255,0.8);}100%{transform:scale(1.15);opacity:0;}}
+#fc-controls{display:flex;align-items:center;gap:6px;margin-left:8px;opacity:0;transition:opacity 0.2s;white-space:nowrap;flex-shrink:0;}
+#fc-pill.open #fc-controls{opacity:1;}
+</style>
+<div id="fc-pill">
+  <div id="fc-mag"><div id="fc-ring"></div><svg width="18" height="18" viewBox="0 0 20 20" fill="none" style="display:block;flex-shrink:0;"><circle cx="8.5" cy="8.5" r="5" stroke="rgba(255,255,255,0.75)" stroke-width="1.8"/><line x1="12.5" y1="12.5" x2="17" y2="17" stroke="rgba(255,255,255,0.75)" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+  <div id="fc-controls">
+    <span style="font-size:10px;color:rgba(255,255,255,0.4);font-family:sans-serif;font-weight:400;">A</span>
+    <input type="range" id="font-size-slider" min="16" max="22" value="16" step="1" style="width:72px;cursor:pointer;accent-color:#4db8ff;" oninput="applyFontSize(this.value)">
+    <span style="font-size:14px;color:rgba(255,255,255,0.5);font-family:sans-serif;font-weight:400;">A</span>
+  </div>
+</div>
+
 <!-- Zoom root — wraps class-select + game-screen so applyFontSize() can scale
      the content via CSS transform. Without this wrapper the zoom slider
      silently no-ops on the player screen. -->
@@ -422,25 +446,6 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 </div>
 
 <!-- GAME SCREEN -->
-<style>
-#fc-pill{position:fixed;bottom:14px;right:14px;z-index:9999;display:flex;align-items:center;background:transparent;border:none;border-radius:22px;height:44px;padding:0 6px;overflow:hidden;width:44px;transition:width 0.3s ease,background 0.3s,border 0.25s;}
-#fc-pill.open{width:200px;background:rgba(0,0,0,0.72);border:1.5px solid rgba(255,255,255,0.15);}
-#fc-pill.pressing{background:rgba(0,0,0,0.5);border:1.5px solid rgba(77,184,255,0.6);}#fc-pill.pressing #fc-mag,#fc-pill.open #fc-mag{background:rgba(255,255,255,0.08);}
-#fc-mag{width:32px;height:32px;border-radius:50%;background:transparent;display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;position:relative;user-select:none;-webkit-user-select:none;transition:background 0.2s;}
-#fc-ring{position:absolute;inset:-5px;border-radius:50%;border:2px solid transparent;pointer-events:none;}
-#fc-ring.active{border-color:rgba(77,184,255,0.6);animation:fcring 1.5s linear forwards;}
-@keyframes fcring{0%{transform:scale(0.6);opacity:0;}50%{transform:scale(1);opacity:1;border-color:rgba(77,184,255,0.8);}100%{transform:scale(1.15);opacity:0;}}
-#fc-controls{display:flex;align-items:center;gap:6px;margin-left:8px;opacity:0;transition:opacity 0.2s;white-space:nowrap;flex-shrink:0;}
-#fc-pill.open #fc-controls{opacity:1;}
-</style>
-<div id="fc-pill">
-  <div id="fc-mag"><div id="fc-ring"></div><svg width="18" height="18" viewBox="0 0 20 20" fill="none" style="display:block;flex-shrink:0;"><circle cx="8.5" cy="8.5" r="5" stroke="rgba(255,255,255,0.75)" stroke-width="1.8"/><line x1="12.5" y1="12.5" x2="17" y2="17" stroke="rgba(255,255,255,0.75)" stroke-width="1.8" stroke-linecap="round"/></svg></div>
-  <div id="fc-controls">
-    <span style="font-size:10px;color:rgba(255,255,255,0.4);font-family:sans-serif;font-weight:400;">A</span>
-    <input type="range" id="font-size-slider" min="16" max="22" value="16" step="1" style="width:72px;cursor:pointer;accent-color:#4db8ff;" oninput="applyFontSize(this.value)">
-    <span style="font-size:14px;color:rgba(255,255,255,0.5);font-family:sans-serif;font-weight:400;">A</span>
-  </div>
-</div>
 <div id="game-screen">
   <div class="topbar">
     <span class="topbar-icon" id="t-icon">⚔️</span>
