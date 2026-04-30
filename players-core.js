@@ -127,6 +127,37 @@ var _justExitedRumble = false;
 // AFTER the first render).
 var _connState = false;
 
+// v0.16.16 — Dynamic zone state machine for hold-invoked surfaces.
+//
+// _zoneState: which surface the dynamic zone is currently showing
+//   'idle'   — flavor text (default ambient state)
+//   'market' — coin-hold surface (renderMarketPanel content)
+//   'cheese' — cheese-hold surface (Eat Cheese button)
+//   'party'  — class-icon-hold surface (renderParty content)
+//
+// Active landing events ALWAYS override hold-invoked surfaces (priority
+// rule from v0.16.8). When event is active and player tries to hold a
+// chip, the gesture is ignored and a quick toast surfaces brief feedback.
+//
+// State transitions:
+//   - hold a chip 400ms → set _zoneState to that surface, render
+//   - tap outside surface → reset to 'idle'
+//   - tap same chip again → toggle off (back to 'idle')
+//   - hold different chip → swap surface
+//   - new event arrives → forced back to 'idle' (event takes the slot)
+var _zoneState = 'idle';
+
+// _holdRes: state for an in-progress resource hold gesture.
+//   active   — true while pointer is down on a hold-target chip
+//   trigger  — which surface this hold is invoking ('market'/'cheese'/'party')
+//   chipEl   — the DOM element being held (for visual feedback)
+//   startTs  — when pointer-down fired
+//   timeoutId — setTimeout for the 400ms threshold
+//   committed — true once threshold hit and surface opened
+var _holdRes = null;
+var RES_HOLD_THRESHOLD_MS = 400;
+var RES_HOLD_TAP_INFO_MS = 1500;
+
 // v0.15.46 — Resolution snapshot model. REPLACES the v0.15.39 _displayDeltas
 // system entirely.
 //
@@ -702,6 +733,21 @@ function render() {
   // reverted in v0.15.45. v0.15.46 solves the flash via snapshot model
   // instead, leaving render order intact.)
   renderDashboard(me);
+  // v0.16.16: when a hold-invoked surface is open in the dynamic zone,
+  // attach a document-level click listener that dismisses on outside-tap.
+  // When state is idle, ensure no stale listener is attached.
+  try {
+    if (_zoneState !== 'idle') {
+      document.removeEventListener('click', _zoneOutsideTapHandler);
+      // Defer attach so the click that opened the surface doesn't
+      // immediately dismiss it.
+      setTimeout(function() {
+        document.addEventListener('click', _zoneOutsideTapHandler);
+      }, 50);
+    } else {
+      document.removeEventListener('click', _zoneOutsideTapHandler);
+    }
+  } catch(e) {}
   // v0.16.4: chipPulse fires AFTER renderDashboard so chip elements exist at
   // fresh positions. Previous order (pulse before dashboard render) meant
   // _findGoldChipDest etc. queried stale-or-detached chip elements with
@@ -911,18 +957,21 @@ function _dashHeader(me) {
   return `<div class="head-card">
     <div class="head-id">
       <div style="display:flex;align-items:center;gap:10px;">
-        <div class="head-icon">${classIcon}</div>
+        <div class="head-icon" data-zone-trigger="party" title="Hold to view party"
+             onpointerdown="_holdResStart(event, 'party', this)">${classIcon}</div>
         <div style="flex:1;">
           <div class="head-name">${className}<span class="conn-dot ${connClass}" id="conn-dot" title="Connection status"></span></div>
           <div class="head-zone">${space?.label || 'Start'}</div>
         </div>
       </div>
       <div class="head-resources">
-        <div class="res-chip" data-res="gold" data-zone-trigger="market" title="Hold to open market">
+        <div class="res-chip" data-res="gold" data-zone-trigger="market" title="Hold to open market"
+             onpointerdown="_holdResStart(event, 'market', this)">
           <span class="res-chip-glyph">🪙</span>
           <span class="res-chip-num stat-num">${goldVal}</span>
         </div>
-        <div class="res-chip" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options">
+        <div class="res-chip" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options"
+             onpointerdown="_holdResStart(event, 'cheese', this)">
           <span class="res-chip-glyph">🧀</span>
           <span class="res-chip-num stat-num">${cheeseVal}</span>
         </div>
@@ -1309,6 +1358,172 @@ function _fireTierAction(color, tier, target) {
   } else {
     toast(color + ' tier ' + tier + ' — abilities land in 0.16', 'info');
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// RESOURCE HOLD GESTURES (v0.16.16)
+// ═══════════════════════════════════════════════════════════════════
+// Hold-to-invoke gestures for the dynamic zone surfaces.
+// Coin chip → market | Cheese chip → cheese options | Class icon → party
+//
+// Distinct from the brick `_holdStart` system — bricks have their own
+// tap/hold/tier semantics and stay pointer-handled separately. Resource
+// holds are simpler: hold for 400ms to open a surface, tap for quick
+// info popup that teaches the gesture.
+//
+// Wired via data-zone-trigger attributes on chips (set by _dashHeader
+// for coin/cheese, _dashHeader's class-icon wrapper for party). Pointer
+// handlers attached via inline onpointerdown.
+
+function _holdResStart(e, trigger, chipEl) {
+  if (e && e.preventDefault) e.preventDefault();
+  // Cancel any prior hold gesture in flight
+  _holdResCancel();
+  // Block if active landing event — event always wins (UNITY priority).
+  if (_isEventActive()) {
+    toast('Resolve the current event first', 'info');
+    return;
+  }
+  // Block if rumble pending/active — same priority logic
+  if (typeof _rumbleActive !== 'undefined' && _rumbleActive) {
+    toast('Rumble in progress', 'info');
+    return;
+  }
+  _holdRes = {
+    active: true,
+    trigger: trigger,
+    chipEl: chipEl,
+    startTs: Date.now(),
+    timeoutId: null,
+    committed: false
+  };
+  // Visual feedback on chip — subtle border tint, slight scale.
+  if (chipEl && chipEl.classList) chipEl.classList.add('hold-active');
+  // Schedule the commit at threshold
+  _holdRes.timeoutId = setTimeout(function() {
+    if (_holdRes && _holdRes.active && !_holdRes.committed) {
+      _holdResCommit();
+    }
+  }, RES_HOLD_THRESHOLD_MS);
+  // Attach pointer-up listener on document to catch release anywhere
+  document.addEventListener('pointerup', _holdResEnd, { once: true });
+  document.addEventListener('pointercancel', _holdResEnd, { once: true });
+}
+
+function _holdResCommit() {
+  if (!_holdRes || !_holdRes.active) return;
+  _holdRes.committed = true;
+  // Toggle: if zone already showing this surface, close it instead.
+  if (_zoneState === _holdRes.trigger) {
+    _zoneState = 'idle';
+  } else {
+    _zoneState = _holdRes.trigger;
+  }
+  // Re-render dashboard so dynamic zone reflects new state
+  try { render(); } catch(e) {}
+}
+
+function _holdResEnd(e) {
+  if (!_holdRes) return;
+  var elapsed = Date.now() - _holdRes.startTs;
+  var trigger = _holdRes.trigger;
+  var chipEl = _holdRes.chipEl;
+  var committed = _holdRes.committed;
+  _holdResCleanup();
+  // If never committed (released before threshold), it's a TAP.
+  if (!committed) {
+    _showResourceTapInfo(trigger, chipEl);
+  }
+  // If committed, surface is already open — nothing more to do on release.
+}
+
+function _holdResCancel() {
+  if (!_holdRes) return;
+  _holdResCleanup();
+}
+
+function _holdResCleanup() {
+  if (_holdRes) {
+    if (_holdRes.timeoutId) clearTimeout(_holdRes.timeoutId);
+    if (_holdRes.chipEl && _holdRes.chipEl.classList) {
+      _holdRes.chipEl.classList.remove('hold-active');
+    }
+  }
+  _holdRes = null;
+}
+
+// Tap (release-before-threshold) shows a brief info tooltip that
+// teaches the hold gesture. Auto-dismisses after RES_HOLD_TAP_INFO_MS.
+function _showResourceTapInfo(trigger, chipEl) {
+  if (!chipEl) return;
+  var msg = '';
+  var me = G && G.players && G.players[MY_CLASS];
+  if (trigger === 'market') {
+    var gold = me ? _displayed(me, 'gold') : 0;
+    msg = '🪙 ' + gold + ' coin' + (gold !== 1 ? 's' : '') + ' · Hold to open market';
+  } else if (trigger === 'cheese') {
+    var cheese = me ? _displayed(me, 'cheese') : 0;
+    msg = '🧀 ' + cheese + ' cheese · Hold for options';
+  } else if (trigger === 'party') {
+    msg = '👥 Hold to view party';
+  }
+  if (!msg) return;
+  // Remove any existing tooltip first
+  var prior = document.querySelector('.zone-tap-info');
+  if (prior) prior.parentNode.removeChild(prior);
+  var tip = document.createElement('div');
+  tip.className = 'zone-tap-info';
+  tip.textContent = msg;
+  // Position above the chip
+  var rect = chipEl.getBoundingClientRect();
+  tip.style.left = (rect.left + rect.width / 2) + 'px';
+  tip.style.top  = (rect.top - 8) + 'px';
+  document.body.appendChild(tip);
+  // Auto-dismiss
+  setTimeout(function() {
+    if (tip && tip.parentNode) {
+      tip.classList.add('fade-out');
+      setTimeout(function() {
+        if (tip && tip.parentNode) tip.parentNode.removeChild(tip);
+      }, 200);
+    }
+  }, RES_HOLD_TAP_INFO_MS);
+}
+
+// Helper: is a player landing event currently active for me?
+// Mirrors the check in _dashDynamicZone.
+function _isEventActive() {
+  if (!G || !G.activeEvent) return false;
+  var isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
+  var hasMyActiveEvent = isMyTurn && G.phase === 'land' && !_pendingResult
+    && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
+  var hasSharedRiddle = !isMyTurn && G.activeEvent.evType === 'riddle'
+    && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired);
+  var hasSharedTrial = !isMyTurn && G.activeEvent.redVariant === 'trial_of_hand';
+  return hasMyActiveEvent || hasSharedRiddle || hasSharedTrial;
+}
+
+// Dismiss the active dynamic zone surface (tap-outside or cancel button).
+// Called from outside-tap handler attached at render time, or from Close
+// button inside surface content.
+function _dismissDynamicZone() {
+  if (_zoneState === 'idle') return;
+  _zoneState = 'idle';
+  try { render(); } catch(e) {}
+}
+
+// Tap-outside dismisser: when a hold-invoked surface is open, clicking
+// anywhere outside the dynamic zone returns it to idle. Attached to
+// document at render time when zone is in a non-idle state, removed
+// when state is back to idle.
+function _zoneOutsideTapHandler(e) {
+  if (_zoneState === 'idle') return;
+  // Don't dismiss if the click is INSIDE the dynamic zone or on a
+  // hold-target chip (that's the toggle path).
+  var dz = document.getElementById('dynamic-zone');
+  if (dz && dz.contains(e.target)) return;
+  if (e.target.closest && e.target.closest('[data-zone-trigger]')) return;
+  _dismissDynamicZone();
 }
 
 // ── HOLD OVERLAY RENDERER ─────────────────────────────────────────
@@ -1763,11 +1978,13 @@ function _dashInteractionRow(me) {
   </div>`;
 }
 
-// ── DYNAMIC ZONE (v0.16.9 — class-color outlined slot, intense pulse on turn) ──
-// Single multi-state slot between header and interaction row. v0.16.8
-// shipped foundation (idle + event); v0.16.9 adds class-color outline +
-// my-turn highlight + pulse animation (replaces the gone phase-banner).
-// Hold-invoked surfaces (market, cheese, party, fusion) wire in v0.16.10.
+// ── DYNAMIC ZONE (v0.16.16 — adds hold-invoked surfaces) ──
+// Single multi-state slot between header and interaction row.
+// States (priority order):
+//   1. RUMBLE      — pending/active rumble card, ALWAYS shown when applicable
+//   2. EVENT       — landing-result container when active event for me
+//   3. HOLD-SURFACE — market/cheese/party from _zoneState (hold-invoked)
+//   4. IDLE        — flavor text fallback
 //
 // Returns { html, active } so renderDashboard can track transitions.
 // The .my-turn class lights up the border + triggers the pulse keyframes.
@@ -1776,11 +1993,11 @@ function _dashDynamicZone(me) {
   let html = '';
   let active = false;
 
-  // Rumble card (pending or active) — always shown when applicable.
+  // 1. Rumble card (pending or active) — always shown when applicable.
   const rumbleHtml = renderRumbleCard(me);
   if (rumbleHtml) { html += rumbleHtml; active = true; }
 
-  // Event card — the #landing-result container, populated by restoreActiveEvent.
+  // 2. Event card — the #landing-result container, populated by restoreActiveEvent.
   const hasMyActiveEvent = isMyTurn && G.phase === 'land' && !_pendingResult
     && G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
   const hasSharedRiddle = !isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle'
@@ -1789,12 +2006,27 @@ function _dashDynamicZone(me) {
   if (hasMyActiveEvent || hasSharedRiddle || hasSharedTrial) {
     html += '<div id="landing-result"></div>';
     active = true;
+    // Force-reset hold-surface state when event takes priority — hold
+    // gestures are blocked while event active anyway, but if a surface
+    // was open and an event arrives, snap back to event display.
+    if (_zoneState !== 'idle') _zoneState = 'idle';
   }
 
-  // Idle state — flavor text. Only render when no other content claimed the zone.
-  // Phase banner is gone (v0.16.9) — flavor text is the ambient "what's happening
-  // when nothing is happening" surface, working alongside the .my-turn border
-  // highlight to communicate state.
+  // 3. Hold-invoked surface (market / cheese / party) — only when no
+  //    rumble or event has claimed the slot. Renders inside the dynamic
+  //    zone with a subtle "Close" affordance.
+  if (!active && _zoneState !== 'idle') {
+    const surfaceHtml = _renderZoneSurface(me, _zoneState);
+    if (surfaceHtml) {
+      html = surfaceHtml;
+      active = true;
+    } else {
+      // Surface couldn't render (e.g. function missing); reset state.
+      _zoneState = 'idle';
+    }
+  }
+
+  // 4. Idle state — flavor text. Only when no other content claimed slot.
   if (!active) {
     const line = dashboardFlavor(false);
     if (line) {
@@ -1804,11 +2036,88 @@ function _dashDynamicZone(me) {
     }
   }
 
-  // .my-turn class triggers intense border + pulse animation on the dynamic zone.
-  // Set whenever it's the player's turn, regardless of whether content is active —
-  // so even an event card during your turn glows.
+  // .my-turn class triggers intense border + pulse animation.
   const turnClass = isMyTurn ? ' my-turn' : '';
   return { html: `<div class="dynamic-zone${turnClass}" id="dynamic-zone">${html}</div>`, active };
+}
+
+// ── HOLD-INVOKED SURFACE RENDERERS (v0.16.16) ──────────────────────
+// Each surface returns the inner HTML of the dynamic zone (no outer
+// .dynamic-zone wrapper — that's added by _dashDynamicZone).
+// All surfaces share a common header with title + close button and a
+// content area below.
+function _renderZoneSurface(me, state) {
+  if (state === 'market')  return _renderZoneMarket(me);
+  if (state === 'cheese')  return _renderZoneCheese(me);
+  if (state === 'party')   return _renderZoneParty(me);
+  return '';
+}
+
+function _zoneSurfaceFrame(title, bodyHtml) {
+  return `<div class="zone-surface">
+    <div class="zone-surface-head">
+      <span class="zone-surface-title">${title}</span>
+      <button class="zone-surface-close" onclick="_dismissDynamicZone()" title="Close">✕</button>
+    </div>
+    <div class="zone-surface-body">${bodyHtml}</div>
+  </div>`;
+}
+
+function _renderZoneMarket(me) {
+  // Reuse existing renderMarketPanel content if available.
+  // The function returns a full panel; we strip its outer wrapper if needed.
+  let body = '';
+  try {
+    if (typeof renderMarketPanel === 'function') {
+      body = renderMarketPanel(me) || '';
+    }
+  } catch(e) { body = ''; }
+  if (!body) body = '<div style="padding:12px;color:var(--text-dim);">Market unavailable.</div>';
+  return _zoneSurfaceFrame('🛒 Market', body);
+}
+
+function _renderZoneCheese(me) {
+  const cheese = _displayed(me, 'cheese');
+  const canEat = cheese > 0;
+  const body = `<div style="padding:12px;display:flex;flex-direction:column;gap:10px;align-items:center;">
+    <div style="font-size:14px;color:var(--text-dim);text-align:center;">
+      You have <span style="color:#FFD96A;font-weight:700;">${cheese}</span> cheese.
+      Each cheese consumed grants <span style="color:var(--cls-color);font-weight:700;">+1 max HP</span>
+      and restores 1 HP.
+    </div>
+    <button class="zone-action-btn"
+      ${canEat ? `onclick="_zoneEatCheese()"` : 'disabled'}>
+      🧀 Eat 1 cheese
+    </button>
+  </div>`;
+  return _zoneSurfaceFrame('🧀 Cheese', body);
+}
+
+function _zoneEatCheese() {
+  if (!client || !MY_CLASS) return;
+  client.send('consumeCheese', { cls: MY_CLASS, amount: 1 });
+  // Don't auto-close — server broadcasts updated state which re-renders;
+  // user can eat multiple in a row, then dismiss manually.
+}
+
+function _renderZoneParty(me) {
+  // Reuse renderParty if it can return HTML. Currently it writes into
+  // pane-party (which no longer exists). Wrap it temporarily: capture
+  // its target write by giving it a temp container.
+  let body = '';
+  try {
+    // Create temp host so renderParty can write into something
+    const tmp = document.createElement('div');
+    tmp.id = 'pane-party'; // renderParty looks for this id
+    document.body.appendChild(tmp);
+    if (typeof renderParty === 'function') {
+      renderParty();
+      body = tmp.innerHTML;
+    }
+    document.body.removeChild(tmp);
+  } catch(e) { body = ''; }
+  if (!body) body = '<div style="padding:12px;color:var(--text-dim);">No party data.</div>';
+  return _zoneSurfaceFrame('👥 Party', body);
 }
 
 // ── TOP SLOT and FLAVOR LINE (REMOVED v0.16.8) ──

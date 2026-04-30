@@ -2372,6 +2372,190 @@ the children's sizing.
 
 ---
 
+### v0.16.16 — Hold-gesture state machine for dynamic zone surfaces
+
+> "lets finish 2 and 3 before 1" (referring to v0.16.16 hold-gestures
+> and v0.16.17 fusion-drag, deferring roadmap+design doc).
+
+The dynamic zone foundation laid in v0.16.8 had `data-zone-trigger`
+attributes on coin/cheese chips, sitting inert until gesture handlers
+wired in. v0.16.16 wires them: hold any of {coin, cheese, class icon}
+for 400ms to invoke its dynamic zone surface.
+
+---
+
+**Gesture model:**
+
+- **Hold threshold:** 400ms (constant `RES_HOLD_THRESHOLD_MS`). Long
+  enough to clearly distinguish from accidental taps; short enough
+  to feel responsive. Distinct from brick `_holdStart`'s 250ms which
+  needs to feel snappier for tier-charge actions.
+- **During hold (0-400ms):** chip gets `.hold-active` class — border
+  takes class color, slight scale-up (1.05). Visual feedback that the
+  gesture is being recognized.
+- **At 400ms:** surface fades into dynamic zone via `_holdResCommit()`.
+  `_zoneState` set to the surface name ('market'/'cheese'/'party').
+  `render()` called to re-render dashboard with new state.
+- **Tap (release before 400ms):** `_showResourceTapInfo()` shows a
+  tooltip above the chip teaching the gesture: "🪙 3 coins · Hold to
+  open market". Auto-dismisses after `RES_HOLD_TAP_INFO_MS` (1500ms).
+
+**Toggle behavior:** holding the same chip when its surface is open
+toggles back to idle. Holding a different chip swaps to that surface.
+
+**Outside-tap dismiss:** when `_zoneState !== 'idle'`, a document-level
+click listener (`_zoneOutsideTapHandler`) is attached. Tapping outside
+the dynamic zone (and not on another hold-target chip) dismisses back
+to idle. Listener attaches with 50ms delay so the click that opened
+the surface doesn't immediately close it. Detached when state returns
+to idle.
+
+**Event priority (v0.16.8 rule held):** active landing event ALWAYS
+wins. `_holdResStart` checks `_isEventActive()` first — if true,
+shows toast "Resolve the current event first" and aborts. Same for
+active rumble. If event arrives WHILE a hold-surface is open, the
+surface is force-reset in `_dashDynamicZone` (the event wins the slot).
+
+---
+
+**State machine:**
+
+```
+'idle' (default — flavor text shown)
+  ↓ hold coin 400ms
+'market' (renderMarketPanel content)
+  ↓ tap outside | tap coin again | hold different chip
+back to 'idle' or swap
+
+'idle' ↔ 'cheese' (Eat 1 cheese button → consumeCheese)
+'idle' ↔ 'party' (renderParty content)
+```
+
+`_zoneState` reset to 'idle' when:
+- User dismisses (outside-tap, close button, toggle)
+- Event arrives (`_dashDynamicZone` snaps it back)
+- Surface fails to render (defensive fallback)
+
+---
+
+**Surface integration:**
+
+- **Market** — reuses existing `renderMarketPanel(me)` HTML output,
+  wrapped in the new `_zoneSurfaceFrame` chrome (title + close button
+  + body container). Same panel that was previously shown via the
+  removed Market button.
+- **Cheese** — new surface. One button: "🧀 Eat 1 cheese". Disabled
+  if cheese count is 0. Click fires
+  `client.send('consumeCheese', {cls: MY_CLASS, amount: 1})` —
+  server handler ALREADY EXISTS (server.js line 2635, was wired but
+  unused since v0.16.x removed the old market button). Server
+  decrements cheese, increments hpMax + hp, broadcasts. Surface
+  doesn't auto-close — user can eat multiple in a row, dismisses
+  when done.
+- **Party** — temporarily injects a hidden `pane-party` div, calls
+  `renderParty()` (which writes into that id), captures the resulting
+  HTML, removes the temp div. v0.16.17+ should refactor renderParty
+  to return HTML directly instead of writing to a host id.
+
+---
+
+**Files changed:**
+
+- `players-core.js` — new globals (`_zoneState`, `_holdRes`,
+  `RES_HOLD_THRESHOLD_MS`, `RES_HOLD_TAP_INFO_MS`); new functions
+  (`_holdResStart`, `_holdResCommit`, `_holdResEnd`, `_holdResCancel`,
+  `_holdResCleanup`, `_showResourceTapInfo`, `_isEventActive`,
+  `_dismissDynamicZone`, `_zoneOutsideTapHandler`,
+  `_renderZoneSurface`, `_zoneSurfaceFrame`, `_renderZoneMarket`,
+  `_renderZoneCheese`, `_zoneEatCheese`, `_renderZoneParty`);
+  `_dashHeader` updated to wire onpointerdown on class icon and
+  res-chips with `_holdResStart` calls; `_dashDynamicZone` extended
+  with hold-surface state branch + event-takes-priority reset; `render()`
+  now attaches/detaches `_zoneOutsideTapHandler` based on `_zoneState`.
+- `players.html` — added CSS for `.res-chip.hold-active`,
+  `.head-icon` (cursor + hold-active state), `.zone-tap-info`
+  tooltip with in/out animations, `.zone-surface` frame
+  components, `.zone-action-btn`.
+- `test_players.html` — mirrored CSS changes.
+- `NOTES.md` — this entry.
+
+UNTOUCHED: server.js (consumeCheese already existed), rumble.js,
+characters.js, boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Tap coin briefly:** small tooltip appears above chip showing
+   "🪙 3 coins · Hold to open market". Auto-dismisses ~1.5s.
+3. **Hold coin 400ms+:** chip glows class color → market surface
+   fades into dynamic zone. Tap outside → returns to idle/flavor.
+4. **Tap cheese briefly:** tooltip "🧀 N cheese · Hold for options".
+5. **Hold cheese:** cheese surface opens with "Eat 1 cheese" button.
+   Click button → cheese count drops by 1, max HP increases by 1,
+   HP increases by 1. Surface stays open (eat multiple). Tap close
+   button or outside to dismiss.
+6. **Hold class icon (head-card avatar):** party surface opens
+   showing other players' status.
+7. **Toggle:** holding the same chip while its surface is open
+   closes it (back to idle).
+8. **Swap:** holding cheese while market is open swaps to cheese
+   surface.
+9. **During event:** if you hold a chip while a landing event is
+   active, toast appears "Resolve the current event first"; surface
+   does not open.
+10. **Event arrival:** if you have a surface open and an event
+    fires (off-turn riddle activation, etc.), surface is replaced
+    by the event card.
+11. **No regressions:** brick hold-tier still works (coin/cheese/icon
+    handlers separate from `_holdStart`); chipPulse arrivals still
+    fire on inventory rises.
+
+---
+
+**Risk surfaces:**
+
+- The `_renderZoneParty` temp-div hack works but is fragile — if
+  `renderParty` has any side effects beyond writing to `pane-party`,
+  they may misfire. v0.16.17 should refactor `renderParty` properly.
+- The 50ms outside-tap-attach delay may need tuning. If hold-surface
+  closes immediately on iOS Safari (different click event timing),
+  bump to 100ms.
+- Hold-during-rumble check uses `typeof _rumbleActive !== 'undefined'
+  && _rumbleActive` defensively — if `_rumbleActive` global doesn't
+  exist on all client builds, the typeof guard prevents errors.
+- Cheese surface reads `_displayed(me, 'cheese')` for the count display
+  but `client.send('consumeCheese')` operates on server state — there's
+  a brief render lag where button shows "Eat 1 cheese" enabled even
+  after pressing it (until server broadcasts new state). Acceptable
+  for v0.16.16; could add optimistic UI in polish push.
+
+---
+
+**Standards audit (rule #17 — push #36 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #11 (data/runtime/UI separation): all UI work in players-core
+  + html. characters.js, server.js, rumble.js untouched (server's
+  consumeCheese was pre-existing, just newly wired). ✓
+- Rule #14 (handoff hygiene): verified consumeCheese existed in
+  server.js BEFORE assuming it didn't (Ross caught my prior assumption
+  this session). ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: one gesture pattern (hold 400ms) for all three triggers.
+    One state machine. One frame component (`_zoneSurfaceFrame`).
+  - ELEGANCE: hold-gestures replace what would have been three
+    separate buttons + three separate panels. Same chip serves
+    display + interaction.
+  - EFFICIENCY: zero new server endpoints (consumeCheese reused);
+    market panel and party renderer reused from existing code.
+- Rule #20 (grep duplicates): checked CSS selectors before shipping.
+  All new selectors appear exactly once in each file. ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
