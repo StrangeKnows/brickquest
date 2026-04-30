@@ -1452,6 +1452,209 @@ handle any layout shift between detect and fire.
 
 ---
 
+### v0.16.8 — Dynamic Zone Foundation (layout restructure)
+
+> "this redesign should feel at home in all orientations, purposeful
+> and intuitive… cheese and coins move down to bricks, event/flavor
+> text zone becomes all-in-one… market button gone completely…"
+
+**Foundation push for the All-in-One Dynamic Zone redesign.**
+
+This patch ships the structural layer ONLY — layout, HTML restructure,
+new helper functions for the dashboard composition. The hold-gesture
+state machine that turns the dynamic zone into a true multi-state slot
+(market / cheese / party / fusion surfaces) lands in v0.16.9. The
+brick-drag-to-fusion gesture with particle/flicker/flash choreography
+lands in v0.16.10.
+
+---
+
+**Design vision (locked in S016):**
+
+The dashboard becomes radically simpler:
+- **Top:** identity + survival (avatar, class, zone, HP bar, shield)
+- **Middle:** dynamic zone — single slot, multiple states, one mental
+  model. Currently shows flavor (idle) or event card (active). v0.16.9+
+  adds market / cheese options / party / fusion states reachable via
+  hold-gestures on the interaction row chips below.
+- **Bottom:** interaction row — bricks + coin + cheese + avatar. Each
+  is a hold-target. Hold-gestures invoke their respective dynamic zone
+  surface (wired in v0.16.9).
+
+UNITY: every interactive element follows the same hold-to-invoke
+pattern. Every "view" lives in the same dynamic zone.
+
+ELEGANCE: removes Market button (redundant), removes tabs (redundant),
+removes BRICK CHARGES label (redundant). The interactions ARE the
+navigation.
+
+EFFICIENCY: dashboard becomes a tight stack — three sections doing the
+work of seven. Landscape no longer wastes the right half because the
+dynamic zone can flow horizontally when nothing forces narrow content.
+
+---
+
+**v0.16.8 ships (foundation only):**
+
+1. **Tabs system removed entirely.** `.tabs` and `.tab-content` divs
+   replaced with single `.dashboard-host` containing `pane-dashboard`
+   directly. `pane-party` and `pane-fusion` removed from the HTML —
+   their content surfaces via the dynamic zone going forward.
+   `buildTabs()` and `switchTab()` kept as no-op stubs (boot
+   sequence still calls them; v0.16.9 strip can remove the calls).
+2. **Connect indicator inline.** `.conn-pill` (standalone right-side
+   pill with text "online"/"offline") replaced with `.conn-dot` —
+   8px color-coded circle (green/dark gray) inline with player name
+   in the topbar. Updated in players.html, test_players.html, plus
+   their inline JS (`setConn`, test connect handlers).
+3. **Compact `_dashHeader`.** Renders avatar + class name + zone label,
+   HP big number + bar, shield label + count + pips, status badges.
+   No gold/cheese chips here anymore — those moved to the interaction
+   row. Same layout for portrait/landscape (responsive depends on the
+   parent flex flow).
+4. **New `_dashDynamicZone(me)`.** Replaces old `_dashTopSlot` +
+   `_dashFlavorLine`. Returns `{html, active}` so renderDashboard can
+   track active state for transitions. Today's states: idle (flavor
+   text from `dashboardFlavor()`), event (`#landing-result` container
+   when active event), rumble pending/active (via `renderRumbleCard`).
+   The shell `<div class="dynamic-zone" id="dynamic-zone">` wraps the
+   content for v0.16.9 state transitions to target.
+5. **New `_dashInteractionRow(me)`.** Replaces old `_dashBrickBar`.
+   Renders `.interaction-row` containing brick chips (via renamed
+   helper `_dashBrickChips`, returns chip HTML only, no card wrapper)
+   plus three resource chips: gold (`data-res="gold"`), cheese
+   (`data-res="cheese"`), avatar (`data-res="avatar"`). Each
+   resource chip has `data-zone-trigger` attribute hinting at which
+   dynamic zone surface its hold-gesture should invoke (wired
+   in v0.16.9).
+6. **`renderDashboard` composition rewritten:**
+   `header → dynamic zone → interaction row → phase context → market
+   panel → status clues`. Old composition was
+   `top slot → header → brick bar → phase context → market → clues`.
+7. **Chip-finder helpers updated** for new gold/cheese position.
+   `_findGoldChipDest` and `_findCheeseChipDest` now query
+   `.res-chip[data-res="gold"]` / `[data-res="cheese"]` directly
+   instead of scanning `.stat-num` for emoji content. Maintains
+   chipPulse arrival highlights without changes downstream.
+   `_findBrickChipDest` first-of-color fallback updated — was looking
+   for the "Brick Charges" card-title (now removed); now falls back to
+   the `.interaction-row .brick-chips` host.
+8. **Scroll-hide IIFE** updated to attach to `dashboard-host` instead
+   of `tab-content`.
+9. **`applyFontSize`** updated to target `dashboard-host` for zoom
+   scrolling instead of `tab-content`.
+
+---
+
+**v0.16.8 deliberately does NOT ship:**
+
+- Hold-to-invoke gestures for coin/cheese/avatar — `data-zone-trigger`
+  attributes are present but no event handlers attached. Chips render
+  but holds are inert. v0.16.9 wires the gesture state machine.
+- Brick-drag-to-fusion gesture with particle/flicker/flash. v0.16.10.
+- `renderParty` / `renderFusion` function strip — kept in code for now
+  with early-return on missing pane. v0.16.9 cleanup pass removes them.
+- `.stats-row` and `.stat-chip` CSS — orphaned after gold/cheese moved
+  out of header but harmless. Cleanup in v0.16.9.
+- Tab CSS (`.tabs`, `.tab`, `.tab-content`, `.tab-pane`) — already
+  removed from players.html and test_players.html.
+
+---
+
+**Files changed:**
+
+- `players.html` — topbar conn-pill→conn-dot, tabs/tab-content removed,
+  replaced with `.dashboard-host > pane-dashboard`. CSS for
+  `.dashboard-host`, `.dash-surface`, `.dynamic-zone`,
+  `.interaction-row`, `.res-chip`, `.conn-dot`. Inline `setConn` updated.
+- `test_players.html` — mirrors all players.html changes (memory rule
+  #1: paired files always move together). Test-specific connect
+  handlers updated.
+- `players-core.js` — major edit. New `_dashHeader` (compact, no
+  gold/cheese), new `_dashBrickChips` (was `_dashBrickBar`, returns
+  chips only), new `_dashInteractionRow`, new `_dashDynamicZone`,
+  removed `_dashTopSlot` and `_dashFlavorLine`, rewritten
+  `renderDashboard` composition, removed `renderParty()`/`renderFusion()`
+  calls from `render()`, replaced TAB_DEFS / buildTabs / switchTab
+  with no-op stubs, updated chip-finder helpers
+  (`_findCheeseDest`/`_findGoldChipDest`/`_findCheeseChipDest`/
+  `_findBrickChipDest`), updated scroll-hide IIFE and `applyFontSize`
+  to target `dashboard-host` instead of `tab-content`.
+- `NOTES.md` — this entry.
+
+---
+
+**Test focus:**
+
+1. **Hard refresh** (HTML + CSS + JS all changed).
+2. **Connect:** conn-dot turns green (top of screen, inline with class
+   name). Disconnect: turns dark gray. No more text-based pill.
+3. **Header:** compact card with class icon, name, zone, HP bar +
+   number, shield label + count + pips. NO gold/cheese here.
+4. **Dynamic zone:** when idle, shows flavor text in italic, dim
+   styling (same as old flavor line). When active event, shows event
+   card. When rumble pending/active, shows rumble card. Same content
+   as before, just relocated between header and interaction row.
+5. **Interaction row:** at bottom, single rounded card containing
+   brick chips on the left (with charge pips, signature highlighting),
+   gold + cheese + avatar chips on the right. No "BRICK CHARGES" label.
+   No Market button.
+6. **Brick hold-tier:** existing white/gray hold-tier behavior should
+   still work — tap fires tier-1 action, hold opens fan-out for
+   white. (Untouched by this patch.)
+7. **Resource chip holds:** holding coin, cheese, or avatar should
+   do NOTHING in v0.16.8. They render and visually press but no
+   action invokes. (v0.16.9 wires the hold-gestures.)
+8. **chipPulse arrivals:** gold/cheese rises (from rumble or events)
+   should still pulse on the right chips — the finder updates
+   maintained the pattern. Brick rises pulse on the brick chips
+   in the interaction row.
+9. **Scroll-hide:** scrolling the dashboard content should still
+   hide topbar + phase banner (now attached to dashboard-host).
+10. **Tab regression:** any old call sites that expected
+    `pane-party` / `pane-fusion` should fail gracefully (early-return
+    on missing element). No console errors.
+
+---
+
+**Risk surfaces being watched:**
+
+- `renderParty` / `renderFusion` still exist as functions; they target
+  removed elements and early-return. Until v0.16.9 cleanup, any
+  external caller (rumble manager? KO panel?) that referenced them
+  is now silently no-op. Watch for missing UI in those flows.
+- Hold-gesture conflict: brick chips have `_holdStart` for tier-charge
+  (white/gray). v0.16.10's brick-drag-to-fusion gesture will need to
+  coexist via drag-direction differentiation. Parked for v0.16.10.
+- KO panel text references the "Party tab" — updated to "Hold your
+  avatar to view party" to match the new gesture pattern. v0.16.9
+  needs to actually wire that gesture.
+
+---
+
+**Standards audit (rule #17 — push #28 in S015 continuation):**
+
+This is the largest single patch in S016 so far. Ross signed off on
+the scope after the planning loop. Build executed in the order:
+HTML restructure → CSS → players-core.js helpers → composition
+rewrite → chip-finders → audit pass → NOTES.
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html moved
+  together ✓
+- Rule #11 (data/runtime/UI separation): UI-only changes; no
+  characters.js touched, no runtime in rumble.js disturbed ✓
+- Rule #14 (handoff hygiene): files re-read before each major edit;
+  layout decisions grounded in actual current structure, not
+  assumptions ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): the redesign IS the principle.
+  Three sections doing the work of seven.
+- Rule #19 (intuition): led with intuition (dynamic zone as unified
+  slot), Ross extended it (cheese/coins move down to bricks, hold
+  gestures invoke surfaces). Bundled both into the build.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

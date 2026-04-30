@@ -127,12 +127,16 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 }
 .topbar-icon{font-size:18px;}
 .topbar-name{font-family:'Cinzel',serif;font-size:12px;font-weight:600;color:var(--cls-color);}
-.conn-pill{
-  font-size:9px;padding:1px 6px;border-radius:8px;
-  font-family:'Crimson Pro',serif;margin-left:auto;font-weight:600;
+/* v0.16.8: connect indicator is a small dot next to topbar-name, replacing
+   the standalone conn-pill. 8px circle, color-coded for connection state. */
+.conn-dot{
+  width:8px;height:8px;border-radius:50%;
+  margin-left:6px;
+  display:inline-block;vertical-align:middle;
+  transition:background .2s, box-shadow .2s;
 }
-.conn-pill.on{background:#0a2a1a;color:var(--green);}
-.conn-pill.off{background:#222;color:#555;}
+.conn-dot.on{background:var(--green);box-shadow:0 0 6px var(--green);}
+.conn-dot.off{background:#444;box-shadow:none;}
 
 /* PHASE BANNER */
 .phase-banner{
@@ -154,19 +158,15 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .phase-banner.battle-mine{background:#1a0505;border-bottom:2px solid var(--red);color:var(--red);}
 .phase-banner.battle-wait{background:#0f0505;border-bottom:1px solid #333;color:#555;}
 
-/* TABS */
-.tabs{display:flex;flex-shrink:0;border-bottom:1px solid #222;}
-.tab{
-  flex:1;padding:9px 4px;text-align:center;font-size:11px;
-  font-family:'Cinzel',serif;letter-spacing:.04em;
-  background:#0a0a0a;color:#555;cursor:pointer;border:none;
-  border-right:1px solid #1a1a1a;transition:all .15s;
-}
-.tab:last-child{border-right:none;}
-.tab.active{background:var(--cls-bg);color:var(--cls-color);border-bottom:2px solid var(--cls-color);}
-
-/* SCROLL CONTENT */
-.tab-content{
+/* DASHBOARD HOST (v0.16.8 — replaces tabs system entirely)
+   Single full-height surface that scrolls. The dashboard surface contains:
+     1. Compact header (avatar+name+zone+conn-dot, HP, shield)
+     2. Dynamic zone (flavor text now; events, market, cheese options,
+        party, fusion in v0.16.9+)
+     3. Interaction row (brick chips + coin chip + cheese chip + avatar)
+   Tabs/panes (party, fusion) are gone. Hold-gestures on chips will surface
+   their respective views in the dynamic zone (v0.16.9). */
+.dashboard-host{
   flex:1;
   min-height:0;
   overflow-y:auto;
@@ -177,12 +177,51 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   -webkit-overflow-scrolling:touch;
   overscroll-behavior:contain;
 }
-.tab-pane{display:none;}
-.tab-pane.active{
-  display:block;
-  min-height:100%;
-  padding-bottom:calc(160px + env(safe-area-inset-bottom, 0px));
+.dash-surface{display:none;min-height:100%;padding-bottom:calc(160px + env(safe-area-inset-bottom, 0px));}
+.dash-surface.active{display:block;}
+
+/* DYNAMIC ZONE (v0.16.8 — single multi-state slot between header and bricks)
+   States: idle (flavor text) / event (landing card) / market / cheese / party
+   / fusion. Foundation patch (v0.16.8) renders idle and event only — other
+   states light up in v0.16.9 when hold-gestures wire in. */
+.dynamic-zone{
+  position:relative;
+  margin-bottom:10px;
+  min-height:48px;
+  transition:min-height .25s ease;
 }
+.dynamic-zone:empty{display:none;}
+
+/* INTERACTION ROW (v0.16.8 — bottom row, bricks + coin + cheese + avatar)
+   Each chip is a hold-target. Coin/cheese/avatar holds invoke their dynamic
+   zone surface (v0.16.9). Brick chips retain existing hold-tier behavior;
+   future fusion-drag gesture lands in v0.16.10. */
+.interaction-row{
+  display:flex;flex-wrap:wrap;align-items:stretch;gap:6px;
+  padding:8px;
+  background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;
+  margin-bottom:10px;
+}
+.interaction-row .brick-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex:1;}
+.interaction-row .resource-chips{display:flex;gap:6px;align-items:stretch;}
+
+/* RESOURCE CHIP (gold + cheese in interaction row; avatar tile too) */
+.res-chip{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-width:44px;padding:6px 10px;
+  background:var(--surface3);border-radius:8px;border:1px solid transparent;
+  cursor:pointer;
+  user-select:none;-webkit-user-select:none;
+  transition:border-color .15s, background .15s, transform .1s;
+  touch-action:none;
+}
+.res-chip:active{transform:scale(.95);}
+.res-chip-glyph{font-size:18px;line-height:1;}
+.res-chip-num{font-family:'Cinzel',serif;font-size:14px;font-weight:700;margin-top:2px;}
+.res-chip[data-res="gold"] .res-chip-num{color:#F5D000;}
+.res-chip[data-res="cheese"] .res-chip-num{color:#FFD96A;}
+.res-chip[data-res="avatar"]{padding:6px 8px;}
+.res-chip[data-res="avatar"] .res-chip-glyph{font-size:24px;}
 
 /* CARDS */
 .card{
@@ -450,12 +489,17 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   <div class="topbar">
     <span class="topbar-icon" id="t-icon">⚔️</span>
     <span class="topbar-name" id="t-name">—</span>
-    <span class="conn-pill off" id="conn-pill">connecting…</span>
+    <!-- v0.16.8: connect indicator moved inline with topbar-name as a small dot -->
+    <span class="conn-dot off" id="conn-dot" title="Connection status"></span>
 
   </div>
   <div class="phase-banner waiting" id="phase-banner">Connecting…</div>
-  <div class="tabs" id="tabs-bar"></div>
-  <div class="tab-content" id="tab-content"></div>
+  <!-- v0.16.8: tabs/tab-content replaced with single dashboard host. Pane-party
+       and pane-fusion removed entirely; their content now surfaces in the
+       dynamic zone via hold-gestures (v0.16.9+). -->
+  <div class="dashboard-host" id="dashboard-host">
+    <div id="pane-dashboard" class="dash-surface active"></div>
+  </div>
 </div>
 </div><!-- end #zoom-root -->
 
@@ -578,9 +622,9 @@ function connectWS() {
 }
 
 function setConn(on) {
-  const el = document.getElementById('conn-pill');
-  el.className = 'conn-pill '+(on?'on':'off');
-  el.textContent = on?'online':'offline';
+  // v0.16.8: conn-pill replaced with conn-dot. Smaller, inline with name.
+  const el = document.getElementById('conn-dot');
+  if (el) el.className = 'conn-dot '+(on?'on':'off');
   if (on && MY_CLASS) {
     const name = (document.getElementById('player-name-input')?.value||'').trim();
     if (name) client.send('setPlayerName', {cls:MY_CLASS, name});

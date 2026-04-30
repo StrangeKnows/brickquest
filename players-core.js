@@ -350,10 +350,11 @@ function applyFontSize(size) {
   var root = document.getElementById('zoom-root');
   var html = document.documentElement;
   var gs = document.getElementById('game-screen');
-  var tc = document.getElementById('tab-content');
+  // v0.16.8: tab-content replaced by dashboard-host
+  var tc = document.getElementById('dashboard-host');
 
   if (scale <= 1) {
-    // Default — body locked, tab-content scrolls naturally
+    // Default — body locked, dashboard-host scrolls naturally
     if (root) {
       root.style.transform = '';
       root.style.transformOrigin = '';
@@ -590,38 +591,20 @@ function syncRumbleFromState(state) {
 }
 
 
-// ── TABS ──
-// Skills tab removed during cleanup; skill system pending redesign.
-var TAB_DEFS = [
-  { id:'dashboard', label:'Dashboard' },
-  { id:'party',     label:'Party'     },
-  { id:'fusion',    label:'Fusion'    },
-];
-
+// ── DASHBOARD HOST (v0.16.8) ──
+// Tabs system removed entirely. Pane-dashboard lives in the HTML directly
+// inside .dashboard-host. The party and fusion panes are gone — their
+// content surfaces in the dynamic zone via hold-gestures (v0.16.9+).
+// `buildTabs` kept as a no-op for backward compatibility with the boot
+// sequence; can be removed once we're confident nothing else calls it.
 function buildTabs() {
-  const bar  = document.getElementById('tabs-bar');
-  const cont = document.getElementById('tab-content');
-  bar.innerHTML = '';
-  cont.innerHTML = '';
-  TAB_DEFS.forEach((t,i)=>{
-    const btn = document.createElement('button');
-    btn.className = 'tab'+(i===0?' active':'');
-    btn.textContent = t.label;
-    btn.onclick = () => switchTab(t.id, btn);
-    bar.appendChild(btn);
-    const pane = document.createElement('div');
-    pane.className = 'tab-pane'+(i===0?' active':'');
-    pane.id = 'pane-'+t.id;
-    cont.appendChild(pane);
-  });
+  // No-op: pane-dashboard is now in the HTML, no dynamic tab construction needed.
 }
 
+// `switchTab` kept as a no-op stub. Any old call sites just trigger a render.
 function switchTab(id, btn) {
-  document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
-  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
-  btn.classList.add('active');
-  document.getElementById('pane-'+id)?.classList.add('active');
-  // Returning to Dashboard should feel fresh — rotate flavor next render.
+  // No-op: no tabs to switch. Trigger a render in case the caller expected
+  // a refresh (e.g., flavor-rotation on returning to dashboard).
   if (id === 'dashboard') {
     _flavorStaleTab = true;
     try { render(); } catch(e) {}
@@ -705,8 +688,10 @@ function render() {
   // mid-screen instead of on the actual chip. _prevRenderInv is still
   // captured at end of render, so the diff detection still works correctly.
   _detectInvIncreasesAndPulse(me);
-  renderParty();
-  renderFusion();
+  // v0.16.8: renderParty()/renderFusion() removed from render flow — pane-party
+  // and pane-fusion no longer exist. Their content surfaces via hold-gestures
+  // in the dynamic zone (v0.16.9+). The functions themselves remain for now
+  // (stub-like, early-return on missing pane) until v0.16.9 stripping pass.
   restoreActiveEvent();
   // Start riddle timer tick if active, stop if not
   if (G.activeEvent && G.activeEvent.riddleActive && !_riddleTimerInterval) {
@@ -853,7 +838,20 @@ function collapsibleCard(id, titleHtml, bodyHtml, startOpen) {
 // Class signature/secondary tables live in characters.js (Phase 2 consolidation).
 // Access via getSignature(cls) / getSecondary(cls) helpers.
 
-// ── HEADER ── class + HP + armor + gold/cheese chips + status
+// ── HEADER (v0.16.8 redesign) ──
+// Compact identity + survival surface. NO inventory chips here — gold,
+// cheese, avatar (party trigger) all moved to the new interaction row at
+// the bottom.
+//
+// Layout:
+//   [classIcon] [Class Name · Zone label · connect-dot]
+//   [HP big number] [bar] [/maxHP]
+//   [SHIELD label · count · pips]
+//   [statuses if any]
+//
+// The connect-dot is rendered as a pure presentation element (color-coded
+// circle) — its on/off state is set by setConn() in players.html at
+// connection events; we just show the styling here.
 function _dashHeader(me) {
   const isOH = me.hp > me.hpMax;
   const pct = Math.min(100, Math.max(0, Math.round(me.hp / me.hpMax * 100)));
@@ -905,14 +903,6 @@ function _dashHeader(me) {
         <span style="font-family:Cinzel,serif;font-size:14px;font-weight:700;color:${(me.armor||0)>0?'#AAAAAA':'#333'};">${me.armor||0}<span style="font-size:10px;color:#555;"> / ${shieldMax}</span></span>
       </div>
       <div style="display:flex;flex-wrap:wrap;" id="my-shield-pips">${shieldPips}</div>
-    </div>
-    <div class="stats-row" style="margin-top:10px;">
-      <div class="stat-chip">
-        <div class="stat-num" style="color:#F5D000;">🪙 ${_displayed(me,'gold')}</div>
-      </div>
-      <div class="stat-chip">
-        <div class="stat-num" style="color:#FFD96A;">🧀 ${_displayed(me,'cheese')}</div>
-      </div>
     </div>
     ${(statuses || debuffBadge) ? `<div class="status-wrap">${statuses}${debuffBadge}</div>` : ''}
     ${(me.queuedPoisonStacks || 0) > 0 ? `<div style="margin-top:6px;padding:6px 8px;background:#1a2a10;border:1px solid #4a7a2a;border-radius:6px;">
@@ -1661,15 +1651,19 @@ function _detectHealsAndFire() {
 // charges refresh only at rumble entry or zone gate crossing, per §1.1).
 // Mirrors rumble's _brickBtnHTML so dashboard and rumble share one visual
 // language for bricks.
-function _dashBrickBar(me) {
+// Returns BRICK CHIP HTML ONLY (no card wrapper, no card-title).
+// Composed into the interaction row by _dashInteractionRow.
+// v0.16.8: was _dashBrickBar — renamed for clarity, restructured to fit
+// the new interaction-row composition.
+function _dashBrickChips(me) {
   const sigs = getSignature(MY_CLASS);
   const bricks = me.bricks || {};
   const charged = me.bricksCharged || {};
   const ld = me.lastDropped || {};
   const owned = BRICK_NAMES.filter(c => _displayedBricks(me, c) > 0);
   if (!owned.length) {
-    return `<div class="card"><div class="card-title">Brick Charges</div>
-      <div style="font-size:12px;color:var(--text-dim);padding:6px 0;">No bricks owned.</div></div>`;
+    // No bricks — return placeholder text
+    return `<div style="font-size:12px;color:var(--text-dim);padding:6px 8px;flex:1;">No bricks owned.</div>`;
   }
   let chips = '';
   owned.forEach(color => {
@@ -1700,7 +1694,7 @@ function _dashBrickBar(me) {
       + (hasAction ? `onpointerdown="_holdStart(event, '${color}', this)" ` : '')
       + `style="`
       + `display:flex;flex-direction:column;align-items:center;justify-content:flex-start;`
-      + `padding:6px 4px 4px 4px;margin:2px;border-radius:6px;`
+      + `padding:6px 4px 4px 4px;border-radius:6px;`
       + (hasAction ? 'cursor:pointer;' : 'cursor:default;opacity:.85;')
       + `background:${chipBg};border:2px solid ${chipBorder};min-width:44px;`
       + `touch-action:none;user-select:none;-webkit-user-select:none;">`
@@ -1709,30 +1703,58 @@ function _dashBrickBar(me) {
       + `<div style="display:flex;flex-wrap:wrap;justify-content:center;max-width:40px;">${pips}</div>`
       + `</div>`;
   });
-  return `<div class="card"><div class="card-title">Brick Charges</div>
-    <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:2px;padding:4px 0;">${chips}</div>
+  return chips;
+}
+
+// ── INTERACTION ROW (v0.16.8) ──
+// Bottom row: brick chips + coin + cheese + avatar. Each is a hold-target.
+// Brick chips retain existing tier-charge hold behavior. Coin/cheese/avatar
+// holds invoke their dynamic zone surface (v0.16.9 wires the gestures —
+// for v0.16.8 they render but holds are inert).
+function _dashInteractionRow(me) {
+  const meta = PLAYER_META[MY_CLASS] || {};
+  const classIcon = meta.icon || '◆';
+  const goldVal = _displayed(me, 'gold');
+  const cheeseVal = _displayed(me, 'cheese');
+  return `<div class="interaction-row">
+    <div class="brick-chips">
+      ${_dashBrickChips(me)}
+    </div>
+    <div class="resource-chips">
+      <div class="res-chip" data-res="gold" data-zone-trigger="market" title="Hold to open market">
+        <span class="res-chip-glyph">🪙</span>
+        <span class="res-chip-num stat-num">${goldVal}</span>
+      </div>
+      <div class="res-chip" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options">
+        <span class="res-chip-glyph">🧀</span>
+        <span class="res-chip-num stat-num">${cheeseVal}</span>
+      </div>
+      <div class="res-chip" data-res="avatar" data-zone-trigger="party" title="Hold to view party">
+        <span class="res-chip-glyph">${classIcon}</span>
+      </div>
+    </div>
   </div>`;
 }
 
-// ── TOP SLOT ── above the character card. Holds one of:
-//   (A) The landing-event card (via #landing-result container; populated by
-//       restoreActiveEvent), OR
-//   (B) The rumble-pending/active card, OR
-//   (C) A flavor line (when neither is active) — rendered by _dashFlavorLine.
+// ── DYNAMIC ZONE (v0.16.8 foundation) ──
+// Single multi-state slot that lives between header and interaction row.
+// In v0.16.8 it renders flavor text (idle) or event card (active event) —
+// same content the old top-slot had, just relocated. Hold-invoked surfaces
+// (market, cheese options, party, fusion) wire in v0.16.9.
 //
-// Returns { html, active } so renderDashboard knows whether to skip flavor.
-function _dashTopSlot(me) {
+// Returns { html, active } so renderDashboard can track transitions for
+// effects like the `_dashTopSlotWasActive` flash-suppression logic.
+function _dashDynamicZone(me) {
   const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
   let html = '';
   let active = false;
 
-  // Rumble card (pending or active) — always shown when applicable
+  // Rumble card (pending or active) — always shown when applicable.
+  // Mirrors old _dashTopSlot logic; the rumble card was previously top-slot.
   const rumbleHtml = renderRumbleCard(me);
   if (rumbleHtml) { html += rumbleHtml; active = true; }
 
   // Event card — the #landing-result container, populated by restoreActiveEvent.
-  // Multiple conditions surface this container (on-turn events, off-turn riddle
-  // watchers, red-trial race). Consolidate into one flag.
   const hasMyActiveEvent = isMyTurn && G.phase === 'land' && !_pendingResult
     && G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
   const hasSharedRiddle = !isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle'
@@ -1742,16 +1764,26 @@ function _dashTopSlot(me) {
     html += '<div id="landing-result"></div>';
     active = true;
   }
-  return { html, active };
+
+  // Idle state — flavor text. Only render when no other content claimed the zone.
+  if (!active) {
+    const line = dashboardFlavor(false);
+    if (line) {
+      html = `<div class="card" style="padding:12px 16px;text-align:center;border-color:#2a2a2a;">
+        <div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;color:var(--text-dim);line-height:1.5;">${line}</div>
+      </div>`;
+    }
+  }
+
+  return { html: `<div class="dynamic-zone" id="dynamic-zone">${html}</div>`, active };
 }
 
-function _dashFlavorLine(me) {
-  const line = dashboardFlavor(false);
-  if (!line) return '';
-  return `<div class="card" style="padding:12px 16px;text-align:center;border-color:#2a2a2a;">
-    <div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;color:var(--text-dim);line-height:1.5;">${line}</div>
-  </div>`;
-}
+// ── TOP SLOT and FLAVOR LINE (REMOVED v0.16.8) ──
+// Old _dashTopSlot and _dashFlavorLine functions were merged into the new
+// _dashDynamicZone (above). The dynamic zone is the unified successor —
+// renders flavor (idle), event card (active event), or rumble card from
+// the same slot. Will gain market/cheese/party/fusion states in v0.16.9
+// when hold-gestures wire in.
 
 // ── PHASE CONTEXT ── middle-of-dashboard cards (non-top-slot).
 // Absorbs what the old Actions tab did, minus the event + rumble cards which
@@ -1810,26 +1842,24 @@ function renderDashboard(me) {
   if (isKO) {
     el.innerHTML = `<div class="card" style="border-color:var(--red);">
       <div style="text-align:center;color:var(--red);font-family:'Cinzel',serif;font-size:16px;margin-bottom:8px;">⬇ KNOCKED OUT</div>
-      <div style="font-size:12px;color:var(--text-dim);text-align:center;">Your phone is still active. You can accept or decline trade requests from the Party tab.</div>
+      <div style="font-size:12px;color:var(--text-dim);text-align:center;">Your phone is still active. Hold your avatar to view party.</div>
     </div>`;
     return;
   }
   // Market expanded inline? Keep the existing market-panel render for now.
   const marketPanel = (typeof _marketOpen !== 'undefined' && _marketOpen)
     ? renderMarketPanel(me) : '';
-  // Top slot: event or rumble-pending card if active, otherwise a flavor line.
-  // The dashboardFlavor() call is made AFTER computing topSlot.active so the
-  // "just cleared" detection fires correctly on the render after event resolves.
-  const topSlot = _dashTopSlot(me);
-  const topSlotHtml = topSlot.active
-    ? topSlot.html
-    : _dashFlavorLine(me);
+  // v0.16.8 composition: header (identity+HP+shield) → dynamic zone
+  // (flavor or event) → interaction row (bricks+coin+cheese+avatar).
+  // The dynamic zone replaces the old top-slot/flavor split. Phase context
+  // and clues remain below for prepare/land panels.
+  const dz = _dashDynamicZone(me);
   // Track active state for next render's transition detection
-  _dashTopSlotWasActive = topSlot.active;
+  _dashTopSlotWasActive = dz.active;
   el.innerHTML = `
-    ${topSlotHtml}
     ${_dashHeader(me)}
-    ${_dashBrickBar(me)}
+    ${dz.html}
+    ${_dashInteractionRow(me)}
     ${_dashPhaseContext(me)}
     ${marketPanel}
     ${renderStatusClues()}
@@ -5703,18 +5733,16 @@ function _collectResolutionReward(specJson, btnId) {
 // v0.15.40 — Find cheese display destination. Mirrors _findGoldDestination
 // in boardFx.js but for cheese. Used by the goldGained preset when the
 // caller passes dest=_findCheeseDest() (cheese reuses goldGained for FX).
+// v0.16.8: gold/cheese moved from .stats-row in header to .interaction-row
+// at bottom; query by data-res attribute now (UNITY: same pattern for both).
 function _findCheeseDest() {
   var pane = document.getElementById('pane-dashboard');
   if (!pane || !pane.classList.contains('active')) return null;
-  var candidates = pane.querySelectorAll('.stat-num');
-  for (var i = 0; i < candidates.length; i++) {
-    if (candidates[i].textContent.indexOf('🧀') >= 0) {
-      var r = candidates[i].getBoundingClientRect();
-      if (r.width === 0) return null;
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-    }
-  }
-  return null;
+  var chip = pane.querySelector('.res-chip[data-res="cheese"]');
+  if (!chip) return null;
+  var r = chip.getBoundingClientRect();
+  if (r.width === 0) return null;
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 }
 
 // v0.15.41 — Find brick-chip destination for a given color. Used by the
@@ -5722,24 +5750,24 @@ function _findCheeseDest() {
 // Returns viewport coords + the rect (so chipPulse can size to the chip).
 // Falls back to null if dashboard pane isn't active or chip doesn't exist
 // yet (player owns no bricks of that color — first-of-color situation).
+// v0.16.8: "Brick Charges" card-title is gone. First-of-color fallback now
+// targets the .interaction-row's .brick-chips container instead.
 function _findBrickChipDest(color) {
   var pane = document.getElementById('pane-dashboard');
   if (!pane || !pane.classList.contains('active')) return null;
   var chip = pane.querySelector('[data-brick-chip="'+color+'"]');
   if (!chip) {
-    // First-of-color: no chip exists yet (player will get one after delta
-    // increments). Fall back to the brick-charges card area as the dest.
-    var cardTitles = pane.querySelectorAll('.card-title');
-    for (var i = 0; i < cardTitles.length; i++) {
-      if (cardTitles[i].textContent.indexOf('Brick Charges') >= 0) {
-        var titleR = cardTitles[i].getBoundingClientRect();
-        if (titleR.width === 0) return null;
-        return {
-          x: titleR.left + titleR.width / 2,
-          y: titleR.top + titleR.height + 30,  // below the title, in the chip area
-          rect: null
-        };
-      }
+    // First-of-color: no chip exists yet. Fall back to the interaction-row's
+    // brick-chips container as the dest.
+    var brickHost = pane.querySelector('.interaction-row .brick-chips');
+    if (brickHost) {
+      var hostR = brickHost.getBoundingClientRect();
+      if (hostR.width === 0) return null;
+      return {
+        x: hostR.left + hostR.width / 2,
+        y: hostR.top + hostR.height / 2,
+        rect: null
+      };
     }
     return null;
   }
@@ -5755,33 +5783,27 @@ function _findBrickChipDest(color) {
 // v0.15.41 — Find gold-display destination with rect (for chipPulse arrival).
 // Mirrors boardFx's _findGoldDestination but returns rect so chipPulse can
 // size the glow ring to the chip.
+// v0.16.8: gold and cheese chips moved from .stats-row in header to
+// .interaction-row at bottom; query by data-res attribute now.
 function _findGoldChipDest() {
   var pane = document.getElementById('pane-dashboard');
   if (!pane || !pane.classList.contains('active')) return null;
-  var candidates = pane.querySelectorAll('.stat-num');
-  for (var i = 0; i < candidates.length; i++) {
-    if (candidates[i].textContent.indexOf('🪙') >= 0) {
-      var r = candidates[i].getBoundingClientRect();
-      if (r.width === 0) return null;
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2, rect: r };
-    }
-  }
-  return null;
+  var chip = pane.querySelector('.res-chip[data-res="gold"]');
+  if (!chip) return null;
+  var r = chip.getBoundingClientRect();
+  if (r.width === 0) return null;
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2, rect: r };
 }
 
 // v0.15.41 — Find cheese-display destination with rect (for chipPulse arrival).
 function _findCheeseChipDest() {
   var pane = document.getElementById('pane-dashboard');
   if (!pane || !pane.classList.contains('active')) return null;
-  var candidates = pane.querySelectorAll('.stat-num');
-  for (var i = 0; i < candidates.length; i++) {
-    if (candidates[i].textContent.indexOf('🧀') >= 0) {
-      var r = candidates[i].getBoundingClientRect();
-      if (r.width === 0) return null;
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2, rect: r };
-    }
-  }
-  return null;
+  var chip = pane.querySelector('.res-chip[data-res="cheese"]');
+  if (!chip) return null;
+  var r = chip.getBoundingClientRect();
+  if (r.width === 0) return null;
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2, rect: r };
 }
 
 function buildResolutionCard(opts) {
@@ -7125,10 +7147,11 @@ function toast(msg, type='normal') {
 initFontSize();
 
 // ── Mobile header auto-hide on scroll ──
-// When scrolling DOWN within .tab-content, hide .topbar + .phase-banner (more action-pane room).
-// When scrolling UP, restore them. Useful in landscape/small screens.
+// When scrolling DOWN within .dashboard-host, hide .topbar + .phase-banner
+// (more action-pane room). When scrolling UP, restore them.
+// v0.16.8: tabs system removed — was tab-content, now dashboard-host.
 (function(){
-  var tabContent = null;
+  var dashHost = null;
   var lastScrollTop = 0;
   var ticking = false;
   var SCROLL_THRESHOLD = 6;  // ignore tiny scroll jitter
@@ -7136,12 +7159,12 @@ initFontSize();
 
   function updateHeaderVisibility() {
     ticking = false;
-    if (!tabContent) return;
+    if (!dashHost) return;
     var topbar = document.querySelector('.topbar');
     var phaseBanner = document.querySelector('.phase-banner');
     if (!topbar) return;
 
-    var scrollTop = tabContent.scrollTop;
+    var scrollTop = dashHost.scrollTop;
     var delta = scrollTop - lastScrollTop;
 
     // Always show when at top
@@ -7168,9 +7191,9 @@ initFontSize();
   }
 
   function attach() {
-    tabContent = document.getElementById('tab-content');
-    if (!tabContent) { setTimeout(attach, 200); return; }
-    tabContent.addEventListener('scroll', onScroll, { passive: true });
+    dashHost = document.getElementById('dashboard-host');
+    if (!dashHost) { setTimeout(attach, 200); return; }
+    dashHost.addEventListener('scroll', onScroll, { passive: true });
   }
   attach();
 })();
