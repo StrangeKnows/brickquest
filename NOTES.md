@@ -3194,6 +3194,138 @@ UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
 
 ---
 
+### v0.16.23 — Strip coin/cheese chip cards, replace with bare icons matching head-icon vocabulary
+
+> "what if we just got rid of the card altogether for coin and cheese?
+> could put numbers below the icon. icon would have its outline shadow
+> lit, like we just did with player icon."
+
+Triple-digit values (e.g. coin "122") were overflowing the chip
+containers — `.res-chip` with `max-width:90px` was too tight for
+3-digit numbers at any meaningful font size. The fix wasn't tighter
+sizing but eliminating the chip card entirely. Bare icons with
+numbers stacked underneath, each icon a hold-target with the same
+silhouette glow vocabulary as the class icon (.head-icon).
+
+**Architectural collapse:**
+
+Stripped from CSS:
+- `.res-chip` (the chip container)
+- `.res-chip:active`, `.res-chip.hold-active`, `.res-chip.surface-active`
+- `.res-chip-glyph`, `.res-chip-num`
+- `.res-chip[data-res="gold"] .res-chip-num` color rule
+- `.res-chip[data-res="cheese"] .res-chip-num` color rule
+- `chip-surface-pulse` keyframes (only used by .res-chip)
+- All `flex:1`, `min-width:48px`, `max-width:90px`, padding/gap
+  clamps that constrained the chip layout
+
+Added to CSS:
+- `.head-resource` — bare flex column container, transparent, no
+  border, no background. Just the hold-target wrapper.
+- `.head-resource-glyph` — emoji at clamp(18px, 4.5vw, 24px) (slightly
+  bigger than old chip glyph since it has more space now)
+- `.head-resource-num` — number at clamp(13px, 3.5vw, 18px), color
+  per data-res attribute (#F5D000 gold, #FFD96A cheese)
+- `.head-icon:active, .head-resource:active` unified scale-down
+- `.head-icon.hold-active, .head-resource.hold-active` unified
+  drop-shadow bloom
+- `.head-icon.surface-active, .head-resource.surface-active` unified
+  `head-icon-surface-pulse` animation
+
+Markup (players-core.js _dashHeader):
+- `<div class="res-chip" ...>` with `<span class="res-chip-glyph">`
+  and `<span class="res-chip-num stat-num">` →
+- `<div class="head-resource" ...>` with `<span class="head-resource-glyph">`
+  and `<span class="head-resource-num">`
+- All onpointerdown / data-res / data-zone-trigger attributes intact.
+
+Finder helpers (`_findCheeseDest`, `_findGoldChipDest`,
+`_findCheeseChipDest`):
+- Selector switched from `.res-chip[data-res="X"]` to
+  `[data-res="X"]` — class-agnostic, durable across future renames.
+  Added v0.16.23 comment noting the migration.
+
+Triple-digit numbers fit naturally now because the layout has no
+chip box constraining the number's horizontal space. Whatever width
+the digits need, they get.
+
+**UNITY across all three header hold-targets:**
+
+Class icon, coin, cheese all now:
+- Render as bare icons (no container card)
+- Glow with drop-shadow on `.hold-active` (same intensity, same
+  layered bloom)
+- Pulse with `head-icon-surface-pulse` on `.surface-active` (same
+  rhythm, same drop-shadow keyframe values)
+- Scale 0.95 on `:active`, 1.05 on `.hold-active`, 1.04 peak on pulse
+
+One vocabulary, three triggers. ELEGANCE.
+
+---
+
+**Files changed:** `players.html`, `test_players.html`, `players-core.js`,
+`NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Coin/cheese display:** bare icons with numbers stacked beneath
+   in the head-id column. No chip background, no border, no padding
+   around them as a card.
+3. **Triple-digit values fit:** coin "122" shows cleanly under the
+   coin icon without overflow or truncation.
+4. **Hold coin or cheese:** drop-shadow bloom on the icon silhouette
+   (Image 1 vocabulary), same as holding the class icon.
+5. **Past 400ms (surface opens):** icon pulses with `head-icon-surface-pulse`
+   at 2.3s rhythm. Class icon, coin, cheese all pulse with same look
+   when their respective surfaces are open.
+6. **chipPulse arrivals** (gold from coin pickup, cheese from event):
+   still hit the icons in their new bare form (finder selectors are
+   data-res based, position-agnostic).
+7. **No regressions:** market opens on coin hold, cheese options on
+   cheese hold, party on class-icon hold. Swipe-to-dismiss works.
+
+---
+
+**Risk surfaces:**
+
+- Bare icons may look TOO bare without the chip background to
+  ground them visually. If layout reads as floating-numbers-with-no-frame,
+  may want subtle bg restored (lighter than old surface3, just a hint).
+- `head-resource-glyph` size went UP (clamp(18, 4.5vw, 24px) vs old
+  chip's clamp(14, 4vw, 20)). This was intentional — bare icons can
+  be larger since they have more space — but if the icon dominates
+  visually over the number, dial back.
+- Vertical-stack flex column changes spacing in `.head-resources`.
+  May need `gap:6px` or similar adjustment if icons sit too close
+  to each other.
+
+---
+
+**Standards audit (rule #17 — push #43 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): big UNITY win — three
+  header hold-targets now share one vocabulary. ELEGANCE in the
+  removal of three CSS rule groups + one keyframe set. EFFICIENCY
+  in not constraining triple-digit numbers (problem solved by
+  architecture not by tighter sizing).
+- Rule #19 (intuition): Ross's reframe (ditch the card, go bare-icon)
+  was the right read. My instinct was to tune `clamp()` values
+  tighter — would have technically worked but kept the awkward
+  chip-with-cramped-number aesthetic. Architectural collapse beats
+  numerical squeeze.
+- Rule #20 (grep duplicates): touched selectors verified to appear
+  exactly once. Old `.res-chip` references confirmed all comment-only
+  (migration history). ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -972,15 +972,15 @@ function _dashHeader(me) {
         </div>
       </div>
       <div class="head-resources">
-        <div class="res-chip${marketActive}" data-res="gold" data-zone-trigger="market" title="Hold to open market"
+        <div class="head-resource${marketActive}" data-res="gold" data-zone-trigger="market" title="Hold to open market"
              onpointerdown="_holdResStart(event, 'market', this)">
-          <span class="res-chip-glyph">🪙</span>
-          <span class="res-chip-num stat-num">${goldVal}</span>
+          <span class="head-resource-glyph">🪙</span>
+          <span class="head-resource-num">${goldVal}</span>
         </div>
-        <div class="res-chip${cheeseActive}" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options"
+        <div class="head-resource${cheeseActive}" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options"
              onpointerdown="_holdResStart(event, 'cheese', this)">
-          <span class="res-chip-glyph">🧀</span>
-          <span class="res-chip-num stat-num">${cheeseVal}</span>
+          <span class="head-resource-glyph">🧀</span>
+          <span class="head-resource-num">${cheeseVal}</span>
         </div>
       </div>
     </div>
@@ -6169,10 +6169,13 @@ function _collectResolutionReward(specJson, btnId) {
 // caller passes dest=_findCheeseDest() (cheese reuses goldGained for FX).
 // v0.16.8: gold/cheese moved from .stats-row in header to .interaction-row
 // at bottom; query by data-res attribute now (UNITY: same pattern for both).
+// v0.16.23: chip class renamed .res-chip → .head-resource as part of the
+// bare-icon redesign; selectors switched to data-res-only so they're
+// class-agnostic and durable across future renames.
 function _findCheeseDest() {
   var pane = document.getElementById('pane-dashboard');
   if (!pane || !pane.classList.contains('active')) return null;
-  var chip = pane.querySelector('.res-chip[data-res="cheese"]');
+  var chip = pane.querySelector('[data-res="cheese"]');
   if (!chip) return null;
   var r = chip.getBoundingClientRect();
   if (r.width === 0) return null;
@@ -6222,7 +6225,7 @@ function _findBrickChipDest(color) {
 function _findGoldChipDest() {
   var pane = document.getElementById('pane-dashboard');
   if (!pane || !pane.classList.contains('active')) return null;
-  var chip = pane.querySelector('.res-chip[data-res="gold"]');
+  var chip = pane.querySelector('[data-res="gold"]');
   if (!chip) return null;
   var r = chip.getBoundingClientRect();
   if (r.width === 0) return null;
@@ -6233,7 +6236,7 @@ function _findGoldChipDest() {
 function _findCheeseChipDest() {
   var pane = document.getElementById('pane-dashboard');
   if (!pane || !pane.classList.contains('active')) return null;
-  var chip = pane.querySelector('.res-chip[data-res="cheese"]');
+  var chip = pane.querySelector('[data-res="cheese"]');
   if (!chip) return null;
   var r = chip.getBoundingClientRect();
   if (r.width === 0) return null;
