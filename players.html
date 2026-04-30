@@ -156,10 +156,13 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .dynamic-zone{
   position:relative;
   margin-bottom:10px;
-  min-height:48px;
+  /* v0.16.18: min-height bumped 48→80 and padding 8→14 so the card has
+     visible presence even when content is just one line of flavor text.
+     Card feels intentionally-sized rather than a thin strip. */
+  min-height:80px;
   border-radius:10px;
   border:1px solid var(--cls-color);
-  padding:8px;
+  padding:14px;
   background:var(--surface2);
   transition:border-color .25s ease, box-shadow .25s ease, min-height .25s ease;
   box-shadow:0 0 0 0 var(--cls-color);
@@ -184,14 +187,20 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
    the header card (.head-resources). Bricks remain interactive with
    existing tier-charge hold behavior. v0.16.11+ adds fusion-drag from
    brick to dynamic zone. */
+/* INTERACTION ROW (v0.16.10 redesign, v0.16.18 sizing)
+   Bricks-only now. Coin and cheese moved up to the header card
+   (.head-resources inside .head-id). Brick chips retain existing
+   tier-charge hold behavior. v0.16.18: padding bumped 10→16, gap
+   10→14, chip-row gap 6→10. Goal: cards feel intentionally-sized
+   and bricks have presence as the primary interaction surface. */
 .interaction-row{
-  display:flex;flex-direction:column;gap:10px;
-  padding:10px;
+  display:flex;flex-direction:column;gap:14px;
+  padding:16px;
   background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;
   margin-bottom:10px;
 }
 .interaction-row .brick-chips{
-  display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:center;
+  display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center;
 }
 /* RESOURCE CHIP — coin + cheese (lives in .head-resources)
    v0.16.14: responsive sizing. flex:1 lets the chips share available

@@ -1758,6 +1758,9 @@ function _renderOptionRadialFan(s) {
   //   N=3: [0, -π/4, -π/2]         stacked upward by 45° steps
   //   N≥4: evenly distributed from 0 to -π (full upper half arc)
   // Negative angle offset = visually above on screen (canvas y inverted).
+  // v0.16.18: items whose center lies outside the interaction-row card
+  // get reduced opacity (same fade-beyond-bounds rule as ally radial).
+  const homeRect = _radialHomeBounds();
   const N = opts.length;
   function angleOffsetFor(idx) {
     if (N === 1) return 0;
@@ -1781,14 +1784,23 @@ function _renderOptionRadialFan(s) {
     const angle = s.fanCenterAngle + offset;
     const ax = s.chipCx + Math.cos(angle) * RADIUS - ICON_SIZE / 2;
     const ay = s.chipCy + Math.sin(angle) * RADIUS - ICON_SIZE / 2;
+    // v0.16.18: opacity by bounds. Targeted icon always full opacity.
+    const iconCx = ax + ICON_SIZE / 2;
+    const iconCy = ay + ICON_SIZE / 2;
+    const inBounds = !homeRect || (
+      iconCx >= homeRect.left && iconCx <= homeRect.right &&
+      iconCy >= homeRect.top  && iconCy <= homeRect.bottom
+    );
     const isTarget = s.dragTarget === opt.label;
+    const finalOpacity = isTarget ? 1 : (inBounds ? 1 : 0.4);
     const scale = isTarget ? 1.2 : 1.0;
     const ringGlow = isTarget
       ? `0 0 16px ${tierColor},0 0 24px #fff`
       : `0 2px 8px rgba(0,0,0,.5)`;
     html += `<div data-option-target="${opt.label}" style="position:absolute;left:${ax}px;top:${ay}px;
       width:${ICON_SIZE}px;height:${ICON_SIZE}px;pointer-events:auto;cursor:pointer;
-      transform:scale(${scale});transition:transform .12s;">
+      transform:scale(${scale});transition:transform .12s, opacity .15s;
+      opacity:${finalOpacity};">
       <div style="width:${ICON_SIZE}px;height:${ICON_SIZE}px;border-radius:50%;
         background:${tierColor};border:2px solid ${isTarget?'#fff':tierColor+'cc'};
         box-shadow:${ringGlow};
@@ -1870,22 +1882,39 @@ function _renderAllyRadialFan(s) {
   </svg>`;
 
   // ── ALLY ICONS ────────────────────────────────────────────
+  // v0.16.18: items whose center lies OUTSIDE the interaction-row card
+  // get reduced opacity. Communicates layered relationship — overlay
+  // extends past the home card, dashboard content is still beneath.
+  // Bounds derived from the interaction-row element since that's where
+  // the brick chip lives. If the element can't be found, no fade applied.
+  const homeRect = _radialHomeBounds();
   allies.forEach((ally, i) => {
     // Distribute allies across the 120° arc centered on fanCenterAngle
     const step = (allies.length > 1) ? FAN_ARC_RAD / (allies.length - 1) : 0;
     const angle = center - FAN_ARC_RAD / 2 + i * step;
     const ax = s.chipCx + Math.cos(angle) * RADIUS - ICON_SIZE / 2;
     const ay = s.chipCy + Math.sin(angle) * RADIUS - ICON_SIZE / 2;
+    // v0.16.18: opacity based on whether icon center is inside home card
+    const iconCx = ax + ICON_SIZE / 2;
+    const iconCy = ay + ICON_SIZE / 2;
+    const inBounds = !homeRect || (
+      iconCx >= homeRect.left && iconCx <= homeRect.right &&
+      iconCy >= homeRect.top  && iconCy <= homeRect.bottom
+    );
+    const boundsOpacity = inBounds ? 1 : 0.4;
     const meta = (typeof PLAYER_META !== 'undefined' ? PLAYER_META[ally.cls] : null) || {};
     const clsColor = getCharUiStyle(ally.cls).color;
     const isTarget = s.dragTarget === ally.cls;
+    // Targeted ally always full opacity (player is actively pointing at it)
+    const finalOpacity = isTarget ? 1 : boundsOpacity;
     const hpPct = Math.max(0, Math.min(1, (ally.hp || 0) / Math.max(1, ally.hpMax || 10)));
     const hpBarColor = hpPct < 0.3 ? '#e44' : (hpPct < 0.6 ? '#fa3' : '#5d5');
     const scale = isTarget ? 1.2 : 1.0;
     const ringGlow = isTarget ? `0 0 16px ${clsColor},0 0 24px #fff` : `0 2px 8px rgba(0,0,0,.5)`;
     html += `<div data-ally-target="${ally.cls}" style="position:absolute;left:${ax}px;top:${ay}px;
       width:${ICON_SIZE}px;height:${ICON_SIZE}px;pointer-events:auto;cursor:pointer;
-      transform:scale(${scale});transition:transform .12s;">
+      transform:scale(${scale});transition:transform .12s, opacity .15s;
+      opacity:${finalOpacity};">
       <div style="width:${ICON_SIZE}px;height:${ICON_SIZE}px;border-radius:50%;
         background:${clsColor};border:2px solid ${isTarget?'#fff':clsColor+'cc'};
         box-shadow:${ringGlow};
@@ -1905,6 +1934,18 @@ function _renderAllyRadialFan(s) {
     </div>`;
   });
   return html;
+}
+
+// v0.16.18: bounds for the radial fade-beyond-card visual.
+// Returns the bounding client rect of the .interaction-row element (where
+// brick chips live), or null if not found. Radial items whose centers
+// fall outside this rect render at reduced opacity.
+function _radialHomeBounds() {
+  try {
+    const el = document.querySelector('.interaction-row');
+    if (!el) return null;
+    return el.getBoundingClientRect();
+  } catch (e) { return null; }
 }
 
 // CSS keyframe injection for the charging ring pulse
@@ -1987,18 +2028,21 @@ function _dashBrickChips(me) {
     }
     // Only wire pointer events for colors with defined actions today.
     // Other colors render as inert chips until 0.16 fills in abilities.
+    // v0.16.18: chip size bumped slightly (min-width 44→58, padding more
+    // generous, swatch 22→28) so bricks feel intentionally-sized and the
+    // hold-radial origin has more presence.
     const hasAction = (color === 'white' || color === 'gray');
     chips += `<div class="dash-brick-chip" data-brick-chip="${color}" data-color="${color}" `
       + (hasAction ? `onpointerdown="_holdStart(event, '${color}', this)" ` : '')
       + `style="`
       + `display:flex;flex-direction:column;align-items:center;justify-content:flex-start;`
-      + `padding:6px 4px 4px 4px;border-radius:6px;`
+      + `padding:9px 6px 6px 6px;border-radius:8px;`
       + (hasAction ? 'cursor:pointer;' : 'cursor:default;opacity:.85;')
-      + `background:${chipBg};border:2px solid ${chipBorder};min-width:44px;`
+      + `background:${chipBg};border:2px solid ${chipBorder};min-width:58px;`
       + `touch-action:none;user-select:none;-webkit-user-select:none;">`
-      + `<span style="width:22px;height:22px;border-radius:4px;background:${bg};`
-      + `box-shadow:0 1px 4px rgba(0,0,0,.5);margin-bottom:4px;"></span>`
-      + `<div style="display:flex;flex-wrap:wrap;justify-content:center;max-width:40px;">${pips}</div>`
+      + `<span style="width:28px;height:28px;border-radius:5px;background:${bg};`
+      + `box-shadow:0 1px 5px rgba(0,0,0,.55);margin-bottom:5px;"></span>`
+      + `<div style="display:flex;flex-wrap:wrap;justify-content:center;max-width:50px;">${pips}</div>`
       + `</div>`;
   });
   return chips;

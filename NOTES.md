@@ -2731,6 +2731,156 @@ UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
 
 ---
 
+### v0.16.18 — Card sizing for radial-overlay coexistence + radial fade-beyond-bounds
+
+> "I think we need to expand the size of the dynamic and brick cards,
+> so that the current hold tool does not get in the way of fusion drop,
+> both need to feel intentionally sized and comfortable in their space"
+>
+> "we can gray out/reduce opacity of radial menu when beyond bounds?
+> could be an elegant solution so we are not making huge spaces on
+> these cards to avoid an overlap of tools. handle it with slightly
+> larger space and enhanced visuals so it is clear what is happening"
+
+While prepping for v0.16.19 fusion-drag, Ross spotted the architectural
+collision incoming: the existing white-tier hold-radial overlay (~440px
+diameter) sprawls across the dashboard, overlapping head-card, dynamic
+zone, and interaction-row. Adding fusion-drag on top would compound the
+spatial conflict. Solution wasn't "make the cards bigger to contain the
+overlay" (would waste vertical space when content is small) but
+"make the overlay self-aware of card bounds + give cards more
+breathing room."
+
+Two paired changes:
+
+**1. Card sizing — modest, intentional bumps:**
+
+- `.dynamic-zone`: `min-height` 48 → 80, `padding` 8 → 14. Card has
+  visible presence even when content is just one flavor line.
+- `.interaction-row`: `padding` 10 → 16, internal `gap` 10 → 14, chip
+  row `gap` 6 → 10. Brick chips have room to breathe.
+- `.dash-brick-chip` (inline styled in `_dashBrickChips`):
+  `min-width` 44 → 58, `padding` 6/4 → 9/6, swatch 22×22 → 28×28,
+  pip-row `max-width` 40 → 50, swatch margin-bottom 4 → 5,
+  border-radius 6 → 8. Brick has the presence of a primary
+  interaction surface, not a tiny chip.
+
+This is option-3 from the spec sketch (content-driven, padding/sizing
+push the cards larger naturally), NOT option-1 (flex-grow into empty
+space). Empty space below the dashboard is fine when content is small;
+forcing cards to fill it would feel cramped when content IS large.
+
+**2. Radial fade-beyond-bounds:**
+
+The hold overlay (`_renderAllyRadialFan`, `_renderOptionRadialFan`)
+now tests each item's center against the `.interaction-row` bounding
+rect. Items inside → opacity 1. Items outside → opacity 0.4. Items
+the player is actively targeting (`s.dragTarget`) → always opacity 1
+regardless (player is pointing AT it, must be visible).
+
+New helper `_radialHomeBounds()` returns
+`document.querySelector('.interaction-row').getBoundingClientRect()`,
+or null if not found (no fade applied as fallback).
+
+The fade is per-icon, not gradient. Either inside the card or outside;
+binary. Cleanest visual; hard to misread.
+
+The power arc (the SVG curve wrapping the chip) and the central chip
+ring stay full-strength regardless of bounds — they're anchored to
+the brick and ARE the gesture indicator. Only the radial icons fade.
+
+This communicates layered relationship: "the gesture extends past
+the home card, but the dashboard content is still beneath in those
+regions." UNITY between tool and content.
+
+---
+
+**Files changed:** `players-core.js`, `players.html`, `test_players.html`,
+`NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Brick chips visibly bigger** — more presence, more comfortable
+   touch targets.
+3. **Dynamic zone has more visual weight** — even just flavor text
+   reads as a card, not a thin strip.
+4. **Interaction row breathes** — chips have room around them.
+5. **Hold a white brick (Fixer test):**
+   - Radial fans out as before
+   - Allies whose icon centers are INSIDE the interaction-row card:
+     full opacity
+   - Allies whose centers are OUTSIDE (above or beyond): 0.4 opacity
+   - Drag pointer toward an "outside" ally — as it becomes the target,
+     it lights back up to full opacity
+6. **Hold a gray brick:** option icons get same fade-by-bounds
+   treatment.
+7. **Power arc stays solid** regardless of where it visually extends.
+
+---
+
+**Risk surfaces:**
+
+- The fade threshold is binary (in/out). For radial layouts where
+  many icons land near the boundary, this could feel jumpy. If
+  noticeable, switch to a gradient based on distance-from-rect.
+  Watch in playtest.
+- `.interaction-row` as the "home card" for bounds is correct for
+  brick-originated holds. Future fusion-drag from bricks will use
+  the same anchor. If hold-gestures get added on chips OUTSIDE
+  the interaction-row (unlikely now that coin/cheese/icon use the
+  separate hold-resource system), this helper would need
+  per-color-target lookup.
+
+---
+
+**Next: v0.16.19 — fusion-drag.**
+
+Pending design questions for v0.16.19 (parking here so the work
+doesn't lose context):
+1. What does fusion mechanically DO right now? `renderFusion()` is
+   a "Coming Soon" stub. Building drag choreography into a
+   placeholder = wasted polish. Either:
+   (a) Spec the fusion mechanic first, then build drag against it
+   (b) Build drag with a v1 "fuse 2 same-color = +1 tier" mechanic
+       as starter game design
+   (c) Build drag UI that drops into a stub view that still says
+       "Coming Soon" but with a draggable target zone
+2. Where does the drop happen — into the dynamic zone (showing a
+   brick selector for the second ingredient), or onto another brick
+   chip directly (immediate fuse if compatible)?
+
+Defer answering until current sizing push is verified clean.
+
+---
+
+**Standards audit (rule #17 — push #38 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #11 (data/runtime/UI separation): characters.js untouched
+  (chip sizing is UI, not data); rumble.js untouched. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: tools (radial overlay) and content (cards) coexist
+    visually. The fade communicates layered relationship.
+  - ELEGANCE: smaller code change than expanding cards to contain
+    the overlay would have been. Per-item bounds check is ~6 lines
+    of math.
+  - EFFICIENCY: cards grow modestly, overlay self-manages —
+    neither becomes monstrously large.
+- Rule #19 (intuition + UNITY/ELEGANCE/EFFICIENCY): Ross's
+  intuition that the elegant fix was "make the overlay aware of
+  bounds" rather than "make the cards bigger to fit" was the right
+  read. I was about to default to bigger cards.
+- Rule #20 (grep duplicates): touched selectors verified to appear
+  exactly once. ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

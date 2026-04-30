@@ -116,16 +116,16 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .head-stats{flex:2;min-width:0;display:flex;flex-direction:column;gap:6px;}
 
 /* DYNAMIC ZONE (v0.16.9 — class-color outlined slot, intense pulse on player turn) */
-.dynamic-zone{position:relative;margin-bottom:10px;min-height:48px;border-radius:10px;border:1px solid var(--cls-color);padding:8px;background:var(--surface2);transition:border-color .25s ease, box-shadow .25s ease, min-height .25s ease;box-shadow:0 0 0 0 var(--cls-color);}
+.dynamic-zone{position:relative;margin-bottom:10px;min-height:80px;border-radius:10px;border:1px solid var(--cls-color);padding:14px;background:var(--surface2);transition:border-color .25s ease, box-shadow .25s ease, min-height .25s ease;box-shadow:0 0 0 0 var(--cls-color);}
 .dynamic-zone:empty{display:none;}
 .dynamic-zone > .card{border:none;background:transparent;padding:4px 6px;margin:0;}
 .dynamic-zone > #landing-result{margin:0;}
 .dynamic-zone.my-turn{border-color:var(--cls-color);box-shadow:0 0 18px var(--cls-color), inset 0 0 6px var(--cls-color);animation:dz-pulse 2.4s ease-in-out infinite;}
 @keyframes dz-pulse{0%,100%{box-shadow:0 0 12px var(--cls-color), inset 0 0 4px var(--cls-color);}50%{box-shadow:0 0 22px var(--cls-color), inset 0 0 8px var(--cls-color);}}
 
-/* INTERACTION ROW (v0.16.10 — bricks-only; coin/cheese moved to header) */
-.interaction-row{display:flex;flex-direction:column;gap:10px;padding:10px;background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;margin-bottom:10px;}
-.interaction-row .brick-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:center;}
+/* INTERACTION ROW (v0.16.10 — bricks-only; v0.16.18 sizing bump for breathing room) */
+.interaction-row{display:flex;flex-direction:column;gap:14px;padding:16px;background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;margin-bottom:10px;}
+.interaction-row .brick-chips{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center;}
 .res-chip{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:6px;flex:1;min-width:48px;max-width:90px;padding:clamp(4px, 1.5%, 8px) clamp(6px, 3%, 14px);background:var(--surface3);border-radius:8px;border:1px solid transparent;cursor:pointer;user-select:none;-webkit-user-select:none;transition:border-color .15s, background .15s, transform .1s;touch-action:none;}
 .res-chip:active{transform:scale(.95);}
 .res-chip.hold-active{border-color:var(--cls-color);box-shadow:0 0 8px var(--cls-color);transform:scale(1.05);}
