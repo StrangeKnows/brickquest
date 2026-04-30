@@ -3730,6 +3730,149 @@ dm_screen.html.
 
 ---
 
+### v0.16.27 — Event card hand-off to flavor at result-time + fix gold/blue/trap detection + strip WAITING FOR DM
+
+> "just finished rubble stacking, all fit in card, but no flavor text
+> after loot collection, same for red event, gold event different
+> resolution - waiting for DM, some flavor text, can get rid of
+> waiting for DM, same for yellow event, empty card after look
+> collection, on DM resolve the flavor text seems to be populating,
+> it ties in to event"
+
+Three layered bugs in v0.16.26 that I missed:
+
+**Bug 1: Cache populated but flavor never displayed before DM resolve.**
+
+v0.16.26 fixed detection threshold (result-fields, not `resolved:true`).
+But the EVENT CARD render check still gated on `!G.activeEvent.resolved`,
+which kept the event card on screen after loot distribution. The dz
+idle slot (where post-event flavor renders) doesn't activate while the
+event card is showing. Cache populated correctly; flavor sat unused.
+
+Fix: detection moved BEFORE the event-card render check. New gate
+`myEventDoneWithFlavor` on the event-card show condition: when result
+fields populate AND a themed flavor cached AND its key matches the
+current event, the event card stops rendering and the idle slot picks
+up the cached flavor. Falls back to event card if no flavor cached
+(neutral outcome) so player isn't left with nothing.
+
+Architecturally cleaner: the event card is for ACTIVE gameplay. Once
+gameplay completes (result fields populate), the post-event flavor
+takes over. DM still sees the event in the landing-events panel until
+they Mark Resolved — that's their separate workflow. UNITY: one player-
+facing render path for "event done."
+
+**Bug 2: `_eventHasResult` used wrong gold field.**
+
+v0.16.26 used `typeof ev.goldAmount === 'number'` as the gold trigger.
+But `goldAmount` is set at event CREATION (server.js:1140, 1397, 2416),
+not at resolution. So the gold-event flavor cache fired immediately
+when the event spawned, not after the player searched.
+
+Fix: switched to `ev.goldResult` (server.js:1638 — set when gold
+gameplay completes). Same pattern applied to:
+- `_eventOutcome.gold`: now reads `goldResult.amount` instead of
+  `goldAmount`. Rat bite case (amount=0) properly classifies as
+  unfavorable.
+- `_eventOutcome.trap`: now reads `trapResult.missed` for favorable
+  case (trap missed), falls through to unfavorable default.
+- `_eventOutcome.blue`: now reads `blueResult.success` instead of
+  always-favorable default.
+
+Full result-field roster in `_eventHasResult`: `grayRubbleResult`,
+`redResult`, `purpleResult`, `whiteResult`, `blackResult`,
+`greenResult`, `goldResult`, `blueResult`, `trapResult`,
+`riddleWinner`, `riddleExpired`, `resolved`. Matches the server
+event-cleanup whitelist at server.js:2365.
+
+**Bug 3: "WAITING FOR DM" footer text was redundant.**
+
+Two render sites:
+- `players-core.js:5524` — gold-game finish container
+- `players-core.js:6741` — buildResolutionCard else branch
+
+Both stripped. The dz idle slot now carries the "waiting" beat through
+themed flavor — explicit "WAITING FOR DM" text was clutter alongside
+the verdict line.
+
+---
+
+**Files changed:** `players-core.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, html files, boardFx,
+dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Gray rubble:** stack the bricks. The instant the last brick locks,
+   loot distributed, themed flavor should appear in dz (replacing the
+   event card). DM panel still shows event in landing-events (for DM
+   to Mark Resolved). DM clicks Mark Resolved → no visible change on
+   player dashboard (already showing flavor).
+3. **Red trial of hand:** complete the trial. Same pattern — event
+   card replaced by themed flavor immediately on result, not after DM
+   resolve.
+4. **Gold mini-game (search/torch):** search succeeds → "Coins jingle
+   in your pocket..." (favorable). Rat bite case (found nothing AND
+   took damage) → "The coins were fool's gold..." or similar
+   (unfavorable). No "WAITING FOR DM" footer.
+5. **Yellow riddle:** answer correctly → "Knowledge unlocked..."
+   (favorable). Wrong answer → "The riddle outlasted you..."
+   (unfavorable).
+6. **Blue arcane shrine:** brick obtained → favorable flavor. Failed
+   memory challenge → unfavorable.
+7. **Trap:** if trap missed (lucky) → favorable. Otherwise unfavorable.
+8. **Persists:** themed flavor stays through DM resolve, between turns,
+   until next event of mine starts.
+
+---
+
+**Risk surfaces:**
+
+- Outcome detection still has heuristic gaps:
+  - monster/boss always returns 'favorable' (no result-field signal
+    for win vs flee yet)
+  - white shrine assumes `whiteResult.healed` truthy = favorable,
+    falsy = unfavorable — may need refining if white has multiple
+    sub-outcomes
+- Event-card hand-off relies on themed flavor being CACHED. If
+  outcome is 'neutral' (no flavor available), event card stays up.
+  This is intentional fallback but worth noting — neutral cases
+  show empty event card body until DM resolve.
+- The `myEventDoneWithFlavor` check requires the cache key to match
+  current event key. If cache was populated for event A and event A
+  is somehow re-used or restated, edge-case behavior unknown. Watch
+  for weird cache stickiness in playtest.
+
+---
+
+**Standards audit (rule #17 — push #47 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players-core.js only — no markup or CSS
+  change. ✓
+- Rule #6 (diagnostic-first): lessons learned. v0.16.25 + v0.16.26
+  shipped detection logic without testing the ACTUAL render path
+  (assumed cached flavor would just appear). v0.16.27 fixes the
+  render path AFTER playtest revealed the cache wasn't being
+  consumed. Better to have shipped a diagnostic in v0.16.25 to
+  confirm the cache-to-render path worked end-to-end before
+  declaring done. This is the same diagnostic-first lesson that
+  should have caught v0.16.18's geometric fade issue earlier.
+- Rule #19 (intuition): partial drift. The "post-event flavor"
+  concept seemed straightforward (cache outcome → render in idle
+  slot) but the gating logic between event-card and idle-slot
+  needed careful thought up front. Should have traced the full
+  render path mentally before coding.
+- Rule #11 (data/runtime/UI): held. Fixed gold/trap/blue field
+  reads in `_eventOutcome` (data/runtime), gating in
+  `_dashDynamicZone` (UI). Right separation. ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

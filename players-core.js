@@ -2079,38 +2079,24 @@ function _dashDynamicZone(me) {
   const rumbleHtml = renderRumbleCard(me);
   if (rumbleHtml) { html += rumbleHtml; active = true; }
 
-  // 2. Event card — the #landing-result container, populated by restoreActiveEvent.
-  const hasMyActiveEvent = isMyTurn && G.phase === 'land' && !_pendingResult
-    && G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved;
-  const hasSharedRiddle = !isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle'
-    && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired);
-  const hasSharedTrial = !isMyTurn && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand';
-  if (hasMyActiveEvent || hasSharedRiddle || hasSharedTrial) {
-    html += '<div id="landing-result"></div>';
-    active = true;
-    // Force-reset hold-surface state when event takes priority — hold
-    // gestures are blocked while event active anyway, but if a surface
-    // was open and an event arrives, snap back to event display.
-    if (_zoneState !== 'idle') _zoneState = 'idle';
-  }
-
-  // v0.16.25: Detect "event just finished" — populated result fields are
-  // the signal that gameplay completed and loot distributed. Captures the
-  // outcome BEFORE DM clicks "Mark Resolved" so player sees themed flavor
-  // immediately after their turn outcome lands, not after a DM-mediated
-  // delay. Cache persists until the next event starts (different key) —
-  // no time-based expiry. Player keeps seeing the verdict while sitting.
-  // v0.16.26: trigger threshold lowered from `resolved:true` to "any
-  // result field present" per Ross spec — flavor lands at loot
-  // distribution, persists until next ambient-refresh trigger.
+  // v0.16.27: Post-event flavor detection runs BEFORE the event-card
+  // render check so the cache populates first, and the event-card
+  // gating can use the cache to decide: show event card OR show themed
+  // flavor in idle slot. Was firing correctly in v0.16.26, but the
+  // event card kept rendering through result-display phase, so the
+  // idle slot never got a chance to surface the cached flavor.
+  // v0.16.27: detection moved up; event card gated off when result
+  // fields populated AND outcome flavor available.
   function _eventHasResult(ev) {
     if (!ev) return false;
+    // v0.16.27: full roster of server-side *Result fields. goldAmount
+    // was wrong — it's set at event creation, not resolution. goldResult
+    // is the resolution signal. Same pattern: blueResult, trapResult.
     return !!(
       ev.grayRubbleResult || ev.redResult || ev.purpleResult ||
       ev.whiteResult || ev.blackResult || ev.greenResult ||
+      ev.goldResult || ev.blueResult || ev.trapResult ||
       ev.riddleWinner || ev.riddleExpired ||
-      // gold variants set goldAmount on resolution
-      (typeof ev.goldAmount === 'number') ||
       ev.resolved
     );
   }
@@ -2139,6 +2125,32 @@ function _dashDynamicZone(me) {
     if (_lastResolvedEvent && _lastResolvedEvent.key !== newKey) {
       _lastResolvedEvent = null;
     }
+  }
+
+  // 2. Event card — the #landing-result container, populated by restoreActiveEvent.
+  // v0.16.27: Once result fields populate AND we have themed post-event
+  // flavor cached, gate the event card OFF so the idle slot can render
+  // the verdict flavor. The event card's "result display" phase is now
+  // owned by post-event flavor — UNITY: one render path for "event done"
+  // from the player's POV (DM still sees event in landing-events panel
+  // until they Mark Resolved). Falls back to event card if no flavor
+  // cached (e.g. neutral outcome) so player isn't left with empty card.
+  const myEventDoneWithFlavor = G.activeEvent && G.activeEvent.cls === MY_CLASS
+    && _eventHasResult(G.activeEvent) && _lastResolvedEvent
+    && _lastResolvedEvent.key === ((G.activeEvent.cls||'') + '|' + (G.activeEvent.roll||'') + '|' + (G.activeEvent.evType||''));
+  const hasMyActiveEvent = isMyTurn && G.phase === 'land' && !_pendingResult
+    && G.activeEvent && G.activeEvent.cls === MY_CLASS && !G.activeEvent.resolved
+    && !myEventDoneWithFlavor;
+  const hasSharedRiddle = !isMyTurn && G.activeEvent && G.activeEvent.evType === 'riddle'
+    && (G.activeEvent.riddleActive || G.activeEvent.riddleWinner || G.activeEvent.riddleExpired);
+  const hasSharedTrial = !isMyTurn && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand';
+  if (hasMyActiveEvent || hasSharedRiddle || hasSharedTrial) {
+    html += '<div id="landing-result"></div>';
+    active = true;
+    // Force-reset hold-surface state when event takes priority — hold
+    // gestures are blocked while event active anyway, but if a surface
+    // was open and an event arrives, snap back to event display.
+    if (_zoneState !== 'idle') _zoneState = 'idle';
   }
 
   // 3. Hold-invoked surface (market / cheese / party) — only when no
@@ -4493,10 +4505,11 @@ function _eventOutcome(ev, myCls) {
       if (ev.riddleWinner || ev.riddleExpired) return 'unfavorable';
       return 'neutral';
     case 'gold':
-      // Gold mini-game — if goldVariant ran and resolved with gain, favorable.
-      // ev.goldAmount > 0 indicates gain. (Minimal heuristic; refine later.)
-      if (typeof ev.goldAmount === 'number' && ev.goldAmount > 0) return 'favorable';
-      if (typeof ev.goldAmount === 'number') return 'unfavorable';
+      // Gold mini-game — goldResult.amount > 0 = found gold; <=0 = nothing
+      // (or rat bite, etc.). v0.16.27: switched from goldAmount (set at
+      // event creation) to goldResult.amount (set at gameplay completion).
+      if (ev.goldResult && (ev.goldResult.amount || 0) > 0) return 'favorable';
+      if (ev.goldResult) return 'unfavorable';
       return 'neutral';
     case 'monster':
     case 'boss':
@@ -4507,10 +4520,15 @@ function _eventOutcome(ev, myCls) {
     case 'trap':
     case 'doubletrap':
       // Traps generally damage the player — unfavorable by default.
+      // v0.16.27: now reads trapResult — if trap missed, favorable.
+      if (ev.trapResult && ev.trapResult.missed) return 'favorable';
       return 'unfavorable';
     case 'blue':
-      // Arcane Shrine — brick gain favorable; otherwise neutral.
-      return 'favorable';
+      // Arcane Shrine — blueResult.success = brick obtained.
+      // v0.16.27: now reads blueResult instead of always-favorable default.
+      if (ev.blueResult && ev.blueResult.success) return 'favorable';
+      if (ev.blueResult) return 'unfavorable';
+      return 'neutral';
     default:
       return 'neutral';
   }
@@ -5510,9 +5528,11 @@ function finishGoldGame(amount, total, wrongTap, cheeseFound) {
     + statLine
     + cheeseLine
     + hpLine
-    + (flav ? '<div style="font-size:13px;color:var(--text-dim);font-style:italic;line-height:1.5;margin-bottom:6px;">' + flav + '</div>' : '')
-    + '<div style="font-size:10px;color:var(--text-faint);font-family:Cinzel,serif;letter-spacing:.04em;">WAITING FOR DM</div>'
+    + (flav ? '<div style="font-size:13px;color:var(--text-dim);font-style:italic;line-height:1.5;">' + flav + '</div>' : '')
     + '</div>';
+  // v0.16.27: "WAITING FOR DM" footer stripped — post-event flavor in
+  // dz idle slot now carries this beat. The card itself just shows
+  // gameplay verdict; no need for explicit "waiting" copy.
   // v0.15.38 NOTE: gold-game finish renders into #gold-game-container (a child
   // of #landing-result) via this custom HTML rather than buildResolutionCard.
   // Migration to buildResolutionCard would be cleaner but requires routing
@@ -6728,7 +6748,8 @@ function buildResolutionCard(opts) {
       +      '✋ ' + collectFlavor
       +    '</button>';
   } else {
-    html += '<div style="font-size:10px;color:var(--text-faint);margin-top:6px;font-family:Cinzel,serif;letter-spacing:.04em;">WAITING FOR DM</div>';
+    // v0.16.27: "WAITING FOR DM" footer stripped — post-event flavor in
+    // dz idle slot carries this beat once result fields populate.
   }
   html += '</div></div>';
 
