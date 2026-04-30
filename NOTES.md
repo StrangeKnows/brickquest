@@ -2881,6 +2881,65 @@ Defer answering until current sizing push is verified clean.
 
 ---
 
+### v0.16.19 — Diagnostic: surface radial-bounds rect to debug missing fade
+
+> "what is determining opacity in radial cuurrently?"
+
+Ross's playtest screenshot (Windows Brave, white-tier hold on Fixer)
+shows ally icons clearly OUTSIDE the interaction-row card all rendering
+at full opacity — the v0.16.18 fade-beyond-bounds isn't firing. Per
+rule #6 (diagnostic-first for non-trivial bugs), this push ships
+diagnostic instrumentation to surface what's actually happening BEFORE
+guessing at a fix.
+
+**Diagnostics added to existing HOLD DEBUG panel:**
+
+- `_radialHomeBounds()` result displayed inline as
+  `L:N T:N R:N B:N` or `NULL (selector miss?)` if the helper returns
+  null. Tells us if `document.querySelector('.interaction-row')` is
+  finding the element at overlay-render time.
+
+**Visual bounds outline:**
+
+- Yellow dashed rectangle drawn on screen at the bounds rect
+  coordinates. Lets us see VISUALLY where the in/out cutoff is and
+  compare to where the radial icons actually land.
+
+**What we'll learn from playtest:**
+
+1. If rect is `NULL` → selector mismatch or DOM timing issue.
+   `.interaction-row` isn't being found when the radial renders.
+2. If rect values are reasonable but icons still don't fade → the
+   per-icon math (icon center vs rect bounds) has a coordinate
+   issue — e.g. `getBoundingClientRect` returns viewport coords but
+   icon positions are in some other system.
+3. If the dashed outline visually contains all the icons → the fade
+   IS working as written, but we need a different "outside" definition
+   (maybe the dashboard-host bounds, not interaction-row).
+
+After Ross reports what the panel shows, the fix is whichever of
+the above three.
+
+**Files changed:** `players-core.js`, `NOTES.md`.
+
+UNTOUCHED: players.html, test_players.html (no UI behavior changes,
+only the existing debug overlay gains new fields).
+
+---
+
+**Standards audit (rule #17 — push #39 in S015 continuation):**
+
+- Rule #6 (diagnostic-first for non-trivial bugs): held this push.
+  Did NOT speculate at a fix without first surfacing real values.
+  The temptation to "probably it's the timing — let me wrap it in
+  a setTimeout" was real and rejected.
+- Rule #20 (grep duplicates): N/A (no new selectors).
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players-core.js only; no HTML changes
+  needed. ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

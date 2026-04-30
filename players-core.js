@@ -1592,10 +1592,20 @@ function _renderHoldOverlay() {
   // Diagnostic panel — always visible during hold so we can see what's
   // happening in the gesture state machine. REMOVE this block once the
   // gesture is verified working in the field.
+  // v0.16.19 DIAGNOSTIC: surface _radialHomeBounds rect so we can see
+  // why fade-beyond-bounds isn't visually firing in the field. If rect
+  // is null, the helper isn't finding .interaction-row. If rect values
+  // look wrong vs chipCx/Cy, there's a coordinate-system mismatch.
+  let _diagBounds = null;
+  try { _diagBounds = _radialHomeBounds(); } catch(e) {}
+  const _boundsStr = _diagBounds
+    ? `L:${Math.round(_diagBounds.left)} T:${Math.round(_diagBounds.top)} R:${Math.round(_diagBounds.right)} B:${Math.round(_diagBounds.bottom)}`
+    : 'NULL (selector miss?)';
+
   let html = `<div style="position:absolute;top:8px;right:8px;background:#0a0a0a;
     border:1px solid #444;padding:6px 8px;border-radius:6px;
     font-family:ui-monospace,monospace;font-size:10px;color:#0f0;
-    pointer-events:none;line-height:1.4;max-width:240px;">
+    pointer-events:none;line-height:1.4;max-width:280px;">
     <div style="color:#ff0;font-weight:bold;">HOLD DEBUG</div>
     color: ${s.color}<br>
     elapsed: ${Math.round(elapsed)}ms<br>
@@ -1604,12 +1614,26 @@ function _renderHoldOverlay() {
     tier: ${s.tier} / max ${s.maxCharges}<br>
     isDrag: ${s.isDrag}<br>
     dragTarget: ${s.dragTarget || 'none'}<br>
-    chipCx,Cy: ${Math.round(s.chipCx)},${Math.round(s.chipCy)}
+    chipCx,Cy: ${Math.round(s.chipCx)},${Math.round(s.chipCy)}<br>
+    <span style="color:#ff8;">interaction-row rect:</span><br>
+    ${_boundsStr}
   </div>`;
 
   // Charging visuals — only after hold threshold
   if (inHoldMode) {
     const tierColor = BRICK_COLORS[s.color] || '#fff';
+
+    // v0.16.19 DIAGNOSTIC: draw the bounds rect outline so we can see
+    // visually where the in/out cutoff is supposed to be. Yellow dashed
+    // border. Remove once fade-beyond-bounds is confirmed working.
+    if (_diagBounds) {
+      html += `<div style="position:absolute;
+        left:${_diagBounds.left}px;top:${_diagBounds.top}px;
+        width:${_diagBounds.right - _diagBounds.left}px;
+        height:${_diagBounds.bottom - _diagBounds.top}px;
+        border:2px dashed #ff0;pointer-events:none;
+        box-sizing:border-box;"></div>`;
+    }
 
     // Subtle chip ring — shows the gesture is active, no tier info embedded
     const ringSize = 64;
