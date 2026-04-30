@@ -112,7 +112,7 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .head-id .head-icon{font-size:28px;line-height:1;}
 .head-id .head-name{font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;display:flex;align-items:center;}
 .head-id .head-zone{font-size:11px;color:var(--text-dim);}
-.head-resources{display:flex;flex-direction:column;gap:6px;align-items:flex-start;margin-top:auto;margin-bottom:8%;}
+.head-resources{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;justify-content:center;align-items:stretch;align-self:stretch;margin-top:auto;margin-bottom:8%;}
 .head-stats{flex:2;min-width:0;display:flex;flex-direction:column;gap:6px;}
 
 /* DYNAMIC ZONE (v0.16.9 — class-color outlined slot, intense pulse on player turn) */
@@ -126,10 +126,10 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 /* INTERACTION ROW (v0.16.10 — bricks-only; coin/cheese moved to header) */
 .interaction-row{display:flex;flex-direction:column;gap:10px;padding:10px;background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;margin-bottom:10px;}
 .interaction-row .brick-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:center;}
-.res-chip{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:8px;min-width:64px;padding:8px 14px;background:var(--surface3);border-radius:8px;border:1px solid transparent;cursor:pointer;user-select:none;-webkit-user-select:none;transition:border-color .15s, background .15s, transform .1s;touch-action:none;}
+.res-chip{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:6px;flex:1;min-width:48px;max-width:90px;padding:clamp(4px, 1.5%, 8px) clamp(6px, 3%, 14px);background:var(--surface3);border-radius:8px;border:1px solid transparent;cursor:pointer;user-select:none;-webkit-user-select:none;transition:border-color .15s, background .15s, transform .1s;touch-action:none;}
 .res-chip:active{transform:scale(.95);}
-.res-chip-glyph{font-size:20px;line-height:1;}
-.res-chip-num{font-family:'Cinzel',serif;font-size:18px;font-weight:700;margin:0;}
+.res-chip-glyph{font-size:clamp(14px, 4vw, 20px);line-height:1;}
+.res-chip-num{font-family:'Cinzel',serif;font-size:clamp(13px, 3.5vw, 18px);font-weight:700;margin:0;}
 .res-chip[data-res="gold"] .res-chip-num{color:#F5D000;}
 .res-chip[data-res="cheese"] .res-chip-num{color:#FFD96A;}
 

@@ -2179,6 +2179,93 @@ iteration loop.
 
 ---
 
+### v0.16.14 — Coin/cheese: side-by-side default + responsive sizing + wrap fallback
+
+> "coind and cheese should be side by side, unless there is not enough
+> room for them, then stack centered within the available space on
+> card. zoomed out and in all the way, looks like there is room on each
+> for them to be stacked horizontally both times. cant they be a bit
+> smaller if needed as well? are they not responsive to display size?"
+
+v0.16.13 forced vertical-stack by default. Wrong heuristic — the
+columns DO have room for side-by-side in both orientations on most
+viewports. The chips weren't responsive (fixed `min-width:64px`,
+fixed font sizes), so they appeared too large to fit even when
+they could.
+
+**Fix: let CSS do the responsive work.**
+
+**1. `.head-resources` is now `flex-direction:row` with `flex-wrap:wrap`.**
+Side-by-side by default. When the column is genuinely too narrow,
+flex-wrap kicks in and they stack. `justify-content:center` keeps
+them centered (in the row when side-by-side; visually centered in
+the column when wrapped). `align-self:stretch` gives the chip block
+the full width of head-id so chips have room to spread.
+
+**2. `.res-chip` is now responsive.**
+- `flex:1` — chips share available width equally
+- `min-width:48px` — comfortable touch target floor (was 64px fixed)
+- `max-width:90px` — caps so they don't sprawl in landscape (new)
+- `padding:clamp(4px, 1.5%, 8px) clamp(6px, 3%, 14px)` — scales
+  with viewport, smaller when squeezed
+- `gap:6px` — tighter inner spacing (was 8px)
+
+**3. Glyph and number font sizes use `clamp()`.**
+- `.res-chip-glyph` — `font-size:clamp(14px, 4vw, 20px)`
+  (was fixed 20px)
+- `.res-chip-num` — `font-size:clamp(13px, 3.5vw, 18px)`
+  (was fixed 18px)
+
+The `clamp(min, preferred, max)` pattern lets the browser scale
+naturally with viewport width, so the chips look right at every
+zoom level and in both orientations without fixed breakpoints.
+
+UNITY: one rule for chip layout that handles all viewport sizes —
+no media queries, no JS branching, no orientation-detection.
+ELEGANCE: CSS does the responsive work. EFFICIENCY: zero added
+complexity, just better-chosen flex/clamp values.
+
+---
+
+**Files changed:** `players.html`, `test_players.html`, `NOTES.md`.
+
+UNTOUCHED: players-core.js, server.js, rumble.js, characters.js, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Landscape, default zoom:** coin + cheese side-by-side in the
+   head-id column.
+3. **Landscape, zoomed in:** chips remain side-by-side (responsive
+   sizing keeps them small enough); fall back to vertical stack
+   only when truly squeezed.
+4. **Portrait, default zoom:** side-by-side if room exists, wrapped
+   to stack if not — let the browser decide.
+5. **Portrait, zoomed in:** likely stacks as fallback. Centered in
+   the available space.
+6. **Both orientations:** chips look proportional to the rest of
+   the card — not overly large, not too small.
+
+---
+
+**Standards audit (rule #17 — push #34 in S015 continuation):**
+
+Checked for duplicate CSS selectors with grep before shipping (rule
+#20 lesson from v0.16.12). All `.head-*` and `.res-chip` selectors
+appear exactly once in each file. ✓
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): one CSS rule covers all
+  viewport sizes — no JS, no media queries, no orientation hacks.
+  This is the elegant version.
+- Rule #19 (intuition): trusted Ross's observation ("looks like
+  there is room") over my v0.16.13 default-to-stack pessimism.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
