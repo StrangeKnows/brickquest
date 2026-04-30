@@ -848,16 +848,15 @@ function collapsibleCard(id, titleHtml, bodyHtml, startOpen) {
 // Class signature/secondary tables live in characters.js (Phase 2 consolidation).
 // Access via getSignature(cls) / getSecondary(cls) helpers.
 
-// ── HEADER (v0.16.9 redesign) ──
-// Horizontal-split card: identity (avatar + class name + zone + conn-dot)
-// on the left, HP big number + bar + shield label/count + pips on the
-// right. On portrait, the .head-stats wraps below .head-id automatically
-// (flex-wrap on .head-card). HP bar width is now bounded by .head-stats
-// container — fixes v0.16.8 overflow where bar read as full-viewport.
+// ── HEADER (v0.16.10 redesign) ──
+// Horizontal-split card: identity (avatar + class name + zone + conn-dot
+// + coin + cheese chips) on the left, HP big number + bar + shield on
+// the right. Coin and cheese chips moved here from the interaction row
+// (which was previously two-layer; now bricks-only). Fills the empty
+// space below the name/zone block in the identity column.
 //
 // Conn-dot reads from global _connState (set by setConn() in players.html
-// or test_players.html connect handlers). The dot also has id="conn-dot"
-// so direct DOM updates from setConn keep working between renders.
+// or test_players.html connect handlers).
 function _dashHeader(me) {
   const isOH = me.hp > me.hpMax;
   const pct = Math.min(100, Math.max(0, Math.round(me.hp / me.hpMax * 100)));
@@ -872,6 +871,8 @@ function _dashHeader(me) {
   const className = meta.name || MY_CLASS;
   const classIcon = meta.icon || '◆';
   const connClass = (typeof _connState !== 'undefined' && _connState) ? 'on' : 'off';
+  const goldVal = _displayed(me, 'gold');
+  const cheeseVal = _displayed(me, 'cheese');
 
   const statuses = (me.statusEffects || []).map(s => `<span class="status-badge ${s}">${s}</span>`).join('');
   const debuff = G.movementDebuffs?.[MY_CLASS];
@@ -891,10 +892,22 @@ function _dashHeader(me) {
 
   return `<div class="head-card">
     <div class="head-id">
-      <div class="head-icon">${classIcon}</div>
-      <div style="flex:1;">
-        <div class="head-name">${className}<span class="conn-dot ${connClass}" id="conn-dot" title="Connection status"></span></div>
-        <div class="head-zone">${space?.label || 'Start'}</div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="head-icon">${classIcon}</div>
+        <div style="flex:1;">
+          <div class="head-name">${className}<span class="conn-dot ${connClass}" id="conn-dot" title="Connection status"></span></div>
+          <div class="head-zone">${space?.label || 'Start'}</div>
+        </div>
+      </div>
+      <div class="head-resources">
+        <div class="res-chip" data-res="gold" data-zone-trigger="market" title="Hold to open market">
+          <span class="res-chip-glyph">🪙</span>
+          <span class="res-chip-num stat-num">${goldVal}</span>
+        </div>
+        <div class="res-chip" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options">
+          <span class="res-chip-glyph">🧀</span>
+          <span class="res-chip-num stat-num">${cheeseVal}</span>
+        </div>
       </div>
     </div>
     <div class="head-stats">
@@ -1715,29 +1728,13 @@ function _dashBrickChips(me) {
   return chips;
 }
 
-// ── INTERACTION ROW (v0.16.9 redesign) ──
-// Two layers in a single rounded card:
-//   Layer 1 (top):    coin chip + cheese chip with breathing room
-//   Layer 2 (bottom): brick chips (existing tier-charge hold behavior)
-// Avatar chip removed — class icon in the header is the avatar reference
-// (v0.16.10+ will wire holding it for party invocation).
-//
-// Coin and cheese chips have data-zone-trigger attributes hinting at which
-// dynamic zone surface their hold-gesture should invoke (wired in v0.16.10).
+// ── INTERACTION ROW (v0.16.10 redesign) ──
+// Bricks-only now. Coin and cheese moved up to the header card
+// (.head-resources inside .head-id). Brick chips retain existing
+// tier-charge hold behavior. v0.16.11+ will add fusion-drag gesture
+// from a brick to the dynamic zone.
 function _dashInteractionRow(me) {
-  const goldVal = _displayed(me, 'gold');
-  const cheeseVal = _displayed(me, 'cheese');
   return `<div class="interaction-row">
-    <div class="resource-chips">
-      <div class="res-chip" data-res="gold" data-zone-trigger="market" title="Hold to open market">
-        <span class="res-chip-glyph">🪙</span>
-        <span class="res-chip-num stat-num">${goldVal}</span>
-      </div>
-      <div class="res-chip" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options">
-        <span class="res-chip-glyph">🧀</span>
-        <span class="res-chip-num stat-num">${cheeseVal}</span>
-      </div>
-    </div>
     <div class="brick-chips">
       ${_dashBrickChips(me)}
     </div>

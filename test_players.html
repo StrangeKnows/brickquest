@@ -106,12 +106,13 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .dash-surface{display:none;min-height:100%;padding-bottom:calc(160px + env(safe-area-inset-bottom,0px));}
 .dash-surface.active{display:block;}
 
-/* HEADER CARD (v0.16.9 — horizontal split: identity left, HP/shield right) */
+/* HEADER CARD (v0.16.10) */
 .head-card{background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;padding:12px;margin-bottom:10px;display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;}
-.head-id{display:flex;align-items:center;gap:10px;flex:1;min-width:140px;}
+.head-id{display:flex;flex-direction:column;gap:10px;flex:1;min-width:140px;}
 .head-id .head-icon{font-size:28px;line-height:1;}
 .head-id .head-name{font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;display:flex;align-items:center;}
 .head-id .head-zone{font-size:11px;color:var(--text-dim);}
+.head-resources{display:flex;gap:10px;align-items:stretch;}
 .head-stats{flex:2;min-width:200px;display:flex;flex-direction:column;gap:6px;}
 
 /* DYNAMIC ZONE (v0.16.9 — class-color outlined slot, intense pulse on player turn) */
@@ -122,9 +123,8 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .dynamic-zone.my-turn{border-color:var(--cls-color);box-shadow:0 0 18px var(--cls-color), inset 0 0 6px var(--cls-color);animation:dz-pulse 2.4s ease-in-out infinite;}
 @keyframes dz-pulse{0%,100%{box-shadow:0 0 12px var(--cls-color), inset 0 0 4px var(--cls-color);}50%{box-shadow:0 0 22px var(--cls-color), inset 0 0 8px var(--cls-color);}}
 
-/* INTERACTION ROW (v0.16.9 — two layers: resources top, bricks bottom) */
+/* INTERACTION ROW (v0.16.10 — bricks-only; coin/cheese moved to header) */
 .interaction-row{display:flex;flex-direction:column;gap:10px;padding:10px;background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;margin-bottom:10px;}
-.interaction-row .resource-chips{display:flex;gap:14px;align-items:stretch;justify-content:center;}
 .interaction-row .brick-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:center;}
 .res-chip{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:8px;min-width:64px;padding:8px 14px;background:var(--surface3);border-radius:8px;border:1px solid transparent;cursor:pointer;user-select:none;-webkit-user-select:none;transition:border-color .15s, background .15s, transform .1s;touch-action:none;}
 .res-chip:active{transform:scale(.95);}

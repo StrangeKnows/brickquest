@@ -1846,6 +1846,96 @@ events.
 
 ---
 
+### v0.16.10 — Coin + cheese chips moved into header card
+
+> "so close, lets move coin and cheese back up, will fit perfectly on
+> upper card now in the space below icon player tag"
+
+v0.16.9's two-layer interaction row left the space below name+zone in
+the head-id column empty while filling the bottom card with two layers
+(resources + bricks). Ross's read: those resources fit better in the
+empty header space, and the interaction row simplifies to bricks-only.
+
+**Change:**
+
+- **Coin + cheese res-chips moved** from `.interaction-row .resource-chips`
+  (top layer) into the header card's `.head-id` column, in a new
+  `.head-resources` block below the name/zone identity row.
+- **`.head-id` switched** from `align-items:center` (horizontal layout)
+  to `flex-direction:column` so the identity row and resources stack
+  vertically inside the left column of the head-card.
+- **`.interaction-row` simplified** — removed `.resource-chips`
+  sub-element, now contains only `.brick-chips`. Still a rounded card
+  with `padding:10px` so bricks have visual containment.
+- **`_dashHeader`** rewritten: identity row inside its own wrapper,
+  followed by `.head-resources` containing the two chips with their
+  existing `data-zone-trigger` attributes (still inert; v0.16.11
+  wires the hold-gestures).
+- **`_dashInteractionRow`** simplified to just brick chips.
+
+**Files changed:** `players-core.js`, `players.html`, `test_players.html`,
+`NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx.js, boardFx.css.
+
+---
+
+**Layout result (landscape):**
+
+```
+┌─ HEAD CARD ────────────────────────────────────────┐
+│ ┌── .head-id ─────┐  ┌── .head-stats ──────────┐ │
+│ │ [icon] Name •   │  │ HP big / max + bar      │ │
+│ │        Zone     │  │ SHIELD label + count    │ │
+│ │                 │  │ + pips                  │ │
+│ │ [coin] [cheese] │  │ (statuses, badges)      │ │
+│ └─────────────────┘  └──────────────────────────┘ │
+└────────────────────────────────────────────────────┘
+┌─ DYNAMIC ZONE (class-color border, pulse on turn) ─┐
+│ flavor / event / rumble                             │
+└─────────────────────────────────────────────────────┘
+┌─ INTERACTION ROW (bricks only) ─────────────────────┐
+│ [brick] [brick] [brick]                             │
+└─────────────────────────────────────────────────────┘
+```
+
+Portrait: `.head-card` flex-wrap kicks in — `.head-stats` stacks below
+`.head-id`. Coin + cheese remain in the head-id column either way.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Coin + cheese chips visible inside header card**, beneath the
+   class name + zone label, on the LEFT side.
+3. **Interaction row is bricks-only** at the bottom — no resource chips
+   there anymore.
+4. **chipPulse arrivals** on coin/cheese should land on the chips in
+   their new header position. (Finder helpers query
+   `.res-chip[data-res="..."]` so they work regardless of where the
+   chip lives in the DOM.)
+5. Existing brick hold-tier still works.
+6. Header card in landscape is still one row (identity left, stats
+   right); in portrait still wraps cleanly.
+7. Dynamic zone class-color border + my-turn pulse still right.
+
+---
+
+**Standards audit (rule #17 — push #30 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: each card has one clear purpose now — head holds identity
+    + survival + spendables, dynamic zone holds narrative state,
+    interaction row holds the interactive brick layer
+  - EFFICIENCY: filled the empty space in the head-id column, removed
+    a sub-component (`.resource-chips` layer) from interaction row.
+    Visual density better, code simpler.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -179,23 +179,21 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   50%      { box-shadow:0 0 22px var(--cls-color), inset 0 0 8px var(--cls-color); }
 }
 
-/* INTERACTION ROW (v0.16.9 — two layers: resources on top, bricks on bottom)
-   Layer 1 (top):    coin chip + cheese chip with breathing room
-   Layer 2 (bottom): brick chips (existing tier-charge hold behavior)
-   Resource avatar removed — class icon in header is the avatar reference. */
+/* INTERACTION ROW (v0.16.10 — bricks-only)
+   Single rounded card holding the brick chips. Coin + cheese moved to
+   the header card (.head-resources). Bricks remain interactive with
+   existing tier-charge hold behavior. v0.16.11+ adds fusion-drag from
+   brick to dynamic zone. */
 .interaction-row{
   display:flex;flex-direction:column;gap:10px;
   padding:10px;
   background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;
   margin-bottom:10px;
 }
-.interaction-row .resource-chips{
-  display:flex;gap:14px;align-items:stretch;justify-content:center;
-}
 .interaction-row .brick-chips{
   display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:center;
 }
-/* RESOURCE CHIP — coin + cheese only in v0.16.9 (avatar removed) */
+/* RESOURCE CHIP — coin + cheese (now lives in .head-resources) */
 .res-chip{
   display:flex;flex-direction:row;align-items:center;justify-content:center;gap:8px;
   min-width:64px;padding:8px 14px;
@@ -211,26 +209,27 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .res-chip[data-res="gold"] .res-chip-num{color:#F5D000;}
 .res-chip[data-res="cheese"] .res-chip-num{color:#FFD96A;}
 
-/* HEADER CARD (v0.16.9 — horizontal split: identity left, HP/shield right)
-   .head-card is the top dashboard card. .head-id holds avatar + class name +
-   zone + conn-dot on the left. .head-stats holds HP big number + bar +
-   shield label/count + pips on the right. Both flex equally so on landscape
-   the row uses full width; on portrait they wrap.
-   .hpbar-outer / .hpbar-inner kept as-is — width is now constrained by the
-   .head-stats container, fixing the v0.16.8 overflow where bar read as
-   full-viewport-wide. */
+/* HEADER CARD (v0.16.10 — horizontal split: identity left, HP/shield right)
+   .head-card is the top dashboard card. .head-id holds avatar + class name
+   + zone + conn-dot (top) AND coin + cheese chips (bottom-left under
+   identity). .head-stats holds HP big number + bar + shield label/count
+   + pips on the right. Both flex equally so on landscape the row uses
+   full width; on portrait they wrap. */
 .head-card{
   background:var(--surface2);border:1px solid #2a2a2a;
   border-radius:10px;padding:12px;margin-bottom:10px;
   display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;
 }
 .head-id{
-  display:flex;align-items:center;gap:10px;
+  display:flex;flex-direction:column;gap:10px;
   flex:1;min-width:140px;
 }
 .head-id .head-icon{font-size:28px;line-height:1;}
 .head-id .head-name{font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;display:flex;align-items:center;}
 .head-id .head-zone{font-size:11px;color:var(--text-dim);}
+/* v0.16.10: coin + cheese chips inside the head-id column, below the
+   name/zone block. Sits in the previously-empty space. */
+.head-resources{display:flex;gap:10px;align-items:stretch;}
 .head-stats{flex:2;min-width:200px;display:flex;flex-direction:column;gap:6px;}
 
 /* CARDS */
