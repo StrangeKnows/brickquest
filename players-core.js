@@ -102,6 +102,21 @@ var _cardEntered = {};
 // Cleared when activeEvent changes.
 var _cardFlavors = {};
 
+// v0.16.5 — Post-rumble pulse delay flag. When the user just exited a
+// rumble battle, dashboard chipPulse fires can land while the user's
+// attention is still transitioning from the rumble UI. Without a beat
+// to register where the dashboard chips are, the pulse is "over before
+// you saw it" — even at the v0.16.5 beefed-up duration.
+//
+// Set by the rumble-end handler (line ~410). Consumed by
+// _detectInvIncreasesAndPulse — when set, defers the pulse calls by
+// 500ms so the user has time to land on the dashboard before the
+// arrival highlights fire.
+//
+// Single boolean — covers any number of post-rumble chip rises in
+// the same render pass.
+var _justExitedRumble = false;
+
 // v0.15.46 — Resolution snapshot model. REPLACES the v0.15.39 _displayDeltas
 // system entirely.
 //
@@ -229,55 +244,46 @@ function _recordRenderInv(me) {
 // `me[field]` rises but `_displayed` lags (drain ticks snapshot up). We
 // don't want auto-pulse to compete with the drain visuals.
 function _detectInvIncreasesAndPulse(me) {
-  if (!_prevRenderInv) {
-    _bqLog('pulse-skip', { reason: 'no-prev-inv' });
-    return;
+  if (!_prevRenderInv) return;
+  if (_hasActiveSnapshot()) return;
+  // v0.16.5: post-rumble delay. If user just exited a rumble, defer the
+  // pulse calls by 500ms so the dashboard has a beat to settle into the
+  // user's attention before chipPulse fires. Without this, pulses fire
+  // during the rumble→dashboard context switch and the user misses them.
+  // Flag consumed (cleared) on this pass.
+  // Re-queries chip position inside the deferred call so any layout shift
+  // between now and 500ms is handled.
+  var delayMs = 0;
+  if (_justExitedRumble) {
+    delayMs = 500;
+    _justExitedRumble = false;
   }
-  if (_hasActiveSnapshot()) {
-    _bqLog('pulse-skip', { reason: 'snapshot-active' });
-    return;
+  function _firePulse(findFn, color, findArg) {
+    if (delayMs > 0) {
+      setTimeout(function(){
+        var dest = findArg !== undefined ? findFn(findArg) : findFn();
+        if (dest && dest.rect) BoardFx.fire('chipPulse', dest.rect, { color: color });
+      }, delayMs);
+    } else {
+      var dest = findArg !== undefined ? findFn(findArg) : findFn();
+      if (dest && dest.rect) BoardFx.fire('chipPulse', dest.rect, { color: color });
+    }
   }
-  // v0.16.4 diagnostic: log inventory comparison so we can see what _prevRenderInv
-  // captured vs what me has. Helps diagnose post-rumble chipPulse misses.
-  var diff = {
-    gold: { prev: _prevRenderInv.gold||0, curr: me.gold||0 },
-    cheese: { prev: _prevRenderInv.cheese||0, curr: me.cheese||0 },
-    bricks: {}
-  };
-  var bricks = me.bricks || {};
-  var pb = _prevRenderInv.bricks || {};
-  var allColors = {};
-  for (var ca in bricks) allColors[ca] = true;
-  for (var cb in pb) allColors[cb] = true;
-  for (var cc in allColors) {
-    diff.bricks[cc] = { prev: pb[cc]||0, curr: bricks[cc]||0 };
-  }
-  _bqLog('pulse-check', diff);
-  // Pane-active diagnostic: chipPulse depends on pane-dashboard.classList.active
-  var pane = document.getElementById('pane-dashboard');
-  var paneActive = pane && pane.classList.contains('active');
-  _bqLog('pulse-pane', { paneFound: !!pane, paneActive: paneActive });
   // Gold
   if ((me.gold||0) > (_prevRenderInv.gold||0)) {
-    var goldDest = _findGoldChipDest();
-    _bqLog('pulse-gold', { rise: (me.gold||0) - (_prevRenderInv.gold||0), destFound: !!(goldDest && goldDest.rect) });
-    if (goldDest && goldDest.rect) BoardFx.fire('chipPulse', goldDest.rect, { color: '#F5D000' });
+    _firePulse(_findGoldChipDest, '#F5D000');
   }
   // Cheese
   if ((me.cheese||0) > (_prevRenderInv.cheese||0)) {
-    var cheeseDest = _findCheeseChipDest();
-    _bqLog('pulse-cheese', { rise: (me.cheese||0) - (_prevRenderInv.cheese||0), destFound: !!(cheeseDest && cheeseDest.rect) });
-    if (cheeseDest && cheeseDest.rect) BoardFx.fire('chipPulse', cheeseDest.rect, { color: '#FFD96A' });
+    _firePulse(_findCheeseChipDest, '#FFD96A');
   }
   // Bricks — pulse each color whose count rose
+  var bricks = me.bricks || {};
+  var pb = _prevRenderInv.bricks || {};
   for (var c in bricks) {
     if ((bricks[c]||0) > (pb[c]||0)) {
-      var dest = _findBrickChipDest(c);
-      _bqLog('pulse-brick', { color: c, rise: (bricks[c]||0) - (pb[c]||0), destFound: !!(dest && dest.rect) });
-      if (dest && dest.rect) {
-        var hex = (typeof BRICK_COLORS !== 'undefined' && BRICK_COLORS[c]) || '#FFFFFF';
-        BoardFx.fire('chipPulse', dest.rect, { color: hex });
-      }
+      var hex = (typeof BRICK_COLORS !== 'undefined' && BRICK_COLORS[c]) || '#FFFFFF';
+      _firePulse(_findBrickChipDest, hex, c);
     }
   }
 }
@@ -437,6 +443,10 @@ function handleRumbleEvent(type, data) {
   if (type === 'end') {
     if (!_rumbleActive || !client) return;
     _rumbleActive = false;
+    // v0.16.5: flag the next chipPulse pass to delay so the user has a
+    // beat to land on the dashboard before arrival highlights fire.
+    // Consumed in _detectInvIncreasesAndPulse on next render.
+    _justExitedRumble = true;
     var reason = (data && data.reason) || 'unknown';
     var victor = reason === 'victory' ? MY_CLASS
                : reason === 'defeat'  ? 'enemy'

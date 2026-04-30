@@ -9835,6 +9835,165 @@ UNTOUCHED everywhere else. Pure observation push.
 
 ---
 
+### v0.16.5 — chipPulse visibility beef-up + post-rumble delay + diagnostic strip
+
+**Diagnostic-first paid off.** v0.16.4 shipped logging in
+`_detectInvIncreasesAndPulse`. Ross ran a rumble + pasted post-rumble
+console output:
+
+```
+[bq:pulse-check] {gold:{...}, cheese:{...}, bricks:{...}}
+[bq:pulse-pane] {paneFound: true, paneActive: true}
+[bq:pulse-gold] {rise: 1, destFound: true}
+[bq:fx-fire] {preset: "chipPulse", pos: {...}, data: {...}}
+[bq:pulse-brick] {color: "green", rise: 1, destFound: true}
+[bq:fx-fire] {preset: "chipPulse", pos: {...}, data: {...}}
+```
+
+Everything fired correctly. Pipeline worked end-to-end:
+- Inventory diff detected ✓
+- Pane was active ✓
+- Chip elements found, rects captured ✓
+- BoardFx.fire received the calls with valid positions ✓
+
+So the chipPulse WAS firing. Just not visible enough.
+
+> "rumble rewards are shown incremented in inv, but there is still
+> no flair, no fx to indicate that inventory has grown"
+
+Two compounding issues:
+1. **Animation too subtle.** Old keyframes peaked opacity at 20%
+   then immediately decayed — only ~80ms at full opacity in a 500ms
+   pulse. Easy to miss.
+2. **Post-rumble context switch.** Pulse fired while user attention
+   was still transitioning from rumble UI to dashboard. Even a
+   visible pulse would be missed during that switch.
+
+Ross suggested the delay: "also add delay from rumble, nice idea".
+Bundled both fixes into v0.16.5.
+
+---
+
+**Fix 1: chipPulse visibility beef-up**
+
+**Longer duration:** default `lifeMs` 500ms → 900ms. Animation has
+time to register on the user's eye.
+
+**Hold at peak opacity (CSS keyframes):** new shape is
+opacity 0 → 1 (at 15%) → 1 (at 50%) → 0 (at 100%). Holds full
+opacity from 15% to 50% — nearly 35% of duration at peak. Old
+version was basically a flash; new version is a hold-then-decay.
+
+**More expansion:** scale 0.6 → 1.1 → 1.25 → 1.6 (was 0.7 → 1.1 → 1.4).
+Bigger "thunk landed here" beat.
+
+**Brighter ring:**
+- Border: 2px → 3px
+- Box-shadow: doubled outer glow + added second outer layer + alpha
+  bumped on inset glow
+
+**Padding:** rect padding bumped from +12 to +16 so the ring sits
+visibly clear of the chip's own box-shadow.
+
+---
+
+**Fix 2: Post-rumble delay (Ross's idea)**
+
+New `_justExitedRumble` flag set in the rumble-end handler
+(line ~410, after `_rumbleActive = false`). Consumed in
+`_detectInvIncreasesAndPulse` on next render — when set, pulse
+calls are deferred by 500ms.
+
+500ms is the beat for the user to:
+- Process the rumble UI dismiss
+- Land their eye on the dashboard
+- See where the chips ARE before they pulse
+
+After 500ms passes, pulses fire normally with the v0.16.5 longer
+animation. User now has ~1.4s of total visibility (500ms delay +
+900ms pulse) which is plenty to register.
+
+**Implementation detail:** the deferred call re-queries the chip
+position inside the setTimeout (rather than capturing rect at
+detect-time). Means any dashboard layout shift between detect and
+fire is handled — pulse fires at the chip's CURRENT position, not
+its position 500ms ago.
+
+---
+
+**Fix 3: Diagnostic logging stripped**
+
+Removed `_bqLog('pulse-skip'/'pulse-check'/'pulse-pane'/'pulse-*')`
+from `_detectInvIncreasesAndPulse`. Diagnostic served its purpose —
+told us pipeline worked, problem was visibility. No reason to keep
+logging firing on every render. `_bqLog('fx-fire')` in BoardFx still
+present (system-level, not specific to this issue).
+
+---
+
+**Files changed:**
+
+- `players-core.js`:
+  - Added `_justExitedRumble` flag
+  - Set flag in rumble-end handler (line ~410)
+  - `_detectInvIncreasesAndPulse` consumes flag, defers by 500ms
+  - Re-queries chip position inside the deferred call
+  - Stripped v0.16.4 diagnostic logging
+- `boardFx.js`:
+  - `chipPulse` default `lifeMs` 500 → 900
+  - `_chipPulseElement` rect padding +12 → +16
+  - `_chipPulseElement` box-shadow doubled
+  - `_chipPulseElement` border 2px → 3px (via CSS class)
+- `boardFx.css`:
+  - `chip-pulse` keyframes: 4-stop with peak hold (15% → 50% at full
+    opacity), more dramatic scale (0.6 → 1.6 vs old 0.7 → 1.4)
+  - `chip-pulse` border-width: 2px → 3px
+- `NOTES.md` — this entry
+
+UNTOUCHED: server.js, rumble.js, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. **Hard refresh** (CSS + JS changed)
+
+2. **Trigger rumble victory** — finish a battle. Return to board.
+   - **Wait the 500ms beat** — chipPulse should fire AFTER you've
+     landed on the dashboard
+   - Pulse should be visibly more dramatic than before — bigger,
+     brighter, lasts longer (~900ms at peak)
+   - Pulse fires on each chip that grew (gold, cheese, bricks)
+
+3. **Non-rumble inventory rises** — gold mini-game, riddle solve,
+   trade — chipPulse should fire IMMEDIATELY (no delay) but with
+   the new beefier animation. Should be hard to miss now.
+
+4. **Regression checks:** Collect drain still drains correctly,
+   per-element chipPulse on drain arrival still fires, snapshot
+   model still masks pre-tap, cards still animate.
+
+---
+
+**Standards audit (rule #17 — push #26 in S015 continuation):**
+
+This was a textbook execution of memory rule #6 (diagnostic-first).
+v0.16.4 shipped diagnostic. Ross paste-confirmed pipeline worked.
+v0.16.5 fixes the actual problem (visibility + timing) without
+speculative changes to the detection logic.
+
+- Rule #25 (version bump consent): patch `-v` ✓
+- Rule #6 (diagnostic-first): followed and paid off ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): the chipPulse upgrades
+  apply universally (all inventory rises benefit), the rumble
+  delay is the targeted fix for the context-switch case. Two
+  flow patterns kept clean.
+- Rule #19 (intuition): I led with intuition (pulse too subtle +
+  context switch), Ross confirmed and added the rumble delay. Both
+  bundled.
+
+---
+
 
 ### Session 015 Process Retrospective
 

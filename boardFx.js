@@ -629,10 +629,10 @@
     // anchor: an element selector or DOMRect (the chip itself).
     // data:
     //   color   — accent color (e.g. brick hex, gold yellow, cheese yellow)
-    //   lifeMs  — total pulse duration (default 500)
+    //   lifeMs  — total pulse duration (default 900, v0.16.5 bumped from 500)
     chipPulse: function(pos, data) {
       var color = (data && data.color) || '#FFFFFF';
-      var lifeMs = (data && data.lifeMs) || 500;
+      var lifeMs = (data && data.lifeMs) || 900;
       _chipPulseElement(pos.x, pos.y, pos.rect, color, lifeMs);
     }
   };
@@ -673,19 +673,23 @@
   // Renders a glow-ring at (cx,cy) sized to fit the chip rect. Used
   // for arrival highlight when a reward lands at its destination.
   // The ring expands + fades, giving a "thunk landed here" beat.
+  // v0.16.5: visibility beefed up — thicker border, brighter outer
+  // glow, and inset glow doubled. Was barely visible post-rumble
+  // when user attention was still transitioning from rumble UI.
   function _chipPulseElement(cx, cy, rect, color, lifeMs) {
     var overlay = _ensureOverlay();
     var ring = document.createElement('div');
     ring.className = 'chip-pulse';
     // Size to fit the chip rect (with padding)
-    var w = (rect && rect.width)  ? rect.width  + 12 : 56;
-    var h = (rect && rect.height) ? rect.height + 12 : 32;
+    var w = (rect && rect.width)  ? rect.width  + 16 : 60;
+    var h = (rect && rect.height) ? rect.height + 16 : 36;
     ring.style.left = (cx - w/2) + 'px';
     ring.style.top  = (cy - h/2) + 'px';
     ring.style.width  = w + 'px';
     ring.style.height = h + 'px';
     ring.style.borderColor = color;
-    ring.style.boxShadow = '0 0 14px ' + color + ', inset 0 0 14px ' + color + '88';
+    // v0.16.5: doubled outer + inset glow for visibility post-rumble
+    ring.style.boxShadow = '0 0 24px ' + color + ', 0 0 8px ' + color + ', inset 0 0 20px ' + color + 'aa';
     ring.style.animationDuration = lifeMs + 'ms';
     overlay.appendChild(ring);
     setTimeout(function(){
