@@ -3398,6 +3398,202 @@ UNTOUCHED: server.js, rumble.js, characters.js, boardFx, html files.
 
 ---
 
+### v0.16.25 — Event card containment + post-event themed flavor + armor cap audit
+
+> "need events to fit inside dynamic event card, rubble stacking
+> hangs beyond, lets have this responsive to bounds as well as other
+> events as well. also, when event is finished, relevant flavor text
+> about event just finished shoudl display in dynamic zone, not just
+> empty space. flavor pools need depth, and should relate to how
+> player did in event. favorable? not favorable? we have a dad joke
+> for that and it is themed per event. also, does rumble and board
+> agree on max overload HP and max armor per character?"
+
+Three asks, three responses:
+
+---
+
+**1. Event card containment (UI fix):**
+
+`.dynamic-zone` gets `max-height: 340px` + `overflow-y: auto`. Long
+event content (Rubble Stacking, Trial of Hand, etc.) now scrolls
+inside the bounded card rather than overflowing. Card stays within
+layout bounds; content respects them. Min-height 80 unchanged so
+short content (one flavor line) still has presence.
+
+Mirrored in test_players.html. Both files.
+
+---
+
+**2. Post-event themed flavor (system + content):**
+
+Added `POST_EVENT_FLAVOR` keyed by `[eventType][outcome]` where
+outcome is `'favorable' | 'unfavorable'`. Initial pool: 13 event
+types × 2 outcomes × 3 lines = ~78 entries. Voice: dungeon dad-joke
+per event, wry post-mortem on what just happened. Examples:
+- gray favorable: "You stack the rubble like a true mason. The
+  dungeon nods, vaguely."
+- gray unfavorable: "The rubble defeats you. Even gravity is
+  judging."
+- purple favorable: "You picked the right chest. Fate, this time,
+  was a friend."
+- purple unfavorable: "You picked the wrong chest. Fate is a stern
+  teacher."
+
+System scaffolding:
+- `getPostEventFlavor(type, outcome)` — random pick from the matching
+  pool, returns null if no match.
+- `_eventOutcome(ev, myCls)` — per-event-type classification reading
+  result fields (`grayRubbleResult.success`, `redResult.winner`,
+  `purpleResult.outcome`, `whiteResult.healed`, `greenResult.success`,
+  `blackResult.outcome`, `riddleWinner`, `goldAmount`, etc.). Returns
+  `'favorable' | 'unfavorable' | 'neutral'`. Neutral falls through
+  to ambient flavor (no themed line shown when wash).
+- `_lastResolvedEvent` cache: `{ key, type, outcome, line, expiresAt }`.
+  Captured on first render where activeEvent is `cls=me` and
+  `resolved=true`. Persists 12 seconds (long enough to read, short
+  enough to return to ambient before next event).
+
+Render hookup in `_dashDynamicZone` idle slot: prefer
+`_lastResolvedEvent.line` over ambient `dashboardFlavor()`. Themed
+line styled with class color (favorable) or muted gray
+(unfavorable) so player reads it as a verdict, not generic ambient.
+
+**Content depth note:** v1 ships with 3 lines per cell as the
+end-to-end-shippable baseline. Real depth (8-12 lines per cell, with
+zone-tier variants) is iterative content work. Pool can grow as
+playtest reveals which lines land and which fall flat.
+
+**Outcome detection caveats (TODOs in code):**
+- monster/boss: heuristic returns favorable always (combat resolved
+  ≈ win, but doesn't distinguish flee vs win). Refine when combat
+  result fields surface a clear signal.
+- gold: relies on `ev.goldAmount > 0`. Works but minimal.
+- trap/doubletrap: hardcoded unfavorable. Traps can technically miss;
+  refine if hit/miss flag surfaces.
+
+---
+
+**3. Armor cap audit (game-state integrity finding, NOT patched):**
+
+**HP — AGREES.** Single source of truth: `characters.js` `c.hp`
+field per class (Breaker=14, Formwright=6, Snapstep=9, Blocksmith=12,
+Fixer=8, Wild One=10). Server hardcodes the same values when calling
+mkPlayer. Rumble's standalone makePlayer reads
+`window.CHARACTERS[cls].hp`. Server passes `p.hpMax` to rumble via
+cfg → rumble assigns to `player.hpMax`. All paths trace to
+characters.js. ✓
+
+**ARMOR — DISAGREES.** Three different caps in play:
+- **Rumble** (`getArmorMax()` in rumble.js:6532):
+  Breaker → `floor(hpMax × 0.75)`, others → `floor(hpMax × 0.5)`
+- **Server gray-charge action** (server.js:2608):
+  cap = `p.hpMax` (full HP, all classes)
+- **Server event-bonus armor** (server.js:1707, 1735):
+  cap = `floor(hpMax × 0.5)`
+- **Dashboard pip display** (players-core.js:940):
+  shows `hpMax` slots regardless
+
+**Concrete bug surface:** Breaker leaves dashboard with 14 armor.
+Enters rumble. Rumble cap drops to 10 (`14 × 0.75`). 4 pips
+disappear in transit. Same applies for any class — server
+gray-charges allow up to hpMax armor; rumble caps at half.
+
+**Resolution requires DESIGN DECISION** — which rule is canonical?
+- Option A: Rumble cap is intentional combat balance. Server
+  gray-charge cap should be lowered to match (`hpMax × 0.5` or
+  `× 0.75` for Breaker).
+- Option B: Server cap is correct. Rumble should accept up to
+  `hpMax` armor.
+- Option C: Hybrid — board allows accumulation up to hpMax, rumble
+  treats excess as "depletes first" temp armor.
+
+Parking this in NOTES; not patched in v0.16.25. Need design call
+before code change.
+
+Same audit done for max overload HP — no separate concept; HP and
+hpMax are fully consistent. The "overload" mechanic in rumble is a
+brick-charge tier system, not an HP ceiling.
+
+---
+
+**Files changed:** `players-core.js`, `players.html`,
+`test_players.html`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx,
+dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Long event (Rubble Stacking on Breaker red landing):** event
+   card now scrolls inside the dz instead of overflowing below it.
+   The dz visual stays bounded.
+3. **Resolve any event** (gray rubble, riddle, purple choice, etc.):
+   - Win/favorable outcome: dz shows themed flavor in class color.
+     Example after gray rubble win: "You stack the rubble like a
+     true mason..."
+   - Lose/unfavorable outcome: dz shows themed flavor in muted gray.
+     Example after gray rubble loss: "The rubble defeats you..."
+   - Themed flavor persists ~12 seconds, then dz returns to ambient
+     FLAVOR_POOL.
+4. **Next event arrives:** post-event flavor clears, event card
+   takes over.
+5. **All event types**: gray, red, purple, white, green, black,
+   riddle/yellow, gold, monster, boss, trap, doubletrap, blue. Each
+   should show themed flavor on resolution (flavor pool covers all
+   13 types).
+6. **Armor cap inconsistency**: NOT FIXED. Documented in NOTES for
+   design decision. Continue current behavior — rumble caps stay
+   in effect, dashboard pip count exceeds rumble cap on Breaker
+   etc. Awaiting your call on which rule is canonical.
+
+---
+
+**Risk surfaces:**
+
+- Outcome detection heuristics (monster/boss/trap) may classify
+  wrong on edge cases. Watch playtest; refine in subsequent push.
+- `_lastResolvedEvent` 12-second window may feel too short or too
+  long. Tunable.
+- Class-color vs muted-gray styling for favorable vs unfavorable
+  may not read clearly enough as a verdict. Could add ✓/✗ icon
+  prefix if needed.
+- Content depth at 3 lines per cell is thin. Repeats will become
+  noticeable with 10+ events per session. Pool growth is the
+  iterative path — push more content as playtest exposes which
+  lines land.
+
+---
+
+**Standards audit (rule #17 — push #45 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #11 (data/runtime/UI separation): POST_EVENT_FLAVOR is a
+  data table, lives in players-core.js alongside LANDING_FLAVOR
+  (consistent with existing pattern). `_eventOutcome` is runtime
+  classification, near it. Render hookup is UI in `_dashDynamicZone`.
+  Right place for each. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: post-event flavor uses same dz-idle render path as
+    ambient flavor; just preferred when fresh outcome cached.
+  - ELEGANCE: outcome classification is a pure function reading
+    existing result fields, no new state on G.activeEvent.
+  - EFFICIENCY: 12-second cache window keeps flavor active across
+    re-renders without re-rolling each frame.
+- Rule #6 (diagnostic-first): N/A — no bug, this is a feature
+  build with audit findings reported.
+- Rule #20 (grep duplicates): touched selectors verified to appear
+  exactly once. ✓
+- Rule #10 (don't fragment): handled all three ask items in one
+  push. Items (1) and (2) shipped as code. Item (3) reported with
+  full findings + design options + parked for your call. ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

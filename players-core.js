@@ -2094,6 +2094,35 @@ function _dashDynamicZone(me) {
     if (_zoneState !== 'idle') _zoneState = 'idle';
   }
 
+  // v0.16.25: Detect "event just resolved" transition. If my last-seen
+  // active event has now flipped to resolved (or cleared), capture its
+  // type + outcome for post-event flavor display in idle slot.
+  // Uses _lastResolvedEvent cache (declared near POST_EVENT_FLAVOR).
+  // Cache window: 12 seconds — long enough for player to read + appreciate,
+  // short enough that the dz returns to ambient flavor for next turn.
+  if (G.activeEvent && G.activeEvent.cls === MY_CLASS && G.activeEvent.resolved) {
+    var key = (G.activeEvent.cls||'') + '|' + (G.activeEvent.roll||'') + '|' + (G.activeEvent.evType||'');
+    if (!_lastResolvedEvent || _lastResolvedEvent.key !== key) {
+      var outcome = _eventOutcome(G.activeEvent, MY_CLASS);
+      var line = (outcome !== 'neutral')
+        ? getPostEventFlavor(G.activeEvent.evType, outcome)
+        : null;
+      if (line) {
+        _lastResolvedEvent = {
+          key: key,
+          type: G.activeEvent.evType,
+          outcome: outcome,
+          line: line,
+          expiresAt: Date.now() + 12000
+        };
+      }
+    }
+  }
+  // Expire stale post-event flavor.
+  if (_lastResolvedEvent && Date.now() > _lastResolvedEvent.expiresAt) {
+    _lastResolvedEvent = null;
+  }
+
   // 3. Hold-invoked surface (market / cheese / party) — only when no
   //    rumble or event has claimed the slot. Renders inside the dynamic
   //    zone with a subtle "Close" affordance.
@@ -2108,13 +2137,26 @@ function _dashDynamicZone(me) {
     }
   }
 
-  // 4. Idle state — flavor text. Only when no other content claimed slot.
+  // 4. Idle state — flavor text. v0.16.25: prefer post-event themed flavor
+  //    if a recent event resolution is cached; else fall through to ambient
+  //    FLAVOR_POOL. Themed flavor styled with class color accent so player
+  //    reads it as "this is about what just happened" not generic ambient.
   if (!active) {
-    const line = dashboardFlavor(false);
-    if (line) {
-      html = `<div style="padding:12px 16px;text-align:center;">
-        <div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;color:var(--text-dim);line-height:1.5;">${line}</div>
-      </div>`;
+    if (_lastResolvedEvent && _lastResolvedEvent.line) {
+      var outcomeColor = _lastResolvedEvent.outcome === 'favorable'
+        ? 'var(--cls-color)'
+        : '#888';
+      html = '<div style="padding:12px 16px;text-align:center;">'
+        + '<div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;'
+        + 'color:' + outcomeColor + ';line-height:1.5;">' + _lastResolvedEvent.line + '</div>'
+        + '</div>';
+    } else {
+      const line = dashboardFlavor(false);
+      if (line) {
+        html = `<div style="padding:12px 16px;text-align:center;">
+          <div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;color:var(--text-dim);line-height:1.5;">${line}</div>
+        </div>`;
+      }
     }
   }
 
@@ -4193,6 +4235,273 @@ function getLandingFlavor(type, color, zone) {
   var pool = LANDING_FLAVOR[key] || LANDING_FLAVOR[type] || LANDING_FLAVOR.monster;
   return pool[Math.floor(Math.random() * pool.length)];
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// POST-EVENT FLAVOR (v0.16.25)
+// ═══════════════════════════════════════════════════════════════════════
+// After a landing event resolves, the dynamic zone shows themed flavor
+// keyed by [eventType][outcome] where outcome is 'favorable' | 'unfavorable'.
+// Tone: dungeon dad-joke per event, wry post-mortem on what just happened.
+// Initial v1 has 3 lines per (type × outcome) cell — system end-to-end
+// shippable. Content depth iterates in subsequent pushes; pool grows as
+// playtest reveals which lines land and which fall flat.
+//
+// Outcome detection: per-event-type — _eventOutcome(ev) inspects the
+// result fields and returns favorable/unfavorable/neutral. Neutral
+// falls through to ambient FLAVOR_POOL (no point showing themed flavor
+// when the event was a wash).
+var POST_EVENT_FLAVOR = {
+  gray: {
+    favorable: [
+      'You stack the rubble like a true mason. The dungeon nods, vaguely.',
+      'Three blocks, perfectly aligned. Civil engineering, for crime.',
+      'Stones placed. Pride earned. Back pain pending.'
+    ],
+    unfavorable: [
+      'The rubble defeats you. Even gravity is judging.',
+      'Stones do not stack themselves. You learned this the hard way.',
+      'A pile is just a stack with bad posture. Yours had bad posture.'
+    ]
+  },
+  gold: {
+    favorable: [
+      'Coins jingle in your pocket. The dungeon\'s economy weeps.',
+      'Free money. The fortress writes it off as a loss.',
+      'Pocket heavier, conscience lighter. A fair trade.'
+    ],
+    unfavorable: [
+      'The coins were fool\'s gold. The fortress is laughing somewhere.',
+      'You found nothing. Even the floor mocks you.',
+      'A pocket full of disappointment. Currency in some realms.'
+    ]
+  },
+  blue: {
+    favorable: [
+      'Magic congealed and you scooped it up. Crystal economy.',
+      'A blue brick. It hums politely.',
+      'You harvested the residue. The wizard would be furious.'
+    ],
+    unfavorable: [
+      'The shrine fizzled. Possibly low on enchantment batteries.',
+      'The magic dispersed before you could grab it. Wizard tax.',
+      'Arcane residue, but nothing to show for it. Spell-side service fee.'
+    ]
+  },
+  white: {
+    favorable: [
+      'The shrine\'s warmth lingers. So does the smell of incense.',
+      'Healed up. The pilgrim\'s rest delivers.',
+      'A clean rest in a dirty fortress. Five stars on dungeon-yelp.'
+    ],
+    unfavorable: [
+      'You knelt at the shrine. The shrine knelt back. Awkward.',
+      'No miracle today. Try again at higher altitudes.',
+      'Pilgrim\'s rest, but no rest. Ironic.'
+    ]
+  },
+  yellow: {
+    favorable: [
+      'Knowledge unlocked. A small thrill of cleverness.',
+      'You solved the riddle. The dungeon owes you a riddle now.',
+      'A clue, decoded. The fortress respects a sharp mind.'
+    ],
+    unfavorable: [
+      'The riddle outlasted you. It was patient. You were not.',
+      'The card stays cryptic. So does your future.',
+      'Unsolved. The yellow brick keeps its secrets.'
+    ]
+  },
+  riddle: {
+    favorable: [
+      'Knowledge unlocked. A small thrill of cleverness.',
+      'You solved the riddle. The dungeon owes you a riddle now.',
+      'A clue, decoded. The fortress respects a sharp mind.'
+    ],
+    unfavorable: [
+      'The riddle outlasted you. It was patient. You were not.',
+      'The card stays cryptic. So does your future.',
+      'Unsolved. The yellow brick keeps its secrets.'
+    ]
+  },
+  red: {
+    favorable: [
+      'The trial accepted you. The stones liked your form.',
+      'Grip strength: confirmed. The circle approves.',
+      'You held the line. The dungeon respects a steady hand.'
+    ],
+    unfavorable: [
+      'The trial declined you. The stones liked your form less.',
+      'You dropped the brick. The fortress writes it down.',
+      'Trial failed. The stone circle has seen better.'
+    ]
+  },
+  purple: {
+    favorable: [
+      'You picked the right chest. Fate, this time, was a friend.',
+      'Power crystallized in violet, and it likes you.',
+      'The chest blessed you. The other chest is sulking.'
+    ],
+    unfavorable: [
+      'You picked the wrong chest. Fate is a stern teacher.',
+      'The curse settles in. It will not be brief.',
+      'Both chests glowed. You picked the angry one.'
+    ]
+  },
+  green: {
+    favorable: [
+      'The vines parted. The forest, briefly, was kind.',
+      'You read the path correctly. The greenery approves.',
+      'Pollen everywhere. But also: progress.'
+    ],
+    unfavorable: [
+      'The vines did not part. They closed around your ankle.',
+      'Wrong vine. The fortress logs another mistake.',
+      'You are now itchy in places you did not know existed.'
+    ]
+  },
+  black: {
+    favorable: [
+      'The shadow shook your hand. The shadow pays well.',
+      'A shadow bargain, well-haggled. The fortress is impressed.',
+      'You signed in shadow ink. Ink sometimes dries.'
+    ],
+    unfavorable: [
+      'The shadow took more than it gave. Shadows usually do.',
+      'You blink and the figure is gone. So is something of yours.',
+      'The pact was unfavorable. You will think about this later.'
+    ]
+  },
+  monster: {
+    favorable: [
+      'The monster fled. Or possibly retired.',
+      'You won. The monster is filing a complaint somewhere.',
+      'Combat resolved. The fortress files the body.'
+    ],
+    unfavorable: [
+      'The monster won that one. The dungeon keeps score.',
+      'Bruises everywhere. So is your dignity.',
+      'The monster did not flee. You did. Strategic regrouping.'
+    ]
+  },
+  boss: {
+    favorable: [
+      'The boss fell. Somewhere, a smaller boss gets a promotion.',
+      'You felled a titan. The fortress notes this.',
+      'Boss defeated. The dungeon\'s HR department is busy.'
+    ],
+    unfavorable: [
+      'The boss is still up. So are your problems.',
+      'You retreated. The boss makes a note in its book.',
+      'The boss is patient. You will meet again.'
+    ]
+  },
+  trap: {
+    favorable: [
+      'You stepped on the plate. Nothing happened. Suspicious.',
+      'The trap missed. The fortress has notes for the contractor.',
+      'A trap, disarmed. You learned a thing.'
+    ],
+    unfavorable: [
+      'The trap worked exactly as designed. Compliments to the architect.',
+      'You found the trap. With your foot.',
+      'Pressure plates: 1. You: 0.'
+    ]
+  },
+  doubletrap: {
+    favorable: [
+      'You danced between two plates. The fortress is grudgingly impressed.',
+      'Both traps missed. The architect is fired.',
+      'Twin traps avoided. You feel briefly heroic.'
+    ],
+    unfavorable: [
+      'Two traps. Both worked. Quality construction.',
+      'You found two traps. Mostly with your feet.',
+      'Double the trap, double the regret.'
+    ]
+  }
+};
+
+function getPostEventFlavor(eventType, outcome) {
+  if (!eventType || !outcome) return null;
+  var typePool = POST_EVENT_FLAVOR[eventType];
+  if (!typePool) return null;
+  var pool = typePool[outcome];
+  if (!pool || !pool.length) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// Inspect a resolved event and classify outcome from the player's POV.
+// Returns 'favorable' | 'unfavorable' | 'neutral'. Neutral falls through
+// to ambient flavor (no themed line shown).
+function _eventOutcome(ev, myCls) {
+  if (!ev) return 'neutral';
+  var t = ev.evType || ev.type;
+  if (!t) return 'neutral';
+  // Per-type detection. Each branch reads the event's result fields.
+  switch (t) {
+    case 'gray':
+      // Rubble Stacking — grayRubbleResult truthy if stacked.
+      if (ev.grayRubbleResult && ev.grayRubbleResult.success) return 'favorable';
+      if (ev.grayRubbleResult) return 'unfavorable';
+      return 'neutral';
+    case 'red':
+      // Trial of Hand — redResult.success or .winner === me.
+      if (ev.redResult && (ev.redResult.success || ev.redResult.winner === myCls)) return 'favorable';
+      if (ev.redResult) return 'unfavorable';
+      return 'neutral';
+    case 'purple':
+      // Fated Choice — purpleResult.bless = favorable, .curse = unfavorable
+      if (ev.purpleResult && ev.purpleResult.outcome === 'bless') return 'favorable';
+      if (ev.purpleResult && ev.purpleResult.outcome === 'curse') return 'unfavorable';
+      return 'neutral';
+    case 'white':
+      // Pilgrim's Rest — heal applied = favorable; whiteResult.healed truthy
+      if (ev.whiteResult && ev.whiteResult.healed) return 'favorable';
+      if (ev.whiteResult) return 'unfavorable';
+      return 'neutral';
+    case 'green':
+      // Vine Path — greenResult.success
+      if (ev.greenResult && ev.greenResult.success) return 'favorable';
+      if (ev.greenResult) return 'unfavorable';
+      return 'neutral';
+    case 'black':
+      // Shadow Bargain — blackResult.outcome
+      if (ev.blackResult && ev.blackResult.outcome === 'reward') return 'favorable';
+      if (ev.blackResult) return 'unfavorable';
+      return 'neutral';
+    case 'riddle':
+    case 'yellow':
+      if (ev.riddleWinner === myCls) return 'favorable';
+      if (ev.riddleWinner || ev.riddleExpired) return 'unfavorable';
+      return 'neutral';
+    case 'gold':
+      // Gold mini-game — if goldVariant ran and resolved with gain, favorable.
+      // ev.goldAmount > 0 indicates gain. (Minimal heuristic; refine later.)
+      if (typeof ev.goldAmount === 'number' && ev.goldAmount > 0) return 'favorable';
+      if (typeof ev.goldAmount === 'number') return 'unfavorable';
+      return 'neutral';
+    case 'monster':
+    case 'boss':
+      // Combat resolved — if me alive at resolution, favorable. (Heuristic.)
+      // TODO: better signal (hp at resolution vs hp before?) once combat
+      // result fields surface a clear signal.
+      return 'favorable';
+    case 'trap':
+    case 'doubletrap':
+      // Traps generally damage the player — unfavorable by default.
+      return 'unfavorable';
+    case 'blue':
+      // Arcane Shrine — brick gain favorable; otherwise neutral.
+      return 'favorable';
+    default:
+      return 'neutral';
+  }
+}
+
+// Track the most recently resolved event so post-event flavor can
+// persist briefly even after activeEvent clears server-side. Cached
+// across renders. Cleared on next event start or after ~15s idle.
+var _lastResolvedEvent = null;  // { type, outcome, expiresAt, line }
 
 
 

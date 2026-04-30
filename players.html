@@ -158,8 +158,14 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   margin-bottom:10px;
   /* v0.16.18: min-height bumped 48→80 and padding 8→14 so the card has
      visible presence even when content is just one line of flavor text.
-     Card feels intentionally-sized rather than a thin strip. */
+     Card feels intentionally-sized rather than a thin strip.
+     v0.16.25: max-height + overflow-y:auto so long event cards (e.g.
+     Rubble Stacking) scroll inside the bounded card rather than
+     overflowing the dz visually. Card stays within layout bounds;
+     content respects them. */
   min-height:80px;
+  max-height:340px;
+  overflow-y:auto;
   border-radius:10px;
   border:1px solid var(--cls-color);
   padding:14px;
