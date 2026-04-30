@@ -94,71 +94,44 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 }
 #rumble-exit-overlay.visible{display:block;}
 
-/* TOPBAR */
-.topbar{
-  display:flex;align-items:center;gap:8px;
-  padding:4px 12px;
-  background:linear-gradient(90deg,var(--cls-bg),#0a0a0a);
-  border-bottom:1px solid var(--cls-border);
-  flex-shrink:0;
-  transition:max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease, border-bottom-width 0.2s ease;
-  max-height:36px;
-  overflow:hidden;
-}
-.topbar.hidden-on-scroll{
-  max-height:0;
-  padding-top:0;
-  padding-bottom:0;
-  opacity:0;
-  border-bottom-width:0;
-}
-.topbar-icon{font-size:18px;}
-.topbar-name{font-family:'Cinzel',serif;font-size:12px;font-weight:600;color:var(--cls-color);}
-/* v0.16.8: connect indicator is a small dot, replacing the standalone conn-pill. */
+/* v0.16.9: TOPBAR and PHASE BANNER CSS removed — see players.html note. */
+
+/* CONNECT DOT */
 .conn-dot{width:8px;height:8px;border-radius:50%;margin-left:6px;display:inline-block;vertical-align:middle;transition:background .2s, box-shadow .2s;}
 .conn-dot.on{background:var(--green);box-shadow:0 0 6px var(--green);}
 .conn-dot.off{background:#444;box-shadow:none;}
 
-/* PHASE BANNER */
-.phase-banner{
-  padding:4px 14px;text-align:center;font-size:11px;font-weight:600;
-  font-family:'Cinzel',serif;letter-spacing:.05em;flex-shrink:0;
-  transition:max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease, border-bottom-width 0.2s ease;
-  max-height:32px;
-  overflow:hidden;
-}
-.phase-banner.hidden-on-scroll{
-  max-height:0;
-  padding-top:0;
-  padding-bottom:0;
-  opacity:0;
-  border-bottom-width:0;
-}
-.phase-banner.mine{background:var(--cls-bg);border-bottom:1px solid var(--cls-color);color:var(--cls-color);}
-.phase-banner.waiting{background:#0a0a0a;border-bottom:1px solid #222;color:#444;}
-.phase-banner.battle-mine{background:#1a0505;border-bottom:2px solid var(--red);color:var(--red);}
-.phase-banner.battle-wait{background:#0f0505;border-bottom:1px solid #333;color:#555;}
-
-/* TABS */
-/* DASHBOARD HOST (v0.16.8 — replaces tabs system entirely) */
+/* DASHBOARD HOST (v0.16.8) */
 .dashboard-host{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:12px;padding-bottom:max(12px,env(safe-area-inset-bottom,12px));background:var(--surface);-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
 .dash-surface{display:none;min-height:100%;padding-bottom:calc(160px + env(safe-area-inset-bottom,0px));}
 .dash-surface.active{display:block;}
-/* DYNAMIC ZONE (v0.16.8) */
-.dynamic-zone{position:relative;margin-bottom:10px;min-height:48px;transition:min-height .25s ease;}
+
+/* HEADER CARD (v0.16.9 — horizontal split: identity left, HP/shield right) */
+.head-card{background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;padding:12px;margin-bottom:10px;display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;}
+.head-id{display:flex;align-items:center;gap:10px;flex:1;min-width:140px;}
+.head-id .head-icon{font-size:28px;line-height:1;}
+.head-id .head-name{font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;display:flex;align-items:center;}
+.head-id .head-zone{font-size:11px;color:var(--text-dim);}
+.head-stats{flex:2;min-width:200px;display:flex;flex-direction:column;gap:6px;}
+
+/* DYNAMIC ZONE (v0.16.9 — class-color outlined slot, intense pulse on player turn) */
+.dynamic-zone{position:relative;margin-bottom:10px;min-height:48px;border-radius:10px;border:1px solid var(--cls-color);padding:8px;background:var(--surface2);transition:border-color .25s ease, box-shadow .25s ease, min-height .25s ease;box-shadow:0 0 0 0 var(--cls-color);}
 .dynamic-zone:empty{display:none;}
-/* INTERACTION ROW (v0.16.8) */
-.interaction-row{display:flex;flex-wrap:wrap;align-items:stretch;gap:6px;padding:8px;background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;margin-bottom:10px;}
-.interaction-row .brick-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex:1;}
-.interaction-row .resource-chips{display:flex;gap:6px;align-items:stretch;}
-.res-chip{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:44px;padding:6px 10px;background:var(--surface3);border-radius:8px;border:1px solid transparent;cursor:pointer;user-select:none;-webkit-user-select:none;transition:border-color .15s, background .15s, transform .1s;touch-action:none;}
+.dynamic-zone > .card{border:none;background:transparent;padding:4px 6px;margin:0;}
+.dynamic-zone > #landing-result{margin:0;}
+.dynamic-zone.my-turn{border-color:var(--cls-color);box-shadow:0 0 18px var(--cls-color), inset 0 0 6px var(--cls-color);animation:dz-pulse 2.4s ease-in-out infinite;}
+@keyframes dz-pulse{0%,100%{box-shadow:0 0 12px var(--cls-color), inset 0 0 4px var(--cls-color);}50%{box-shadow:0 0 22px var(--cls-color), inset 0 0 8px var(--cls-color);}}
+
+/* INTERACTION ROW (v0.16.9 — two layers: resources top, bricks bottom) */
+.interaction-row{display:flex;flex-direction:column;gap:10px;padding:10px;background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;margin-bottom:10px;}
+.interaction-row .resource-chips{display:flex;gap:14px;align-items:stretch;justify-content:center;}
+.interaction-row .brick-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:center;}
+.res-chip{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:8px;min-width:64px;padding:8px 14px;background:var(--surface3);border-radius:8px;border:1px solid transparent;cursor:pointer;user-select:none;-webkit-user-select:none;transition:border-color .15s, background .15s, transform .1s;touch-action:none;}
 .res-chip:active{transform:scale(.95);}
-.res-chip-glyph{font-size:18px;line-height:1;}
-.res-chip-num{font-family:'Cinzel',serif;font-size:14px;font-weight:700;margin-top:2px;}
+.res-chip-glyph{font-size:20px;line-height:1;}
+.res-chip-num{font-family:'Cinzel',serif;font-size:18px;font-weight:700;margin:0;}
 .res-chip[data-res="gold"] .res-chip-num{color:#F5D000;}
 .res-chip[data-res="cheese"] .res-chip-num{color:#FFD96A;}
-.res-chip[data-res="avatar"]{padding:6px 8px;}
-.res-chip[data-res="avatar"] .res-chip-glyph{font-size:24px;}
 
 /* CARDS */
 .card{
@@ -396,11 +369,7 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 <div id="zoom-root" style="width:100%;height:100dvh;transform-origin:top left;">
 <div id="class-select-screen"></div>
 <div id="game-screen">
-  <div class="topbar"><span class="topbar-icon" id="t-icon">⚔️</span><span class="topbar-name" id="t-name">Breaker</span><span style="font-size:10px;color:#F5D000;background:#1a1500;padding:2px 8px;border-radius:8px;font-family:Cinzel,serif;">TEST</span><span class="conn-dot off" id="conn-dot" title="Connection status"></span></div>
-  <div class="phase-banner waiting" id="phase-banner">Waiting…</div>
-  <!-- v0.16.8: tabs/tab-content replaced with single dashboard host. Pane-party
-       and pane-fusion removed entirely; their content now surfaces in the
-       dynamic zone via hold-gestures (v0.16.9+). -->
+  <!-- v0.16.9: topbar and phase-banner removed entirely (see players.html note). -->
   <div class="dashboard-host" id="dashboard-host">
     <div id="pane-dashboard" class="dash-surface active"></div>
   </div>
@@ -456,15 +425,17 @@ function testSwitch(cls) {
   document.documentElement.style.setProperty('--cls-color', s.color);
   document.documentElement.style.setProperty('--cls-bg',    s.bg);
   document.documentElement.style.setProperty('--cls-border',s.border);
-  document.getElementById('t-icon').textContent = m.icon;
-  document.getElementById('t-name').textContent = m.name + ' [TEST]';
+  // v0.16.9: t-icon/t-name removed (topbar gone). Class info in header card.
   document.querySelectorAll('.cls-sw').forEach(function(b){ b.classList.remove('active'); });
   var btn = document.getElementById('sw-'+cls);
   if (btn) btn.classList.add('active');
   client = _testClients[cls] || null;
-  // v0.16.8: conn-pill replaced with conn-dot.
-  var dot = document.getElementById('conn-dot');
+  // v0.16.9: conn-dot now lives inside the header card (rendered by
+  // _dashHeader). It may not exist yet on first setClass() call — guard.
+  // Also persist _connState so renders can read it.
   var on = !!_testConnected[cls];
+  _connState = on;
+  var dot = document.getElementById('conn-dot');
   if (dot) dot.className = 'conn-dot ' + (on?'on':'off');
   buildTabs();
   if (G) render();
@@ -481,7 +452,9 @@ function connectWS() {
         if (dot) dot.className = 'sw-dot on';
         if (cls === MY_CLASS) {
           client = c;
-          // v0.16.8: conn-pill -> conn-dot
+          // v0.16.9: conn-dot inside header card; also persist to _connState
+          // so _dashHeader can render the correct state on next render.
+          _connState = true;
           var p = document.getElementById('conn-dot');
           if (p) p.className = 'conn-dot on';
         }
@@ -492,6 +465,7 @@ function connectWS() {
         var dot = document.getElementById('dot-'+cls);
         if (dot) dot.className = 'sw-dot';
         if (cls === MY_CLASS) {
+          _connState = false;
           var p = document.getElementById('conn-dot');
           if (p) p.className = 'conn-dot off';
         }

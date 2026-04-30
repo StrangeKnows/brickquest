@@ -118,6 +118,15 @@ var _cardFlavors = {};
 // the same render pass.
 var _justExitedRumble = false;
 
+// v0.16.9 — Connection state cache. The conn-dot now lives inside the
+// header card (rendered by _dashHeader), so connection events can fire
+// before the dot exists in the DOM. This boolean is set by setConn()
+// in players.html / setClass() in test_players.html and read by
+// _dashHeader when rendering the dot. setConn() also still tries to
+// directly update the DOM element (for connection events that happen
+// AFTER the first render).
+var _connState = false;
+
 // v0.15.46 — Resolution snapshot model. REPLACES the v0.15.39 _displayDeltas
 // system entirely.
 //
@@ -331,11 +340,9 @@ function selectClass(cls) {
   document.documentElement.style.setProperty('--cls-color', s.color);
   document.documentElement.style.setProperty('--cls-bg',    s.bg);
   document.documentElement.style.setProperty('--cls-border',s.border);
-  // Update topbar
-  document.getElementById('t-icon').textContent = m.icon;
-  const pname = (document.getElementById('player-name-input')?.value||'').trim();
-  document.getElementById('t-name').textContent = pname ? pname+' ('+m.name+')' : m.name;
-  // Build tabs
+  // v0.16.9: t-icon/t-name elements removed (topbar gone). Class info now
+  // lives in the header card rendered by _dashHeader().
+  // Build tabs (no-op stub since v0.16.8)
   buildTabs();
   // Show game screen
   document.getElementById('class-select-screen').style.display = 'none';
@@ -785,13 +792,16 @@ function restoreActiveEvent() {
   }
 }
 
-// ── PHASE BANNER ──
+// ── PHASE BANNER (REMOVED v0.16.9) ──
+// The phase-banner element is gone in v0.16.9. Player-turn signaling now
+// lives on the dynamic zone via the .my-turn class (intense border + pulse
+// animation, set by _dashDynamicZone based on turn check). Other phase
+// states (waiting, battle, trade) surface as flavor text in the dynamic
+// zone or as content cards (rumble card, trade modal, etc.).
+// renderPhaseBanner kept as no-op so existing call sites don't break;
+// future cleanup can remove the calls.
 function renderPhaseBanner(me) {
-  const el = document.getElementById('phase-banner');
-  const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
-  const activeName = PLAYER_META[G.turnOrder[G.activePlayerIdx]]?.name||'?';
-  el.className = 'phase-banner '+(isMyTurn?'mine':'waiting');
-  el.textContent = isMyTurn ? `▶ YOUR TURN — ${G.phase.toUpperCase()}` : `Waiting — ${activeName}'s turn`;
+  // No-op: phase banner element removed in v0.16.9.
 }
 
 // ═══════════════════════════════════════════
@@ -838,20 +848,16 @@ function collapsibleCard(id, titleHtml, bodyHtml, startOpen) {
 // Class signature/secondary tables live in characters.js (Phase 2 consolidation).
 // Access via getSignature(cls) / getSecondary(cls) helpers.
 
-// ── HEADER (v0.16.8 redesign) ──
-// Compact identity + survival surface. NO inventory chips here — gold,
-// cheese, avatar (party trigger) all moved to the new interaction row at
-// the bottom.
+// ── HEADER (v0.16.9 redesign) ──
+// Horizontal-split card: identity (avatar + class name + zone + conn-dot)
+// on the left, HP big number + bar + shield label/count + pips on the
+// right. On portrait, the .head-stats wraps below .head-id automatically
+// (flex-wrap on .head-card). HP bar width is now bounded by .head-stats
+// container — fixes v0.16.8 overflow where bar read as full-viewport.
 //
-// Layout:
-//   [classIcon] [Class Name · Zone label · connect-dot]
-//   [HP big number] [bar] [/maxHP]
-//   [SHIELD label · count · pips]
-//   [statuses if any]
-//
-// The connect-dot is rendered as a pure presentation element (color-coded
-// circle) — its on/off state is set by setConn() in players.html at
-// connection events; we just show the styling here.
+// Conn-dot reads from global _connState (set by setConn() in players.html
+// or test_players.html connect handlers). The dot also has id="conn-dot"
+// so direct DOM updates from setConn keep working between renders.
 function _dashHeader(me) {
   const isOH = me.hp > me.hpMax;
   const pct = Math.min(100, Math.max(0, Math.round(me.hp / me.hpMax * 100)));
@@ -865,6 +871,7 @@ function _dashHeader(me) {
   const meta = PLAYER_META[MY_CLASS] || {};
   const className = meta.name || MY_CLASS;
   const classIcon = meta.icon || '◆';
+  const connClass = (typeof _connState !== 'undefined' && _connState) ? 'on' : 'off';
 
   const statuses = (me.statusEffects || []).map(s => `<span class="status-badge ${s}">${s}</span>`).join('');
   const debuff = G.movementDebuffs?.[MY_CLASS];
@@ -882,36 +889,38 @@ function _dashHeader(me) {
 
   const myKeys = Object.entries(G.magicKeys || {}).filter(([, cls]) => cls === MY_CLASS).map(([c]) => c);
 
-  return `<div class="card">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-      <div style="font-size:28px;line-height:1;">${classIcon}</div>
+  return `<div class="head-card">
+    <div class="head-id">
+      <div class="head-icon">${classIcon}</div>
       <div style="flex:1;">
-        <div style="font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;">${className}</div>
-        <div style="font-size:11px;color:var(--text-dim);">${space?.label || 'Start'}</div>
+        <div class="head-name">${className}<span class="conn-dot ${connClass}" id="conn-dot" title="Connection status"></span></div>
+        <div class="head-zone">${space?.label || 'Start'}</div>
       </div>
     </div>
-    <div class="hp-row">
-      <span class="hp-big" style="color:${hc};">${me.hp}</span>
-      <span class="hp-max">/ ${me.hpMax} HP</span>
-    </div>
-    <div class="hpbar-outer" id="my-hp-bar">
-      <div class="hpbar-inner" style="width:${pct}%;background:${hpBg};${hpShadow}"></div>
-    </div>
-    <div style="margin-top:10px;position:relative;" id="my-shield-section">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
-        <span style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.06em;color:#888;">🛡 SHIELD</span>
-        <span style="font-family:Cinzel,serif;font-size:14px;font-weight:700;color:${(me.armor||0)>0?'#AAAAAA':'#333'};">${me.armor||0}<span style="font-size:10px;color:#555;"> / ${shieldMax}</span></span>
+    <div class="head-stats">
+      <div class="hp-row">
+        <span class="hp-big" style="color:${hc};">${me.hp}</span>
+        <span class="hp-max">/ ${me.hpMax} HP</span>
       </div>
-      <div style="display:flex;flex-wrap:wrap;" id="my-shield-pips">${shieldPips}</div>
+      <div class="hpbar-outer" id="my-hp-bar">
+        <div class="hpbar-inner" style="width:${pct}%;background:${hpBg};${hpShadow}"></div>
+      </div>
+      <div style="position:relative;" id="my-shield-section">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <span style="font-family:Cinzel,serif;font-size:10px;letter-spacing:.06em;color:#888;">🛡 SHIELD</span>
+          <span style="font-family:Cinzel,serif;font-size:14px;font-weight:700;color:${(me.armor||0)>0?'#AAAAAA':'#333'};">${me.armor||0}<span style="font-size:10px;color:#555;"> / ${shieldMax}</span></span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;" id="my-shield-pips">${shieldPips}</div>
+      </div>
+      ${(statuses || debuffBadge) ? `<div class="status-wrap" style="margin-top:4px;">${statuses}${debuffBadge}</div>` : ''}
+      ${(me.queuedPoisonStacks || 0) > 0 ? `<div style="margin-top:4px;padding:6px 8px;background:#1a2a10;border:1px solid #4a7a2a;border-radius:6px;">
+        <span style="font-size:11px;color:#bada7a;font-family:Cinzel,serif;letter-spacing:.04em;">☠ POISON QUEUED: ${me.queuedPoisonStacks} stack${me.queuedPoisonStacks!==1?'s':''} (${me.queuedPoisonBattles||1} battle${(me.queuedPoisonBattles||1)!==1?'s':''})</span>
+      </div>` : ''}
+      ${(me.nextRumbleBuff && me.nextRumbleBuff.refreshBoost) ? `<div style="margin-top:4px;padding:6px 8px;background:#0a1a2a;border:1px solid #4d8abf;border-radius:6px;">
+        <span style="font-size:11px;color:#4db8ff;font-family:Cinzel,serif;letter-spacing:.04em;">⚡ FORMWRIGHT CHARGE: 2× brick refresh for first ${Math.round((me.nextRumbleBuff.refreshBoost.durationMs||10000)/1000)}s of next rumble</span>
+      </div>` : ''}
+      ${myKeys.length ? `<div style="font-size:12px;color:var(--yellow);margin-top:4px;">🗝 Keys: ${myKeys.join(', ')}</div>` : ''}
     </div>
-    ${(statuses || debuffBadge) ? `<div class="status-wrap">${statuses}${debuffBadge}</div>` : ''}
-    ${(me.queuedPoisonStacks || 0) > 0 ? `<div style="margin-top:6px;padding:6px 8px;background:#1a2a10;border:1px solid #4a7a2a;border-radius:6px;">
-      <span style="font-size:11px;color:#bada7a;font-family:Cinzel,serif;letter-spacing:.04em;">☠ POISON QUEUED: ${me.queuedPoisonStacks} stack${me.queuedPoisonStacks!==1?'s':''} (${me.queuedPoisonBattles||1} battle${(me.queuedPoisonBattles||1)!==1?'s':''})</span>
-    </div>` : ''}
-    ${(me.nextRumbleBuff && me.nextRumbleBuff.refreshBoost) ? `<div style="margin-top:6px;padding:6px 8px;background:#0a1a2a;border:1px solid #4d8abf;border-radius:6px;">
-      <span style="font-size:11px;color:#4db8ff;font-family:Cinzel,serif;letter-spacing:.04em;">⚡ FORMWRIGHT CHARGE: 2× brick refresh for first ${Math.round((me.nextRumbleBuff.refreshBoost.durationMs||10000)/1000)}s of next rumble</span>
-    </div>` : ''}
-    ${myKeys.length ? `<div style="font-size:12px;color:var(--yellow);margin-top:4px;">🗝 Keys: ${myKeys.join(', ')}</div>` : ''}
   </div>`;
 }
 
@@ -1706,20 +1715,19 @@ function _dashBrickChips(me) {
   return chips;
 }
 
-// ── INTERACTION ROW (v0.16.8) ──
-// Bottom row: brick chips + coin + cheese + avatar. Each is a hold-target.
-// Brick chips retain existing tier-charge hold behavior. Coin/cheese/avatar
-// holds invoke their dynamic zone surface (v0.16.9 wires the gestures —
-// for v0.16.8 they render but holds are inert).
+// ── INTERACTION ROW (v0.16.9 redesign) ──
+// Two layers in a single rounded card:
+//   Layer 1 (top):    coin chip + cheese chip with breathing room
+//   Layer 2 (bottom): brick chips (existing tier-charge hold behavior)
+// Avatar chip removed — class icon in the header is the avatar reference
+// (v0.16.10+ will wire holding it for party invocation).
+//
+// Coin and cheese chips have data-zone-trigger attributes hinting at which
+// dynamic zone surface their hold-gesture should invoke (wired in v0.16.10).
 function _dashInteractionRow(me) {
-  const meta = PLAYER_META[MY_CLASS] || {};
-  const classIcon = meta.icon || '◆';
   const goldVal = _displayed(me, 'gold');
   const cheeseVal = _displayed(me, 'cheese');
   return `<div class="interaction-row">
-    <div class="brick-chips">
-      ${_dashBrickChips(me)}
-    </div>
     <div class="resource-chips">
       <div class="res-chip" data-res="gold" data-zone-trigger="market" title="Hold to open market">
         <span class="res-chip-glyph">🪙</span>
@@ -1729,28 +1737,27 @@ function _dashInteractionRow(me) {
         <span class="res-chip-glyph">🧀</span>
         <span class="res-chip-num stat-num">${cheeseVal}</span>
       </div>
-      <div class="res-chip" data-res="avatar" data-zone-trigger="party" title="Hold to view party">
-        <span class="res-chip-glyph">${classIcon}</span>
-      </div>
+    </div>
+    <div class="brick-chips">
+      ${_dashBrickChips(me)}
     </div>
   </div>`;
 }
 
-// ── DYNAMIC ZONE (v0.16.8 foundation) ──
-// Single multi-state slot that lives between header and interaction row.
-// In v0.16.8 it renders flavor text (idle) or event card (active event) —
-// same content the old top-slot had, just relocated. Hold-invoked surfaces
-// (market, cheese options, party, fusion) wire in v0.16.9.
+// ── DYNAMIC ZONE (v0.16.9 — class-color outlined slot, intense pulse on turn) ──
+// Single multi-state slot between header and interaction row. v0.16.8
+// shipped foundation (idle + event); v0.16.9 adds class-color outline +
+// my-turn highlight + pulse animation (replaces the gone phase-banner).
+// Hold-invoked surfaces (market, cheese, party, fusion) wire in v0.16.10.
 //
-// Returns { html, active } so renderDashboard can track transitions for
-// effects like the `_dashTopSlotWasActive` flash-suppression logic.
+// Returns { html, active } so renderDashboard can track transitions.
+// The .my-turn class lights up the border + triggers the pulse keyframes.
 function _dashDynamicZone(me) {
   const isMyTurn = G.turnOrder[G.activePlayerIdx] === MY_CLASS;
   let html = '';
   let active = false;
 
   // Rumble card (pending or active) — always shown when applicable.
-  // Mirrors old _dashTopSlot logic; the rumble card was previously top-slot.
   const rumbleHtml = renderRumbleCard(me);
   if (rumbleHtml) { html += rumbleHtml; active = true; }
 
@@ -1766,16 +1773,23 @@ function _dashDynamicZone(me) {
   }
 
   // Idle state — flavor text. Only render when no other content claimed the zone.
+  // Phase banner is gone (v0.16.9) — flavor text is the ambient "what's happening
+  // when nothing is happening" surface, working alongside the .my-turn border
+  // highlight to communicate state.
   if (!active) {
     const line = dashboardFlavor(false);
     if (line) {
-      html = `<div class="card" style="padding:12px 16px;text-align:center;border-color:#2a2a2a;">
+      html = `<div style="padding:12px 16px;text-align:center;">
         <div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;color:var(--text-dim);line-height:1.5;">${line}</div>
       </div>`;
     }
   }
 
-  return { html: `<div class="dynamic-zone" id="dynamic-zone">${html}</div>`, active };
+  // .my-turn class triggers intense border + pulse animation on the dynamic zone.
+  // Set whenever it's the player's turn, regardless of whether content is active —
+  // so even an event card during your turn glows.
+  const turnClass = isMyTurn ? ' my-turn' : '';
+  return { html: `<div class="dynamic-zone${turnClass}" id="dynamic-zone">${html}</div>`, active };
 }
 
 // ── TOP SLOT and FLAVOR LINE (REMOVED v0.16.8) ──

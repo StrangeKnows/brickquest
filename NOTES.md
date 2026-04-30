@@ -1655,6 +1655,197 @@ rewrite → chip-finders → audit pass → NOTES.
 
 ---
 
+### v0.16.9 — Header redesign + class-color dynamic zone + two-layer interaction row
+
+> "move health/armor/status bar next to player tag/name and move the
+> connected icon down next to player tag remove the red header
+> completely and the player icon and connect icon, these are
+> unnecessary and redundant. get rid of player icon next to cheese,
+> player icon next to health bar will work just fine; remove market
+> button completely; moe cheese and coin above brick bar, two layers,
+> a bit more breathing room between coin and cheese; a bit of space
+> between coin/cheese and brick layers. outline dynamic card in
+> player color, and more intense highlight when it is player turn."
+
+Plus: "no banner; always flavor text when not in event; during turn
+intense highlight and gentle pulsing of border."
+
+---
+
+**Vision shift (S016 redesign continuation):**
+
+v0.16.8 shipped the structural foundation (tabs gone, dynamic zone +
+interaction row scaffolded). v0.16.9 finishes the layout vision based
+on Ross's playtest annotations on the v0.16.8 result.
+
+Originally v0.16.9 was scoped to be the hold-gesture state machine
+(coin→market, cheese→eat, avatar→party). That moves to v0.16.10.
+Layout polish takes priority — the dashboard needs to feel right
+visually before behavior layers on top.
+
+---
+
+**Removed:**
+
+1. **Topbar entirely** (`.topbar` div + class icon + class name +
+   conn-dot at top of viewport). Class info now lives in the header
+   card; conn-dot moved inline with class name in the header.
+2. **Phase banner entirely** (`.phase-banner` div with "▶ YOUR TURN —
+   PREPARE", "Waiting…", etc.). Replaced by:
+   - Dynamic zone border outlined in class color (always)
+   - `.my-turn` class on dynamic zone triggers intense glow + gentle
+     pulse animation when it's the player's turn
+   - Flavor text inside dynamic zone covers the "ambient state when
+     nothing else is happening" case
+3. **Avatar resource chip** from interaction row. Class icon in header
+   serves as the avatar reference (v0.16.10 wires holding it for
+   party invocation).
+4. **`renderPhaseBanner`** stubbed to no-op — element is gone, callers
+   harmless (existing call sites in render() and trade flow guard with
+   `if (banner)` checks or just no-op out).
+5. **t-icon / t-name DOM updates** in `chooseClass()` (players-core.js)
+   and `setClass()` (test_players.html) — those elements are gone.
+
+---
+
+**Restructured:**
+
+1. **Header is now a horizontal-split card** (`.head-card`):
+   - LEFT (`.head-id`): class icon (28px) + class name + zone label +
+     conn-dot inline next to the name
+   - RIGHT (`.head-stats`): HP big number + bar + shield label/count
+     + pips + status badges
+   - Flexes evenly: in landscape, fills width as one row; in portrait,
+     wraps to two stacked rows
+   - **Fixes v0.16.8 HP bar overflow** — bar was unbounded and read as
+     full-viewport-wide; now bounded by `.head-stats` container.
+2. **Interaction row is now two layers** (`.interaction-row`,
+   `flex-direction:column`):
+   - LAYER 1 (top, `.resource-chips`): coin chip + cheese chip with
+     `gap:14px` for breathing room
+   - LAYER 2 (bottom, `.brick-chips`): brick chips, centered
+   - `gap:10px` between the two layers
+   - `padding:10px` around the whole row
+   - Resource chips redesigned: now horizontal (icon + number side-by-side)
+     instead of vertical stack; bigger touch target.
+3. **Dynamic zone styled** as the visual chrome (replaces inner card
+   borders):
+   - Always: 1px border in `var(--cls-color)`, padding 8px, transparent
+     interior, no inner card border
+   - On player's turn: `.my-turn` class adds glow + 2.4s pulse animation
+     via `@keyframes dz-pulse`
+   - Inner `.card` and `#landing-result` get border:none, background:
+     transparent, margin:0 so the outer dz border is the visual frame
+
+---
+
+**State-cache for conn-dot:**
+
+The conn-dot now lives inside the header card (rendered by
+`_dashHeader`), which means connection events can fire BEFORE the dot
+exists in the DOM. Added `_connState` global in players-core.js.
+`setConn()` (players.html) and the test_players connect/disconnect
+handlers now write to `_connState` AND attempt direct DOM update. On
+each render, `_dashHeader` reads `_connState` to set the initial
+class. Direct updates between renders still work for connection
+events.
+
+---
+
+**Files changed:**
+
+- `players.html` — removed topbar div, removed phase-banner div,
+  removed topbar/phase-banner CSS, restyled `.dynamic-zone` (class-color
+  border + my-turn pulse), restyled `.interaction-row` (two-layer flex
+  column), restyled `.res-chip` (horizontal icon+number), added
+  `.head-card` / `.head-id` / `.head-stats` / `.head-icon` / `.head-name`
+  / `.head-zone` CSS. Updated `setConn()` to write `_connState`.
+- `test_players.html` — mirrors all players.html changes (memory rule
+  #1). Updated test connect/disconnect handlers to write `_connState`.
+  Updated setClass() to remove t-icon/t-name updates and persist
+  `_connState`.
+- `players-core.js` — rewrote `_dashHeader` (horizontal split, conn-dot
+  inline, reads `_connState`), rewrote `_dashInteractionRow` (two-layer,
+  no avatar), rewrote `_dashDynamicZone` (returns `.my-turn` class on
+  player's turn, sheds inner `.card` wrapper), stubbed `renderPhaseBanner`
+  to no-op, removed `t-icon`/`t-name` updates from `chooseClass`,
+  added `_connState` global.
+- `NOTES.md` — this entry.
+
+---
+
+**Test focus:**
+
+1. Hard refresh (everything changed: HTML, CSS, JS).
+2. **No top topbar visible** — class identity is in the header card now.
+3. **No phase banner visible** — turn signal is the dynamic zone glow.
+4. **Header card** at top of dashboard:
+   - Avatar (class icon) + class name + zone label on left
+   - Conn-dot is the small color-coded circle right after the class
+     name (green = connected, gray = disconnected)
+   - HP big number, bar, shield label/count, pips on the right
+   - In landscape: identity left, stats right, single row
+   - In portrait: identity row, stats wrap below
+   - **HP bar bounded** to the right column — no longer overflowing
+5. **Dynamic zone** between header and interaction row:
+   - Always outlined in class color (subtle)
+   - When it's YOUR turn: intense glow + gentle pulsing border
+   - Idle: shows flavor text in italic dim style
+   - Event: shows event card content (same as before, fits inside
+     the class-color frame)
+6. **Interaction row** at bottom:
+   - Top layer: coin + cheese chips with space between, centered
+   - Bottom layer: brick chips, centered
+   - Space between the two layers
+   - Resource chips are bigger now (horizontal icon+number)
+   - **No avatar chip** — class icon is in the header instead
+7. **No Market button** anywhere
+8. Brick hold-tier (white/gray) still works — tap=tier-1, hold=fan-out
+9. chipPulse arrivals still hit the new chip positions
+10. Connection: connect → green dot, disconnect → gray dot
+11. Trade flow still works (the trade-toast fallback that wrote to
+    phase-banner is now silently no-op; trade composer still appears)
+
+---
+
+**Risk surfaces:**
+
+- The `dz-pulse` animation is constant 2.4s loop while it's your turn.
+  If that's too aggressive (eye fatigue during long prepare phases),
+  Ross calls and we tune duration / amplitude.
+- `_connState` global — writing happens in two files (players.html,
+  test_players.html). Risk of state desync if a future patch only
+  touches one. NOTES'd here so the pair-update is documented.
+- Trade toast (line 4970-area) writes to gone `phase-banner` element.
+  Currently if-guarded so silent no-op. v0.16.10 should surface
+  trade-sent feedback via dynamic zone or a fade-toast.
+- Battle-mine phase-banner update at line 5213 — same pattern, silently
+  no-ops. Also for v0.16.10 polish.
+- Existing landing-result inner content that has its OWN class-color
+  border may double-up visually with the new dynamic-zone border.
+  Watch in playtest.
+
+---
+
+**Standards audit (rule #17 — push #29 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #11 (data/runtime/UI separation): UI-only, no characters.js or
+  rumble.js touched ✓
+- Rule #14 (handoff hygiene): re-read each file region before editing ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: phase signal lives in dynamic zone (one place for state)
+  - ELEGANCE: removed redundant topbar, phase-banner, avatar chip
+  - EFFICIENCY: landscape uses width (header is one row); portrait
+    still works (head-card flex-wrap)
+- Rule #19 (intuition): Ross gave concrete annotations, I extended with
+  the implied design choices (head-card horizontal split, conn-dot
+  position, removing avatar chip). Asked for clarification on a few
+  before building.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
