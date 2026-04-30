@@ -4489,6 +4489,94 @@ override, visible counter chip, uniform threshold across classes.
 
 ## Parking lot — v0.15.36 close
 
+### Events-system overhaul (v0.16.27 close)
+
+**Source:** Ross during v0.16.27 close on rubble stacking sizing:
+> "feels like rubble stacking can take more room in this card, how
+> many cards is it on top of? seems like we can make this more
+> efficient and elegant, not to mention unify the whole event
+> system. that is coming down the pipeline...lol, still need to
+> wrap with players. rubble stacking deferred until events
+> overhaul? what is your take"
+>
+> "add to parking lot what we were discussing about events"
+
+**Current architecture** (problem inventory):
+
+Each event type has its own custom inline rendering through
+`showLandingResult` → `restoreActiveEvent` → per-color branches
+that emit raw HTML into `#landing-result`. Stack of nested chrome
+per event:
+1. `_dashDynamicZone` outer dz card (border + class color + padding)
+2. `#landing-result` inner div
+3. `roll-display` wrapper (margin + text-align)
+4. Event-specific outer (background, border, padding)
+5. Event-specific body (canvas/UI/buttons)
+
+That's 4-5 nested containers per event type. Each event reinvents
+the wrapper wheel: gray, red, green, gold (with sub-variants
+search/torch), blue (with sub-variants), purple, white, black,
+riddle, trap. Rubble-stacking sizing fix in v0.16.26 was a
+patch on rubble's specific markup — won't survive an overhaul.
+
+**Proposed unified shape:**
+
+One `EventCard` component:
+- Reads `G.activeEvent` for type/state
+- Renders standardized header (icon + name + zone tag) +
+  body slot + footer slot
+- Body slot is per-event-type module — same interface, different
+  contents (canvas for spatial mini-games, choice grid for
+  binary events, animated stages for combat)
+- Header/footer/wrapper chrome shared, only body differs
+- Hand-off to post-event flavor at result-field-populate (already
+  built in v0.16.27)
+- Event types as data: `EVENT_TYPES = { gray: { icon, name,
+  bodyRenderer, ... }, red: { ... } }` — UNITY: same shape,
+  different fields per type
+
+**Wins:**
+- UNITY: one render path, one container hierarchy
+- ELEGANCE: per-event chrome stripped, body modules are pure
+  content
+- EFFICIENCY: shared header/footer = less code; sizing fix
+  applies to all events at once (not per-type patches)
+- Overflow problem solved structurally — body fits dz width
+  by default, body modules render to that width
+
+**Dependencies / risk:**
+- Touches `showLandingResult`, `restoreActiveEvent`, all per-type
+  result branches (gray/red/green/gold/blue/purple/white/black/
+  riddle/trap). Big surface area.
+- Server-side result fields stay as-is — overhaul is client-only
+- Need to validate every event type rerender works post-migration
+  (per rule #20 grep migration symptoms)
+- Big enough that it deserves a dedicated session, not mixed
+  with other work
+
+**Defer until:** dashboard interaction layer fully sealed
+(post-event flavor verified clean across all 13 types, fusion
+mechanic spec begun or completed). Then events-overhaul as a
+focused session.
+
+**Pre-overhaul tech debt parked for the overhaul to absorb:**
+- Rubble stacking sizing — v0.16.26 patched canvas to 240px
+  width with CSS scaling, but wider dz could accommodate larger.
+  Defer to overhaul (body slot will inherit dz width naturally).
+- Other event canvases (green vine path, red trial of hand)
+  may have similar overflow issues — not yet playtest-verified.
+  Overhaul fixes by structure.
+- Outcome detection edge cases (monster/boss heuristic, white
+  shrine sub-outcomes) — overhaul is good moment to refactor
+  `_eventOutcome` against the unified type schema.
+- Red trial outcome detection: v0.16.27 playtest showed
+  Breaker WON on DM panel but unfavorable flavor displayed.
+  Field-name mismatch suspected — `ev.redResult.winner` may
+  not match server's actual field name. Worth grep before/after
+  overhaul to verify all per-type field reads.
+
+---
+
 ### Market redesign — cheese-modal visual language + coin icon
 
 **Source:** Ross during v0.15.36 playtest:
