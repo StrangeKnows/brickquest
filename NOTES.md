@@ -9224,6 +9224,154 @@ to prevent re-firing across renders.
 
 ---
 
+### v0.16.2 — Gold card framing + rumble result card + auto-credit confirmation
+
+Three bundled changes per Ross's directive after v0.16.1 playtest:
+
+> "after rumble, players should auto increment their loot, not after
+> DM presses resolve. Resolve for DM is to pass turn, lets make sure
+> this is functioning correctly. Also, remember to highlight the inv
+> area that is being incremented. All else is looking good, gold
+> reward card is below where it should be...gold and rumble were
+> slated to be fixed after anyhow, correct?"
+
+---
+
+**Change 1: Gold result card framing (UNITY)**
+
+The audit revealed two visual patterns existed in the codebase:
+- Six events (gray, red, purple, white, black, green) wrap their
+  buildResolutionCard output in an outer "stage" frame:
+  `'<div style="margin-top:10px;padding:14px;background:#X;border:2px
+  solid #Y;border-radius:12px;">' + card + '</div>'`
+- Four events (gold, riddle, trap, blue) render buildResolutionCard
+  directly without an outer frame.
+
+Result: gold card sat ungrounded compared to gray/red — visually
+"below where it should be" because the outer stage frame's padding
+shifts the inner card down ~14px. Gold's missing frame meant the card
+appeared higher in space, perceptually wrong.
+
+**Fix:** wrap gold result in an outer stage frame matching the gray/red
+pattern. Themed for gold (bg:#1a1200, border:#F5D00066). UNITY: all
+event resolutions now have the two-layer visual structure (stage outer
++ result card inner).
+
+**Future polish (not this push):** the riddle/trap/blue cases also lack
+the outer frame. Could be unified in a follow-up if Ross flags them.
+
+---
+
+**Change 2: Rumble result card**
+
+Server-side, rumble loot is ALREADY auto-credited at battleEnd (see
+`server.js` ~line 988-1018). The DM's `dm_resolved` only advances the
+turn — doesn't gate loot. So the user's directive ("auto increment, not
+after DM presses resolve") is already true server-side. ✓
+
+**The gap was visual.** Player view had no specific rendering for
+post-rumble events. After rumble end:
+- Server credits → state broadcast → client renders
+- `_detectInvIncreasesAndPulse` (v0.16.0) fires chipPulse on increased
+  chips ✓
+- BUT: no result card shown — player sees pulses without context
+
+**Fix:** new branch in `showLandingResult` for `ev.evType === 'monster'
+|| ev.evType === 'boss'` with `rumbleResult` populated. Renders a
+buildResolutionCard with:
+- Outcome title (VICTORY / DEFEATED / TIMEOUT / BATTLE ENDED)
+- Theme color matching outcome (green-success, red-defeat, gray-other)
+- Flavor line per outcome
+- Stats line (damage dealt/taken, crits) — surfaces battleStats
+- Loot summary line — informational, mirrors what already auto-credited
+- **NO spec** — no Collect button, no drain. Auto-credit already happened.
+
+The card uses the same outer stage frame pattern as other events, so
+the entrance/dismissal animations (v0.16.1) work consistently.
+
+`alreadyRumble` added to `hideHeader` logic so the brick-square header
+doesn't render redundantly when the rumble card is showing.
+
+**Architectural choice:** rumble result intentionally has NO Collect
+button. This is the divergent pattern from regular events:
+- Regular events: spec → Collect button → drain to chips with FX
+- Rumble: auto-credit → chipPulse on dashboard → result card is
+  informational only
+
+Per Ross's directive, this is correct. Loot doesn't gate on DM action.
+
+---
+
+**Change 3: chipPulse on rumble-end inventory rise**
+
+`_detectInvIncreasesAndPulse` (v0.16.0) already handles this. When
+rumble ends and dashboard becomes visible again, the next render
+detects inventory rise vs `_prevRenderInv` (which captured pre-rumble
+state since dashboard didn't render during rumble). chipPulse fires
+on each chip that grew.
+
+No code change needed — verifying the existing flow works. If playtest
+shows pulses missing or unstable, that's a follow-up diagnostic.
+
+---
+
+**Files changed:**
+
+- `players-core.js`:
+  - Gold result branch wraps in outer stage frame (line ~2364)
+  - New rumble result branch in `showLandingResult` for monster/boss
+    + rumbleResult (~30 lines)
+  - `alreadyRumble` added to hideHeader logic
+- `NOTES.md` — this entry
+
+UNTOUCHED: boardFx.js, boardFx.css, players.html, test_players.html,
+server.js, rumble.js. Server-side auto-credit was already correct.
+
+---
+
+**Test focus:**
+
+1. **Gold event:** play gold mini-game (crack/torch). When result card
+   appears, position should match gray rubble's (stage frame around
+   inner result card). No "below where it should be" feeling.
+
+2. **Rumble end (victory):** finish a rumble battle. After return to
+   board:
+   - Result card visible: "⚔ VICTORY" or "🏆 BOSS DEFEATED" with theme
+     color, flavor, stats line, loot summary
+   - Dashboard chips pulse on each looted item (gold/cheese/bricks)
+   - DM's "Mark Resolved" only advances turn — does NOT change inventory
+
+3. **Rumble end (defeat):** ditto but with "✗ DEFEATED" theming.
+
+4. **Rumble end (timeout/force-quit):** gray theming, neutral flavor.
+
+5. **No regression:** other events (riddle, trial, gray rubble, etc.)
+   continue to work as in v0.16.1. Card animations still fire once
+   per event. Snapshot model still fixes pre-tap flash.
+
+---
+
+**Standards audit (rule #17 — push #21 in S015 continuation):**
+
+This push was a feature-add grounded in the v0.15.45 audit, not a
+bug fix. Diagnostic-first protocol (rule #6) doesn't strictly apply —
+the "diagnostic" was the audit document. Followed:
+
+- **Rule #18 (UNITY):** gold framing fix unifies the two-layer visual
+  structure across all events. Rumble result uses same envelope.
+- **Rule #20 (migration grep):** grep'd evType==='monster'/'boss'
+  before adding the branch. Confirmed no existing rumble UI to
+  conflict with.
+- **Rule #14 (handoff hygiene):** read rumble.js + server.js targeted
+  via grep+view, not full file read.
+- **Rule #21 (working-file safety):** copied only rumble.js and
+  server.js to /home/claude/bq, no blanket cp.
+- **Rule #25 (version bump consent):** patch bump (-v) used. No -V
+  without explicit Ross consent. ✓
+
+---
+
 
 ### Session 015 Process Retrospective
 

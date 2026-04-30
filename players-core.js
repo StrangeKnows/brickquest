@@ -2361,7 +2361,14 @@ function showLandingResult(ev, r, zone) {
         grFlav = grPool.length ? grPool[Math.floor(Math.random()*grPool.length)] : '';
       }
 
-      extra = buildResolutionCard({
+      // v0.16.2: wrap in outer stage frame matching gray/red/purple/white/
+      // black/green pattern. Without this, the gold result card sits
+      // ungrounded (no stage frame) compared to other events which have a
+      // dark themed outer frame around their resolution card. UNITY: all
+      // events share the two-layer visual structure (stage outer + result
+      // card inner).
+      extra = '<div style="margin-top:10px;padding:14px;background:#1a1200;border:2px solid #F5D00066;border-radius:12px;">'
+        + buildResolutionCard({
         themeColor: grTheme,
         borderColor: grTheme + '66',
         bgColor: grBg,
@@ -2371,7 +2378,8 @@ function showLandingResult(ev, r, zone) {
         flavor: grFlav,
         showerTint: grTheme,
         shower: foundAmt2 > 0 || grCheese > 0,
-      });
+      })
+        + '</div>';
     } else if (G.activeEvent && G.activeEvent.goldVariant) {
       // Mini-game ready to launch — render into container after DOM settles
       extra = '<div id="gold-game-container" style="margin-top:10px;"></div>';
@@ -2733,6 +2741,82 @@ function showLandingResult(ev, r, zone) {
   } else if (ev.type === 'gray' || ev.evType === 'gray') {
   }
 
+  // v0.16.2: RUMBLE result card. After rumble ends, server credits loot
+  // automatically (see server.js battleEnd handler ~line 988). Player view
+  // shows an informational card with outcome + summary stats. Inventory chip
+  // values pulse via _detectInvIncreasesAndPulse on the next render — no
+  // Collect button, no drain. DM's "Mark Resolved" only advances the turn.
+  if ((ev.evType === 'monster' || ev.evType === 'boss') && G.activeEvent && G.activeEvent.rumbleResult) {
+    var rr = G.activeEvent.rumbleResult;
+    var bs = rr.battleStats || {};
+    var rTitle, rTheme, rBg, rFlavor;
+    if (rr.victor === rr.cls) {
+      // Player won
+      rTitle = (ev.evType === 'boss') ? '🏆 BOSS DEFEATED' : '⚔ VICTORY';
+      rTheme = '#9adb9a';
+      rBg = '#0a1a0a';
+      var enemiesK = (bs.enemiesKilled && bs.enemiesKilled.length) || 0;
+      rFlavor = enemiesK > 0
+        ? 'Steel rang. The path opens.'
+        : 'The battle is yours.';
+    } else if (rr.victor === 'enemy') {
+      rTitle = '✗ DEFEATED';
+      rTheme = '#d66';
+      rBg = '#1a0808';
+      rFlavor = rr.playerDied
+        ? 'You fell. The page turns.'
+        : 'Driven back. Lick your wounds.';
+    } else if (rr.reason === 'timeout') {
+      rTitle = '⊘ TIMEOUT';
+      rTheme = '#aaa';
+      rBg = '#141414';
+      rFlavor = 'The clock ran out. Standoff.';
+    } else if (rr.reason === 'force-quit' || rr.reason === 'dm_force_quit') {
+      rTitle = '⊘ BATTLE ENDED';
+      rTheme = '#aaa';
+      rBg = '#141414';
+      rFlavor = 'The DM called it.';
+    } else {
+      rTitle = '⊘ BATTLE OVER';
+      rTheme = '#aaa';
+      rBg = '#141414';
+      rFlavor = '';
+    }
+    // Build a small stats line — what was looted, how the fight went
+    var statsBits = [];
+    if (bs.damageDealt > 0) statsBits.push(bs.damageDealt + ' dmg dealt');
+    if (bs.damageTaken > 0) statsBits.push(bs.damageTaken + ' taken');
+    if (bs.critsLanded > 0) statsBits.push(bs.critsLanded + ' crit' + (bs.critsLanded > 1 ? 's' : ''));
+    var statsLine = statsBits.length
+      ? '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.04em;margin-top:6px;">' + statsBits.join(' · ') + '</div>'
+      : '';
+    // Loot summary (informational — actual credit already happened, chips pulse)
+    var lootBits = [];
+    if (bs.bricksGained && typeof bs.bricksGained === 'object') {
+      Object.keys(bs.bricksGained).forEach(function(c) {
+        var n = bs.bricksGained[c] || 0;
+        if (n > 0) lootBits.push('+' + n + ' ' + c);
+      });
+    }
+    if (bs.goldGained > 0) lootBits.push('+' + bs.goldGained + ' 🪙');
+    var lootLine = lootBits.length
+      ? '<div style="font-size:12px;color:var(--text-dim);margin-top:6px;">looted: ' + lootBits.join(', ') + '</div>'
+      : '';
+    extra = '<div style="margin-top:10px;padding:14px;background:'+rBg+';border:2px solid '+rTheme+'66;border-radius:12px;">'
+      + buildResolutionCard({
+          themeColor: rTheme,
+          borderColor: rTheme + '66',
+          bgColor: rBg,
+          title: rTitle,
+          flavor: rFlavor,
+          extra: statsLine + lootLine,
+          showerTint: rTheme,
+          shower: rr.victor === rr.cls,
+          // No spec — auto-credit already happened, no Collect button.
+        })
+      + '</div>';
+  }
+
   // Brick square color mapping
   var evColor = ev.color || ev.type;
   var brickBg = {
@@ -2757,7 +2841,11 @@ function showLandingResult(ev, r, zone) {
   var alreadyGreen = (ev.type === 'green' || ev.evType === 'green') && G.activeEvent && G.activeEvent.greenVariant === 'vine_path';
   var alreadyRed = (ev.type === 'red' || ev.evType === 'red') && G.activeEvent && G.activeEvent.redVariant === 'trial_of_hand';
   var alreadyGrayRubble = (ev.type === 'gray' || ev.evType === 'gray') && G.activeEvent && G.activeEvent.grayVariant === 'rubble_stacking';
-  var hideHeader = alreadyChoseBlue || alreadyRiddle || alreadyTrap || alreadyGold || alreadyPurple || alreadyWhite || alreadyBlack || alreadyGreen || alreadyRed || alreadyGrayRubble;
+  // v0.16.2: rumble result card (monster/boss with rumbleResult) is self-
+  // contained — hide the brick-square header for the same reason as other
+  // dispatched events.
+  var alreadyRumble = (ev.evType === 'monster' || ev.evType === 'boss') && G.activeEvent && G.activeEvent.rumbleResult;
+  var hideHeader = alreadyChoseBlue || alreadyRiddle || alreadyTrap || alreadyGold || alreadyPurple || alreadyWhite || alreadyBlack || alreadyGreen || alreadyRed || alreadyGrayRubble || alreadyRumble;
 
   el.innerHTML = '<div class="roll-display" style="margin-top:8px;text-align:center;">'
     + (!hideHeader ? '<div style="display:flex;justify-content:center;margin-bottom:6px;">' + brickSquare + '</div>' : '')
