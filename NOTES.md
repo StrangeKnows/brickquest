@@ -4196,6 +4196,116 @@ boardFx, dm_screen.html.
 
 ---
 
+### v0.16.31 — White/gray drop-target highlight via elementsFromPoint stack walk
+
+> "if the fusion screen is present, draggin white and gray onto it
+> cauuses highlighht. if there is no fusion screen present, dragtgin
+> white and gray will trigger fusion screen, buut no white ouuutline
+> prior"
+
+Half-bug from v0.16.30. The fusion-drop routing in `_holdUp` was
+fixed (using overlay display-toggle hack), so DROP works for white/
+gray. But the LIVE highlight feedback in `_holdMove` was still using
+`document.elementFromPoint` (singular), which returned the radial
+fan overlay element first and never found the dz beneath. Result:
+- Drop works (right routing)
+- But no `.fusion-drop-target` highlight while dragging — player
+  has no visual confirmation the dz is the drop target
+
+When fusion screen was already open, the dz content shape changed
+(taller content, surface card extends past fan icons), so the cursor
+crossed the dz BEYOND the radial coverage area as the player moved
+toward the dz center — and at that point elementFromPoint found the
+dz. So highlight kicked in. Misleading "sometimes works" pattern.
+
+**Fix: elementsFromPoint stack walk in `_holdMove`.**
+
+`document.elementsFromPoint(x, y)` returns ALL elements at the
+point in z-order top to bottom. Walk the stack and find the first
+match for each role we care about (ally icon, option icon, dz).
+The radial fan icons are in the stack but the dz is too — stack
+walk finds both. No display-toggle, no DOM mutation, no perf
+concern (one extra elementsFromPoint per move event vs one
+elementFromPoint).
+
+**Same approach applied to `_holdUp`.**
+
+Replaced the v0.16.30 display-toggle hack with the cleaner stack
+walk. Goal identical (find dz beneath overlay), implementation more
+elegant. Aligns _holdMove and _holdUp to use the same lookup
+pattern. ELEGANCE: one technique, two call sites.
+
+**Also fixed: stale highlight cleanup.**
+
+Tracked `_holdState._highlightedDz` so when the cursor leaves the dz
+mid-drag, the previous highlight class is removed (was lingering).
+And `_holdEnd` now clears the highlight on any termination path —
+so successful drop, cancelled drop, and other-target releases all
+leave a clean dz.
+
+---
+
+**Files changed:** `players-core.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, html files,
+boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **No fusion screen open → drag white brick toward dz:** dz border
+   brightens to white as soon as cursor is over the dz area.
+3. **No fusion screen open → drag gray brick toward dz:** same — dz
+   highlights immediately on hover.
+4. **Drag onto dz, drop:** highlight clears as fusion placeholder
+   opens (was working before, still works).
+5. **Drag onto dz, drag off:** highlight clears as cursor leaves
+   (no stale highlight persisting).
+6. **Fusion screen already open, drag white/gray to dz:** highlight
+   still works (was already working in v0.16.30).
+7. **No regressions** to ally radial (Fixer hold without drag, drag
+   to ally icon for heal still works).
+
+---
+
+**Risk surfaces:**
+
+- `elementsFromPoint` is well-supported (all modern browsers) but
+  not in IE. Fallback to single elementFromPoint if missing — see
+  `typeof document.elementsFromPoint === 'function'` guard.
+- Stack walk costs O(n) where n = elements at point. Usually 3-6
+  elements; negligible perf impact at 60Hz.
+- The `_highlightedDz` tracking handles "cursor leaves dz" cleanup,
+  but if the dz element is replaced mid-drag by a re-render, the
+  old reference is stale. Edge case unlikely during a single drag,
+  but worth noting.
+
+---
+
+**Standards audit (rule #17 — push #50 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players-core.js only — no markup or CSS
+  changes. ✓
+- Rule #6 (diagnostic-first): N/A — bug root cause was clear from
+  Ross's symptom report (highlight works conditionally on fusion
+  screen presence) plus knowledge of the v0.16.30 overlay-stack
+  issue. Direct fix.
+- Rule #19 (intuition): held — Ross's symptom description told me
+  the issue was specifically "highlight not showing" not "drop not
+  working," which meant the bug was in `_holdMove` not `_holdUp`.
+  Fixed both call sites for consistency.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: _holdMove and _holdUp now use the same elementsFromPoint
+    technique for dz lookup.
+  - ELEGANCE: replaces the v0.16.30 display-toggle hack with a
+    cleaner stack walk. No DOM mutation.
+  - EFFICIENCY: O(n) stack walk per pointermove event is cheap.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

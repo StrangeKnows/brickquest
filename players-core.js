@@ -1194,23 +1194,39 @@ function _holdMove(e) {
   if (moved > HOLD_DRAG_THRESHOLD_PX) {
     _holdState.isDrag = true;
   }
-  // Drag-target detection — find ally icon OR option icon under cursor.
-  // White uses ally targets; other colors use option targets. dragTarget
-  // holds the matched id; _holdUp routes by which kind was hit.
-  // v0.16.29: also detect dynamic-zone hover for fusion drop. overDz
-  // flag drives the dz highlight visual + _holdUp routing.
-  const el = document.elementFromPoint(e.clientX, e.clientY);
-  const allyIcon = el ? el.closest('[data-ally-target]') : null;
-  const optIcon  = el ? el.closest('[data-option-target]') : null;
-  const dzEl     = el ? el.closest('.dynamic-zone') : null;
+  // v0.16.31: use elementsFromPoint (plural) so we see the full stack at
+  // the cursor and can find the dz beneath the hold-overlay. The overlay
+  // (radial fan + arc + ghost) sits over the dz with pointer-events:auto
+  // on its targets, which made elementFromPoint return overlay elements
+  // first and miss the dz. Walking the stack picks the first matching
+  // ancestor for each role we care about — ally/option icons stay
+  // discoverable, dz becomes discoverable too, no display-toggle thrash.
+  var stack = (typeof document.elementsFromPoint === 'function')
+    ? document.elementsFromPoint(e.clientX, e.clientY)
+    : [document.elementFromPoint(e.clientX, e.clientY)];
+  var allyIcon = null, optIcon = null, dzEl = null;
+  for (var i = 0; i < stack.length; i++) {
+    var node = stack[i];
+    if (!node || !node.closest) continue;
+    if (!allyIcon) allyIcon = node.closest('[data-ally-target]');
+    if (!optIcon)  optIcon  = node.closest('[data-option-target]');
+    if (!dzEl)     dzEl     = node.closest('.dynamic-zone');
+    if (allyIcon && optIcon && dzEl) break;
+  }
   _holdState.dragTarget = allyIcon
     ? allyIcon.getAttribute('data-ally-target')
     : (optIcon ? optIcon.getAttribute('data-option-target') : null);
   _holdState.overDz = !!dzEl && _holdState.fusionEligible && _holdState.isDrag;
-  // Toggle a class on the dz element so CSS can highlight it as drop target.
-  if (dzEl) {
-    if (_holdState.overDz) dzEl.classList.add('fusion-drop-target');
-    else dzEl.classList.remove('fusion-drop-target');
+  // Toggle highlight class. Track which dz currently carries the class so
+  // we can remove it if the cursor leaves dz entirely (otherwise a stale
+  // highlight would persist on the previous dz element until next move
+  // back over it).
+  if (_holdState.overDz && dzEl) {
+    dzEl.classList.add('fusion-drop-target');
+    _holdState._highlightedDz = dzEl;
+  } else if (_holdState._highlightedDz) {
+    _holdState._highlightedDz.classList.remove('fusion-drop-target');
+    _holdState._highlightedDz = null;
   }
   _renderHoldOverlay();
 }
@@ -1229,22 +1245,22 @@ function _holdUp(e) {
   const onOption = releaseEl ? releaseEl.closest('[data-option-target]') : null;
   const releasedOnOwnChip = onChip && onChip.getAttribute('data-brick-chip') === s.color;
 
-  // v0.16.30: dz detection ignoring the hold overlay. For radial-eligible
-  // chips (white/gray), the fan icons + arc SVG are positioned on top of
-  // the dz and intercept the elementFromPoint check, so a drag-to-fuse
-  // from white/gray would never see the dz beneath. Fix: do a second
-  // elementFromPoint with the overlay temporarily hidden, so we see the
-  // actual document underneath. Falls through naturally for non-radial
-  // chips that don't have an overlay obscuring anything.
+  // v0.16.31: dz detection via elementsFromPoint stack walk. Replaces the
+  // v0.16.30 display-toggle hack — same goal (find dz beneath the hold
+  // overlay) without mutating the DOM. Walks the full element stack at
+  // the cursor and finds the first .dynamic-zone match. Aligns with the
+  // approach used in _holdMove for consistency.
   let onDz = releaseEl ? releaseEl.closest('.dynamic-zone') : null;
   if (!onDz && s.isDrag) {
-    const overlay = document.getElementById('hold-overlay');
-    if (overlay) {
-      const prevDisplay = overlay.style.display;
-      overlay.style.display = 'none';
-      const elBeneath = document.elementFromPoint(e.clientX, e.clientY);
-      overlay.style.display = prevDisplay;
-      onDz = elBeneath ? elBeneath.closest('.dynamic-zone') : null;
+    var stackUp = (typeof document.elementsFromPoint === 'function')
+      ? document.elementsFromPoint(e.clientX, e.clientY)
+      : [];
+    for (var k = 0; k < stackUp.length; k++) {
+      var n = stackUp[k];
+      if (n && n.closest) {
+        var d = n.closest('.dynamic-zone');
+        if (d) { onDz = d; break; }
+      }
     }
   }
 
@@ -1394,7 +1410,15 @@ function _holdEnd(cancelled, skipClearOverlay) {
   document.removeEventListener('pointermove', _holdMove);
   document.removeEventListener('pointerup', _holdUp);
   document.removeEventListener('pointercancel', _holdUp);
-  if (_holdState) _holdState.cancelled = cancelled;
+  if (_holdState) {
+    _holdState.cancelled = cancelled;
+    // v0.16.31: clear stale fusion-drop-target highlight if any.
+    // _holdMove tracks the dz currently carrying the class; on hold end
+    // we make sure it's cleared regardless of where the gesture ended.
+    if (_holdState._highlightedDz && _holdState._highlightedDz.classList) {
+      _holdState._highlightedDz.classList.remove('fusion-drop-target');
+    }
+  }
   _holdState = null;
   if (!skipClearOverlay) _clearHoldOverlay();
 }
