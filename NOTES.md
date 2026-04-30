@@ -3117,6 +3117,83 @@ rumble.js, characters.js, boardFx, dm_screen.html.
 
 ---
 
+### v0.16.22 — Tuning pass: dim radial-disengaged, halve glow intensity, slow surface pulses
+
+> "1 - radial opacity 0.2; 2 - this should be correct, goal is to have
+> half intensity; 3 - lets make 2.3 for pulse duration"
+
+Three numerical tuning adjustments after playtesting v0.16.20 (cursor-
+engagement radial fade) + v0.16.21 (head-icon drop-shadow pulse). All
+three reduce visual intensity — the system was reading too loud at
+v0.16.21 levels.
+
+**1. Radial outside-engagement opacity 0.4 → 0.2.** When cursor leaves
+the radial bounds, the fan now dims more aggressively. Reads more
+clearly as "you've disengaged from this gesture, options are still
+here but de-emphasized." The 0.2 value makes the disengaged state
+distinctly muted without being invisible.
+
+**2. Head-icon drop-shadow blur values halved across the board.**
+- `.head-icon.hold-active`: layered 8px+16px → 4px+8px
+- `head-icon-surface-pulse` keyframes: (4+8 → 2+4) at rest, (10+20 →
+  5+10) at peak
+- Bloom is still visible and follows the icon silhouette (Image 1
+  reference behavior), just at half the glow intensity.
+
+**3. Surface pulse duration 1.2s → 2.3s** for both
+`chip-surface-pulse` and `head-icon-surface-pulse`. Slow pulse rhythm
+puts these surface-active animations near (but not literally equal to)
+the dynamic-zone `.my-turn` 2.4s pulse — close enough to feel like
+unified ambient slow-cadence breathing across all three pulse states,
+without being synchronized (which would look mechanical).
+
+UNITY across pulse cadence: dynamic-zone `.my-turn` 2.4s, surface-active
+2.3s. Three pulses (turn, surface-active chip, surface-active icon)
+all in the slow ambient family.
+
+---
+
+**Files changed:** `players-core.js` (one constant), `players.html`
+(three CSS rules), `test_players.html` (mirrored), `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Hold a brick, move cursor outside radial:** fan dims to 0.2 —
+   distinctly muted but still readable. Move back inside → returns
+   to full opacity smoothly.
+3. **Hold class icon briefly:** subtle drop-shadow bloom on
+   silhouette. Half the intensity of v0.16.21 — feels less aggressive,
+   still clearly a glow effect.
+4. **Hold past 400ms (party surface opens):** icon pulses with
+   gentler bloom at slower 2.3s rhythm. Reads as ambient breathing,
+   not insistent flashing.
+5. **Hold cheese / coin (surface opens):** chip pulses with same
+   2.3s rhythm.
+6. **All ambient pulses together** (your turn + party surface open):
+   feels like one unified slow-breathing cadence, not three
+   competing rhythms.
+
+---
+
+**Standards audit (rule #17 — push #42 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #19 (intuition): direct numerical tuning per spec — no
+  speculation, no hedging. ✓
+- Rule #20 (grep duplicates): touched selectors verified to appear
+  exactly once. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): all three changes pull
+  toward UNITY (slow pulse cadence family), ELEGANCE (less visual
+  noise), EFFICIENCY (no architectural change, just numerical tune).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

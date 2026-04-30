@@ -1668,7 +1668,7 @@ function _renderHoldOverlay() {
     // icon + a touch of grace zone). Matches the radii used in both fans
     // (RADIUS=80, ICON_SIZE=44, total ≈ 124).
     const RADIAL_ENGAGE_RADIUS = 124;
-    const radialEngagement = cursorDist <= RADIAL_ENGAGE_RADIUS ? 1 : 0.4;
+    const radialEngagement = cursorDist <= RADIAL_ENGAGE_RADIUS ? 1 : 0.2;
     let fanHtml = '';
     if (s.color === 'white') {
       fanHtml = _renderAllyRadialFan(s);

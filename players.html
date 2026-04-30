@@ -246,7 +246,7 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 }
 .head-icon:active{transform:scale(.95);}
 .head-icon.hold-active{
-  filter:drop-shadow(0 0 8px var(--cls-color)) drop-shadow(0 0 16px var(--cls-color));
+  filter:drop-shadow(0 0 4px var(--cls-color)) drop-shadow(0 0 8px var(--cls-color));
   transform:scale(1.05);
 }
 
@@ -293,18 +293,18 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
    technique to suit each shape. */
 .res-chip.surface-active{
   border-color:var(--cls-color);
-  animation:chip-surface-pulse 1.2s ease-in-out infinite;
+  animation:chip-surface-pulse 2.3s ease-in-out infinite;
 }
 .head-icon.surface-active{
-  animation:head-icon-surface-pulse 1.2s ease-in-out infinite;
+  animation:head-icon-surface-pulse 2.3s ease-in-out infinite;
 }
 @keyframes chip-surface-pulse{
   0%, 100% { box-shadow:0 0 4px var(--cls-color); transform:scale(1); }
   50%      { box-shadow:0 0 14px var(--cls-color); transform:scale(1.04); }
 }
 @keyframes head-icon-surface-pulse{
-  0%, 100% { filter:drop-shadow(0 0 4px var(--cls-color)) drop-shadow(0 0 8px var(--cls-color)); transform:scale(1); }
-  50%      { filter:drop-shadow(0 0 10px var(--cls-color)) drop-shadow(0 0 20px var(--cls-color)); transform:scale(1.04); }
+  0%, 100% { filter:drop-shadow(0 0 2px var(--cls-color)) drop-shadow(0 0 4px var(--cls-color)); transform:scale(1); }
+  50%      { filter:drop-shadow(0 0 5px var(--cls-color)) drop-shadow(0 0 10px var(--cls-color)); transform:scale(1.04); }
 }
 
 /* SWIPE AFFORDANCE — when a surface is open, .has-surface adds a
