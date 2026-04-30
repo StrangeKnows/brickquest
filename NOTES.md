@@ -3594,6 +3594,142 @@ dm_screen.html.
 
 ---
 
+### v0.16.26 — Three corrections to v0.16.25 post-event flavor + dz containment
+
+> "no scrolling, make the card fit the data and the data fit the
+> card, and event data needs to convert to fit. still seeing blank
+> card after event resolutions before DM presses resolve. These
+> after event flavor text shoulw come up immediately after loot
+> distribution, and persist until next ambient refresh from event
+> or other trigger"
+
+Three fixes to the v0.16.25 work:
+
+**1. No scrolling — strip max-height + overflow-y from .dynamic-zone.**
+
+v0.16.25 added `max-height:340px; overflow-y:auto`. Wrong move. The
+correct framing is "card fits data, data fits card" — bidirectional
+adaptation, not scrolling. Stripped both rules. Card now grows with
+content; content compacts itself for the card (see fix #3 below).
+
+**2. Trigger threshold lowered: result fields, not `resolved:true`.**
+
+v0.16.25 detected post-event flavor when `G.activeEvent.resolved`,
+which only flips when DM clicks "Mark Resolved." That created the
+blank-card window Ross saw — gameplay finished, loot distributed,
+but DM hadn't yet clicked the button. Fix: detection runs when ANY
+result field is populated (`grayRubbleResult`, `redResult`,
+`purpleResult`, `whiteResult`, `blackResult`, `greenResult`,
+`riddleWinner`, `riddleExpired`, `goldAmount`, OR `resolved`).
+Captures outcome at loot-distribution moment.
+
+New helper `_eventHasResult(ev)` encapsulates this check. Replaces
+the `G.activeEvent.resolved` test in detection.
+
+**3. Persistence: cleared event-driven, not time-driven.**
+
+v0.16.25 cleared `_lastResolvedEvent` after 12 seconds. Wrong model.
+Per Ross spec: themed flavor persists until the next event starts
+or another trigger (e.g. phase change) refreshes ambient. Stripped
+the `expiresAt` field and the time-based expiry check. Cache now
+clears only when:
+- A NEW event of mine starts (different key, no result fields yet)
+- The cache key is replaced by a fresh resolution
+
+This means while sitting between turns or waiting for DM, player
+keeps seeing the verdict line. UNITY: dz idle slot reads as "the
+last thing that happened" until something new happens.
+
+**4. Data fits card: rubble stacking compacted.**
+
+v0.16.25's overflow-scroll hid the symptom. Real fix: make event
+content compact enough to fit. Started with rubble stacking (the
+event Ross screenshotted overflowing):
+- Title font: 18→15px
+- Instruction text: 12→11px, condensed
+- Timer text: 11→10px, smaller margin
+- Canvas: now CSS-scaled via `width:100%; max-width:240px;
+  aspect-ratio:5/6`. Internal resolution stays 300×360 (pointer
+  math via `getBoundingClientRect` is coord-agnostic), display
+  fits dz at ≤240×288px.
+- Footer text: 10→9px
+
+Total height compression: the 300×360 canvas plus verbose
+chrome was ~440px tall. Now ~310px max — fits dz cleanly.
+
+**Other events not yet compacted** — green vine path, red trial of
+hand likely have the same issue. Pattern documented; iterate as
+playtest reveals which need attention.
+
+---
+
+**Files changed:** `players-core.js`, `players.html`,
+`test_players.html`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx,
+dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Rubble stacking event:** card now fits inside dynamic zone
+   without scroll bar. Canvas visibly smaller (≤240px wide) but
+   gameplay works identically.
+3. **Resolve any event** (drop the 3rd brick, answer riddle, pick
+   chest, etc.):
+   - Themed flavor appears IMMEDIATELY after loot distribution,
+     not after DM clicks Mark Resolved.
+   - Wait — actually the event card itself stays on screen until
+     DM resolves. Post-event flavor populates the dz idle slot
+     after that. The cache captures the outcome at result-field
+     time so it's ready when the slot opens.
+4. **DM clicks Mark Resolved:** event card disappears; themed
+   flavor appears in dz idle slot.
+5. **Player sits between turns:** themed flavor PERSISTS, no time
+   expiry. Reads as "the last thing that happened."
+6. **Next event starts:** themed flavor pre-empted by event card.
+7. **No regressions** to ambient FLAVOR_POOL when no event
+   recently resolved (fresh game, first turn, etc.).
+
+---
+
+**Risk surfaces:**
+
+- Other long event cards (green vine path canvas, red trial of
+  hand canvas) may still overflow. Watch playtest.
+- Canvas CSS scaling on rubble: pointer math should work because
+  `getPointerCol` uses `getBoundingClientRect` (DPI/scale-aware).
+  If touch precision feels off post-scale, tune.
+- `_eventHasResult` checks for `goldAmount` numeric — gold
+  variants always set this field on init? Need to confirm; if
+  pre-resolution it's already a number, the cache will fire too
+  early. Watch playtest — if gold events show post-event flavor
+  during the gameplay phase, refine the heuristic.
+
+---
+
+**Standards audit (rule #17 — push #46 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #19 (intuition): Ross's framing ("card fits data, data fits
+  card") was the right reframe. v0.16.25 reached for scroll first;
+  the intuitive answer was bidirectional adaptation. Rule #19
+  reminder: when an "easy" UI fix introduces a scroll bar, the
+  layout is probably wrong, not the constraint.
+- Rule #6 (diagnostic-first): N/A — these are corrections to known
+  v0.16.25 issues with clear specs from Ross. Direct fixes.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: dz idle slot reads "what just happened" until something
+    new happens — no arbitrary time gates.
+  - ELEGANCE: trigger detection on existing result fields (no new
+    server flag), no time logic, no overflow scroll.
+  - EFFICIENCY: less CSS, less code, content compacted not capped.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

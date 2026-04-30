@@ -2094,13 +2094,27 @@ function _dashDynamicZone(me) {
     if (_zoneState !== 'idle') _zoneState = 'idle';
   }
 
-  // v0.16.25: Detect "event just resolved" transition. If my last-seen
-  // active event has now flipped to resolved (or cleared), capture its
-  // type + outcome for post-event flavor display in idle slot.
-  // Uses _lastResolvedEvent cache (declared near POST_EVENT_FLAVOR).
-  // Cache window: 12 seconds — long enough for player to read + appreciate,
-  // short enough that the dz returns to ambient flavor for next turn.
-  if (G.activeEvent && G.activeEvent.cls === MY_CLASS && G.activeEvent.resolved) {
+  // v0.16.25: Detect "event just finished" — populated result fields are
+  // the signal that gameplay completed and loot distributed. Captures the
+  // outcome BEFORE DM clicks "Mark Resolved" so player sees themed flavor
+  // immediately after their turn outcome lands, not after a DM-mediated
+  // delay. Cache persists until the next event starts (different key) —
+  // no time-based expiry. Player keeps seeing the verdict while sitting.
+  // v0.16.26: trigger threshold lowered from `resolved:true` to "any
+  // result field present" per Ross spec — flavor lands at loot
+  // distribution, persists until next ambient-refresh trigger.
+  function _eventHasResult(ev) {
+    if (!ev) return false;
+    return !!(
+      ev.grayRubbleResult || ev.redResult || ev.purpleResult ||
+      ev.whiteResult || ev.blackResult || ev.greenResult ||
+      ev.riddleWinner || ev.riddleExpired ||
+      // gold variants set goldAmount on resolution
+      (typeof ev.goldAmount === 'number') ||
+      ev.resolved
+    );
+  }
+  if (G.activeEvent && G.activeEvent.cls === MY_CLASS && _eventHasResult(G.activeEvent)) {
     var key = (G.activeEvent.cls||'') + '|' + (G.activeEvent.roll||'') + '|' + (G.activeEvent.evType||'');
     if (!_lastResolvedEvent || _lastResolvedEvent.key !== key) {
       var outcome = _eventOutcome(G.activeEvent, MY_CLASS);
@@ -2112,15 +2126,19 @@ function _dashDynamicZone(me) {
           key: key,
           type: G.activeEvent.evType,
           outcome: outcome,
-          line: line,
-          expiresAt: Date.now() + 12000
+          line: line
         };
       }
     }
   }
-  // Expire stale post-event flavor.
-  if (_lastResolvedEvent && Date.now() > _lastResolvedEvent.expiresAt) {
-    _lastResolvedEvent = null;
+  // Clear post-event flavor when a NEW event of mine starts (different key,
+  // not yet resolved). The current event's flavor pre-empts the previous
+  // event's verdict at the next gameplay tick.
+  if (G.activeEvent && G.activeEvent.cls === MY_CLASS && !_eventHasResult(G.activeEvent)) {
+    var newKey = (G.activeEvent.cls||'') + '|' + (G.activeEvent.roll||'') + '|' + (G.activeEvent.evType||'');
+    if (_lastResolvedEvent && _lastResolvedEvent.key !== newKey) {
+      _lastResolvedEvent = null;
+    }
   }
 
   // 3. Hold-invoked surface (market / cheese / party) — only when no
@@ -4498,10 +4516,12 @@ function _eventOutcome(ev, myCls) {
   }
 }
 
-// Track the most recently resolved event so post-event flavor can
-// persist briefly even after activeEvent clears server-side. Cached
-// across renders. Cleared on next event start or after ~15s idle.
-var _lastResolvedEvent = null;  // { type, outcome, expiresAt, line }
+// Track the most recently resolved event so post-event flavor persists
+// in the dz idle slot from loot-distribution moment until the NEXT event
+// starts (no time-based expiry — player keeps seeing the verdict line
+// while sitting between turns).
+// v0.16.26: expiresAt removed; cache lifecycle now event-driven.
+var _lastResolvedEvent = null;  // { key, type, outcome, line }
 
 
 
@@ -7636,15 +7656,20 @@ function renderGrayRubbleStacking(ev, me, G) {
   }
   const blocks = ev.grayBlocks || [];
   const isBlocksmith = MY_CLASS === 'blocksmith';
+  // v0.16.26: tightened to fit dynamic-zone card without scrolling.
+  // Title smaller (18→15), instructions/timer tighter, canvas scales
+  // responsively via CSS (max-width 100%, aspect ratio preserved).
+  // Internal resolution stays 300×360 — getBoundingClientRect handles
+  // pointer mapping, so coords stay accurate when CSS-scaled.
   return lingerHeader
-    + '<div style="font-family:Cinzel,serif;font-size:18px;color:#ccc;text-align:center;margin-bottom:4px;">🧱 RUBBLE STACKING</div>'
-    + '<div style="font-size:12px;color:#aaa;text-align:center;margin-bottom:10px;font-style:italic;">Drag to move the falling block. It locks when it lands.</div>'
-    + '<div style="font-size:11px;color:#8ac;text-align:center;margin-bottom:8px;">⏱ <span id="gray-timer">'+(20 + 5*blocks.length)+'</span>s · block <span id="gray-block-idx">1</span>/<span id="gray-block-total">'+blocks.length+'</span></div>'
-    + '<div style="text-align:center;"><canvas id="gray-canvas" style="background:#0a0a0a;border:1px solid #333;border-radius:6px;display:inline-block;touch-action:none;" width="300" height="360"></canvas></div>'
+    + '<div style="font-family:Cinzel,serif;font-size:15px;color:#ccc;text-align:center;margin-bottom:2px;">🧱 RUBBLE STACKING</div>'
+    + '<div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:6px;font-style:italic;">Drag to move the falling block.</div>'
+    + '<div style="font-size:10px;color:#8ac;text-align:center;margin-bottom:6px;">⏱ <span id="gray-timer">'+(20 + 5*blocks.length)+'</span>s · block <span id="gray-block-idx">1</span>/<span id="gray-block-total">'+blocks.length+'</span></div>'
+    + '<div style="text-align:center;"><canvas id="gray-canvas" style="background:#0a0a0a;border:1px solid #333;border-radius:6px;display:inline-block;touch-action:none;width:100%;max-width:240px;height:auto;aspect-ratio:5/6;" width="300" height="360"></canvas></div>'
     + (isBlocksmith
-      ? '<div style="font-size:10px;color:#F5D000;text-align:center;margin-top:6px;letter-spacing:.04em;">🔧 BLOCKSMITH: perfect bonus</div>'
+      ? '<div style="font-size:9px;color:#F5D000;text-align:center;margin-top:4px;letter-spacing:.04em;">🔧 BLOCKSMITH: perfect bonus</div>'
       : '')
-    + '<div style="font-size:10px;color:#888;text-align:center;margin-top:6px;">Drag, or tap a column to jump. Block drops 1 row/sec.</div>';
+    + '<div style="font-size:9px;color:#888;text-align:center;margin-top:4px;">Drag, or tap a column to jump. Block drops 1 row/sec.</div>';
 }
 
 // ── TETRIS RUBBLE GAME (v4 — auto-fall with drag-and-drop) ──
