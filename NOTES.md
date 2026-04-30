@@ -3030,6 +3030,93 @@ UNTOUCHED: players.html, test_players.html.
 
 ---
 
+### v0.16.21 — Head-icon pulse: drop-shadow silhouette glow (Image 1 reference)
+
+> "first image for pulse bounds, not the rect in the second image, lets
+> adjust all character icons to this behavior"
+> "want the drop shadow only, no box shadow for this use case. all other
+> functionality for party access should remain for now"
+
+Image 1 reference: Breaker icon with strong orange-red bloom that
+follows the sword silhouette — soft halo sized to the icon's actual
+shape, not a rectangle around it.
+
+I overcorrected on first attempt: made `.head-icon` a circular container
+with `box-shadow` (would have produced a circular halo around a 44px
+disc). Ross clarified: just the drop-shadow effect, glowing the icon
+silhouette itself. Reverted.
+
+**Final approach:**
+
+- `.head-icon` keeps its original shape (rounded square wrapper, 6px
+  border-radius, 2px padding, transparent background). No circle.
+- `.head-icon.hold-active`: `filter: drop-shadow(0 0 8px var(--cls-color))
+  drop-shadow(0 0 16px var(--cls-color))` — layered drop-shadows for a
+  punchier bloom than the v0.16.16 single 6px. Glows the emoji's actual
+  silhouette like Image 1.
+- `.head-icon.surface-active`: new `head-icon-surface-pulse` keyframes
+  using drop-shadow filter (4-10px and 8-20px layered, scale 1→1.04).
+  Same rhythm as `chip-surface-pulse` (1.2s ease-in-out infinite),
+  different technique to suit the icon-shape glow.
+- `.res-chip.surface-active`: unchanged — chips ARE rectangular
+  containers, box-shadow halo is the right tool there. Split the v0.16.17
+  combined rule so chip and head-icon use separate animations
+  (`chip-surface-pulse` for chips, `head-icon-surface-pulse` for icon).
+
+UNITY: same color, same rhythm. ELEGANCE: technique fits each shape —
+drop-shadow for icon silhouettes, box-shadow for rectangular chips.
+EFFICIENCY: animations isolated; no cross-element styling.
+
+Party access functionality unchanged — hold class icon still invokes
+party surface (v0.16.16 behavior intact).
+
+---
+
+**Files changed:** `players.html`, `test_players.html`, `NOTES.md`.
+
+UNTOUCHED: players-core.js (markup unchanged, only CSS), server.js,
+rumble.js, characters.js, boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Tap-and-hold the class icon (head-card avatar) briefly:**
+   icon glows in class color following the icon's silhouette
+   (sword shape for Breaker, etc.). Strong bloom.
+3. **Hold past 400ms (party surface opens):** icon pulses with
+   layered drop-shadow at 1.2s rhythm — bloom expands and contracts.
+4. **Tap coin or cheese chip and hold:** chip border glows
+   class color (rectangular halo via box-shadow — chip-surface-pulse).
+   Different visual technique, same color/rhythm. Both look
+   intentional alongside each other.
+5. **Hold party surface open + watch dynamic zone with .my-turn pulse
+   (your turn):** all three pulses (head-icon drop-shadow,
+   res-chip box-shadow if open, dynamic-zone .my-turn) coexist
+   visually without competing.
+6. Party surface still opens correctly on 400ms hold.
+
+---
+
+**Standards audit (rule #17 — push #41 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #19 (intuition): partial drift on first attempt — went to
+  "circular container with box-shadow" instead of "drop-shadow on
+  existing shape". Ross's clarification course-corrected within
+  one iteration. Lesson: when reference image shows a glow, the
+  default first read should be drop-shadow (silhouette glow) not
+  box-shadow (container halo). They're visually distinct techniques.
+- Rule #20 (grep duplicates): touched selectors verified to appear
+  exactly once. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): UNITY in shared color/rhythm
+  across pulses; ELEGANCE in technique-per-shape; EFFICIENCY in
+  isolated animations.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

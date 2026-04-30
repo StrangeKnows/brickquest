@@ -231,7 +231,12 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .res-chip[data-res="gold"] .res-chip-num{color:#F5D000;}
 .res-chip[data-res="cheese"] .res-chip-num{color:#FFD96A;}
 
-/* HEAD ICON as hold-target (v0.16.16 — class icon invokes party surface) */
+/* HEAD ICON as hold-target (v0.16.16 — class icon invokes party surface)
+   v0.16.21: drop-shadow filter for the bloom — glows the icon's
+   silhouette (e.g. sword shape) rather than a halo around a container.
+   Punched up the intensity (was 6px in v0.16.16, now layered 8px+16px)
+   so the bloom reads strongly like the Image 1 reference. Stays on the
+   icon shape itself; no circular container, no box-shadow. */
 .head-icon{
   cursor:pointer;
   user-select:none;-webkit-user-select:none;
@@ -241,7 +246,7 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 }
 .head-icon:active{transform:scale(.95);}
 .head-icon.hold-active{
-  filter:drop-shadow(0 0 6px var(--cls-color));
+  filter:drop-shadow(0 0 8px var(--cls-color)) drop-shadow(0 0 16px var(--cls-color));
   transform:scale(1.05);
 }
 
@@ -279,14 +284,27 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
    the dynamic zone border), surface-active = "this chip opened the
    open card" (faster 1.2s tighter pulse on the chip itself).
    Same color family (cls-color) maintains visual UNITY. */
-.res-chip.surface-active,
-.head-icon.surface-active{
+/* SURFACE-ACTIVE TRIGGER PULSE (v0.16.17, split v0.16.21)
+   When a hold-invoked surface is open, the chip that opened it pulses.
+   v0.16.21: split so .res-chip uses box-shadow halo (chip IS a rectangular
+   container, circular bloom around it reads cleanly) while .head-icon
+   uses drop-shadow filter (glows the icon's silhouette per Image 1
+   reference, no container halo). Same color, same rhythm, different
+   technique to suit each shape. */
+.res-chip.surface-active{
   border-color:var(--cls-color);
   animation:chip-surface-pulse 1.2s ease-in-out infinite;
+}
+.head-icon.surface-active{
+  animation:head-icon-surface-pulse 1.2s ease-in-out infinite;
 }
 @keyframes chip-surface-pulse{
   0%, 100% { box-shadow:0 0 4px var(--cls-color); transform:scale(1); }
   50%      { box-shadow:0 0 14px var(--cls-color); transform:scale(1.04); }
+}
+@keyframes head-icon-surface-pulse{
+  0%, 100% { filter:drop-shadow(0 0 4px var(--cls-color)) drop-shadow(0 0 8px var(--cls-color)); transform:scale(1); }
+  50%      { filter:drop-shadow(0 0 10px var(--cls-color)) drop-shadow(0 0 20px var(--cls-color)); transform:scale(1.04); }
 }
 
 /* SWIPE AFFORDANCE — when a surface is open, .has-surface adds a

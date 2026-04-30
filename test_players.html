@@ -135,7 +135,7 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .res-chip[data-res="cheese"] .res-chip-num{color:#FFD96A;}
 .head-icon{cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;transition:transform .1s, filter .15s;border-radius:6px;padding:2px;}
 .head-icon:active{transform:scale(.95);}
-.head-icon.hold-active{filter:drop-shadow(0 0 6px var(--cls-color));transform:scale(1.05);}
+.head-icon.hold-active{filter:drop-shadow(0 0 8px var(--cls-color)) drop-shadow(0 0 16px var(--cls-color));transform:scale(1.05);}
 .zone-surface{display:flex;flex-direction:column;}
 .zone-surface-head{display:flex;align-items:center;justify-content:center;padding:6px 8px 8px 8px;border-bottom:1px solid #2a2a2a;margin-bottom:6px;}
 .zone-surface-title{font-family:'Cinzel',serif;font-size:13px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;}
@@ -145,9 +145,11 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .zone-action-btn:active:not(:disabled){transform:scale(.95);}
 .zone-action-btn:disabled{opacity:.4;cursor:not-allowed;}
 /* SURFACE-ACTIVE TRIGGER PULSE (v0.16.17) — chip pulses with class color while its surface is open. */
-.res-chip.surface-active,
-.head-icon.surface-active{border-color:var(--cls-color);animation:chip-surface-pulse 1.2s ease-in-out infinite;}
+/* SURFACE-ACTIVE TRIGGER PULSE (v0.16.17, split v0.16.21 — see players.html note) */
+.res-chip.surface-active{border-color:var(--cls-color);animation:chip-surface-pulse 1.2s ease-in-out infinite;}
+.head-icon.surface-active{animation:head-icon-surface-pulse 1.2s ease-in-out infinite;}
 @keyframes chip-surface-pulse{0%,100%{box-shadow:0 0 4px var(--cls-color);transform:scale(1);}50%{box-shadow:0 0 14px var(--cls-color);transform:scale(1.04);}}
+@keyframes head-icon-surface-pulse{0%,100%{filter:drop-shadow(0 0 4px var(--cls-color)) drop-shadow(0 0 8px var(--cls-color));transform:scale(1);}50%{filter:drop-shadow(0 0 10px var(--cls-color)) drop-shadow(0 0 20px var(--cls-color));transform:scale(1.04);}}
 /* SWIPE AFFORDANCE — cursor change for mouse users when a surface is open. */
 .dynamic-zone.has-surface{cursor:grab;}
 .dynamic-zone.has-surface:active{cursor:grabbing;}
