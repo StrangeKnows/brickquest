@@ -4306,6 +4306,57 @@ boardFx, dm_screen.html.
 
 ---
 
+### v0.16.32 — Strip redundant prepare-phase Market button
+
+> "get rid of the dang market buuutton now, please!"
+> "only market is the coin that activates the dz"
+
+`buildPrepareActions` was always pushing a Market entry which
+rendered as a "🛒 Market" expandable button in the prepare panel.
+Duplicate of the coin-hold gesture which now opens the market
+surface in the dz. Two paths to the same place = clutter.
+
+Stripped the Market entry from `buildPrepareActions`. The only path
+to market is now coin-hold (opens dz market surface). renderMarketPanel
++ _renderZoneMarket remain wired for the coin-hold surface — the
+market itself still exists, just one entry point.
+
+The `a.isMarket` branches in `renderActionButton` (lines 2886, 2910)
+are now dead (no action sets `isMarket:true`) but harmless — left
+in place in case future prepare-panel restoration wants the hook.
+
+---
+
+**Files changed:** `players-core.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, html files,
+boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Prepare phase:** no "🛒 Market" button in dashboard.
+3. **Hold coin:** market surface opens in dz (existing behavior).
+4. **Buy a brick from the dz market:** purchase still works.
+5. **No regressions** to other prepare actions (since list is now
+   empty, prepare panel renders nothing).
+
+---
+
+**Standards audit (rule #17 — push #51 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players-core.js only — no markup or CSS
+  changes. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): UNITY win — one path to
+  market (coin-hold) instead of two. ELEGANCE: less code path.
+  EFFICIENCY: smaller renderPreparePanel output (empty list now).
+- Rule #19 (intuition): held — Ross's spec was clear, direct strip.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -2964,22 +2964,13 @@ function renderMarketGrid() {
 function buildPrepareActions(me) {
   var list = [];
 
-  // ── MARKET — always shown unless restricted ──
-  var zone = (SPACES[me.space] && SPACES[me.space].zone) || 0;
-  var zoneRestricted = zone === 4; // zone 5 (0-indexed 4)
-  var marketBlocked = zoneRestricted || G.storeDisabled;
-  var marketDetail;
-  if (zoneRestricted) marketDetail = 'Market unavailable in this zone.';
-  else if (G.storeDisabled) marketDetail = 'Market closed by DM.';
-  else marketDetail = 'Buy bricks with gold.\nYour gold: 🪙' + (me.gold || 0) + '.';
-  list.push({
-    id: 'market',
-    label: '🛒 Market',
-    detail: marketDetail,
-    available: !marketBlocked,
-    isMarket: true,
-    onUse: null,
-  });
+  // v0.16.32: Market entry stripped from prepare actions. The ONLY path
+  // to the market is now coin-hold (opens dz market surface). Eliminates
+  // the redundant prepare-phase "🛒 Market" button that duplicated the
+  // coin-hold gesture. Per Ross spec: "only market is the coin that
+  // activates the dz".
+  // (The market itself still exists — renderMarketPanel + _renderZoneMarket
+  // remain wired for the coin-hold surface.)
 
   return list;
 }
