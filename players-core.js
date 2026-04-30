@@ -87,6 +87,21 @@ var _cardFading = {};
 // Cleared when activeEvent changes.
 var _cardEntered = {};
 
+// v0.16.4 — Frozen flavor stash. When a card is fading (post-drain), the
+// rotating flavor text (button label AND body flavor) should STOP — text
+// freezes at whatever it last rolled. Without this stash,
+// _pickResolutionCollectFlavor and event-branch LANDING_FLAVOR picks would
+// re-roll on each render during the fade and the text would visibly
+// shuffle while the card is dissolving away. Bad polish.
+//
+// Set on each render that ISN'T fading: stash the latest values. Once
+// fading begins, buildResolutionCard reads from stash instead of re-rolling.
+// Stash is locked from that point until card collected.
+//
+// Shape: { eventKey: { button: "Snagged!", body: "..." } }
+// Cleared when activeEvent changes.
+var _cardFlavors = {};
+
 // v0.15.46 — Resolution snapshot model. REPLACES the v0.15.39 _displayDeltas
 // system entirely.
 //
@@ -214,24 +229,51 @@ function _recordRenderInv(me) {
 // `me[field]` rises but `_displayed` lags (drain ticks snapshot up). We
 // don't want auto-pulse to compete with the drain visuals.
 function _detectInvIncreasesAndPulse(me) {
-  if (!_prevRenderInv) return;
-  if (_hasActiveSnapshot()) return;
+  if (!_prevRenderInv) {
+    _bqLog('pulse-skip', { reason: 'no-prev-inv' });
+    return;
+  }
+  if (_hasActiveSnapshot()) {
+    _bqLog('pulse-skip', { reason: 'snapshot-active' });
+    return;
+  }
+  // v0.16.4 diagnostic: log inventory comparison so we can see what _prevRenderInv
+  // captured vs what me has. Helps diagnose post-rumble chipPulse misses.
+  var diff = {
+    gold: { prev: _prevRenderInv.gold||0, curr: me.gold||0 },
+    cheese: { prev: _prevRenderInv.cheese||0, curr: me.cheese||0 },
+    bricks: {}
+  };
+  var bricks = me.bricks || {};
+  var pb = _prevRenderInv.bricks || {};
+  var allColors = {};
+  for (var ca in bricks) allColors[ca] = true;
+  for (var cb in pb) allColors[cb] = true;
+  for (var cc in allColors) {
+    diff.bricks[cc] = { prev: pb[cc]||0, curr: bricks[cc]||0 };
+  }
+  _bqLog('pulse-check', diff);
+  // Pane-active diagnostic: chipPulse depends on pane-dashboard.classList.active
+  var pane = document.getElementById('pane-dashboard');
+  var paneActive = pane && pane.classList.contains('active');
+  _bqLog('pulse-pane', { paneFound: !!pane, paneActive: paneActive });
   // Gold
   if ((me.gold||0) > (_prevRenderInv.gold||0)) {
     var goldDest = _findGoldChipDest();
+    _bqLog('pulse-gold', { rise: (me.gold||0) - (_prevRenderInv.gold||0), destFound: !!(goldDest && goldDest.rect) });
     if (goldDest && goldDest.rect) BoardFx.fire('chipPulse', goldDest.rect, { color: '#F5D000' });
   }
   // Cheese
   if ((me.cheese||0) > (_prevRenderInv.cheese||0)) {
     var cheeseDest = _findCheeseChipDest();
+    _bqLog('pulse-cheese', { rise: (me.cheese||0) - (_prevRenderInv.cheese||0), destFound: !!(cheeseDest && cheeseDest.rect) });
     if (cheeseDest && cheeseDest.rect) BoardFx.fire('chipPulse', cheeseDest.rect, { color: '#FFD96A' });
   }
   // Bricks — pulse each color whose count rose
-  var bricks = me.bricks || {};
-  var pb = _prevRenderInv.bricks || {};
   for (var c in bricks) {
     if ((bricks[c]||0) > (pb[c]||0)) {
       var dest = _findBrickChipDest(c);
+      _bqLog('pulse-brick', { color: c, rise: (bricks[c]||0) - (pb[c]||0), destFound: !!(dest && dest.rect) });
       if (dest && dest.rect) {
         var hex = (typeof BRICK_COLORS !== 'undefined' && BRICK_COLORS[c]) || '#FFFFFF';
         BoardFx.fire('chipPulse', dest.rect, { color: hex });
@@ -599,10 +641,6 @@ function render() {
   // restoreActiveEvent reads will return the snapshot via _displayed/
   // _displayedBricks. This is what eliminates the pre-tap flash universally.
   _maybeTakeSnapshot(me);
-  // v0.15.46 — Auto chipPulse on any non-Collect inventory increase (e.g.
-  // post-rumble combat rewards, trade completions). Skipped when a Collect
-  // snapshot is active because drain handles its own per-element pulses.
-  _detectInvIncreasesAndPulse(me);
   // v0.15.46 — diagnostic log at top of every render. Shows the raw server
   // state, the active snapshot if any, and what _displayed will return.
   try {
@@ -638,6 +676,7 @@ function render() {
     _drainedTokens = {};
     _cardFading = {};
     _cardEntered = {};
+    _cardFlavors = {};
   }
   renderPhaseBanner(me);
   // restoreActiveEvent MUST run AFTER renderDashboard. The active-event host
@@ -648,6 +687,13 @@ function render() {
   // reverted in v0.15.45. v0.15.46 solves the flash via snapshot model
   // instead, leaving render order intact.)
   renderDashboard(me);
+  // v0.16.4: chipPulse fires AFTER renderDashboard so chip elements exist at
+  // fresh positions. Previous order (pulse before dashboard render) meant
+  // _findGoldChipDest etc. queried stale-or-detached chip elements with
+  // potentially zero rects — chipPulse would render at viewport (0,0) or
+  // mid-screen instead of on the actual chip. _prevRenderInv is still
+  // captured at end of render, so the diff detection still works correctly.
+  _detectInvIncreasesAndPulse(me);
   renderParty();
   renderFusion();
   restoreActiveEvent();
@@ -5251,6 +5297,7 @@ function handleDisarmChain(data) {
 // to keep the moment fresh across an evening of play. Uses no-immediate-
 // repeat logic via _pickResolutionCollectFlavor.
 var REWARD_COLLECT_FLAVORS = [
+  // Original 15 — proven flavor staples
   "Mine!",
   "Snagged!",
   "Pocket it!",
@@ -5265,7 +5312,41 @@ var REWARD_COLLECT_FLAVORS = [
   "Heck yes!",
   "Pay day!",
   "Cha-ching!",
-  "Loot it!"
+  "Loot it!",
+  // v0.16.4 — expanded pool (30 more, mix of styles)
+  // Action-y
+  "Grab it!",
+  "Scoop it!",
+  "Bag it!",
+  "Hoard it!",
+  "Nab it!",
+  "Swipe!",
+  "Stash!",
+  "Pluck it!",
+  "Pinch it!",
+  "Lift it!",
+  // Triumphant
+  "Victory!",
+  "Spoils!",
+  "Plunder!",
+  "Bounty!",
+  "Riches!",
+  "Treasure!",
+  "Score!",
+  "Jackpot!",
+  "Boom!",
+  "Win!",
+  // Cheeky
+  "Don't mind if I do!",
+  "Finders keepers!",
+  "Mine now!",
+  "It's mine!",
+  "Look at that!",
+  "Well, well!",
+  "Lucky me!",
+  "About time!",
+  "Worth it!",
+  "Nice."
 ];
 var _lastCollectFlavorIdx = null;
 function _pickResolutionCollectFlavor() {
@@ -5583,11 +5664,14 @@ function _collectResolutionReward(specJson, btnId) {
   // After all drains complete, mark card as fading and trigger render.
   // The render rebuilds the card with class `bq-card-exit` (set by
   // buildResolutionCard via _cardFading flag) — CSS handles the
-  // 600ms scale-down + fade-out animation. After 600ms, _collectedResolutions
+  // 850ms scale-down + fade-out animation. After 850ms, _collectedResolutions
   // flag wipes the panel.
   // v0.15.46: pure CSS-class-based fade. No inline opacity manipulation.
+  // v0.16.4: bumped from 600ms to 850ms to match new dramatic dissolve
+  // (CSS scale 1.0→0.6 + opacity 1→0 over 850ms). Pairs with flavor/button
+  // freeze in buildResolutionCard so the card "lets go" cleanly.
   var totalDrainMs = t;
-  var CARD_FADE_MS = 600;
+  var CARD_FADE_MS = 850;
   setTimeout(function(){
     if (collectKey) _cardFading[collectKey] = true;
     _bqLog('card-fade-start', { totalDrainMs: totalDrainMs, key: collectKey });
@@ -5710,6 +5794,27 @@ function buildResolutionCard(opts) {
   var shower      = opts.shower !== false;
   var showerTint  = opts.showerTint  || themeColor;
 
+  // v0.16.4: freeze body flavor if card is fading (post-drain). Without
+  // this, the event-branch (e.g. gold's grFlav, riddle's rFlav) re-rolls
+  // a fresh flavor on each render that fires during the fade window —
+  // text would shuffle while the card is dissolving. Stash the last-used
+  // flavor on the first non-fading render, then read from stash during
+  // fade. Caller passes flavor in opts; we mutate the local var.
+  if (dismissKey) {
+    if (_cardFading[dismissKey]) {
+      // Fading — read from stash if present (else fall through with
+      // whatever the caller passed, harmless edge case).
+      if (_cardFlavors[dismissKey] && _cardFlavors[dismissKey].body !== undefined) {
+        flavor = _cardFlavors[dismissKey].body;
+      }
+    } else {
+      // Not fading — stash the latest body flavor. Init the dict entry if
+      // needed; button stash is set later in the hasReward branch.
+      if (!_cardFlavors[dismissKey]) _cardFlavors[dismissKey] = {};
+      _cardFlavors[dismissKey].body = flavor;
+    }
+  }
+
   // S013.6: Strip parsed reward tokens from flavor text so they don't
   // double-render (icon row already shows them). Keeps narrative tail.
   // Mirrors DM-side dm_screen.html v4DmResultBlock de-dup logic.
@@ -5800,7 +5905,21 @@ function buildResolutionCard(opts) {
     html += extra;
   }
   if (hasReward) {
-    var collectFlavor = _pickResolutionCollectFlavor();
+    // v0.16.4: when card is fading (post-drain), use the LAST flavor that
+    // was rolled, not a fresh one. _cardFlavors[armKey].button gets stashed
+    // on each non-fading render; during fade, read from stash so the button
+    // text doesn't shuffle while the card dissolves.
+    var collectFlavor;
+    if (armKey && _cardFading[armKey] && _cardFlavors[armKey] && _cardFlavors[armKey].button) {
+      collectFlavor = _cardFlavors[armKey].button;
+    } else {
+      collectFlavor = _pickResolutionCollectFlavor();
+      // Stash the latest button flavor so when fade kicks in it's the one frozen.
+      if (armKey) {
+        if (!_cardFlavors[armKey]) _cardFlavors[armKey] = {};
+        _cardFlavors[armKey].button = collectFlavor;
+      }
+    }
     var btnId = 'collect-btn-' + Math.random().toString(36).slice(2, 9);
     var specJson = JSON.stringify(spec).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
     html += '<button id="' + btnId + '" '

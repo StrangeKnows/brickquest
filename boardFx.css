@@ -276,11 +276,15 @@
 }
 
 
-/* ── Resolution card animations (v0.15.46) ──────────────────────
+/* ── Resolution card animations (v0.15.46, dissolve updated v0.16.4) ──
  * Entrance: scale from 0.85 + fade in over 250ms when card first appears.
- * Dismissal: scale to 0.85 + fade out over 600ms when bq-card-exit applied.
+ * Dismissal: scale to 0.6 + fade out over 850ms when bq-card-exit applied.
+ *   v0.16.4 made the dissolve more dramatic per Ross — bigger scale-down
+ *   (was 0.85, now 0.6) and longer duration (was 600ms, now 850ms). Pairs
+ *   with the post-drain flavor/button freeze so the card "lets go" rather
+ *   than reshuffling text on its way out.
  * Both have transform-origin:center so card scales from its center,
- * giving the "shrink and pop" feel Ross asked for.
+ * giving the "shrink and dissolve" feel Ross asked for.
  */
 @keyframes bq-card-enter {
   0%   { opacity: 0; transform: scale(0.85); }
@@ -288,7 +292,7 @@
 }
 @keyframes bq-card-exit {
   0%   { opacity: 1; transform: scale(1.0); }
-  100% { opacity: 0; transform: scale(0.85); }
+  100% { opacity: 0; transform: scale(0.6); }
 }
 .bq-resolution-card {
   transform-origin: center center;
@@ -298,5 +302,5 @@
   animation: bq-card-enter 250ms ease-out forwards;
 }
 .bq-card-exit {
-  animation: bq-card-exit 600ms ease-in forwards;
+  animation: bq-card-exit 850ms ease-in forwards;
 }

@@ -1636,6 +1636,12 @@ wss.on('connection', (ws, req) => {
           log(pNameGold+' found '+awarded+' gold (mini-game)','reward');
         }
         G.activeEvent = { ...G.activeEvent, goldResult: { amount: awarded, wrongTap: wrongTap||false, totalPlaced, cheeseFound }, resolved: false };
+        // v0.16.4: early return so the catch-all `resolved: true` at line ~2304
+        // doesn't override our resolved:false. With resolved:true, the client's
+        // hasMyActiveEvent check fails and the landing-result container falls
+        // out of the dashboard top slot — appearing at the bottom of the pane
+        // instead of where other event results (gray, red, etc.) sit.
+        broadcastState(); return;
       }
       if (eventType === 'brick')  {
         const d = data||{};

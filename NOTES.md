@@ -9501,6 +9501,340 @@ properly differentiated. ELEGANCE intact.
 
 ---
 
+### v0.16.4 — Gold position root-cause + chipPulse render order
+
+**Two related fixes.**
+
+**Bug 1: Gold result card rendering at BOTTOM of dashboard, not top.**
+
+After v0.16.2/.3 work, gold result card was still positioned wrong.
+Looking at the playtest screenshot carefully:
+
+- Top of player view: dashboard flavor "minifig next to you..." (this
+  fires only when `topSlot.active === false`)
+- Then: dashboard header, brick chips
+- THEN at bottom: "RAT BITE" gold card
+
+So the gold result is in `_dashPhaseContext`'s landing-result via
+`renderLandPanel()`, NOT the top slot via `_dashTopSlot`.
+
+**Root cause traced to server.js.** The `resolveEvent` handler for
+gold (line 1605-1639) sets `G.activeEvent.resolved = false` —
+correct intent. But execution falls through to line 2304 which sets
+`G.activeEvent = {...G.activeEvent, resolved: true }` for ALL
+event types at the end of the handler. Gray rubble has an early
+`broadcastState(); return;` after setting its result — so
+resolved stays false. Trap has the same. **Gold doesn't.** Gold
+falls through, gets `resolved: true`, and the client's
+`hasMyActiveEvent` check (which requires `!resolved`) evaluates to
+false. landing-result drops out of top slot, lands at bottom.
+
+**Fix:** add early `broadcastState(); return;` after the gold
+resolveEvent block, matching the pattern used by gray rubble, trap,
+and other early-returning event types.
+
+---
+
+**Bug 2: chipPulse "flashed in middle of screen" post-rumble.**
+
+> "ruuumble seemed to highlight, but it flashed in middle of screen,
+> not sure what it was highliting"
+
+Root cause: `_detectInvIncreasesAndPulse` was running at TOP of
+render(), BEFORE `renderDashboard`. When chipPulse looked for chip
+destinations via `_findGoldChipDest()` etc., those queries ran
+against the OLD DOM from the previous render. After rumble, the
+dashboard hadn't been freshly rendered yet — chip elements existed
+but at potentially stale or zero-width positions.
+
+Result: `getBoundingClientRect()` returned a rect with bad
+coordinates (or the helpers fell through to fallback paths),
+chipPulse rendered at wrong viewport position — "middle of screen"
+matched what you'd see if rect was zeroed.
+
+**Fix:** move `_detectInvIncreasesAndPulse(me)` to AFTER
+`renderDashboard(me)` so chips exist at fresh positions when
+queried. `_prevRenderInv` is still captured at end of render(), so
+the inventory-diff detection logic remains correct.
+
+---
+
+**Files changed:**
+
+- `players-core.js`: moved `_detectInvIncreasesAndPulse` from before
+  `renderDashboard` to after, with comment explaining why
+- `server.js`: added early `broadcastState(); return;` after gold
+  `resolveEvent` block to preserve `resolved: false`
+- `NOTES.md` — this entry
+
+UNTOUCHED: boardFx.js, boardFx.css, players.html, test_players.html,
+rumble.js.
+
+---
+
+**Test focus:**
+
+1. **Gold mini-game flow** — play a gold mini-game. Result card
+   should now appear at TOP of dashboard (in top slot) like gray
+   rubble. Not at the bottom.
+
+2. **Rumble end chipPulse** — finish rumble, return to board. Chip
+   pulses should fire on the actual inventory chips (gold/cheese/
+   brick chips), not in middle of screen.
+
+3. **Regression checks:**
+   - Gray rubble result still at top ✓
+   - Other events render correctly ✓
+   - Snapshot model still works for Collect-gated events ✓
+   - Rumble result card from v0.16.2 still shows ✓
+
+---
+
+**Standards audit (rule #17 — push #23 in S015 continuation):**
+
+This push followed diagnostic-first protocol properly:
+- Read user's screenshot evidence carefully
+- Traced server.js code path for resolveEvent
+- Compared gold flow to known-working gray rubble flow
+- Found the divergence (early return missing)
+- Applied surgical fix
+
+**Lesson learned:** when a UI bug appears event-specific, compare
+the divergent event's server flow to a known-working event's flow.
+The pattern catalog approach (memory rule #20) applies — grep for
+"resolved: false" + early returns to check coverage.
+
+For chipPulse: render order matters when chasing DOM positions.
+Helpers that query DOM elements need those elements at known good
+state. Render-then-query pattern is safer than query-during-render.
+
+---
+
+### v0.16.4 (cont'd) — Polish: deeper flavor pool + freeze on dissolve + dramatic fade
+
+*This section was originally drafted for v0.16.5 in chat, then bundled
+into the v0.16.4 push at Ross's request after v0.16.4 chat-side fixes
+never made it to the repo.*
+
+**Three small UX tweaks** to the Collect drain dismissal, all from
+Ross playtest feedback:
+
+> "flavor text change between items leaving is a nice touch. text
+> should not change on card or button once last item leaves card,
+> that is when it should dissolve out"
+
+> "may need a much deeper pool so it does not get stale"
+
+> "still fade, could even be slightly dramatic"
+
+---
+
+**Change 1: Expanded REWARD_COLLECT_FLAVORS pool (15 → 45)**
+
+Original 15 entries get repetitive after a few play sessions. Tripled
+the pool to 45, organized into three loose groups:
+- Action-y: "Grab it!", "Scoop it!", "Bag it!", "Hoard it!", etc.
+- Triumphant: "Victory!", "Spoils!", "Plunder!", "Bounty!", etc.
+- Cheeky: "Don't mind if I do!", "Finders keepers!", "Mine now!", etc.
+
+`_pickResolutionCollectFlavor` already avoids back-to-back repeats via
+`_lastCollectFlavorIdx`, so the deeper pool means you'll see a fresh
+phrase on basically every Collect now.
+
+---
+
+**Change 2: Flavor + button text FREEZE during card fade**
+
+The current behavior re-rolls flavor (both event-body flavor AND the
+✋ Collect button label) on every render. During pre-tap and during
+drain, that rotation is good — Ross called it "a nice touch."
+
+But once the last item drains, the card starts fading away. Renders
+during the fade window (server broadcasts, timer ticks, etc.) were
+re-rolling the flavor, which made the text visibly shuffle while the
+card was dissolving. Bad polish.
+
+**Fix:** new `_cardFlavors[eventKey]` stash with shape
+`{ button: "Snagged!", body: "..." }`. On each non-fading render, the
+stash captures the latest values. When `_cardFading[key]` flips true,
+buildResolutionCard reads from the stash instead of re-rolling. Both
+the body flavor and the button label freeze.
+
+Mirrors the `_cardEntered` / `_cardFading` state-flag pattern from
+v0.15.46/v0.16.1. Three flags now tracked per event key:
+- `_cardEntered` — has entrance animation already played?
+- `_cardFading` — is the card in its post-drain dissolve?
+- `_cardFlavors` — what last-rolled flavor should freeze during fade?
+
+All cleared together when activeEvent changes.
+
+---
+
+**Change 3: Dramatic dissolve (CSS animation)**
+
+Old: `bq-card-exit` was 600ms, scale 1.0 → 0.85, opacity 1 → 0.
+Modest. Felt like a quick fade.
+
+New: 850ms, scale 1.0 → **0.6**, opacity 1 → 0. The bigger scale
+shrink + longer duration gives the card a real "letting go" beat
+as it dissolves. Pairs nicely with the flavor freeze — text holds
+steady while the card visibly contracts and fades.
+
+JS-side `CARD_FADE_MS` constant bumped from 600 to 850 to match the
+new animation duration (the `_collectedResolutions` flag now fires
+850ms after fade-start instead of 600ms, matching the visual end).
+
+---
+
+**Files changed:**
+
+- `players-core.js`:
+  - Expanded `REWARD_COLLECT_FLAVORS` from 15 to 45 entries
+  - Added `_cardFlavors` state stash (button + body)
+  - `buildResolutionCard` reads from stash during fade, captures
+    fresh values otherwise
+  - `_cardFlavors` reset alongside other card-state flags when
+    activeEvent clears
+  - `CARD_FADE_MS` bumped 600 → 850
+- `boardFx.css`:
+  - `bq-card-exit` keyframes: scale 1.0→0.6 (was 0.85), 850ms (was 600ms)
+  - Updated comment block to reflect new dramatic dissolve
+- `NOTES.md` — this entry
+
+UNTOUCHED: server.js, rumble.js, players.html, test_players.html,
+boardFx.js.
+
+---
+
+**Test focus:**
+
+1. Hard refresh (CSS changed).
+
+2. Trigger any event with a Collect button (riddle, gold, gray, red, etc.)
+
+3. **Pre-tap rotation:** flavor on the body and the button should
+   rotate normally on each render. Try waiting through a riddle's
+   timer ticks — text should change.
+
+4. **During drain:** tap Collect. As each item drains and arrives,
+   text continues to rotate. The "nice touch."
+
+5. **POST-LAST-ITEM:** when the last drain item arrives, the fade
+   begins. Body flavor + button label should now FREEZE — no more
+   shuffling.
+
+6. **Dissolve drama:** the fade should feel slightly more dramatic
+   than before — bigger shrink, longer duration. Card visibly
+   "lets go" rather than quick-fading.
+
+7. **Regression checks:** no new event-flow bugs; entrance animation
+   still fires once per event key; snapshot model still works.
+
+---
+
+**Standards audit (rule #17 — push #24 in S015 continuation):**
+
+Pure polish push. No architectural changes, no new mechanics. Just
+three small UX improvements bundled because they're related (all
+about the Collect drain dismissal feeling).
+
+- Rule #25 (version bump consent): patch `-v` ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): the `_cardFlavors` stash
+  follows the same pattern as `_cardEntered` and `_cardFading`,
+  consistent state-flag-per-key approach. UNITY check passes.
+- Rule #6 (diagnostic-first): N/A — feature polish, not bug fix.
+
+---
+
+### v0.16.4 (cont'd) — DIAGNOSTIC: post-rumble chipPulse not firing
+
+*This section was originally drafted for v0.16.6 in chat, then bundled
+into the v0.16.4 push at Ross's request.*
+
+**Diagnostic-first push** per memory rule #6.
+
+> "reward post rumble increment nicely, but not seeing and flair
+> during this. need at least highlight"
+
+v0.16.4 was supposed to fix this — moved `_detectInvIncreasesAndPulse`
+to AFTER `renderDashboard` so chip elements would exist at fresh
+positions. Inventory now increments correctly post-rumble (good — the
+v0.16.3 snapshot bypass works), but **no chipPulse highlight fires**.
+
+Possible failure modes:
+
+1. **`pane-dashboard` not `.active`** when render fires post-rumble.
+   `_findGoldChipDest`/etc. all gate on `pane.classList.contains('active')`.
+   If user was on a different tab when entering rumble, dashboard pane
+   wouldn't be active when they returned. All chip dest queries return
+   null → no chipPulse.
+
+2. **`_prevRenderInv` captured during rumble** with already-credited
+   values (unlikely — server crediting only happens at battleEnd, but
+   verifying via diff log).
+
+3. **Chip elements zero-width / off-viewport** at the moment
+   `_detectInvIncreasesAndPulse` queries them. v0.16.4 moved the call
+   AFTER renderDashboard, but maybe DOM hasn't settled yet (layout
+   pending).
+
+4. `_hasActiveSnapshot()` returning true unexpectedly (shouldn't, since
+   v0.16.3 bypasses snapshot for monster/boss).
+
+---
+
+**Diagnostic added:** `_detectInvIncreasesAndPulse` now logs:
+
+- `[bq:pulse-skip]` with reason if early-bail (no-prev-inv,
+  snapshot-active)
+- `[bq:pulse-check]` with full inventory diff (prev vs curr for
+  gold/cheese/each brick color)
+- `[bq:pulse-pane]` with `paneFound` and `paneActive` flags
+- `[bq:pulse-gold]` / `[bq:pulse-cheese]` / `[bq:pulse-brick]`
+  per-field with rise amount and `destFound` flag
+
+**Test:** trigger a rumble, win it, return to board. In console,
+locate the post-rumble render's pulse logs. The log pattern will
+identify which failure mode is hitting:
+
+- `pulse-skip` reason: `no-prev-inv` or `snapshot-active` → root
+  cause is one of those, fix accordingly
+- `pulse-check` shows inventory diff: if prev == curr, then
+  `_prevRenderInv` was updated mid-rumble somehow
+- `pulse-pane.paneActive: false` → tab issue, dashboard not
+  active when chipPulse runs
+- `pulse-gold.destFound: false` → chip element not findable,
+  DOM/layout issue
+- All logs look right but no visual → BoardFx.fire receiving
+  good rect but rendering off-screen
+
+Once Ross runs this and pastes the relevant logs, root cause locks
+and v0.16.7 fix follows.
+
+---
+
+**Files changed:**
+
+- `players-core.js`: added diagnostic logging to
+  `_detectInvIncreasesAndPulse`. Logic unchanged, just visibility.
+- `NOTES.md` — this entry
+
+UNTOUCHED everywhere else. Pure observation push.
+
+---
+
+**Standards audit (rule #17 — push #25 in S015 continuation):**
+
+- Rule #25 (version bump consent): patch `-v` ✓
+- Rule #6 (diagnostic-first): followed properly this time —
+  shipping diagnostic, not speculative fix
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): no change to logic, only
+  observation; no debt added
+- This is exactly the protocol Ross calibrated in S015. Ship
+  diagnostic, get real evidence, then fix.
+
+---
+
 
 ### Session 015 Process Retrospective
 
