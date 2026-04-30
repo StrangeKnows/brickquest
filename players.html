@@ -218,25 +218,30 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .head-card{
   background:var(--surface2);border:1px solid #2a2a2a;
   border-radius:10px;padding:12px;margin-bottom:10px;
-  display:flex;gap:14px;align-items:stretch;flex-wrap:wrap;
+  display:flex;gap:14px;align-items:stretch;
+  /* v0.16.12: no-wrap so portrait keeps the same horizontal split as
+     landscape — coin/cheese stays anchored to the bottom of head-id
+     regardless of orientation. HP bar compresses to fit available width
+     (the bar itself is responsive). */
+  flex-wrap:nowrap;
 }
 .head-id{
   display:flex;flex-direction:column;
-  flex:1;min-width:140px;
-  /* v0.16.11: align-self stretches to full card height; justify-content
-     space-between pushes identity row to top and resources to middle of
-     remaining space via padding-bottom. Margin-top:auto on resources
-     centers them in the leftover vertical space. */
+  flex:1;min-width:0;
+  /* v0.16.12: min-height ensures the column has room for resources to
+     sit at the bottom even when content above is short. Also lets
+     margin-top:auto push the resources block down properly. */
+  min-height:120px;
   align-self:stretch;
 }
 .head-id .head-icon{font-size:28px;line-height:1;}
 .head-id .head-name{font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;display:flex;align-items:center;}
 .head-id .head-zone{font-size:11px;color:var(--text-dim);}
-/* v0.16.10: coin + cheese chips inside the head-id column, below the
-   name/zone block. Sits in the previously-empty space.
-   v0.16.11: margin:auto 0 pushes the chips to vertical-center of the
-   leftover space below the identity row, instead of hugging the top. */
-.head-resources{display:flex;gap:10px;align-items:stretch;margin:auto 0;}
+/* v0.16.12: margin-top:auto pushes the chip block to the BOTTOM of the
+   head-id column (was margin:auto 0 in v0.16.11 which centered).
+   Identity row sits at top, chips at bottom, blank space in between. */
+.head-resources{display:flex;gap:10px;align-items:stretch;margin-top:auto;}
+.head-stats{flex:2;min-width:0;display:flex;flex-direction:column;gap:6px;}
 .head-stats{flex:2;min-width:200px;display:flex;flex-direction:column;gap:6px;}
 
 /* CARDS */

@@ -1990,6 +1990,104 @@ UNTOUCHED: players-core.js, server.js, rumble.js, characters.js, boardFx.
 
 ---
 
+### v0.16.12 — Fullscreen on player select + bottom-anchored coin/cheese in both orientations
+
+> "fullscreen after player select on player/html, landscape and portrait
+> fullscreen forced; cheese and coin need to maintain lower position
+> beneath icon whether landscape or portrait, in portrait shrink health
+> bar to compensate, slightly closer to bottom boundry with coin and
+> cheese, sttil feels too close to player icon, this is the one to
+> drive it home!"
+
+Three fixes bundled:
+
+**1. Fullscreen request on player select.** `selectClass()` in
+players-core.js now calls `requestFullscreen` on the document element
+after switching to game-screen. The class-tap is a user gesture (the
+only context where fullscreen API is allowed). Vendor-prefixed
+fallbacks included (webkitRequestFullscreen / mozRequestFullScreen /
+msRequestFullscreen). Wrapped in try/catch — some embedded views or
+permission policies may deny, in which case behavior degrades to
+non-fullscreen (current behavior). Both orientations supported —
+fullscreen API is orientation-agnostic.
+
+NOT applied to test_players.html — debug harness needs side-by-side
+multi-class inspection without fullscreen interfering.
+
+**2. No-wrap layout across orientations.** v0.16.11 had
+`.head-card` with `flex-wrap:wrap` — in portrait, head-stats (right
+column, min-width:200px) couldn't fit alongside head-id, wrapped to a
+new row, breaking the side-by-side layout AND the
+`align-items:stretch` math (no leftover vertical space for chips to
+center in).
+
+Now: `.head-card` is `flex-wrap:nowrap` so the horizontal split
+persists in both orientations. `.head-stats` `min-width` dropped from
+200px to 0 (relies on `flex:2` for proportional sizing instead of
+hard-pixel floors). `.head-id` `min-width` dropped from 140px to 0
+similarly. HP bar inherits responsive width — compresses naturally
+in narrow portrait. Per Ross's spec: "in portrait shrink health bar
+to compensate."
+
+**3. Coin/cheese pinned to bottom of head-id (not centered).** v0.16.11
+used `margin:auto 0` to vertically center the chips in leftover space.
+Ross feedback: "still feels too close to player icon, this is the
+one to drive it home!" — the chips need to BIAS toward the bottom,
+not center.
+
+Now: `.head-resources` uses `margin-top:auto` (pushes to bottom of
+flex column, no `margin-bottom`). `.head-id` got
+`min-height:120px` so there's guaranteed space for the chips to be
+"pushed to the bottom" of even when the identity row is short.
+
+Result: identity row at top, blank space, coin/cheese flush against
+the bottom of the head-id column with `padding:12px` of head-card
+padding below them.
+
+---
+
+**Files changed:** `players-core.js`, `players.html`, `test_players.html`,
+`NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Player select → fullscreen.** Pick a class, browser should
+   immediately go fullscreen (browser chrome disappears). Both
+   landscape and portrait. If the browser denies (some Android browsers
+   in restricted contexts), fallback is the existing non-fullscreen
+   behavior.
+3. **Coin + cheese in landscape:** sit at the bottom of the head-id
+   column, flush against the card's bottom padding. Significant blank
+   space between identity row and chips.
+4. **Coin + cheese in portrait:** SAME relative position (bottom of
+   head-id column). The columns stay side-by-side — head-stats does
+   NOT wrap below.
+5. **HP bar in portrait:** compressed but functional. Numbers and
+   labels still readable, bar shorter horizontally.
+6. **HP bar in landscape:** unchanged from v0.16.11 — full width of
+   right column.
+7. **chipPulse** still hits the chips in their new lower position
+   (finder helpers position-agnostic).
+
+---
+
+**Standards audit (rule #17 — push #32 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html (note that
+  fullscreen is players-only by design) ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): UNITY for layout (same shape
+  in both orientations); ELEGANCE for the bottom-anchor approach
+  (margin-top:auto is the simplest tool for "push to bottom"); 
+  EFFICIENCY for fullscreen (more screen, less chrome).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

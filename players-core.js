@@ -347,6 +347,20 @@ function selectClass(cls) {
   // Show game screen
   document.getElementById('class-select-screen').style.display = 'none';
   document.getElementById('game-screen').classList.add('visible');
+  // v0.16.12: request fullscreen so the dashboard owns the viewport
+  // (no browser chrome eating space). The class-select tap is a user
+  // gesture, so the requestFullscreen call is allowed. Wrapped in
+  // try/catch in case the browser denies (some embedded views,
+  // permission policies, etc.). Both orientations supported — fullscreen
+  // is orientation-agnostic.
+  try {
+    var docEl = document.documentElement;
+    var req = docEl.requestFullscreen
+           || docEl.webkitRequestFullscreen
+           || docEl.mozRequestFullScreen
+           || docEl.msRequestFullscreen;
+    if (req) req.call(docEl);
+  } catch (e) {}
   // Connect
   connectWS();
 }
