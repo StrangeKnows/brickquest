@@ -930,8 +930,13 @@ function _dashHeader(me) {
     </div>
     <div class="head-stats">
       <div class="hp-row">
-        <span class="hp-big" style="color:${hc};">${me.hp}</span>
-        <span class="hp-max">/ ${me.hpMax} HP</span>
+        <div class="hp-status-slot">
+          ${statuses}${debuffBadge}
+        </div>
+        <div class="hp-cluster">
+          <span class="hp-big" style="color:${hc};">${me.hp}</span>
+          <span class="hp-max" style="color:${hc};">/ ${me.hpMax} HP</span>
+        </div>
       </div>
       <div class="hpbar-outer" id="my-hp-bar">
         <div class="hpbar-inner" style="width:${pct}%;background:${hpBg};${hpShadow}"></div>
@@ -943,7 +948,6 @@ function _dashHeader(me) {
         </div>
         <div style="display:flex;flex-wrap:wrap;" id="my-shield-pips">${shieldPips}</div>
       </div>
-      ${(statuses || debuffBadge) ? `<div class="status-wrap" style="margin-top:4px;">${statuses}${debuffBadge}</div>` : ''}
       ${(me.queuedPoisonStacks || 0) > 0 ? `<div style="margin-top:4px;padding:6px 8px;background:#1a2a10;border:1px solid #4a7a2a;border-radius:6px;">
         <span style="font-size:11px;color:#bada7a;font-family:Cinzel,serif;letter-spacing:.04em;">☠ POISON QUEUED: ${me.queuedPoisonStacks} stack${me.queuedPoisonStacks!==1?'s':''} (${me.queuedPoisonBattles||1} battle${(me.queuedPoisonBattles||1)!==1?'s':''})</span>
       </div>` : ''}

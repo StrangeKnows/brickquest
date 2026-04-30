@@ -2266,6 +2266,112 @@ appear exactly once in each file. ✓
 
 ---
 
+### v0.16.15 — HP cluster right-anchored + status badges in freed left space
+
+> "still overlapping elements on landscape. what if we moved large HP
+> number closer to its end 14_/14 instead of 14____________/14. Make
+> denominator a bit larger and same color as well, numerator stays
+> same. space between character icon and hp numbers can be used for
+> status effect icons"
+
+The HP-overlap-with-BREAKER bug from v0.16.13 had a structural cause
+I missed: `.hp-row` was `justify-content:space-between` which pushed
+`.hp-big` to the FAR LEFT and `.hp-max` to the FAR RIGHT of head-stats.
+At narrow widths, the far-left HP big number physically overlapped
+with head-id content. v0.16.13 chip changes didn't address this.
+
+**Fix per Ross's spec:**
+
+**1. HP cluster right-anchored as one visual unit.**
+- New `.hp-cluster` div wraps `.hp-big` + `.hp-max` together
+- `gap:4px` between number and "/14 HP" — tight, reads as one stat
+- `flex-shrink:0` so the cluster never collapses
+- Cluster sits at the right of `.hp-row` via parent's
+  `justify-content:space-between` (paired with the new status slot)
+
+**2. Denominator picks up HP color, slightly larger font.**
+- `.hp-max` now `clamp(13px, 3vw, 18px)` (was fixed 14px)
+- `.hp-max` now uses inline `style="color:${hc};"` matching the HP
+  big number's color — the dynamic color (cls-color, orange, red,
+  purple-overheal)
+- `opacity:.85` so the denominator reads as supporting text, not
+  competing weight
+
+**3. Status badges relocated to freed left space.**
+- New `.hp-status-slot` div on the LEFT of `.hp-row`
+- Contains poison/curse/confused/down + movement debuff badges
+- `flex:1` takes the remaining width; wraps if many badges
+- Uses the visual gap between class icon and HP cluster — Ross's
+  "space between character icon and hp numbers can be used for
+  status effect icons"
+- Old `.status-wrap` container (below shield) removed from header
+  markup; `.status-wrap` CSS rule still exists, harmless, will
+  prune in a later cleanup
+
+**4. HP big number also clamp()'d.**
+- `.hp-big` was fixed 28px; now `clamp(20px, 5vw, 28px)` for
+  responsive scaling at narrow viewports
+
+UNITY: HP is one stat — rendered as one cluster, not two anchored to
+opposite edges. Status info groups visually with HP since they're
+both health-related.
+
+ELEGANCE: removes the awkward white-space gap. Same color treatment
+makes the denominator read as part of the same number rather than
+a separate label.
+
+EFFICIENCY: status badges no longer take their own row below shield —
+they live in space that was previously empty. Card height shrinks.
+
+---
+
+**Files changed:** `players.html`, `test_players.html`, `players-core.js`,
+`NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Landscape:** HP "14 / 14 HP" sits clustered together at the
+   right of head-stats. Both numbers in cls-color orange. No more
+   overlap with BREAKER name.
+3. **Status badges (when present):** sit in the gap to the LEFT of
+   the HP cluster, between the class identity column and the HP
+   numbers. Wrap if many.
+4. **Portrait:** same right-anchored HP cluster, same status slot.
+   Cluster size shrinks via clamp() but stays readable.
+5. **Zoomed in:** HP cluster shrinks proportionally; status slot
+   compresses; no overlap with head-id content.
+6. **Zoomed out:** HP cluster at max size (28px / 18px) without
+   sprawling. Reads as one unit.
+
+---
+
+**Standards audit (rule #17 — push #35 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #20 (grep for old-pattern symptoms): checked for duplicate
+  `.hp-*` selectors before shipping. Each appears exactly once. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): HP becomes one cluster
+  (UNITY), denominator color-matched (ELEGANCE), status moves into
+  empty space (EFFICIENCY).
+- Rule #19 (intuition): Ross's diagnosis (move HP toward right,
+  use freed left for status) was exactly right. Built directly to
+  spec.
+
+The HP-row structural issue should have been caught earlier in the
+arc — the `space-between` push-apart was always going to overflow at
+narrow widths regardless of how chips were positioned. Lesson for
+next layout audit: when an overlap occurs, also check the
+"intentional spacer" mechanisms in flexbox parents, not just
+the children's sizing.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
