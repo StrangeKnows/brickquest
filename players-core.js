@@ -1592,20 +1592,10 @@ function _renderHoldOverlay() {
   // Diagnostic panel — always visible during hold so we can see what's
   // happening in the gesture state machine. REMOVE this block once the
   // gesture is verified working in the field.
-  // v0.16.19 DIAGNOSTIC: surface _radialHomeBounds rect so we can see
-  // why fade-beyond-bounds isn't visually firing in the field. If rect
-  // is null, the helper isn't finding .interaction-row. If rect values
-  // look wrong vs chipCx/Cy, there's a coordinate-system mismatch.
-  let _diagBounds = null;
-  try { _diagBounds = _radialHomeBounds(); } catch(e) {}
-  const _boundsStr = _diagBounds
-    ? `L:${Math.round(_diagBounds.left)} T:${Math.round(_diagBounds.top)} R:${Math.round(_diagBounds.right)} B:${Math.round(_diagBounds.bottom)}`
-    : 'NULL (selector miss?)';
-
   let html = `<div style="position:absolute;top:8px;right:8px;background:#0a0a0a;
     border:1px solid #444;padding:6px 8px;border-radius:6px;
     font-family:ui-monospace,monospace;font-size:10px;color:#0f0;
-    pointer-events:none;line-height:1.4;max-width:280px;">
+    pointer-events:none;line-height:1.4;max-width:240px;">
     <div style="color:#ff0;font-weight:bold;">HOLD DEBUG</div>
     color: ${s.color}<br>
     elapsed: ${Math.round(elapsed)}ms<br>
@@ -1614,26 +1604,12 @@ function _renderHoldOverlay() {
     tier: ${s.tier} / max ${s.maxCharges}<br>
     isDrag: ${s.isDrag}<br>
     dragTarget: ${s.dragTarget || 'none'}<br>
-    chipCx,Cy: ${Math.round(s.chipCx)},${Math.round(s.chipCy)}<br>
-    <span style="color:#ff8;">interaction-row rect:</span><br>
-    ${_boundsStr}
+    chipCx,Cy: ${Math.round(s.chipCx)},${Math.round(s.chipCy)}
   </div>`;
 
   // Charging visuals — only after hold threshold
   if (inHoldMode) {
     const tierColor = BRICK_COLORS[s.color] || '#fff';
-
-    // v0.16.19 DIAGNOSTIC: draw the bounds rect outline so we can see
-    // visually where the in/out cutoff is supposed to be. Yellow dashed
-    // border. Remove once fade-beyond-bounds is confirmed working.
-    if (_diagBounds) {
-      html += `<div style="position:absolute;
-        left:${_diagBounds.left}px;top:${_diagBounds.top}px;
-        width:${_diagBounds.right - _diagBounds.left}px;
-        height:${_diagBounds.bottom - _diagBounds.top}px;
-        border:2px dashed #ff0;pointer-events:none;
-        box-sizing:border-box;"></div>`;
-    }
 
     // Subtle chip ring — shows the gesture is active, no tier info embedded
     const ringSize = 64;
@@ -1672,12 +1648,39 @@ function _renderHoldOverlay() {
   // White uses the ally-target radial (allies are heal targets). Other
   // colors use the generic option-radial (action options per color).
   // Both render the power arc + selection icons in the same layout space.
+  //
+  // v0.16.20: cursor-distance based engagement fade. While the cursor is
+  // inside the radial bounds (≤ RADIUS + ICON_SIZE from chip center), the
+  // radial reads at full opacity — the player is still selecting an option.
+  // When cursor moves OUTSIDE that bound, the player has visually disengaged
+  // from the radial and the whole fan (arc + icons) fades to 0.4. CSS
+  // transition smooths the edge so it doesn't flicker on threshold crossings.
+  // Chip ring + tier-up pulse stay full strength regardless — they're "the
+  // gesture is active" feedback, not "the options."
   if (inHoldMode && HOLD_RADIAL_COLORS.indexOf(s.color) >= 0) {
+    // Cursor distance from chip center. Use s.dragX/dragY which is updated
+    // on every pointermove regardless of isDrag state. Falls back to chip
+    // center if no movement yet → distance 0 → fully engaged.
+    const curX = (typeof s.dragX === 'number') ? s.dragX : s.chipCx;
+    const curY = (typeof s.dragY === 'number') ? s.dragY : s.chipCy;
+    const cursorDist = Math.hypot(curX - s.chipCx, curY - s.chipCy);
+    // Radial visual extent: RADIUS (icon-center distance) + ICON_SIZE (full
+    // icon + a touch of grace zone). Matches the radii used in both fans
+    // (RADIUS=80, ICON_SIZE=44, total ≈ 124).
+    const RADIAL_ENGAGE_RADIUS = 124;
+    const radialEngagement = cursorDist <= RADIAL_ENGAGE_RADIUS ? 1 : 0.4;
+    let fanHtml = '';
     if (s.color === 'white') {
-      html += _renderAllyRadialFan(s);
+      fanHtml = _renderAllyRadialFan(s);
     } else {
-      html += _renderOptionRadialFan(s);
+      fanHtml = _renderOptionRadialFan(s);
     }
+    html += `<div style="position:absolute;inset:0;pointer-events:none;
+      opacity:${radialEngagement};transition:opacity .2s ease-out;">
+      <div style="position:relative;width:100%;height:100%;pointer-events:auto;">
+        ${fanHtml}
+      </div>
+    </div>`;
   }
 
   // Drag line from chip to current pointer (visual feedback)
@@ -1782,9 +1785,9 @@ function _renderOptionRadialFan(s) {
   //   N=3: [0, -π/4, -π/2]         stacked upward by 45° steps
   //   N≥4: evenly distributed from 0 to -π (full upper half arc)
   // Negative angle offset = visually above on screen (canvas y inverted).
-  // v0.16.18: items whose center lies outside the interaction-row card
-  // get reduced opacity (same fade-beyond-bounds rule as ally radial).
-  const homeRect = _radialHomeBounds();
+  // v0.16.20: per-icon bounds fade removed — replaced by whole-radial
+  // engagement fade at the wrapper level (cursor inside vs outside the
+  // radial bounds).
   const N = opts.length;
   function angleOffsetFor(idx) {
     if (N === 1) return 0;
@@ -1808,23 +1811,14 @@ function _renderOptionRadialFan(s) {
     const angle = s.fanCenterAngle + offset;
     const ax = s.chipCx + Math.cos(angle) * RADIUS - ICON_SIZE / 2;
     const ay = s.chipCy + Math.sin(angle) * RADIUS - ICON_SIZE / 2;
-    // v0.16.18: opacity by bounds. Targeted icon always full opacity.
-    const iconCx = ax + ICON_SIZE / 2;
-    const iconCy = ay + ICON_SIZE / 2;
-    const inBounds = !homeRect || (
-      iconCx >= homeRect.left && iconCx <= homeRect.right &&
-      iconCy >= homeRect.top  && iconCy <= homeRect.bottom
-    );
     const isTarget = s.dragTarget === opt.label;
-    const finalOpacity = isTarget ? 1 : (inBounds ? 1 : 0.4);
     const scale = isTarget ? 1.2 : 1.0;
     const ringGlow = isTarget
       ? `0 0 16px ${tierColor},0 0 24px #fff`
       : `0 2px 8px rgba(0,0,0,.5)`;
     html += `<div data-option-target="${opt.label}" style="position:absolute;left:${ax}px;top:${ay}px;
       width:${ICON_SIZE}px;height:${ICON_SIZE}px;pointer-events:auto;cursor:pointer;
-      transform:scale(${scale});transition:transform .12s, opacity .15s;
-      opacity:${finalOpacity};">
+      transform:scale(${scale});transition:transform .12s;">
       <div style="width:${ICON_SIZE}px;height:${ICON_SIZE}px;border-radius:50%;
         background:${tierColor};border:2px solid ${isTarget?'#fff':tierColor+'cc'};
         box-shadow:${ringGlow};
@@ -1906,39 +1900,25 @@ function _renderAllyRadialFan(s) {
   </svg>`;
 
   // ── ALLY ICONS ────────────────────────────────────────────
-  // v0.16.18: items whose center lies OUTSIDE the interaction-row card
-  // get reduced opacity. Communicates layered relationship — overlay
-  // extends past the home card, dashboard content is still beneath.
-  // Bounds derived from the interaction-row element since that's where
-  // the brick chip lives. If the element can't be found, no fade applied.
-  const homeRect = _radialHomeBounds();
+  // v0.16.20: per-icon bounds fade removed — replaced by whole-radial
+  // engagement fade at the wrapper level (cursor inside vs outside the
+  // radial bounds).
   allies.forEach((ally, i) => {
     // Distribute allies across the 120° arc centered on fanCenterAngle
     const step = (allies.length > 1) ? FAN_ARC_RAD / (allies.length - 1) : 0;
     const angle = center - FAN_ARC_RAD / 2 + i * step;
     const ax = s.chipCx + Math.cos(angle) * RADIUS - ICON_SIZE / 2;
     const ay = s.chipCy + Math.sin(angle) * RADIUS - ICON_SIZE / 2;
-    // v0.16.18: opacity based on whether icon center is inside home card
-    const iconCx = ax + ICON_SIZE / 2;
-    const iconCy = ay + ICON_SIZE / 2;
-    const inBounds = !homeRect || (
-      iconCx >= homeRect.left && iconCx <= homeRect.right &&
-      iconCy >= homeRect.top  && iconCy <= homeRect.bottom
-    );
-    const boundsOpacity = inBounds ? 1 : 0.4;
     const meta = (typeof PLAYER_META !== 'undefined' ? PLAYER_META[ally.cls] : null) || {};
     const clsColor = getCharUiStyle(ally.cls).color;
     const isTarget = s.dragTarget === ally.cls;
-    // Targeted ally always full opacity (player is actively pointing at it)
-    const finalOpacity = isTarget ? 1 : boundsOpacity;
     const hpPct = Math.max(0, Math.min(1, (ally.hp || 0) / Math.max(1, ally.hpMax || 10)));
     const hpBarColor = hpPct < 0.3 ? '#e44' : (hpPct < 0.6 ? '#fa3' : '#5d5');
     const scale = isTarget ? 1.2 : 1.0;
     const ringGlow = isTarget ? `0 0 16px ${clsColor},0 0 24px #fff` : `0 2px 8px rgba(0,0,0,.5)`;
     html += `<div data-ally-target="${ally.cls}" style="position:absolute;left:${ax}px;top:${ay}px;
       width:${ICON_SIZE}px;height:${ICON_SIZE}px;pointer-events:auto;cursor:pointer;
-      transform:scale(${scale});transition:transform .12s, opacity .15s;
-      opacity:${finalOpacity};">
+      transform:scale(${scale});transition:transform .12s;">
       <div style="width:${ICON_SIZE}px;height:${ICON_SIZE}px;border-radius:50%;
         background:${clsColor};border:2px solid ${isTarget?'#fff':clsColor+'cc'};
         box-shadow:${ringGlow};
@@ -1960,17 +1940,12 @@ function _renderAllyRadialFan(s) {
   return html;
 }
 
-// v0.16.18: bounds for the radial fade-beyond-card visual.
-// Returns the bounding client rect of the .interaction-row element (where
-// brick chips live), or null if not found. Radial items whose centers
-// fall outside this rect render at reduced opacity.
-function _radialHomeBounds() {
-  try {
-    const el = document.querySelector('.interaction-row');
-    if (!el) return null;
-    return el.getBoundingClientRect();
-  } catch (e) { return null; }
-}
+// v0.16.20: _radialHomeBounds() helper removed — replaced by cursor-distance
+// based engagement fade in _renderHoldOverlay. Per-icon bounds checking was
+// the v0.16.18 approach; diagnostic in v0.16.19 revealed the rect (sized to
+// .interaction-row) was inherently shorter than the radial, producing an
+// awkward "some icons fade, some don't" pattern. Cursor-distance fade is
+// player-attention-driven and treats the radial as one visual unit.
 
 // CSS keyframe injection for the charging ring pulse
 (function injectHoldCss() {

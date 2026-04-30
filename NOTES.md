@@ -2940,6 +2940,96 @@ only the existing debug overlay gains new fields).
 
 ---
 
+### v0.16.20 — Radial fade by cursor engagement (player-attention-driven)
+
+> "can we fade if cursor is beyond radial bounds instead?"
+
+The v0.16.18 per-icon bounds-fade approach was geometrically correct
+but produced an awkward "some icons fade, some don't" pattern (per
+v0.16.19 diagnostic) because the `.interaction-row` rect was inherently
+shorter than the radial diameter. Icons whose centers landed in the
+middle band of the radial were technically inside the rect; icons at
+top/bottom of the radial were outside. Visually this read as random.
+
+Ross's reframe is the elegant move: **fade based on cursor position,
+not icon position**. While cursor is inside the radial bounds, the
+player is still selecting an option — full opacity. When cursor leaves
+the radial bounds, the player has visually disengaged — fade the whole
+fan together.
+
+This is player-attention-driven instead of geometry-driven. The radial
+becomes one visual unit that responds to player intent.
+
+**Changes:**
+
+**1. Per-icon bounds fade removed.** Both `_renderAllyRadialFan` and
+`_renderOptionRadialFan` strip their `homeRect` / `inBounds` /
+`boundsOpacity` per-icon logic. Icons render at full opacity (with the
+existing `isTarget` scale + glow on the active drag target).
+
+**2. `_radialHomeBounds()` helper removed.** Only a brief comment
+remains noting why it was removed.
+
+**3. Cursor-distance engagement fade added at `_renderHoldOverlay`.**
+- Compute `cursorDist = hypot(s.dragX - s.chipCx, s.dragY - s.chipCy)`
+  using the cursor position tracked on every pointermove (works
+  whether `isDrag` is true or not — `dragX/dragY` are updated regardless).
+- Compare against `RADIAL_ENGAGE_RADIUS = 124` (RADIUS=80 + ICON_SIZE=44).
+  Inside → opacity 1.0. Outside → opacity 0.4.
+- Wrap the entire fan output in a div with that opacity + CSS transition
+  (`opacity .2s ease-out`) so the fade smooths across threshold crossings
+  rather than flickering.
+- Both fans (ally and option) get the same wrapper.
+
+**4. Chip ring + tier-up pulse stay solid regardless** — they're
+"the gesture is active" feedback, not "the options," so they don't
+fade with engagement.
+
+**5. v0.16.19 diagnostics removed.** HOLD DEBUG panel returns to its
+pre-v0.16.19 form (no bounds rect line). Yellow dashed outline gone.
+
+UNITY: radial is one visual unit, fades together. ELEGANCE: fade
+follows player intent. EFFICIENCY: one cursor-distance calculation
+per render, not per-icon math × N icons.
+
+---
+
+**Files changed:** `players-core.js`, `NOTES.md`.
+
+UNTOUCHED: players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. Hold a white brick (Fixer/Snapstep), let radial fan out.
+3. **Cursor inside radial:** all ally icons + power arc at full opacity.
+4. **Move cursor outside the ~124px radial bound:** entire fan
+   (icons + arc) fades to 0.4 together. Smooth transition, no flicker.
+5. **Move cursor back inside:** fan brightens back to full.
+6. **Drag onto an ally icon:** icon scales/glows; if cursor is back
+   inside radial bounds (which it would be while on an icon), full
+   opacity throughout.
+7. Same behavior with gray brick (option radial).
+8. Chip ring + tier-up pulse always full strength.
+
+---
+
+**Standards audit (rule #17 — push #40 in S015 continuation):**
+
+- Rule #6 (diagnostic-first): held in v0.16.19; v0.16.20 is the
+  fix shipped against real diagnostic data. Right cadence. ✓
+- Rule #19 (intuition + UNITY/ELEGANCE/EFFICIENCY): Ross's
+  cursor-based reframe was the elegant read I missed. I had been
+  thinking geometry first; the answer was player-intent first.
+  Lesson: when a "smart" geometric solution feels off, check if
+  there's a player-intent reframing that simplifies it.
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players-core.js only. ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
