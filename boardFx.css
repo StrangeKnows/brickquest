@@ -262,21 +262,21 @@
  * lands. Confirms "this is where it landed" — subtle but satisfying
  * arrival beat. Border + box-shadow inherit color from inline style.
  *
- * v0.16.5: more visible. Old keyframes had opacity peak only at 20%
- * then immediate decay — barely registered, especially post-rumble
- * when user attention is still transitioning. New version holds full
- * opacity from 15% to 50% (~30% of duration), expands more dramatically
- * (scale 0.6 → 1.6), and pairs with a longer default lifeMs in JS.
+ * v0.16.6: reverted to original subtler animation. v0.16.5 had bumped
+ * everything up to fix post-rumble visibility, but the rumble FIX was
+ * the 500ms delay (which lets user land on dashboard before pulse
+ * fires) — the intensity bump made non-rumble inventory rises feel
+ * heavy-handed. Original was right; the delay alone solved the rumble
+ * case.
  */
 @keyframes chip-pulse {
-  0%   { opacity: 0; transform: scale(0.6); }
-  15%  { opacity: 1; transform: scale(1.1); }
-  50%  { opacity: 1; transform: scale(1.25); }
-  100% { opacity: 0; transform: scale(1.6); }
+  0%   { opacity: 0; transform: scale(0.7); }
+  20%  { opacity: 1; transform: scale(1.1); }
+  100% { opacity: 0; transform: scale(1.4); }
 }
 .chip-pulse {
   position: absolute; pointer-events: none;
-  border-width: 3px; border-style: solid;
+  border-width: 2px; border-style: solid;
   border-radius: 8px;
   animation-name: chip-pulse;
   animation-timing-function: ease-out;
