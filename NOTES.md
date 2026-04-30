@@ -3326,6 +3326,78 @@ UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
 
 ---
 
+### v0.16.24 — Strip redundant "Purchased!" confirmation card on market buy
+
+> "get rid of these cards showing purchase, you can see this in
+> inventory. inventory should have pulse same as gaining loot from
+> event when purchase is made"
+
+The market `buyBrick()` was setting `_pendingResult` to render a
+"Purchased! 1 red brick added — spent 🪙1 gold" landing card that
+ate vertical space and told the player something they could see in
+the inventory. Meanwhile chipPulse + brickGained boardFx animations
+were ALREADY firing on the brick chip (per console log: brickGained
+at boardFx.js:709, chipPulse at boardFx.js:712).
+
+UNITY: same feedback path for ANY inventory increase, regardless of
+source (market purchase, event loot, rumble reward). chipPulse on
+the brick chip handles it. No need for a separate confirmation card.
+
+**Change:** removed the `_pendingResult = { ... 'Purchased!' ... }`
+block from `buyBrick()` along with the explicit `render()` call.
+Server broadcasts updated state on next tick which triggers render
+through normal state flow; `_detectInvIncreasesAndPulse` detects the
+brick count bump and fires chipPulse with the brick's color. Same
+feedback as event-loot gains.
+
+Spent-gold feedback handled implicitly by the gold number visibly
+decrementing on the dashboard. Same as how cheese-spend and
+brick-spend work — gain → pulse, spend → just number update.
+
+---
+
+**Files changed:** `players-core.js` (one function), `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx, html files.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. Open market (hold coin).
+3. Buy a brick (any color you can afford).
+4. **Expected:**
+   - No "Purchased!" card appears in dynamic zone
+   - Brick flies from market to brick row (brickGained animation)
+   - Brick chip pulses on arrival (chipPulse)
+   - Gold number decrements on the head-resource
+   - Brick count on the chip increments
+5. **Should NOT see:** confirmation card with "1 red brick added —
+   spent 🪙1 gold" text.
+6. **No regressions:** event-loot gains (riddles, gold trials, etc.)
+   still pulse the inventory. Rumble rewards still pulse.
+   _pendingResult still works for actual landing-event resolutions
+   (the field hasn't been removed, just no longer set by buyBrick).
+
+---
+
+**Standards audit (rule #17 — push #44 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players-core.js only — no markup or CSS
+  changed. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: one feedback path for inventory increases regardless of
+    source. Was three (event card, rumble card, market card) →
+    now one (chipPulse).
+  - ELEGANCE: removed clutter.
+  - EFFICIENCY: smaller code, same information conveyed.
+- Rule #19 (intuition): trusted Ross's read that the "Purchased!"
+  card was clutter, didn't second-guess. Direct strip.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

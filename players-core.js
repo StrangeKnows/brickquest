@@ -4602,15 +4602,15 @@ function buyBrick(color) {
   var me = G.players[MY_CLASS];
   if ((me.gold||0) < price) { toast('Need '+price+' gold', 'warn'); return; }
   client.purchaseBrick(MY_CLASS, color);
-  _pendingResult = {
-    border: BRICK_COLORS[color] || 'var(--gold)',
-    title: 'Purchased!',
-    icon: '🏪',
-    mainNum: null,
-    detail: '1 ' + color + ' brick added — spent 🪙' + price + ' gold',
-    kind: 'reward'
-  };
-  render();
+  // v0.16.24: removed _pendingResult confirmation card. The brick count
+  // bump triggers _detectInvIncreasesAndPulse → chipPulse on the brick chip
+  // (same feedback path as event-loot gains). Plus brickGained boardFx
+  // already fires the flying-brick visual. Showing a redundant "Purchased!"
+  // card on top of those animations was clutter — UNITY: one feedback path
+  // for inventory increases regardless of source (market purchase, event
+  // loot, rumble reward).
+  // No render() call needed — server broadcasts updated state on next tick,
+  // which triggers render through normal state flow.
 }
 
 // ── GOLD MINI-GAME LAUNCHER ──
