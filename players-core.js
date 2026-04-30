@@ -156,7 +156,21 @@ var _zoneState = 'idle';
 //   committed — true once threshold hit and surface opened
 var _holdRes = null;
 var RES_HOLD_THRESHOLD_MS = 400;
-var RES_HOLD_TAP_INFO_MS = 1500;
+
+// v0.16.17 — Swipe-to-dismiss threshold. Drag the dynamic zone right
+// past this distance to dismiss any open hold-invoked surface. Below
+// threshold, card snaps back. Works with touch and mouse via pointer
+// events.
+var SWIPE_DISMISS_THRESHOLD_PX = 80;
+
+// v0.16.17 — Swipe-to-dismiss state for the dynamic zone.
+// Tracks an in-progress swipe gesture on the .dynamic-zone element.
+// Active only while a hold-invoked surface is open (_zoneState !== 'idle').
+//   pointerId — which pointer is currently dragging (multi-touch safety)
+//   startX    — initial pointerdown X
+//   currentX  — most recent pointermove X
+//   started   — true once pointerdown fires on dynamic-zone
+var _zoneSwipe = null;
 
 // v0.15.46 — Resolution snapshot model. REPLACES the v0.15.39 _displayDeltas
 // system entirely.
@@ -733,21 +747,6 @@ function render() {
   // reverted in v0.15.45. v0.15.46 solves the flash via snapshot model
   // instead, leaving render order intact.)
   renderDashboard(me);
-  // v0.16.16: when a hold-invoked surface is open in the dynamic zone,
-  // attach a document-level click listener that dismisses on outside-tap.
-  // When state is idle, ensure no stale listener is attached.
-  try {
-    if (_zoneState !== 'idle') {
-      document.removeEventListener('click', _zoneOutsideTapHandler);
-      // Defer attach so the click that opened the surface doesn't
-      // immediately dismiss it.
-      setTimeout(function() {
-        document.addEventListener('click', _zoneOutsideTapHandler);
-      }, 50);
-    } else {
-      document.removeEventListener('click', _zoneOutsideTapHandler);
-    }
-  } catch(e) {}
   // v0.16.4: chipPulse fires AFTER renderDashboard so chip elements exist at
   // fresh positions. Previous order (pulse before dashboard render) meant
   // _findGoldChipDest etc. queried stale-or-detached chip elements with
@@ -954,10 +953,18 @@ function _dashHeader(me) {
 
   const myKeys = Object.entries(G.magicKeys || {}).filter(([, cls]) => cls === MY_CLASS).map(([c]) => c);
 
+  // v0.16.17: while a hold-invoked surface is open, the chip that opened
+  // it gets .surface-active class. CSS animation (chip-surface-pulse)
+  // mirrors the dynamic zone's class-color theme but with its own rhythm
+  // — visual link between open card and the chip that opened it.
+  const partyActive  = (_zoneState === 'party')  ? ' surface-active' : '';
+  const marketActive = (_zoneState === 'market') ? ' surface-active' : '';
+  const cheeseActive = (_zoneState === 'cheese') ? ' surface-active' : '';
+
   return `<div class="head-card">
     <div class="head-id">
       <div style="display:flex;align-items:center;gap:10px;">
-        <div class="head-icon" data-zone-trigger="party" title="Hold to view party"
+        <div class="head-icon${partyActive}" data-zone-trigger="party" title="Hold to view party"
              onpointerdown="_holdResStart(event, 'party', this)">${classIcon}</div>
         <div style="flex:1;">
           <div class="head-name">${className}<span class="conn-dot ${connClass}" id="conn-dot" title="Connection status"></span></div>
@@ -965,12 +972,12 @@ function _dashHeader(me) {
         </div>
       </div>
       <div class="head-resources">
-        <div class="res-chip" data-res="gold" data-zone-trigger="market" title="Hold to open market"
+        <div class="res-chip${marketActive}" data-res="gold" data-zone-trigger="market" title="Hold to open market"
              onpointerdown="_holdResStart(event, 'market', this)">
           <span class="res-chip-glyph">🪙</span>
           <span class="res-chip-num stat-num">${goldVal}</span>
         </div>
-        <div class="res-chip" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options"
+        <div class="res-chip${cheeseActive}" data-res="cheese" data-zone-trigger="cheese" title="Hold to open cheese options"
              onpointerdown="_holdResStart(event, 'cheese', this)">
           <span class="res-chip-glyph">🧀</span>
           <span class="res-chip-num stat-num">${cheeseVal}</span>
@@ -1425,15 +1432,12 @@ function _holdResCommit() {
 
 function _holdResEnd(e) {
   if (!_holdRes) return;
-  var elapsed = Date.now() - _holdRes.startTs;
-  var trigger = _holdRes.trigger;
-  var chipEl = _holdRes.chipEl;
   var committed = _holdRes.committed;
   _holdResCleanup();
-  // If never committed (released before threshold), it's a TAP.
-  if (!committed) {
-    _showResourceTapInfo(trigger, chipEl);
-  }
+  // v0.16.17: tap (release-before-threshold) is now silent — no tooltip.
+  // The hold-active visual feedback (glow + scale) during the gesture
+  // already teaches the player that the chip is interactive. Tooltip
+  // was clutter.
   // If committed, surface is already open — nothing more to do on release.
 }
 
@@ -1452,44 +1456,6 @@ function _holdResCleanup() {
   _holdRes = null;
 }
 
-// Tap (release-before-threshold) shows a brief info tooltip that
-// teaches the hold gesture. Auto-dismisses after RES_HOLD_TAP_INFO_MS.
-function _showResourceTapInfo(trigger, chipEl) {
-  if (!chipEl) return;
-  var msg = '';
-  var me = G && G.players && G.players[MY_CLASS];
-  if (trigger === 'market') {
-    var gold = me ? _displayed(me, 'gold') : 0;
-    msg = '🪙 ' + gold + ' coin' + (gold !== 1 ? 's' : '') + ' · Hold to open market';
-  } else if (trigger === 'cheese') {
-    var cheese = me ? _displayed(me, 'cheese') : 0;
-    msg = '🧀 ' + cheese + ' cheese · Hold for options';
-  } else if (trigger === 'party') {
-    msg = '👥 Hold to view party';
-  }
-  if (!msg) return;
-  // Remove any existing tooltip first
-  var prior = document.querySelector('.zone-tap-info');
-  if (prior) prior.parentNode.removeChild(prior);
-  var tip = document.createElement('div');
-  tip.className = 'zone-tap-info';
-  tip.textContent = msg;
-  // Position above the chip
-  var rect = chipEl.getBoundingClientRect();
-  tip.style.left = (rect.left + rect.width / 2) + 'px';
-  tip.style.top  = (rect.top - 8) + 'px';
-  document.body.appendChild(tip);
-  // Auto-dismiss
-  setTimeout(function() {
-    if (tip && tip.parentNode) {
-      tip.classList.add('fade-out');
-      setTimeout(function() {
-        if (tip && tip.parentNode) tip.parentNode.removeChild(tip);
-      }, 200);
-    }
-  }, RES_HOLD_TAP_INFO_MS);
-}
-
 // Helper: is a player landing event currently active for me?
 // Mirrors the check in _dashDynamicZone.
 function _isEventActive() {
@@ -1503,27 +1469,100 @@ function _isEventActive() {
   return hasMyActiveEvent || hasSharedRiddle || hasSharedTrial;
 }
 
-// Dismiss the active dynamic zone surface (tap-outside or cancel button).
-// Called from outside-tap handler attached at render time, or from Close
-// button inside surface content.
+// Dismiss the active dynamic zone surface. Called from:
+//   - swipe-right gesture past threshold
+//   - chip toggle (hold same trigger again — handled in _holdResCommit)
 function _dismissDynamicZone() {
   if (_zoneState === 'idle') return;
   _zoneState = 'idle';
   try { render(); } catch(e) {}
 }
 
-// Tap-outside dismisser: when a hold-invoked surface is open, clicking
-// anywhere outside the dynamic zone returns it to idle. Attached to
-// document at render time when zone is in a non-idle state, removed
-// when state is back to idle.
-function _zoneOutsideTapHandler(e) {
+// ── SWIPE-TO-DISMISS (v0.16.17) ──────────────────────────────────
+// Pointer-based swipe gesture on the .dynamic-zone element. Works for
+// both touch and mouse. Drag right past SWIPE_DISMISS_THRESHOLD_PX
+// to dismiss; below threshold, card snaps back. Active only while
+// a hold-invoked surface is open.
+//
+// Wired via inline onpointerdown on the .dynamic-zone wrapper when
+// _zoneState !== 'idle' (set in _dashDynamicZone). The handler itself
+// guards against starting a swipe inside an interactive element
+// (button, input) so users can still interact with surface content.
+
+function _zoneSwipeStart(e) {
+  // Only active when a hold-surface is open. Idle / event / rumble
+  // states should not be swipe-dismissable.
   if (_zoneState === 'idle') return;
-  // Don't dismiss if the click is INSIDE the dynamic zone or on a
-  // hold-target chip (that's the toggle path).
+  // Don't hijack interactions with buttons, inputs, or other clickable
+  // children inside the surface.
+  var t = e.target;
+  if (t && t.closest && t.closest('button, input, select, textarea, [data-no-swipe]')) return;
+  // Single-pointer only — ignore multi-touch
+  if (_zoneSwipe) return;
+  _zoneSwipe = {
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    currentX: e.clientX,
+    started: true
+  };
+  // Capture pointer so move/up come to this element even if pointer
+  // leaves the bounds during drag.
+  try {
+    if (e.currentTarget && e.currentTarget.setPointerCapture) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+  } catch(err) {}
+  // Disable transition during drag so transform tracks pointer 1:1.
   var dz = document.getElementById('dynamic-zone');
-  if (dz && dz.contains(e.target)) return;
-  if (e.target.closest && e.target.closest('[data-zone-trigger]')) return;
-  _dismissDynamicZone();
+  if (dz) dz.style.transition = 'none';
+}
+
+function _zoneSwipeMove(e) {
+  if (!_zoneSwipe || e.pointerId !== _zoneSwipe.pointerId) return;
+  _zoneSwipe.currentX = e.clientX;
+  var dx = _zoneSwipe.currentX - _zoneSwipe.startX;
+  // Only track rightward drag. Leftward = snap-back later, no visual.
+  if (dx < 0) dx = 0;
+  var dz = document.getElementById('dynamic-zone');
+  if (!dz) return;
+  // Translate the dynamic zone with the drag. Opacity fades as drag
+  // approaches threshold (visual cue that release here will dismiss).
+  var progress = Math.min(1, dx / SWIPE_DISMISS_THRESHOLD_PX);
+  dz.style.transform = 'translateX(' + dx + 'px)';
+  dz.style.opacity = String(1 - progress * 0.4);  // fade to 60% at threshold
+}
+
+function _zoneSwipeEnd(e) {
+  if (!_zoneSwipe || e.pointerId !== _zoneSwipe.pointerId) return;
+  var dx = _zoneSwipe.currentX - _zoneSwipe.startX;
+  _zoneSwipe = null;
+  var dz = document.getElementById('dynamic-zone');
+  if (!dz) return;
+  // Re-enable transition for the snap-back or off-screen animation.
+  dz.style.transition = 'transform .25s ease-out, opacity .25s ease-out';
+  if (dx >= SWIPE_DISMISS_THRESHOLD_PX) {
+    // Past threshold — animate off-screen-right, then dismiss.
+    dz.style.transform = 'translateX(120%)';
+    dz.style.opacity = '0';
+    setTimeout(function() {
+      _dismissDynamicZone();
+    }, 240);
+  } else {
+    // Below threshold — snap back.
+    dz.style.transform = '';
+    dz.style.opacity = '';
+  }
+}
+
+function _zoneSwipeCancel(e) {
+  if (!_zoneSwipe) return;
+  _zoneSwipe = null;
+  var dz = document.getElementById('dynamic-zone');
+  if (dz) {
+    dz.style.transition = 'transform .25s ease-out, opacity .25s ease-out';
+    dz.style.transform = '';
+    dz.style.opacity = '';
+  }
 }
 
 // ── HOLD OVERLAY RENDERER ─────────────────────────────────────────
@@ -2037,8 +2076,15 @@ function _dashDynamicZone(me) {
   }
 
   // .my-turn class triggers intense border + pulse animation.
+  // .has-surface class fires when a hold-invoked surface is open;
+  // wires the swipe-to-dismiss pointer handlers and changes the chip
+  // pulse to indicate which trigger opened this surface.
   const turnClass = isMyTurn ? ' my-turn' : '';
-  return { html: `<div class="dynamic-zone${turnClass}" id="dynamic-zone">${html}</div>`, active };
+  const surfaceClass = (_zoneState !== 'idle' && active) ? ' has-surface' : '';
+  const swipeAttrs = (_zoneState !== 'idle' && active)
+    ? ' onpointerdown="_zoneSwipeStart(event)" onpointermove="_zoneSwipeMove(event)" onpointerup="_zoneSwipeEnd(event)" onpointercancel="_zoneSwipeCancel(event)" style="touch-action:pan-y;"'
+    : '';
+  return { html: `<div class="dynamic-zone${turnClass}${surfaceClass}" id="dynamic-zone"${swipeAttrs}>${html}</div>`, active };
 }
 
 // ── HOLD-INVOKED SURFACE RENDERERS (v0.16.16) ──────────────────────
@@ -2054,10 +2100,13 @@ function _renderZoneSurface(me, state) {
 }
 
 function _zoneSurfaceFrame(title, bodyHtml) {
+  // v0.16.17: close button removed. Dismissal is now via:
+  //   - swipe right past SWIPE_DISMISS_THRESHOLD_PX (touch + mouse drag)
+  //   - tap outside the dynamic zone
+  //   - hold the same trigger chip again (toggle off)
   return `<div class="zone-surface">
     <div class="zone-surface-head">
       <span class="zone-surface-title">${title}</span>
-      <button class="zone-surface-close" onclick="_dismissDynamicZone()" title="Close">✕</button>
     </div>
     <div class="zone-surface-body">${bodyHtml}</div>
   </div>`;

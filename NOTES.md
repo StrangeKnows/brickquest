@@ -2556,6 +2556,181 @@ characters.js, boardFx, dm_screen.html.
 
 ---
 
+### v0.16.17 — Swipe-to-dismiss + remove tooltip + remove close X + active chip pulse
+
+> "do not need amounts in tool tip, tool tip itself seems unnessecary
+> clutter. I think we should remove it. and also remove the X in the
+> corner of dynamic sections. maybe a swipe right to remove current
+> dynamic card, click and drag off screen to get rid of on
+> non touchscreen. will need to be some threshhold for this, drag
+> certain distance to dismiss"
+>
+> "remove outside tap, swipe to remove and hold icon to remove; when
+> dynamic portion is loaded, the associated icon should pulse
+> differently than turn pulse, but similar color and behavior"
+
+v0.16.16 shipped the gesture system but with three pieces of clutter
+that didn't earn their space: tap-info tooltip, close X button, and
+outside-tap dismiss. v0.16.17 strips all three and replaces with two
+gesture-driven dismissal paths plus a visual link from open surface
+back to the chip that opened it.
+
+---
+
+**Removed:**
+
+1. **Tap-info tooltip system** — entire `_showResourceTapInfo`
+   function gone, all callers gone, `RES_HOLD_TAP_INFO_MS` constant
+   gone, `.zone-tap-info` CSS + keyframes gone. The `.hold-active`
+   visual feedback during the gesture (chip glow + scale) already
+   teaches the chip is interactive. Tooltip was redundant clutter.
+2. **Close X button** in surface header. `_zoneSurfaceFrame` now
+   renders title-only. `.zone-surface-close` CSS gone.
+   `.zone-surface-head` `justify-content` changed from `space-between`
+   to `center` since there's only the title now.
+3. **Outside-tap dismiss** — `_zoneOutsideTapHandler` function gone,
+   render-time attach/detach logic gone. Was complementary to swipe;
+   per Ross's spec, gesture-driven dismissal is THE path now.
+
+**Tap (release-before-threshold) is now silent.** No tooltip, no
+feedback. The hold-active visual during the gesture itself is the
+only feedback needed. Players learn the gesture by trying it.
+
+---
+
+**Added:**
+
+1. **Swipe-to-dismiss** — `_zoneSwipeStart/Move/End/Cancel` handlers
+   wired via inline onpointer attributes on the `.dynamic-zone`
+   element when `_zoneState !== 'idle'`. Pointer-based so it works
+   for touch (swipe) and mouse (click-drag) uniformly.
+   - `SWIPE_DISMISS_THRESHOLD_PX = 80` — drag right past this
+     distance to dismiss.
+   - During drag: `dynamic-zone` translates with the pointer
+     (rightward only); opacity fades to 60% at threshold (visual
+     cue release here will dismiss).
+   - Past threshold on release: animate translateX(120%) +
+     opacity 0 over 240ms, then `_dismissDynamicZone()`.
+   - Below threshold on release: snap back (clear transform/opacity).
+   - Pointer capture so the gesture continues even if pointer leaves
+     the element bounds.
+   - Guards against hijacking interactions with buttons/inputs/[data-no-swipe]
+     so users can still click the Eat Cheese button etc.
+   - Multi-touch safety: only one active swipe at a time
+     (`_zoneSwipe` is a single object, not an array).
+2. **`.has-surface` class on dynamic-zone** when a hold-invoked
+   surface is open. Adds `cursor:grab` / `cursor:grabbing` for
+   mouse users (visual affordance that the card is draggable).
+3. **Active-trigger chip pulse** — when a hold-invoked surface is
+   open, the chip that opened it gets `.surface-active` class.
+   `_dashHeader` reads `_zoneState` and applies the class to
+   coin/cheese/icon as appropriate.
+   - Animation: `chip-surface-pulse` 1.2s ease-in-out infinite
+   - Box-shadow expands 4px → 14px and back, scale 1 → 1.04 → 1
+   - Class color (`var(--cls-color)`) — same color family as
+     `.my-turn` pulse on dynamic zone (UNITY)
+   - Different rhythm: `.my-turn` is 2.4s slow breath on the dynamic
+     zone border; `.surface-active` is 1.2s tighter pulse on the
+     chip itself. Player can tell them apart at a glance.
+   - Visual link: open card and the chip that opened it pulse
+     together. ELEGANCE — player always knows which chip controls
+     this card.
+
+---
+
+**Dismissal paths now (UNITY: gesture-driven only):**
+
+1. **Swipe right** past 80px on the dynamic zone (touch + mouse)
+2. **Hold the trigger chip again** (toggle behavior, already in v0.16.16)
+3. **Event arrival** (event takes priority, snaps back to event display)
+
+That's it. No buttons, no outside-tap. Closing a surface is always
+a gesture you do, never an accident from clicking elsewhere.
+
+---
+
+**Files changed:** `players-core.js`, `players.html`,
+`test_players.html`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Tap a chip briefly:** nothing happens (no tooltip).
+3. **Hold a chip 400ms+:** surface opens. Chip starts pulsing in
+   class color (faster rhythm than dynamic-zone pulse if it's also
+   your turn).
+4. **Swipe right on the open surface:**
+   - Touch: drag finger right, card follows your finger
+   - Mouse: click and drag right, card follows cursor
+   - Past ~80px: card animates off-screen-right, dismisses
+   - Below ~80px: card snaps back to position
+5. **Hold same chip again while surface is open:** toggles the
+   surface closed (back to flavor text idle).
+6. **Click outside the surface:** nothing happens (outside-tap
+   dismiss removed).
+7. **Click a button INSIDE the surface (Eat Cheese):** still
+   works — swipe handler ignores clicks on buttons/inputs.
+8. **Swap surfaces:** while market open, hold cheese — market
+   pulse stops, cheese pulse starts, surface switches.
+9. **During event:** hold gestures still blocked with toast
+   (priority unchanged).
+10. **No regressions:** brick hold-tier still works.
+
+---
+
+**Risk surfaces:**
+
+- Swipe gesture conflict potential: brick chips have their own
+  `_holdStart` on pointerdown. Brick chips live in the interaction
+  row, NOT inside the dynamic zone, so the swipe handler on
+  `.dynamic-zone` shouldn't see brick pointer events. But if
+  bubbling becomes an issue, may need explicit stopPropagation in
+  brick handlers. Will watch in playtest.
+- 80px threshold is a starting guess. Per Ross's design philosophy
+  (UNITY/ELEGANCE/EFFICIENCY), this is a value to tune by feel.
+  Too low = accidental dismissals; too high = annoying to dismiss.
+- The `chip-surface-pulse` 1.2s rhythm vs `.my-turn` 2.4s rhythm —
+  if both fire simultaneously on the same card (your turn AND a
+  surface is open), there could be visual interference. The dynamic
+  zone has `.my-turn` pulse on its border; the chip has
+  `.surface-active` pulse on the chip itself — different elements,
+  so should compose cleanly. Watch in playtest.
+- Pointer capture in swipe handler uses `setPointerCapture` which
+  is well-supported but wrap in try/catch for older browsers.
+
+---
+
+**Standards audit (rule #17 — push #37 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: dismissal becomes gesture-driven (one paradigm), matching
+    the gesture-driven invocation. No mixed paradigms (button +
+    gesture + click-elsewhere — the v0.16.16 mishmash).
+  - ELEGANCE: zero new chrome. Surface header is just title. The
+    swipe gesture itself is its own affordance for touch users;
+    cursor:grab is the affordance for mouse users.
+  - EFFICIENCY: removed three subsystems (tooltip, close button,
+    outside-tap), added one (swipe). Net code shrinks.
+- Rule #14 (handoff hygiene): verified all removals are clean —
+  grep'd for orphaned references to `_showResourceTapInfo`,
+  `_zoneOutsideTapHandler`, `RES_HOLD_TAP_INFO_MS`,
+  `.zone-tap-info`, `.zone-surface-close`. All return 0. ✓
+- Rule #20 (grep duplicates): all new selectors appear once in
+  each file. ✓
+- Rule #19 (intuition): Ross's read on the v0.16.16 surface chrome
+  (tooltip clutter, close button redundant) was clearly correct in
+  retrospect. Should have intuited "gesture-in, gesture-out" symmetry
+  during v0.16.16 design rather than shipping with three dismissal
+  paths.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

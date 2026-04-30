@@ -136,20 +136,21 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .head-icon{cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;transition:transform .1s, filter .15s;border-radius:6px;padding:2px;}
 .head-icon:active{transform:scale(.95);}
 .head-icon.hold-active{filter:drop-shadow(0 0 6px var(--cls-color));transform:scale(1.05);}
-.zone-tap-info{position:fixed;transform:translate(-50%, -100%);background:rgba(20,20,20,.95);border:1px solid var(--cls-color);border-radius:6px;padding:6px 12px;font-size:12px;color:var(--text);font-family:'Crimson Pro',serif;pointer-events:none;z-index:10000;box-shadow:0 2px 12px rgba(0,0,0,.5);animation:zone-tap-info-in 200ms ease-out;white-space:nowrap;}
-.zone-tap-info.fade-out{animation:zone-tap-info-out 200ms ease-in forwards;}
-@keyframes zone-tap-info-in{0%{opacity:0;transform:translate(-50%, -85%);}100%{opacity:1;transform:translate(-50%, -100%);}}
-@keyframes zone-tap-info-out{0%{opacity:1;transform:translate(-50%, -100%);}100%{opacity:0;transform:translate(-50%, -115%);}}
 .zone-surface{display:flex;flex-direction:column;}
-.zone-surface-head{display:flex;align-items:center;justify-content:space-between;padding:6px 8px 8px 8px;border-bottom:1px solid #2a2a2a;margin-bottom:6px;}
+.zone-surface-head{display:flex;align-items:center;justify-content:center;padding:6px 8px 8px 8px;border-bottom:1px solid #2a2a2a;margin-bottom:6px;}
 .zone-surface-title{font-family:'Cinzel',serif;font-size:13px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;}
-.zone-surface-close{background:transparent;border:none;color:var(--text-dim);font-size:16px;cursor:pointer;padding:2px 8px;border-radius:4px;transition:background .15s, color .15s;}
-.zone-surface-close:hover{background:#2a2a2a;color:var(--text);}
 .zone-surface-body{padding:0 4px 4px 4px;}
 .zone-action-btn{background:var(--cls-bg);border:1px solid var(--cls-color);color:var(--cls-color);font-family:'Cinzel',serif;font-size:13px;font-weight:700;letter-spacing:.04em;padding:10px 18px;border-radius:8px;cursor:pointer;transition:background .15s, transform .1s;}
 .zone-action-btn:hover:not(:disabled){background:var(--cls-color);color:#000;}
 .zone-action-btn:active:not(:disabled){transform:scale(.95);}
 .zone-action-btn:disabled{opacity:.4;cursor:not-allowed;}
+/* SURFACE-ACTIVE TRIGGER PULSE (v0.16.17) — chip pulses with class color while its surface is open. */
+.res-chip.surface-active,
+.head-icon.surface-active{border-color:var(--cls-color);animation:chip-surface-pulse 1.2s ease-in-out infinite;}
+@keyframes chip-surface-pulse{0%,100%{box-shadow:0 0 4px var(--cls-color);transform:scale(1);}50%{box-shadow:0 0 14px var(--cls-color);transform:scale(1.04);}}
+/* SWIPE AFFORDANCE — cursor change for mouse users when a surface is open. */
+.dynamic-zone.has-surface{cursor:grab;}
+.dynamic-zone.has-surface:active{cursor:grabbing;}
 
 /* CARDS */
 .card{
