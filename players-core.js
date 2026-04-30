@@ -152,7 +152,17 @@ function _hasActiveSnapshot() {
 //
 // Idempotent: only snapshots once per event key. Subsequent renders no-op.
 // Snapshot is locked until drain clears it or activeEvent changes.
+//
+// v0.16.3: SKIP snapshot for events that don't have a Collect drain.
+// Specifically: monster/boss rumble results — server auto-credits at battleEnd,
+// no Collect button shown, so masking the credit is harmful. Without this
+// skip, the snapshot model freezes inventory at pre-rumble state until DM
+// resolves (which clears activeEvent), and chipPulse doesn't fire because
+// _hasActiveSnapshot blocks it. Rumble loot needs to be visible immediately.
 function _maybeTakeSnapshot(me) {
+  if (!G || !G.activeEvent) return;
+  // v0.16.3: rumble events bypass the snapshot mask entirely.
+  if (G.activeEvent.evType === 'monster' || G.activeEvent.evType === 'boss') return;
   var key = _activeEventCollectKey();
   if (!key) return;
   if (_resolutionSnapshots[key]) return;  // already snapshotted

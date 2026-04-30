@@ -9372,6 +9372,135 @@ the "diagnostic" was the audit document. Followed:
 
 ---
 
+### v0.16.3 — Rumble snapshot bypass: auto-credit + chipPulse fix
+
+**v0.16.2 had a fundamental bug.** When rumble ends, server credits
+loot at battleEnd handler (server.js ~line 988). Client receives the
+broadcast and renders. But the v0.15.46 snapshot model **freezes
+inventory at pre-credit state until the snapshot clears**. For
+regular events that's correct — pre-tap mask. For rumble, snapshot
+NEVER clears (no Collect button, no drain ticking it up) until DM
+resolves and activeEvent changes.
+
+Result from playtest screenshot: rumble ended with +1 coin loot,
+but inventory showed `🪙 0` until DM hit Mark Resolved. No chipPulse
+either, because `_hasActiveSnapshot()` blocks the auto-pulse path.
+
+> "rumble ended, earned 1 coin, did not increment until resolve by
+> dm and no highlight"
+
+**Both symptoms — same root cause: snapshot mask shouldn't apply to
+events without a Collect drain.**
+
+---
+
+**Fix:** `_maybeTakeSnapshot` now bails early for rumble events:
+
+```js
+if (G.activeEvent.evType === 'monster' || G.activeEvent.evType === 'boss') return;
+```
+
+Cascading effects (all desired):
+- No snapshot taken → `_displayed` returns raw value → inventory shows
+  credited gold/cheese/bricks immediately
+- `_hasActiveSnapshot()` returns false → `_detectInvIncreasesAndPulse`
+  proceeds → chipPulse fires on all increased chips
+- The rumble result card (v0.16.2) still renders correctly — it's
+  informational only and doesn't depend on snapshot state
+
+**This is the right architectural pattern:** snapshot model is for
+events where the credit should be hidden until player explicitly
+accepts (Collect tap). Rumble has no such gate — credit is immediate
+at battleEnd. The two flow patterns are now properly differentiated.
+
+---
+
+**v0.16.2 retrospective — what I got wrong:**
+
+I assumed `_detectInvIncreasesAndPulse` (v0.16.0) would handle rumble
+chipPulse "automatically." It would have, except the snapshot mask
+was active and blocked it. I should have traced the flow end-to-end
+before claiming "no code change needed; verified the flow." Instead
+I asserted it worked without actually verifying.
+
+**Standards lesson** — when claiming an existing system handles a
+new case, verify with concrete trace of the data flow, not just
+"the code reads like it should work." Memory rule candidate.
+
+---
+
+**Gold card position — STILL OPEN (deferred from v0.16.2):**
+
+Ross flagged "gold reward card is below where it should be...should
+be above --- like stone." My v0.16.2 added an outer stage frame to
+match other events, but Image 1 of the v0.16.2 playtest still shows
+the gold card visually below the dashboard's brick chips section.
+
+Hypothesis: the gold result card might be rendering in the right
+DOM position (top slot) but appearing visually low because the
+dashboard pane has more content above it than gray rubble's case.
+Need a side-by-side comparison from the same player's view to
+confirm. Could also be a `_pendingResult` interaction I haven't
+traced.
+
+**Not bundled in this push** — rumble auto-credit is the priority
+fix. Gold position remains a known issue. If still problematic
+after v0.16.3 lands, will investigate with fresh eyes and concrete
+DOM inspection.
+
+---
+
+**Files changed:**
+
+- `players-core.js`: `_maybeTakeSnapshot` early-bail for monster/boss
+  evType (one-line guard)
+- `NOTES.md` — this entry
+
+UNTOUCHED: boardFx.js, boardFx.css, players.html, test_players.html,
+server.js, rumble.js.
+
+---
+
+**Test focus:**
+
+1. **Rumble end (priority test):** finish a rumble battle (victory).
+   - Inventory should immediately reflect new loot — `🪙` count
+     incremented, brick chips updated, no waiting for DM
+   - chipPulse should fire on each chip that grew
+   - Rumble result card still renders with outcome + flavor + stats
+   - DM Mark Resolved → only advances turn, inventory unchanged
+   - **Verify: `[bq:snapshot-taken]` log should NOT fire for rumble events**
+
+2. **Regular events (regression check):** gray rubble, red trial,
+   riddle, gold result still mask inventory pre-tap. Snapshot still
+   takes. Drain still works. (No change to those code paths.)
+
+3. **Gold card position:** if user can grab a side-by-side view
+   showing gold and gray result cards in similar player layouts,
+   I can diagnose properly.
+
+---
+
+**Standards audit (rule #17 — push #22 in S015 continuation):**
+
+This is a proper bug-fix push. Confirmed via Ross's screenshot +
+log evidence: snapshot was taken on rumble event (visible in
+`[bq:snapshot-taken]` log path) and inventory stayed masked until
+DM resolved.
+
+Diagnostic-first protocol (rule #6) — partially followed. Ross's
+screenshot WAS the diagnostic. But I should have logged
+`_maybeTakeSnapshot` decisions for rumble events explicitly to
+catch this earlier. Adding more granular state-taken logging
+might be worth a future patch.
+
+UNITY check (rule #18): the fix preserves the snapshot model for
+its intended use (Collect-gated events) and excludes it from
+events where auto-credit is the design. Two flow patterns,
+properly differentiated. ELEGANCE intact.
+
+---
+
 
 ### Session 015 Process Retrospective
 
