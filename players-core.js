@@ -896,8 +896,12 @@ function _dashHeader(me) {
   let shieldPips = '';
   for (let i = 0; i < shieldMax; i++) {
     const filled = i < (me.armor || 0);
-    const pipW = Math.max(10, Math.min(22, Math.floor(260 / shieldMax)));
-    shieldPips += `<span style="display:inline-block;width:${pipW}px;height:14px;border-radius:3px;margin:1px;`
+    // v0.16.13: allow pips to shrink to 8px for narrow viewports, and bias
+    // the formula toward smaller pips (220 budget instead of 260) so 14
+    // pips wrap to 2 rows instead of one ultra-wide row that overflows
+    // the head-stats column.
+    const pipW = Math.max(8, Math.min(18, Math.floor(220 / shieldMax)));
+    shieldPips += `<span style="display:inline-block;width:${pipW}px;height:12px;border-radius:3px;margin:1px;`
       + (filled ? 'background:#AAAAAA;box-shadow:0 1px 3px rgba(0,0,0,.5);' : 'background:#1a1a1a;border:1px solid #2a2a2a;')
       + '"></span>';
   }

@@ -2088,6 +2088,97 @@ UNTOUCHED: server.js, rumble.js, characters.js, boardFx.
 
 ---
 
+### v0.16.13 — Stack coin/cheese vertically + pip wrap + remove duplicate CSS rule
+
+> "maybe coin on top of cheese for dynamic response if elements get too
+> tight, and armor pips can consolodate onto more rows, making room for
+> everything to breathe. also, need to bump up coin and cheese just a
+> bit, about halfway between last orientation and current for lowest
+> elemtn"
+
+Three fixes:
+
+**1. Coin and cheese stack vertically** (coin on top, cheese below).
+Was `display:flex` row with `gap:10px`. Now `flex-direction:column`,
+`gap:6px`, `align-items:flex-start`. UNITY: chips remain a single
+visual block, just orient compactly when squeezed. Solves overflow
+in narrow portrait where the side-by-side chips were spilling out
+of head-id horizontally.
+
+**2. Shield pips can shrink smaller for narrow viewports.** Was
+`Math.max(10, Math.min(22, Math.floor(260/shieldMax)))` — for
+shieldMax=14 that yielded 18px pips × 14 = ~250px+ wide, which
+overflowed narrow portrait. Now
+`Math.max(8, Math.min(18, Math.floor(220/shieldMax)))` — yields
+15px pips for 14-pip case, allows shrink to 8px floor for very
+narrow. Also pip height nudged 14px → 12px for compactness. Pips
+will wrap to multiple rows naturally via existing
+`flex-wrap:wrap` on `#my-shield-pips`.
+
+**3. CRITICAL FIX: Removed duplicate `.head-stats` CSS rule.**
+v0.16.12's edit landed two `.head-stats` rules in players.html — the
+first with `min-width:0` (intended), the second from the v0.16.11
+version with `min-width:200px` (forgot to clean up). Cascade gave
+the `200px` rule precedence, which in narrow portrait forced
+`.head-stats` too wide and triggered the overflow chaos seen in
+Ross's screenshot (HP big number rendering on top of class name,
+pips overflowing into head-id territory). Single clean rule now.
+
+**4. Coin/cheese position bumped up slightly.** v0.16.12 used
+`margin-top:auto` to push chips flush against card bottom. Per
+Ross: "halfway between last orientation and current." Added
+`margin-bottom:8%` so chips lift off the very bottom. The
+auto-margin still pushes them past the identity row; the bottom
+margin gives ~75% mark instead of 100%.
+
+CSS-only + tiny JS tweak. No markup changes.
+
+**Files changed:** `players-core.js` (pip sizing only), `players.html`,
+`test_players.html`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Portrait orientation:**
+   - Header card splits side by side (no wrap)
+   - HP bar fits in right column (compressed but visible)
+   - HP big number "14" sits cleanly in head-stats column, NOT
+     overlapping the BREAKER name
+   - Shield pips wrap to 2 rows if needed, contained inside
+     head-stats
+   - Coin chip on top, cheese chip below — stacked in head-id column
+   - Chips ~75% down the column (clear space above and small space
+     below, no longer flush bottom)
+3. **Landscape orientation:**
+   - Same layout, more horizontal room — pips might stay one row
+   - Coin/cheese still stacked vertically (consistent across
+     orientations)
+4. chipPulse arrivals still hit the chips.
+
+---
+
+**Standards audit (rule #17 — push #33 in S015 continuation):**
+
+The duplicate `.head-stats` rule is exactly the kind of bug rule #14
+(handoff hygiene) is meant to catch — re-read files before editing,
+spot leftover state. Caught it on Ross's screenshot pass instead of
+edit pass. Slightly drift from the rule but caught quickly in the
+iteration loop.
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #14 (handoff hygiene): partially drifted (left duplicate CSS
+  rule) but recovered in next iteration ⚠️
+- Rule #20 (grep for old-pattern symptoms): would have caught the
+  duplicate rule. Lesson: when editing CSS that was modified in a
+  prior recent push, grep for the SELECTOR to find duplicates.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

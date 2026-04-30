@@ -237,12 +237,19 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .head-id .head-icon{font-size:28px;line-height:1;}
 .head-id .head-name{font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;display:flex;align-items:center;}
 .head-id .head-zone{font-size:11px;color:var(--text-dim);}
-/* v0.16.12: margin-top:auto pushes the chip block to the BOTTOM of the
-   head-id column (was margin:auto 0 in v0.16.11 which centered).
-   Identity row sits at top, chips at bottom, blank space in between. */
-.head-resources{display:flex;gap:10px;align-items:stretch;margin-top:auto;}
+/* v0.16.13: coin + cheese stack vertically (coin on top, cheese below)
+   to fit narrow portrait without overflowing horizontally. Position is
+   ~75% down the column — between v0.16.11 (centered) and v0.16.12 (flush
+   bottom). margin-top:auto pushes them past the identity row;
+   margin-bottom:8% lifts them off the very bottom of the card. */
+.head-resources{
+  display:flex;flex-direction:column;gap:6px;align-items:flex-start;
+  margin-top:auto;margin-bottom:8%;
+}
+/* v0.16.13: removed duplicate .head-stats rule that had min-width:200px
+   overriding the v0.16.12 min-width:0 — that override caused portrait
+   wrap-overlap (head-stats forced too wide for narrow viewports). */
 .head-stats{flex:2;min-width:0;display:flex;flex-direction:column;gap:6px;}
-.head-stats{flex:2;min-width:200px;display:flex;flex-direction:column;gap:6px;}
 
 /* CARDS */
 .card{
