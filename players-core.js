@@ -106,12 +106,13 @@ var _cardFlavors = {};
 // rumble battle, dashboard chipPulse fires can land while the user's
 // attention is still transitioning from the rumble UI. Without a beat
 // to register where the dashboard chips are, the pulse is "over before
-// you saw it" — even at the v0.16.5 beefed-up duration.
+// you saw it."
 //
 // Set by the rumble-end handler (line ~410). Consumed by
-// _detectInvIncreasesAndPulse — when set, defers the pulse calls by
-// 500ms so the user has time to land on the dashboard before the
-// arrival highlights fire.
+// _detectInvIncreasesAndPulse — when set, defers the pulse calls so
+// the user has time to land on the dashboard before the arrival
+// highlights fire. v0.16.7: bumped 500ms → 1000ms per Ross feedback
+// "need more delay after rumble for flair fx, maybe twice as long".
 //
 // Single boolean — covers any number of post-rumble chip rises in
 // the same render pass.
@@ -255,7 +256,7 @@ function _detectInvIncreasesAndPulse(me) {
   // between now and 500ms is handled.
   var delayMs = 0;
   if (_justExitedRumble) {
-    delayMs = 500;
+    delayMs = 1000;
     _justExitedRumble = false;
   }
   function _firePulse(findFn, color, findArg) {

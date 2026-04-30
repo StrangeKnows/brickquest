@@ -1430,6 +1430,28 @@ ARCHIVE.md and leave a one-line pointer here.
 
 ---
 
+## Session 016 — Active Patch Log
+
+Current-session patches live here until the session closes, then they
+migrate to ARCHIVE.md.
+
+### v0.16.7 — Post-rumble pulse delay 500ms → 1000ms
+
+> "need more delay after rumble for flair fx, maybe twice as long"
+
+v0.16.5 introduced the 500ms post-rumble delay (gives user time to land
+on dashboard before chipPulse fires). Playtest revealed 500ms isn't
+quite enough beat — bumped to 1000ms.
+
+The delay is tracked via `_justExitedRumble` boolean set in the rumble-end
+handler (~line 410), consumed in `_detectInvIncreasesAndPulse` to defer
+the pulse calls. Re-queries chip position inside the deferred call to
+handle any layout shift between detect and fire.
+
+**File changed:** `players-core.js` only (one-line constant + comment).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
