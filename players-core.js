@@ -1227,8 +1227,26 @@ function _holdUp(e) {
   const onChip = releaseEl ? releaseEl.closest('[data-brick-chip]') : null;
   const onAlly = releaseEl ? releaseEl.closest('[data-ally-target]') : null;
   const onOption = releaseEl ? releaseEl.closest('[data-option-target]') : null;
-  const onDz = releaseEl ? releaseEl.closest('.dynamic-zone') : null;
   const releasedOnOwnChip = onChip && onChip.getAttribute('data-brick-chip') === s.color;
+
+  // v0.16.30: dz detection ignoring the hold overlay. For radial-eligible
+  // chips (white/gray), the fan icons + arc SVG are positioned on top of
+  // the dz and intercept the elementFromPoint check, so a drag-to-fuse
+  // from white/gray would never see the dz beneath. Fix: do a second
+  // elementFromPoint with the overlay temporarily hidden, so we see the
+  // actual document underneath. Falls through naturally for non-radial
+  // chips that don't have an overlay obscuring anything.
+  let onDz = releaseEl ? releaseEl.closest('.dynamic-zone') : null;
+  if (!onDz && s.isDrag) {
+    const overlay = document.getElementById('hold-overlay');
+    if (overlay) {
+      const prevDisplay = overlay.style.display;
+      overlay.style.display = 'none';
+      const elBeneath = document.elementFromPoint(e.clientX, e.clientY);
+      overlay.style.display = prevDisplay;
+      onDz = elBeneath ? elBeneath.closest('.dynamic-zone') : null;
+    }
+  }
 
   // v0.16.29: Fusion drop — if drag released over dz AND fusion-eligible
   // (player owns at least 1 brick of this color), open the fusion-coming-soon
@@ -1239,6 +1257,20 @@ function _holdUp(e) {
     if (onDz.classList) onDz.classList.remove('fusion-drop-target');
     _holdEnd(true);
     _openFusionPlaceholder(s.color);
+    return;
+  }
+
+  // v0.16.30: Fusion drag CANCELLED — drag started, did NOT land on dz.
+  // For non-radial colors, this is the only release path other than dz.
+  // Show themed cancel flavor briefly via toast (so player knows the
+  // gesture was recognized but didn't complete). Same dad-joke voice as
+  // FUSION_COMING_SOON_FLAVOR. For radial-eligible chips, only fire if
+  // not over a valid radial target (else falls through to existing routing).
+  const offValidRadialTarget = !onAlly && !onOption && !releasedOnOwnChip;
+  if (s.isDrag && s.fusionEligible && offValidRadialTarget) {
+    var cancelLine = FUSION_DRAG_CANCEL_FLAVOR[Math.floor(Math.random() * FUSION_DRAG_CANCEL_FLAVOR.length)];
+    if (typeof toast === 'function') toast(cancelLine, 'warn');
+    _holdEnd(true);
     return;
   }
 
@@ -2313,6 +2345,26 @@ var FUSION_COMING_SOON_FLAVOR = [
   'You hold the bricks close. They hum. They do not yet fuse.',
   'Soon, traveler. Soon.',
   'A power waiting to be unlocked. Or at least implemented.'
+];
+
+// v0.16.30: cancelled-drag flavor — surfaces via toast when player drags
+// a brick but releases off-dz. Same dad-joke voice; "oops, slipped" tone.
+var FUSION_DRAG_CANCEL_FLAVOR = [
+  'The brick slips out of your fingers.',
+  'Caught it just before it shattered. Phew.',
+  'Oops. Bricks are heavier than you remembered.',
+  'You fumble the brick. It rolls back to you, judging.',
+  'Butterfingers. The fortress has seen worse.',
+  'The brick winks at you and returns to your inventory.',
+  'Almost. The bricks need a little more commitment.',
+  'You drop it. Gravity wins. Again.',
+  'The brick declines. Try again with more conviction.',
+  'A swing and a miss. The fortress is amused.',
+  'Slippery little thing. Nice catch though.',
+  'The brick reconsiders. Returns home.',
+  'You ALMOST fused it with the floor. Close one.',
+  'Whoops. Where did you mean to put that?',
+  'The brick laughs. It heard its parents.'
 ];
 
 function _renderZoneFusion(me, color) {

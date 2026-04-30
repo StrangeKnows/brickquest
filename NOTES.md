@@ -4067,6 +4067,135 @@ dm_screen.html.
 
 ---
 
+### v0.16.30 — Fusion drag works for ALL colors + cancelled-drag flavor pool
+
+> "works great, but not for every brick color. gray and white do not
+> trigger - do we just work on this later, or is it something that
+> will benefit us down the line to solve now?"
+>
+> "only treat as fusion intent when released inside dz, otherwise
+> the action is cancelled...maybe some flavor pool for this as well,
+> cancelled flavor pool, the brick slips out of your fingers, caught
+> it just before it shattered, oops!, something silly, dad joke"
+
+Two coupled fixes from v0.16.29 playtest:
+
+**Bug 1: Gray/white drag-to-fuse never reached the dz.**
+
+Root cause: for radial-eligible chips, the hold overlay (radial fan
+icons + arc SVG) renders over the dz with `pointer-events:auto`.
+When player drags from white/gray and releases over the dz, the
+elementFromPoint check finds an overlay element FIRST, never reaching
+the dz beneath. So `releaseEl.closest('.dynamic-zone')` returns null
+even though the cursor is visually over the dz.
+
+Fix: when first elementFromPoint check fails to find dz AND the
+gesture is a drag, do a SECOND check with the overlay temporarily
+hidden via `display:none`. The second check sees what's actually
+underneath. Restore display immediately. One-frame visual blip is
+imperceptible (overlay is removed at `_holdEnd` in the fusion-drop
+branch anyway).
+
+Falls through naturally for non-radial chips (no overlay exists,
+first check works as before).
+
+**Bug 2: Drag released outside dz was silent.**
+
+Per Ross spec: drag-to-anywhere-but-dz should cancel WITH flavor,
+not silently. New `FUSION_DRAG_CANCEL_FLAVOR` pool — 15 lines of
+"oops, slipped" dad-jokes:
+- "The brick slips out of your fingers."
+- "Butterfingers. The fortress has seen worse."
+- "The brick winks at you and returns to your inventory."
+- "You ALMOST fused it with the floor. Close one."
+
+New `_holdUp` branch fires AFTER fusion-drop check fails:
+```
+if (s.isDrag && s.fusionEligible && offValidRadialTarget) {
+  toast(cancelLine, 'warn');
+  _holdEnd(true);
+  return;
+}
+```
+
+`offValidRadialTarget = !onAlly && !onOption && !releasedOnOwnChip`
+— ensures we don't intercept legitimate ally-target / option-target
+release for radial-eligible chips. If white/gray drag releases on
+an ally icon, existing radial routing fires; if it releases in
+dead space, cancel-flavor fires.
+
+Released-on-own-chip stays silent (user effectively cancelled their
+own drag by returning to start — no need for "you fumbled" flavor
+when they brought the brick home).
+
+---
+
+**Files changed:** `players-core.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, html files,
+boardFx, dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Gray brick (Breaker red, has charges):** drag to dz → fusion
+   placeholder opens, gray-colored. Release over dead space →
+   cancel flavor toast appears.
+3. **White brick (Fixer):** drag to dz → fusion placeholder opens,
+   white-colored. Release on ally icon → existing heal still works.
+   Release in dead space → cancel flavor toast.
+4. **Red/blue/etc. (non-radial):** drag to dz → fusion placeholder.
+   Release in dead space → cancel flavor toast (was silent before).
+5. **Tap radial-eligible chip without drag:** existing tier-1 action
+   fires. (No regression.)
+6. **Hold radial-eligible chip without drag, release on radial
+   target:** ally heal / gray option fires. (No regression.)
+7. **Cancel flavor variety:** drag-cancel multiple times, see
+   different lines from the 15-line pool.
+
+---
+
+**Risk surfaces:**
+
+- The temporary overlay hide on elementFromPoint may briefly cause a
+  paint flicker. Should be imperceptible (one frame), but if visible
+  in playtest, alternative is `document.elementsFromPoint` (plural)
+  which returns the stack — pick the first non-overlay match.
+- `toast` function exists (line 8108) but its visual style for
+  `'warn'` type is generic. Cancel-flavor toasts may want a softer
+  tone. Tunable later.
+- 15-line pool is reasonable depth for v1; can grow if cancels
+  become frequent in playtest.
+
+---
+
+**Standards audit (rule #17 — push #49 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players-core.js only — no markup or CSS
+  changes. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: gray/white now share the same drag-to-fuse vocabulary
+    as other colors. No more "fusion only works for some bricks"
+    inconsistency.
+  - ELEGANCE: overlay-hide trick is one block, three lines, one
+    purpose. Cancel flavor uses existing toast infrastructure.
+  - EFFICIENCY: no new state, no new render paths.
+- Rule #19 (intuition): held — Ross's read that "released outside
+  dz = cancel with flavor" was the right shape. I almost left
+  silent-cancel as fallback for radial chips; folding cancel-flavor
+  into the universal drag path is the unified answer.
+- Rule #6 (diagnostic-first): N/A — bug root cause was clear from
+  reading the code (overlay z-order interception). Direct fix.
+- Rule #14 (UNITY): big win this push. Per Ross's "is it something
+  that will benefit us down the line to solve now?" — yes. Solving
+  it now means future fusion-mechanic work doesn't inherit a
+  "some bricks fuse, some don't" arbitrary inconsistency.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
