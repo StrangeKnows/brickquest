@@ -294,6 +294,22 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
   50%      { filter:drop-shadow(0 0 5px var(--cls-color)) drop-shadow(0 0 10px var(--cls-color)); transform:scale(1.04); }
 }
 
+/* FUSION DROP TARGET (v0.16.29)
+   Class added to .dynamic-zone while a brick is dragged over it. Highlights
+   the dz as the active drop target with a brighter border + soft glow.
+   Removed when drag leaves or drop completes. */
+.dynamic-zone.fusion-drop-target{
+  border-color:#fff;
+  box-shadow:0 0 18px rgba(255,255,255,.4),inset 0 0 8px rgba(255,255,255,.15);
+}
+/* FUSION BLOOM (v0.16.29) — gentle pulse on the colored brick swatch in
+   the fusion-coming-soon placeholder. Same slow rhythm as other ambient
+   pulses (2.3s family). */
+@keyframes fusion-bloom{
+  0%, 100% { transform:scale(1); }
+  50%      { transform:scale(1.08); }
+}
+
 /* SWIPE AFFORDANCE — when a surface is open, .has-surface adds a
    subtle visual hint that the card is swipeable. Cursor change for
    mouse users; no extra chrome for touch (the gesture itself is

@@ -147,6 +147,10 @@ var _connState = false;
 //   - new event arrives → forced back to 'idle' (event takes the slot)
 var _zoneState = 'idle';
 
+// v0.16.29: when _zoneState === 'fusion', this holds the brick color
+// dragged into the dz. Drives the colored coming-soon placeholder.
+var _fusionColor = null;
+
 // _holdRes: state for an in-progress resource hold gesture.
 //   active   — true while pointer is down on a hold-target chip
 //   trigger  — which surface this hold is invoking ('market'/'cheese'/'party')
@@ -1069,9 +1073,18 @@ function _holdStart(e, color, chipEl) {
 
   const me = G.players[MY_CLASS];
   const charged = (me?.bricksCharged?.[color]) || 0;
-  console.log('[HOLD] charges available:', charged);
-  if (charged < 1) {
-    console.log('[HOLD] aborted: no charges');
+  // v0.16.29: distinguish gesture eligibility:
+  // - radialEligible: white/gray + has charges → hold-without-drag opens
+  //   the radial fan for ally-target / option-target action
+  // - fusionEligible: ANY color (even with 0 charges) → drag-and-drop on
+  //   dz opens fusion-coming-soon placeholder
+  // Inventory check: must own at least 1 of this color to drag for fusion.
+  const owned = (me?.bricks?.[color]) || 0;
+  const radialEligible = (color === 'white' || color === 'gray') && charged >= 1;
+  const fusionEligible = owned >= 1;
+  console.log('[HOLD] eligibility', { color, charged, owned, radialEligible, fusionEligible });
+  if (!radialEligible && !fusionEligible) {
+    console.log('[HOLD] aborted: nothing to gesture (no charges, no inventory)');
     return;
   }
 
@@ -1105,6 +1118,10 @@ function _holdStart(e, color, chipEl) {
     cancelled: false,
     holdMode: false,         // true once HOLD_TAP_THRESHOLD_MS passed
     lastTierUpTime: 0,       // performance.now() timestamp of most recent tier increment
+    // v0.16.29: gesture-routing flags
+    radialEligible: radialEligible,
+    fusionEligible: fusionEligible,
+    overDz: false,           // true while drag pointer is over .dynamic-zone
   };
 
   document.addEventListener('pointermove', _holdMove);
@@ -1180,12 +1197,21 @@ function _holdMove(e) {
   // Drag-target detection — find ally icon OR option icon under cursor.
   // White uses ally targets; other colors use option targets. dragTarget
   // holds the matched id; _holdUp routes by which kind was hit.
+  // v0.16.29: also detect dynamic-zone hover for fusion drop. overDz
+  // flag drives the dz highlight visual + _holdUp routing.
   const el = document.elementFromPoint(e.clientX, e.clientY);
   const allyIcon = el ? el.closest('[data-ally-target]') : null;
   const optIcon  = el ? el.closest('[data-option-target]') : null;
+  const dzEl     = el ? el.closest('.dynamic-zone') : null;
   _holdState.dragTarget = allyIcon
     ? allyIcon.getAttribute('data-ally-target')
     : (optIcon ? optIcon.getAttribute('data-option-target') : null);
+  _holdState.overDz = !!dzEl && _holdState.fusionEligible && _holdState.isDrag;
+  // Toggle a class on the dz element so CSS can highlight it as drop target.
+  if (dzEl) {
+    if (_holdState.overDz) dzEl.classList.add('fusion-drop-target');
+    else dzEl.classList.remove('fusion-drop-target');
+  }
   _renderHoldOverlay();
 }
 
@@ -1196,12 +1222,25 @@ function _holdUp(e) {
   const heldMs = performance.now() - s.startTime;
   const isTap = heldMs < HOLD_TAP_THRESHOLD_MS && !s.isDrag;
 
-  // Determine release target: chip itself, ally icon, option icon, or off-target
+  // Determine release target: chip itself, ally icon, option icon, dz, or off-target
   const releaseEl = document.elementFromPoint(e.clientX, e.clientY);
   const onChip = releaseEl ? releaseEl.closest('[data-brick-chip]') : null;
   const onAlly = releaseEl ? releaseEl.closest('[data-ally-target]') : null;
   const onOption = releaseEl ? releaseEl.closest('[data-option-target]') : null;
+  const onDz = releaseEl ? releaseEl.closest('.dynamic-zone') : null;
   const releasedOnOwnChip = onChip && onChip.getAttribute('data-brick-chip') === s.color;
+
+  // v0.16.29: Fusion drop — if drag released over dz AND fusion-eligible
+  // (player owns at least 1 brick of this color), open the fusion-coming-soon
+  // placeholder card colored to this brick. Takes priority over other
+  // routing because dz drop is a distinct, intentional gesture.
+  if (s.isDrag && onDz && s.fusionEligible) {
+    // Cleanup drop-target highlight class on the dz element
+    if (onDz.classList) onDz.classList.remove('fusion-drop-target');
+    _holdEnd(true);
+    _openFusionPlaceholder(s.color);
+    return;
+  }
 
   // Capture target locations BEFORE _holdEnd destroys state.
   let allyIconRect = null;
@@ -1218,20 +1257,24 @@ function _holdUp(e) {
   }
 
   if (isTap) {
-    // Plain tap — fire existing tier-1 baseline action, instant overlay clear
+    // Plain tap — fire existing tier-1 baseline action ONLY for radial-eligible
+    // colors. Non-action colors that were tapped (not dragged) are silent.
     _holdEnd(false);
-    _fireTierAction(s.color, 1, null);
+    if (s.radialEligible) {
+      _fireTierAction(s.color, 1, null);
+    }
     return;
   }
 
-  // Hold release routing
-  if (onAlly) {
+  // Hold release routing — radial-eligible colors only (white/gray).
+  // Non-radial colors that drag without hitting dz fall through to silent cancel.
+  if (s.radialEligible && onAlly) {
     // Ally heal — keep overlay alive for spotlight, fire action + ack, then cleanup
     _holdEnd(false, true);                              // skip immediate clear
     _fireTierAction(s.color, s.tier, allyTargetCls);
     if (allyIconRect) BoardFx.fire('casterAck', allyIconRect);
     _spotlightCleanup('[data-ally-target="' + allyTargetCls + '"]');
-  } else if (onOption) {
+  } else if (s.radialEligible && onOption) {
     // Option fired — symmetric with ally path. Spotlight on the option, fire
     // tiered action with the option label as a routing key. Real per-class
     // behaviors land in v0.15/0.16; for now this toasts via _fireTierAction.
@@ -1239,7 +1282,7 @@ function _holdUp(e) {
     _fireTierAction(s.color, s.tier, optionLabel);
     if (optionIconRect) BoardFx.fire('casterAck', optionIconRect);
     _spotlightCleanup('[data-option-target="' + optionLabel + '"]');
-  } else if (releasedOnOwnChip) {
+  } else if (s.radialEligible && releasedOnOwnChip) {
     // Self heal — keep overlay alive briefly, fade everything together
     _holdEnd(false, true);                              // skip immediate clear
     _fireTierAction(s.color, s.tier, null);
@@ -1475,6 +1518,7 @@ function _isEventActive() {
 function _dismissDynamicZone() {
   if (_zoneState === 'idle') return;
   _zoneState = 'idle';
+  _fusionColor = null;  // v0.16.29: clear fusion-staging context on dismiss
   try { render(); } catch(e) {}
 }
 
@@ -1607,8 +1651,10 @@ function _renderHoldOverlay() {
     chipCx,Cy: ${Math.round(s.chipCx)},${Math.round(s.chipCy)}
   </div>`;
 
-  // Charging visuals — only after hold threshold
-  if (inHoldMode) {
+  // Charging visuals — only after hold threshold AND only for radial-eligible
+  // chips (white/gray with charges). Non-radial chips show no overlay during
+  // hold-without-drag — they are silent until a drag triggers fusion.
+  if (inHoldMode && s.radialEligible) {
     const tierColor = BRICK_COLORS[s.color] || '#fff';
 
     // Subtle chip ring — shows the gesture is active, no tier info embedded
@@ -1657,7 +1703,10 @@ function _renderHoldOverlay() {
   // transition smooths the edge so it doesn't flicker on threshold crossings.
   // Chip ring + tier-up pulse stay full strength regardless — they're "the
   // gesture is active" feedback, not "the options."
-  if (inHoldMode && HOLD_RADIAL_COLORS.indexOf(s.color) >= 0) {
+  // v0.16.29: gate radial render on radialEligible. Non-radial colors
+  // (red/blue/green/etc) skip the fan entirely — they only support
+  // fusion-drag, no hold-radial action.
+  if (inHoldMode && s.radialEligible && HOLD_RADIAL_COLORS.indexOf(s.color) >= 0) {
     // Cursor distance from chip center. Use s.dragX/dragY which is updated
     // on every pointermove regardless of isDrag state. Falls back to chip
     // center if no movement yet → distance 0 → fully engaged.
@@ -1683,6 +1732,24 @@ function _renderHoldOverlay() {
     </div>`;
   }
 
+  // v0.16.29: Fusion drag ghost — when player is dragging any brick (not
+  // hovering for radial), show a small ghost-brick at the pointer position
+  // colored to the brick's color. Visible during drag whether or not a
+  // radial is showing. The dz-drop highlight (.fusion-drop-target) handles
+  // the drop-zone affordance.
+  if (s.isDrag && s.fusionEligible) {
+    const ghostColor = (typeof BRICK_COLORS !== 'undefined' && BRICK_COLORS[s.color]) || '#fff';
+    const GHOST_SIZE = 32;
+    const gx = s.dragX - GHOST_SIZE / 2;
+    const gy = s.dragY - GHOST_SIZE / 2;
+    html += `<div style="position:absolute;left:${gx}px;top:${gy}px;
+      width:${GHOST_SIZE}px;height:${GHOST_SIZE}px;
+      background:${ghostColor};border-radius:5px;
+      box-shadow:0 4px 14px rgba(0,0,0,.5),0 0 16px ${ghostColor}66;
+      opacity:.85;pointer-events:none;
+      transform:rotate(-8deg);"></div>`;
+  }
+
   // Drag line from chip to current pointer (visual feedback)
   if (s.isDrag && inHoldMode) {
     const dx = s.dragX - s.chipCx;
@@ -1700,7 +1767,9 @@ function _renderHoldOverlay() {
   // ally icons. Fires on every tier boundary crossing. Size + duration scale
   // with the tier being celebrated (capped at tier 7 — higher tiers use t7
   // values). Higher tier = bigger, longer-lasting pulse.
-  if (inHoldMode) {
+  // v0.16.29: Tier-up pulse only renders for radial-eligible chips. Non-radial
+  // chips (red/blue/etc.) don't have tier mechanics — fusion drag is binary.
+  if (inHoldMode && s.radialEligible) {
     const celebratedTier = Math.min(7, s.lastTierUpValue || 1);
     const PULSE_DURATION = 350 + 150 * celebratedTier;     // 500ms @ t1, 1400ms @ t7
     const pulseAge = performance.now() - (s.lastTierUpTime || 0);
@@ -2025,18 +2094,16 @@ function _dashBrickChips(me) {
             : `background:#1a1a1a;border:1px solid ${bg}aa;box-sizing:border-box;`)
         + `"></span>`;
     }
-    // Only wire pointer events for colors with defined actions today.
-    // Other colors render as inert chips until 0.16 fills in abilities.
-    // v0.16.18: chip size bumped slightly (min-width 44→58, padding more
-    // generous, swatch 22→28) so bricks feel intentionally-sized and the
-    // hold-radial origin has more presence.
-    const hasAction = (color === 'white' || color === 'gray');
+    // v0.16.29: ALL brick chips are now draggable for fusion (drop on dz
+    // opens fusion-coming-soon placeholder). Only white/gray support the
+    // hold-radial action. _holdStart branches internally based on color +
+    // charges to determine which gestures the chip supports.
     chips += `<div class="dash-brick-chip" data-brick-chip="${color}" data-color="${color}" `
-      + (hasAction ? `onpointerdown="_holdStart(event, '${color}', this)" ` : '')
+      + `onpointerdown="_holdStart(event, '${color}', this)" `
       + `style="`
       + `display:flex;flex-direction:column;align-items:center;justify-content:flex-start;`
       + `padding:9px 6px 6px 6px;border-radius:8px;`
-      + (hasAction ? 'cursor:pointer;' : 'cursor:default;opacity:.85;')
+      + `cursor:pointer;`
       + `background:${chipBg};border:2px solid ${chipBorder};min-width:58px;`
       + `touch-action:none;user-select:none;-webkit-user-select:none;">`
       + `<span style="width:28px;height:28px;border-radius:5px;background:${bg};`
@@ -2150,7 +2217,10 @@ function _dashDynamicZone(me) {
     // Force-reset hold-surface state when event takes priority — hold
     // gestures are blocked while event active anyway, but if a surface
     // was open and an event arrives, snap back to event display.
-    if (_zoneState !== 'idle') _zoneState = 'idle';
+    if (_zoneState !== 'idle') {
+      _zoneState = 'idle';
+      _fusionColor = null;  // v0.16.29
+    }
   }
 
   // 3. Hold-invoked surface (market / cheese / party) — only when no
@@ -2164,6 +2234,7 @@ function _dashDynamicZone(me) {
     } else {
       // Surface couldn't render (e.g. function missing); reset state.
       _zoneState = 'idle';
+      _fusionColor = null;  // v0.16.29
     }
   }
 
@@ -2211,7 +2282,62 @@ function _renderZoneSurface(me, state) {
   if (state === 'market')  return _renderZoneMarket(me);
   if (state === 'cheese')  return _renderZoneCheese(me);
   if (state === 'party')   return _renderZoneParty(me);
+  if (state === 'fusion')  return _renderZoneFusion(me, _fusionColor);
   return '';
+}
+
+// v0.16.29: Fusion placeholder. Triggered when player drags any brick chip
+// onto the dynamic zone. Opens a coming-soon card colored to the dragged
+// brick, with themed dad-joke flavor about wanting to grow stronger.
+// The actual fusion mechanic lands later — this is scaffolding so the
+// gesture has a real destination during playtest.
+function _openFusionPlaceholder(color) {
+  _fusionColor = color;
+  _zoneState = 'fusion';
+  if (typeof render === 'function') render();
+}
+
+// Themed flavor for the fusion placeholder. Tone: dad-joke per the
+// "you just cannot wait to get stronger" archetype Ross specified.
+// Pool grows as content depth accrues.
+var FUSION_COMING_SOON_FLAVOR = [
+  'You just cannot wait to get stronger.',
+  'The bricks know what they want. So do you.',
+  'Two halves of a stronger whole. Soon.',
+  'You stack the bricks together. They stay separate. For now.',
+  'The fortress is taking notes on your ambition.',
+  'Brick + brick = bigger brick. The math works. The mechanic is pending.',
+  'Patience is a virtue. Bricks are not patient. Neither are you.',
+  'You feel the bricks WANT to combine. They are waiting.',
+  'The dungeon\'s blacksmith is on a coffee break. Try again later.',
+  'You hold the bricks close. They hum. They do not yet fuse.',
+  'Soon, traveler. Soon.',
+  'A power waiting to be unlocked. Or at least implemented.'
+];
+
+function _renderZoneFusion(me, color) {
+  if (!color) return '';
+  var hex = (typeof BRICK_COLORS !== 'undefined' && BRICK_COLORS[color]) || '#fff';
+  var pool = FUSION_COMING_SOON_FLAVOR;
+  var line = pool[Math.floor(Math.random() * pool.length)];
+  var colorName = color.charAt(0).toUpperCase() + color.slice(1);
+  return '<div class="zone-surface" style="border-color:' + hex + ';">'
+    + '<div class="zone-surface-head" style="border-bottom:1px solid ' + hex + '44;">'
+    + '<span class="zone-surface-title" style="color:' + hex + ';">⚗ FUSION</span>'
+    + '</div>'
+    + '<div class="zone-surface-body" style="text-align:center;padding:16px 12px;">'
+    + '<div style="display:inline-block;width:48px;height:48px;border-radius:8px;'
+    + 'background:' + hex + ';box-shadow:0 0 24px ' + hex + '88,0 4px 12px rgba(0,0,0,.5);'
+    + 'margin-bottom:12px;animation:fusion-bloom 2.3s ease-in-out infinite;"></div>'
+    + '<div style="font-family:Cinzel,serif;font-size:14px;color:' + hex + ';'
+    + 'letter-spacing:.06em;margin-bottom:8px;">' + colorName + ' BRICK</div>'
+    + '<div style="font-family:Cinzel,serif;font-size:13px;font-style:italic;'
+    + 'color:var(--text-dim);line-height:1.5;margin-bottom:14px;">' + line + '</div>'
+    + '<div style="font-family:Cinzel,serif;font-size:12px;color:#888;letter-spacing:.1em;">'
+    + 'FUSION COMING SOON…'
+    + '</div>'
+    + '</div>'
+    + '</div>';
 }
 
 function _zoneSurfaceFrame(title, bodyHtml) {

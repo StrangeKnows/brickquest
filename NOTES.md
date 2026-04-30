@@ -3873,6 +3873,200 @@ dm_screen.html.
 
 ---
 
+### v0.16.28 — Park events-overhaul plan + red-outcome detection bug
+
+> "rubble stacking deferred until events overhaul? what is your take"
+> "add to parking lot what we were discussing about events"
+
+Confirmed in v0.16.27 playtest:
+- Post-event flavor pipeline working end-to-end (rubble → flavor at
+  loot-distribution; trial of hand → flavor at win moment).
+- Red trial outcome detection BUG: "BREAKER WON" on DM panel but
+  Breaker dashboard showed unfavorable flavor. `ev.redResult.winner`
+  field read suspect — server may use different field name.
+
+Per "wrap with players first, events overhaul later": parked the
+events-system overhaul plan in NOTES.md parking lot. Captures:
+- Current architecture (4-5 nested containers per event, reinvented
+  per type)
+- Proposed unified `EventCard` + body-slot pattern
+- UNITY/ELEGANCE/EFFICIENCY wins
+- Tech debt the overhaul absorbs (rubble sizing, other canvases,
+  outcome detection refactor, red field-name bug)
+- Defer-until criteria
+
+NOTES-only push. No code changes.
+
+---
+
+### v0.16.29 — Fusion placeholder: drag any brick to dynamic zone
+
+> "fusion should do nothing but initate the placeholder for now:
+> Fusion coming soon... - dad joke flavor text pool - you just
+> cannot wait to get stronger, that sort of thing. Drag drop brick
+> in dz, opens card/space with some flair, colored to brick you
+> dragged in and giving flavor text plus coming soon"
+
+Wires the drag-to-fuse gesture for ALL brick chips (not just
+white/gray). Drop on dz opens a colored coming-soon placeholder
+with themed dad-joke flavor. Mechanic itself ships later — this is
+scaffolding so the gesture has a real destination during playtest.
+
+**Brick chip pointer-down: now wired for all colors.**
+
+Previously only white/gray had `onpointerdown="_holdStart(...)"`.
+Other colors were inert (`cursor:default; opacity:.85`). v0.16.29:
+all colors get the handler, normal cursor, full opacity. Visual
+parity across all bricks since they're all draggable now.
+
+**`_holdStart` branches internally on eligibility:**
+
+- `radialEligible` = (color is white or gray) && charged ≥ 1 →
+  hold-without-drag opens the radial fan (existing white/gray
+  ally-target / option-target action).
+- `fusionEligible` = owned ≥ 1 (any color) → drag-and-drop on dz
+  opens fusion placeholder.
+- Aborts only if NEITHER (no charges AND no inventory of this color).
+
+**Drag-over-dz detection in `_holdMove`:**
+
+Walks pointer element to detect `.dynamic-zone` ancestor. Sets
+`s.overDz = true` while dragging over dz with `fusionEligible`.
+Toggles `.fusion-drop-target` class on the dz element — CSS
+highlights with brighter border + soft white glow as the drop
+zone affordance.
+
+**Fusion drop branch in `_holdUp`:**
+
+NEW first branch: if `s.isDrag && onDz && s.fusionEligible` →
+clean up drop-target class, end hold state, fire
+`_openFusionPlaceholder(s.color)`. Takes priority over other
+release routing because dz drop is intentional.
+
+**`_openFusionPlaceholder(color)`:**
+
+Sets `_fusionColor = color` and `_zoneState = 'fusion'`, triggers
+render. The dz idle slot picks up via `_renderZoneSurface` ('fusion'
+case → `_renderZoneFusion(me, color)`).
+
+**`_renderZoneFusion(me, color)`:**
+
+Renders a coming-soon placeholder card:
+- Border in the brick's color (BRICK_COLORS table)
+- Title "⚗ FUSION" in matching color
+- Centered colored brick swatch with bloom glow + subtle
+  scale-pulse animation (`fusion-bloom` keyframes, 2.3s rhythm,
+  joins the slow ambient family)
+- Color name (e.g. "RED BRICK") under the swatch
+- One line of themed flavor (random from `FUSION_COMING_SOON_FLAVOR`)
+- "FUSION COMING SOON…" footer
+
+**`FUSION_COMING_SOON_FLAVOR` pool:**
+
+12 lines, dad-joke voice per Ross spec ("you just cannot wait to
+get stronger"). Examples:
+- "You just cannot wait to get stronger."
+- "Brick + brick = bigger brick. The math works. The mechanic is pending."
+- "The dungeon\'s blacksmith is on a coffee break. Try again later."
+
+Pool grows as content depth accrues.
+
+**Hold-overlay render gates updated:**
+
+- Chip ring: now gated on `s.radialEligible` (was unconditional).
+  Non-radial chips show no overlay during hold-without-drag.
+- Tier-up pulse: now gated on `s.radialEligible`.
+- Radial fan render: now gated on `s.radialEligible`.
+- NEW: fusion drag ghost — small colored brick at pointer position,
+  visible during any drag (`s.isDrag && s.fusionEligible`),
+  rotated slightly with shadow + colored glow. Communicates "the
+  brick is following your cursor."
+
+**Dismiss paths clear `_fusionColor`:**
+
+`_dismissDynamicZone`, event-priority reset, surface-render fallback
+all set `_fusionColor = null` alongside `_zoneState = 'idle'`.
+
+**Existing white/gray hold-radial behavior unchanged.** Hold without
+dragging on white/gray chip still opens the ally/option fan as
+before. Drag from white/gray to dz also triggers fusion placeholder
+(inclusive — white/gray bricks can also be fused).
+
+---
+
+**Files changed:** `players-core.js`, `players.html`,
+`test_players.html`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, characters.js, boardFx,
+dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Tap or hold any non-action color (red, blue, green, etc):**
+   chip is now visually active (no `.85` opacity). Hold without drag:
+   nothing happens visually (no chip ring, no fan). Tap and release:
+   silent.
+3. **Drag any brick chip toward dz:** colored ghost brick follows
+   cursor. dz border brightens to white when ghost is over it.
+4. **Drop on dz:** placeholder card opens — colored in brick's
+   color, "⚗ FUSION", brick swatch with bloom, "RED BRICK" label,
+   one flavor line, "FUSION COMING SOON…" footer.
+5. **Different color, drop:** placeholder re-renders in new color.
+6. **Swipe right on dz:** placeholder dismisses (existing dismiss
+   gesture).
+7. **No regressions:** white hold-radial (Fixer) still opens ally
+   fan. Gray hold-radial still opens shield options. Tap-to-fire
+   still works on white/gray. Hold timing unchanged.
+
+---
+
+**Risk surfaces:**
+
+- `_holdStart` continues even with 0 charges if `fusionEligible`.
+  Means non-radial chips with 0 inventory still abort (good), but
+  white/gray with 0 charges and ≥1 owned will enter hold state.
+  Radial doesn\'t render (gated), but the chip ring is also gated
+  now, so it should be silent. Watch for any cosmetic side effects.
+- The drag-to-dz detection uses `.fusion-drop-target` class on the
+  dz element. If the dz element is replaced mid-drag (re-render),
+  the class is lost. Should be rare in practice but worth watching.
+- Drop on dz while a hold-radial fan is showing (white/gray with
+  charges, dragged off-radial) should still trigger fusion. The
+  routing in `_holdUp` checks dz BEFORE ally/option/chip — fusion
+  takes priority. White/gray can be fused.
+- Fusion placeholder re-render on second drop replaces the color.
+  Real fusion will need 2-brick staging — out of scope for v1.
+
+---
+
+**Standards audit (rule #17 — push #48 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #11 (data/runtime/UI): UI only — no server changes, no
+  characters.js changes. Mechanic punted to mechanic-spec session.
+  Right scope. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: all bricks share gesture vocabulary now. Hold-radial
+    is the special case (white/gray); fusion-drag is the universal.
+    Joins the fusion-bloom 2.3s ambient pulse family.
+  - ELEGANCE: branched `_holdStart` rather than parallel handler;
+    one state machine; placeholder reuses `_zoneState` cascade.
+  - EFFICIENCY: minimal new code (one new state, one new renderer,
+    one flavor pool, one keyframe).
+- Rule #19 (intuition): held — Ross's "drag any brick to dz" was
+  the right shape. I almost over-architected with two-handler
+  approach; folding into `_holdStart` is simpler.
+- Rule #6 (diagnostic-first): N/A — this is feature work, not bug
+  fix. Watch playtest for unexpected gesture interactions.
+- Rule #20 (grep duplicates): touched selectors verified to appear
+  exactly once. ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
