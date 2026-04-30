@@ -75,6 +75,18 @@ var _drainedTokens = {};
 // Cleared when activeEvent changes.
 var _cardFading = {};
 
+// v0.16.1 — Card-entered flag. Tracks which event keys have already shown
+// the entrance animation. Without this, EVERY render re-rebuilds the card
+// DOM with class `bq-card-enter`, retriggering the 250ms scale+opacity
+// animation — visible as a "flash" on each re-render during gameplay.
+//
+// First render: flag absent → bq-card-enter applied → animation runs.
+// Subsequent renders: flag present → bq-card-enter omitted → no animation.
+//
+// Shape: { eventKey: true }
+// Cleared when activeEvent changes.
+var _cardEntered = {};
+
 // v0.15.46 — Resolution snapshot model. REPLACES the v0.15.39 _displayDeltas
 // system entirely.
 //
@@ -615,6 +627,7 @@ function render() {
     _resolutionSnapshots = {};
     _drainedTokens = {};
     _cardFading = {};
+    _cardEntered = {};
   }
   renderPhaseBanner(me);
   // restoreActiveEvent MUST run AFTER renderDashboard. The active-event host
@@ -5656,9 +5669,17 @@ function buildResolutionCard(opts) {
   // + opacity 0→1. Dismissal: when _cardFading flag set, swap to
   // `bq-card-exit` — 600ms scale 1.0→0.85 + opacity 1→0. State-driven
   // class swap means renders during fade preserve the exit animation.
+  // v0.16.1: enter only fires ONCE per event key — _cardEntered flag
+  // prevents re-firing on subsequent renders. Without this, every render
+  // rebuilds the card DOM and the entrance animation fires again,
+  // visible as a "flash" each render during gameplay.
   var cardClass = 'bq-resolution-card';
-  if (armKey && _cardFading[armKey]) cardClass += ' bq-card-exit';
-  else cardClass += ' bq-card-enter';
+  if (armKey && _cardFading[armKey]) {
+    cardClass += ' bq-card-exit';
+  } else if (armKey && !_cardEntered[armKey]) {
+    cardClass += ' bq-card-enter';
+    _cardEntered[armKey] = true;
+  }
 
   var html = '<div data-resolution-card class="'+cardClass+'"' + keyAttr + ' style="margin-top:10px;padding:14px;background:'+bgColor+';border:2px solid '+borderColor+';border-radius:12px;text-align:center;position:relative;overflow:hidden;">';
   if (shower) {

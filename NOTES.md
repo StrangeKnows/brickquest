@@ -9145,6 +9145,85 @@ parse checks pass and the smoke logic seems sound. Playtest will tell.
 
 ---
 
+### v0.16.1 — Card entrance fires once per event (no re-flash)
+
+**v0.16.0 playtest revealed two issues with the entrance animation.**
+
+> "after button is pressed to collect rewards, event card flashes,
+> pulses, before sending each reward to inv"
+
+> "[also] each time it flashes before sending rewards out"
+
+The CSS `bq-card-enter` animation re-fires on every render. Card DOM
+is rebuilt fresh by `restoreActiveEvent` each render → fresh element
+gets the class → animation runs from frame 0 again. Visible as a
+flash/pulse on every re-render.
+
+This is most visible during drain because each delta-increment triggers
+a render(), so the card flashes once per element being collected. Also
+visible during gameplay (e.g., riddle gameplay re-renders for the
+timer tick, and each tick flashes the card).
+
+**Fix:** state-driven gating. New `_cardEntered[eventKey]` flag mirrors
+the `_cardFading` pattern. First render for an event key applies
+`bq-card-enter` and sets the flag. Subsequent renders for the same
+key omit the class. Flag cleared when `activeEvent` changes (along
+with snapshot/drained-tokens/fading state).
+
+**Trade-off:** the entrance animation still runs per event key, just
+once. New event = new key = new entrance. Re-renders for the same
+event = no entrance. Exactly what we want.
+
+---
+
+**Files changed:**
+
+- `players-core.js`:
+  - Added `_cardEntered` state alongside `_cardFading`
+  - State reset includes `_cardEntered` when activeEvent clears
+  - `buildResolutionCard` only applies `bq-card-enter` if flag absent,
+    sets flag on first apply
+- `NOTES.md` — this entry
+
+UNTOUCHED: boardFx.css, boardFx.js, players.html, test_players.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. Trigger any event with a reward (riddle, gray rubble, red trial).
+3. **Watch the card on initial appearance:** should scale-in once
+   (~250ms) — the entrance animation. Then stable.
+4. **Watch the card during gameplay:** should NOT re-flash on each
+   render. Riddle timer ticks should not pulse the card. Red trial
+   countdown should not pulse the card.
+5. **Tap Collect.** During drain, card should NOT flash before each
+   reward. Just steady icons fading and FX traveling. After all drained,
+   card scale-out (~600ms) — the exit animation.
+6. **Card still scales-in fresh** for the next event.
+
+---
+
+**Standards audit (rule #17 — push #20 in S015 continuation):**
+
+This is a proper bug-fix push. v0.16.0 was an architectural milestone
+(deserved the minor bump per my judgment, though I should have asked
+Ross first per his point that v0.16.0 was reserved for class-baseline-
+parity). v0.16.1 patches the CSS-animation re-fire issue surfaced by
+playtest. Diagnostic-first protocol followed: console logs + visual
+report from Ross identified the symptom precisely, root cause traced
+to the CSS animation lifecycle vs. DOM rebuild pattern.
+
+**Lesson:** when adding CSS class animations to elements that get
+rebuilt on every render, gate the class application via state flag.
+The animation runs FROM the class being applied, not from the element
+being CREATED. Fresh DOM + same class = animation re-fires. Memory
+rule candidate: track per-event-key flags for one-time visual effects
+to prevent re-firing across renders.
+
+---
+
 
 ### Session 015 Process Retrospective
 
