@@ -1936,6 +1936,60 @@ Portrait: `.head-card` flex-wrap kicks in — `.head-stats` stacks below
 
 ---
 
+### v0.16.11 — Vertically center coin+cheese in head-id column
+
+> "so close, bring the cheese and coin down just a bit, sit middle of
+> vertical space from player icon to lower boundry of card"
+
+v0.16.10 placed coin+cheese chips inside `.head-id` but they sat
+hugging the identity row at the top. Visual goal: the chips should
+sit vertically centered in the leftover space below the
+icon/name/zone block.
+
+**Fix:**
+
+- **`.head-card`** changed from `align-items:flex-start` to
+  `align-items:stretch` — both columns (head-id, head-stats) now
+  stretch to match the taller sibling's height. .head-stats is
+  typically taller (HP + bar + shield + pips + badges), so the head-id
+  column gets that same height.
+- **`.head-id`** kept flex-column, but `gap:10px` removed (was forcing
+  fixed spacing). Added `align-self:stretch` for explicit cross-axis
+  filling.
+- **`.head-resources`** got `margin:auto 0` — flexbox auto-margin
+  trick that pushes the element to vertical-center of remaining space
+  in a flex-column parent. Identity row stays at top; resources land
+  in the middle of leftover space; bottom of card gets matching empty
+  space below the chips.
+
+CSS-only patch — no JS changes, no markup changes.
+
+**Files changed:** `players.html`, `test_players.html`, `NOTES.md`.
+
+UNTOUCHED: players-core.js, server.js, rumble.js, characters.js, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh (CSS changed).
+2. Coin + cheese chips visually centered in the vertical space from
+   icon/name down to bottom of head-card.
+3. Rest of header still right (HP/shield on right, conn-dot inline,
+   etc.).
+4. Header still wraps cleanly in portrait (head-stats below head-id).
+
+---
+
+**Standards audit (rule #17 — push #31 in S015 continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html + test_players.html ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY): pure ELEGANCE polish — visual
+  rhythm, no behavior change, no code complexity added ✓
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -107,12 +107,12 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .dash-surface.active{display:block;}
 
 /* HEADER CARD (v0.16.10) */
-.head-card{background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;padding:12px;margin-bottom:10px;display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;}
-.head-id{display:flex;flex-direction:column;gap:10px;flex:1;min-width:140px;}
+.head-card{background:var(--surface2);border:1px solid #2a2a2a;border-radius:10px;padding:12px;margin-bottom:10px;display:flex;gap:14px;align-items:stretch;flex-wrap:wrap;}
+.head-id{display:flex;flex-direction:column;flex:1;min-width:140px;align-self:stretch;}
 .head-id .head-icon{font-size:28px;line-height:1;}
 .head-id .head-name{font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;display:flex;align-items:center;}
 .head-id .head-zone{font-size:11px;color:var(--text-dim);}
-.head-resources{display:flex;gap:10px;align-items:stretch;}
+.head-resources{display:flex;gap:10px;align-items:stretch;margin:auto 0;}
 .head-stats{flex:2;min-width:200px;display:flex;flex-direction:column;gap:6px;}
 
 /* DYNAMIC ZONE (v0.16.9 — class-color outlined slot, intense pulse on player turn) */

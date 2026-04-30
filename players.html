@@ -218,18 +218,25 @@ body{font-family:'Crimson Pro',Georgia,serif;background:var(--surface);color:var
 .head-card{
   background:var(--surface2);border:1px solid #2a2a2a;
   border-radius:10px;padding:12px;margin-bottom:10px;
-  display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;
+  display:flex;gap:14px;align-items:stretch;flex-wrap:wrap;
 }
 .head-id{
-  display:flex;flex-direction:column;gap:10px;
+  display:flex;flex-direction:column;
   flex:1;min-width:140px;
+  /* v0.16.11: align-self stretches to full card height; justify-content
+     space-between pushes identity row to top and resources to middle of
+     remaining space via padding-bottom. Margin-top:auto on resources
+     centers them in the leftover vertical space. */
+  align-self:stretch;
 }
 .head-id .head-icon{font-size:28px;line-height:1;}
 .head-id .head-name{font-family:'Cinzel',serif;font-size:14px;font-weight:700;color:var(--cls-color);letter-spacing:.04em;display:flex;align-items:center;}
 .head-id .head-zone{font-size:11px;color:var(--text-dim);}
 /* v0.16.10: coin + cheese chips inside the head-id column, below the
-   name/zone block. Sits in the previously-empty space. */
-.head-resources{display:flex;gap:10px;align-items:stretch;}
+   name/zone block. Sits in the previously-empty space.
+   v0.16.11: margin:auto 0 pushes the chips to vertical-center of the
+   leftover space below the identity row, instead of hugging the top. */
+.head-resources{display:flex;gap:10px;align-items:stretch;margin:auto 0;}
 .head-stats{flex:2;min-width:200px;display:flex;flex-direction:column;gap:6px;}
 
 /* CARDS */
