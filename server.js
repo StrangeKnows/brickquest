@@ -1704,7 +1704,12 @@ wss.on('connection', (ws, req) => {
         const isFormwright = cls === 'formwright';
         p.bricks.blue = (p.bricks.blue||0) + 1;
         if (bonus === 'gold') p.gold = (p.gold||0) + 1;
-        if (bonus === 'shield' && p.armor < Math.floor(p.hpMax * 0.5)) p.armor++;
+        if (bonus === 'shield') {
+          // v0.16.33 — armor cap reads canonical class data
+          const _cd = (typeof CHARACTERS !== 'undefined') ? CHARACTERS[cls] : null;
+          const _capMult = (_cd && typeof _cd.armorCapMult === 'number') ? _cd.armorCapMult : 0.5;
+          if (p.armor < Math.floor(p.hpMax * _capMult)) p.armor++;
+        }
         if (bonus === 'roll_bonus') { if (!G.rollBonuses) G.rollBonuses = {}; G.rollBonuses[cls] = (G.rollBonuses[cls]||0) + 1; }
         // v4: FW bonus = "next rumble: 2x brick refresh for 10s" (was +1 extra blue brick)
         if (success && isFormwright) {
@@ -1732,7 +1737,10 @@ wss.on('connection', (ws, req) => {
           log(pNameBF+' blue event failed — +1 Gold consolation, −1 HP','reward');
         } else if (penalty === 'shield') {
           // Cipher lock: shield pip consolation
-          if (p.armor < Math.floor(p.hpMax * 0.5)) p.armor++;
+          // v0.16.33 — armor cap reads canonical class data
+          const _cd = (typeof CHARACTERS !== 'undefined') ? CHARACTERS[cls] : null;
+          const _capMult = (_cd && typeof _cd.armorCapMult === 'number') ? _cd.armorCapMult : 0.5;
+          if (p.armor < Math.floor(p.hpMax * _capMult)) p.armor++;
           log(pNameBF+' blue event failed — +1 Shield pip consolation','reward');
         } else {
           // Singing stone: gold consolation
@@ -2597,16 +2605,19 @@ wss.on('connection', (ws, req) => {
       }
     }
     // Shield self (§8.2 board action, consumes bricksCharged.gray).
-    // BASE for all classes: 1 gray charge → +1 armor, cap = hpMax.
-    // CRIT: on a lucky roll, same cost yields +2 armor instead of +1.
-    //   Blocksmith: 25% crit (class identity). All other classes: 10%.
-    // Class abilities / fusion upgrades will modify these values later.
+    // v0.16.33 — armor cap + gray crit chance both read from CHARACTERS
+    // (canonical class data). Replaces hardcoded `cap = hpMax` (which
+    // overshot the rumble cap) and `cls === 'blocksmith' ? 0.25 : 0.10`
+    // hardcoded literal. Adding a new class with different cap or crit
+    // = data change in characters.js, not server logic surgery.
     if (type === 'addShield') {
       const p = G.players[P.cls];
       if (!p || !p.alive) { broadcastState(); return; }
       const cost = 1;
-      const cap  = p.hpMax || 10;
-      const critChance = (p.cls === 'blocksmith') ? 0.25 : 0.10;
+      const cdata = (typeof CHARACTERS !== 'undefined') ? CHARACTERS[p.cls] : null;
+      const armorCapMult = (cdata && typeof cdata.armorCapMult === 'number') ? cdata.armorCapMult : 0.5;
+      const cap  = Math.floor((p.hpMax || 10) * armorCapMult);
+      const critChance = (cdata && typeof cdata.grayCritChance === 'number') ? cdata.grayCritChance : 0.10;
       if (((p.bricksCharged && p.bricksCharged.gray) || 0) < cost) {
         ws.send(JSON.stringify({type:'error',msg:'Need 1 gray charge (have '+((p.bricksCharged && p.bricksCharged.gray) || 0)+')'}));
         broadcastState(); return;
@@ -2695,7 +2706,11 @@ wss.on('connection', (ws, req) => {
 
     if (type === 'adjustArmor') {
       const ap = G.players[P.cls];
-      const maxShield2 = Math.floor(ap.hpMax * 0.5);
+      // v0.16.33 — armor cap reads canonical class data. Now correctly
+      // honors BK 0.75 multiplier (was always 0.5 before, undercapping BK).
+      const _cd = (typeof CHARACTERS !== 'undefined') ? CHARACTERS[ap.cls] : null;
+      const _capMult = (_cd && typeof _cd.armorCapMult === 'number') ? _cd.armorCapMult : 0.5;
+      const maxShield2 = Math.floor(ap.hpMax * _capMult);
       ap.armor = Math.max(0, Math.min(maxShield2, (ap.armor||0)+P.amount));
       log(`${ap.name} shield ${P.amount>0?'+':''}${P.amount} → ${ap.armor}/${maxShield2}`,'action');
     }

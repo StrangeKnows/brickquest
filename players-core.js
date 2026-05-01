@@ -941,7 +941,13 @@ function _dashHeader(me) {
   const debuff = G.movementDebuffs?.[MY_CLASS];
   const debuffBadge = debuff ? `<span class="status-badge poisoned">🐌 −${debuff} Move</span>` : '';
 
-  const shieldMax = me.hpMax;
+  // v0.16.33: shieldMax now reads canonical armorCapMult from CHARACTERS.
+  // Previously rendered me.hpMax pips (e.g. 14 for Breaker) but rumble
+  // capped armor at 10 — the dashboard could show 4 pips that would never
+  // fill. Now the pip count matches the actual armor cap everywhere.
+  const _ccls = (typeof CHARACTERS !== 'undefined') ? CHARACTERS[MY_CLASS] : null;
+  const _capMult = (_ccls && typeof _ccls.armorCapMult === 'number') ? _ccls.armorCapMult : 0.5;
+  const shieldMax = Math.floor((me.hpMax || 1) * _capMult);
   let shieldPips = '';
   for (let i = 0; i < shieldMax; i++) {
     const filled = i < (me.armor || 0);
@@ -949,7 +955,7 @@ function _dashHeader(me) {
     // the formula toward smaller pips (220 budget instead of 260) so 14
     // pips wrap to 2 rows instead of one ultra-wide row that overflows
     // the head-stats column.
-    const pipW = Math.max(8, Math.min(18, Math.floor(220 / shieldMax)));
+    const pipW = Math.max(8, Math.min(18, Math.floor(220 / Math.max(1, shieldMax))));
     shieldPips += `<span style="display:inline-block;width:${pipW}px;height:12px;border-radius:3px;margin:1px;`
       + (filled ? 'background:#AAAAAA;box-shadow:0 1px 3px rgba(0,0,0,.5);' : 'background:#1a1a1a;border:1px solid #2a2a2a;')
       + '"></span>';

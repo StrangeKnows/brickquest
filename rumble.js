@@ -6531,7 +6531,12 @@ var playerRegen = null; // { hpPerSec, timer, duration, tick } // anchored to pl
 
 function getArmorMax() {
   if (!player) return 0;
-  var mult = player.cls === 'breaker' ? 0.75 : 0.5;
+  // v0.16.33: canonical armor cap reads from CHARACTERS[cls].armorCapMult.
+  // Replaces hardcoded BK 0.75 / else 0.5 ternary. Adding/changing class
+  // armor caps = data change in characters.js, not engine surgery.
+  var mult = (typeof CHARACTERS !== 'undefined' && CHARACTERS[player.cls]
+    && typeof CHARACTERS[player.cls].armorCapMult === 'number')
+    ? CHARACTERS[player.cls].armorCapMult : 0.5;
   return Math.floor(player.hpMax * mult);
 }
 function startWhiteRegen(tier) {

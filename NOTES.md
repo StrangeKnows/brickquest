@@ -4357,6 +4357,155 @@ boardFx, dm_screen.html.
 
 ---
 
+### v0.16.33 — Tier 1 unification: armorCapMult + grayCritChance as canonical class data
+
+> "is an armor helper correct? Characters.js should have all data
+> that is pulled from, or am I thinking wrong? Unity Elegance
+> Efficiency"
+>
+> "lets do it all, and the pace should be determined by Unity,
+> Elegance, and Efficiency"
+
+S016 sets up Blocksmith design (The Forge identity, indirect-damage
+philosophy, shrapnel reactive + wall-death armor regen). The
+shrapnel formula needs to know what "full armor" means consistently
+across the codebase. Existing audit (v0.16.25) found four-way
+inconsistency in armor cap handling:
+
+- rumble.js getArmorMax: BK × 0.75, others × 0.5 (canonical)
+- server.js gray-charge: cap = hpMax (overshoot, no class diff)
+- server.js blue-bonus/fail: × 0.5 (didn't honor BK)
+- server.js adjustArmor: × 0.5 (didn't honor BK)
+- players-core.js dashboard: hpMax pips (overshoot)
+
+Plus a separate hardcoded BS-specific gray crit chance:
+- server.js gray-charge: `cls === 'blocksmith' ? 0.25 : 0.10`
+
+Both classes of inconsistency are CLASS DATA living as runtime
+literals — exactly the failure mode characters.js was created to
+prevent (per its own header comment). Pure unification fix.
+
+**Choice locked at design discussion:** rumble values are canonical
+(Option A). BK × 0.75 = signature heavy-tank class identity. Other
+classes × 0.5 = standard armor-as-buffer. Lower numbers force
+positional play; higher numbers would trivialize combat.
+
+Per Ross design call: "Characters.js should have all data that is
+pulled from." So the unification is FIELD ADDITIONS to each class
+in CHARACTERS, not a helper function. Runtime sites read from the
+data; no logic lives in the data file.
+
+**Two new fields per class:**
+
+```javascript
+breaker:    { armorCapMult: 0.75, grayCritChance: 0.10 }
+formwright: { armorCapMult: 0.50, grayCritChance: 0.10 }
+snapstep:   { armorCapMult: 0.50, grayCritChance: 0.10 }
+blocksmith: { armorCapMult: 0.50, grayCritChance: 0.25 }
+fixer:      { armorCapMult: 0.50, grayCritChance: 0.10 }
+wild_one:   { armorCapMult: 0.50, grayCritChance: 0.10 }
+```
+
+Concrete cap values: BK 10, BS 6, Fixer 4, Snapstep 4, Wild One 5,
+Formwright 3.
+
+**Five runtime sites updated:**
+
+- `rumble.js:6534` getArmorMax — reads `CHARACTERS[cls].armorCapMult`
+- `server.js:1707` blue-event-success armor bonus
+- `server.js:1735` blue-event-fail armor consolation
+- `server.js:2604+` gray-charge cap + crit chance (both)
+- `server.js:2696+` adjustArmor (DM panel armor adjust)
+- `players-core.js:944` dashboard pip render
+
+All four files read the same canonical data. Adding a 7th class
+with different cap or crit chance = field addition only, zero
+runtime changes needed.
+
+**Behavior changes from the unification:**
+
+1. **Dashboard pip render now matches actual cap.** Previously BK
+   showed 14 pips that could never fill above 10 (cap was 10 in
+   rumble). Now BK shows 10 pips; full bar = full armor. Same fix
+   applies to all classes — pip count = real ceiling.
+
+2. **Server gray-charge respects 0.5/0.75 caps.** Previously cap =
+   hpMax (full HP). Now matches rumble exactly. BK can charge
+   to 10 max via gray. Other classes to floor(hpMax × 0.5).
+
+3. **Server adjustArmor honors BK × 0.75.** Previously DM-panel
+   armor adjustment was hardcoded × 0.5 for all. Now BK can
+   accept armor up to 10 via DM panel.
+
+4. **No behavior changes for grayCritChance.** Already worked
+   correctly; just moved to data.
+
+**Documentation updated** in characters.js header comment block.
+Both new fields explained alongside `hp` and `speed`.
+
+---
+
+**Files changed:** `characters.js`, `rumble.js`, `server.js`,
+`players-core.js`, `NOTES.md`.
+
+UNTOUCHED: html files, boardFx, dm_screen.html, package.json.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Breaker dashboard:** shows 10 pips (was 14). Charge gray,
+   armor caps at 10.
+3. **Other classes:** pip counts match new caps (BS 6, Fixer 4,
+   Snapstep 4, Wild One 5, Formwright 3).
+4. **Gray-charge action:** caps at correct value per class. Crit
+   chance still triggers ~25% for BS, ~10% others.
+5. **Blue event success with shield bonus:** armor goes up to
+   correct cap, no overshoot.
+6. **DM adjustArmor:** BK accepts up to 10, others up to floor.
+7. **Rumble entry from dashboard:** armor doesn't drop on
+   transition (caps are now consistent, no truncation).
+
+---
+
+**Risk surfaces:**
+
+- Existing save states with `p.armor > new cap` (e.g. BK saved
+  with armor 12 from old uncapped server). Server now caps further
+  charges but doesn't actively truncate stale armor. Fresh games
+  unaffected; carry-overs from previous sessions may briefly show
+  armor exceeding cap until next damage.
+- Dashboard pip count changes mid-session for any active games.
+  Cosmetic — pip count is display-derived, not stored.
+
+---
+
+**Standards audit (rule #17 — push #52 in S015 continuation,
+push #1 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players-core.js but NOT html — pip render
+  uses inline styles, no CSS changes. ✓
+- Rule #11 (data/runtime/UI): full UNITY win. Class-specific
+  values (armor cap, gray crit chance) now live in CHARACTERS as
+  data. Runtime files read from data. UI reads from data. One
+  source of truth.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: 6 hardcoded sites → 1 canonical data source. Same
+    pattern (`CHARACTERS[cls].fieldName`) repeated everywhere.
+  - ELEGANCE: each runtime site is a clean CHARACTERS read with
+    a defensive fallback to 0.5 / 0.10. No new helper functions.
+  - EFFICIENCY: minimal change per file; no new abstractions.
+- Rule #19 (intuition): held — Ross corrected my "armor helper
+  function" instinct mid-design with the UNITY rule. Right call;
+  data fields are cleaner than helpers.
+- Rule #14 (UNITY): Ross-driven unification this push. Architecture
+  now matches characters.js header doctrine: "SINGLE SOURCE OF
+  TRUTH for everything class-specific."
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

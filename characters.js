@@ -31,8 +31,16 @@
 //     uiBorder      — translucent UI border           ('rgba(153,60,29,0.4)')
 //
 //   Combat
+//   Combat
 //     hp            — starting + max HP               (14)
 //     speed         — rumble movement speed px/s      (150)
+//     armorCapMult  — armor max as fraction of hpMax  (0.75 BK, 0.50 else)
+//                     v0.16.33: canonical class data
+//                     for armor cap. Reads: rumble.js getArmorMax,
+//                     server.js gray-charge / event-bonus / adjustArmor,
+//                     players-core.js dashboard pip render.
+//     grayCritChance — 0..1 chance gray-charge yields  (0.10 base, 0.25 BS)
+//                      2 pips instead of 1.
 //
 //   Affinity (per design doc §2.2 — the canonical spec)
 //     signature     — array of high-output colors     (['red', 'gray'])
@@ -63,6 +71,12 @@ var CHARACTERS = {
     secondary: ['orange'],
     startingKit: { red: 2, gray: 1 },
     weight: 'heavy', dashBreakChance: 1.00, dashBreakDmg: [0, 3], dashDmgAlwaysRolls: false,
+    // v0.16.33 — canonical class data for armor + gray-charge crit. Replaces
+    // hardcoded runtime checks. armorCapMult drives all armor caps (board,
+    // rumble, dashboard). grayCritChance is the chance a gray-charge action
+    // grants 2 pips instead of 1.
+    armorCapMult: 0.75,    // BK signature heavy-tank: 14 × 0.75 = 10 max armor
+    grayCritChance: 0.10,
     // Red signature: heavy hitter with extra reach via signature affinity,
     // larger hitbox, and stronger knockback. Per design doc §2.3
     // (BREAKER RED: larger hitbox, knockback 1.5× on attacks).
@@ -138,6 +152,8 @@ var CHARACTERS = {
     secondary: ['white'],
     startingKit: { blue: 2, purple: 1 },
     weight: 'light', dashBreakChance: 0.15, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    armorCapMult: 0.50,    // 6 × 0.50 = 3 max armor
+    grayCritChance: 0.10,
     // Purple signature: drag-and-drop teleports player to the drop point,
     // fires DUAL blasts at scaled radii. Tap or hold-release on bar (no
     // drag) plays as a normal purple burst at self. Per design doc §2.3
@@ -189,6 +205,8 @@ var CHARACTERS = {
     secondary: ['yellow'],
     startingKit: { orange: 2, red: 1 },
     weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    armorCapMult: 0.50,    // 9 × 0.50 = 4 max armor (floored)
+    grayCritChance: 0.10,
     // Orange signature: overload-orange traps form a CHAIN NETWORK. Each
     // trap dropped is "chain-linked" — when any trap in the network is
     // triggered (entity contact), all transitively-linked traps within
@@ -223,6 +241,8 @@ var CHARACTERS = {
     secondary: ['orange'],
     startingKit: { gray: 2, orange: 1 },
     weight: 'heavy', dashBreakChance: 1.00, dashBreakDmg: [0, 3], dashDmgAlwaysRolls: false,
+    armorCapMult: 0.50,    // 12 × 0.50 = 6 max armor
+    grayCritChance: 0.25,  // BS signature: higher crit chance on gray-charge
     // Red baseline: heavy weight, no signature affinity. Shortest reach.
     redProfile: { rangeBase: 160, rangeAffinityBonus: 1.0 },
   },
@@ -235,6 +255,8 @@ var CHARACTERS = {
     secondary: ['purple'],
     startingKit: { white: 2, black: 1 },
     weight: 'mid', dashBreakChance: 0.50, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    armorCapMult: 0.50,    // 8 × 0.50 = 4 max armor
+    grayCritChance: 0.10,
     // Red baseline: mid weight, no signature affinity. Standard reach.
     redProfile: { rangeBase: 200, rangeAffinityBonus: 1.0 },
   },
@@ -247,6 +269,8 @@ var CHARACTERS = {
     secondary: ['black'],
     startingKit: { green: 2, yellow: 1 },
     weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
+    armorCapMult: 0.50,    // 10 × 0.50 = 5 max armor
+    grayCritChance: 0.10,
     // Red baseline: light weight, no signature affinity. Long reach baseline.
     redProfile: { rangeBase: 240, rangeAffinityBonus: 1.0 },
   },
