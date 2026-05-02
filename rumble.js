@@ -3584,24 +3584,28 @@ function updateEnemyProjectiles(dt) {
     p.y += p.vy * dt;
     p.ttl -= dt;
     if (p.ttl <= 0) { p.done = true; return; }
-    // v0.16.46 — Gray wall collision (ring + arc). Projectiles colliding
-    // with any gray wall are absorbed and damage the wall on impact.
-    // For arc walls, only the wedge portion blocks (open side passes
-    // freely). Universal mechanic — any class's gray walls block enemy
-    // projectiles. Pre-v0.16.46, projectiles passed through walls
-    // entirely; this restores expected solid-wall behavior.
+    // v0.16.47 — Arc-wall projectile interception (rings let projectiles
+    // pass). Per Forge identity design: ring walls are short containment
+    // fences (projectiles arc over them); arc walls are taller vertical
+    // barriers that erect at max armor (projectiles slam into them).
+    // The visual/structural distinction justifies the mechanical split:
+    // same gray vocabulary, different height profile.
+    //
+    // Pre-v0.16.46, no gray walls blocked projectiles. v0.16.46 added
+    // universal collision (rings + arcs); v0.16.47 narrows to arcs only
+    // per design lock. Ring-wall behavior reverts to passthrough.
     if (typeof grayWalls !== 'undefined' && grayWalls.length > 0) {
       var blockedByWall = false;
       for (var wi = 0; wi < grayWalls.length; wi++) {
         var w = grayWalls[wi];
-        if (!w || w.hp <= 0) continue;
+        if (!w || w.hp <= 0 || !w.isArc) continue;  // arc walls only
         var wdx = p.x - w.x, wdy = p.y - w.y;
         var wdist = Math.sqrt(wdx*wdx + wdy*wdy);
         // Within wall radius +/- projectile radius?
         if (wdist > w.r + p.r) continue;
         if (wdist < w.r - p.r) continue;
-        // For arc walls, only collide if projectile is in the cone.
-        if (w.isArc && !_pointInArc(w, p.x, p.y)) continue;
+        // Cone check (always — arc walls only block in their wedge).
+        if (!_pointInArc(w, p.x, p.y)) continue;
         // Collision: damage wall, kill projectile.
         w.hp = Math.max(0, w.hp - 1);
         w.flashTimer = 0.15;
@@ -9312,13 +9316,32 @@ function drawGrayWalls() {
     ctx.lineWidth = 4 + (w.hp <= 0 ? 0 : 2 * (1 - hpPct));
     ctx.setLineDash([8, 6]);
     if (w.isArc) {
-      // v0.16.45 — Arc wall: draw wedge segment instead of full ring.
-      // Same gray vocabulary; geometry is the only difference.
+      // v0.16.47 — Arc wall: draw wedge segment with HEAVIER profile
+      // than ring walls. Per Forge design, arc walls are "taller"
+      // structures (vertical barriers) while ring walls are short
+      // containment fences. Mechanically: arc walls block projectiles,
+      // rings don't. Visually: arc walls render with a thicker primary
+      // stroke + a secondary inner highlight stroke to suggest depth.
       var startA = w.arcAngle - w.arcSpan / 2;
       var endA = w.arcAngle + w.arcSpan / 2;
+      // Primary stroke (thicker than rings — reads as "taller")
+      var arcLineWidth = 7 + (w.hp <= 0 ? 0 : 2 * (1 - hpPct));
+      ctx.lineWidth = arcLineWidth;
       ctx.beginPath();
       ctx.arc(w.x, w.y, w.r, startA, endA);
       ctx.stroke();
+      // Inner highlight — slim bright line inside the primary stroke,
+      // suggesting the top edge of a vertical barrier catching light.
+      ctx.shadowBlur = 4;
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#E0E0E0';
+      ctx.setLineDash([]);  // solid, not dashed, for the highlight
+      ctx.beginPath();
+      ctx.arc(w.x, w.y, w.r, startA, endA);
+      ctx.stroke();
+      // Restore stroke vocabulary for HP bar / etc below
+      ctx.strokeStyle = wallColor;
+      ctx.setLineDash([8, 6]);
     } else {
       ctx.beginPath();
       ctx.arc(w.x, w.y, w.r, 0, Math.PI*2);

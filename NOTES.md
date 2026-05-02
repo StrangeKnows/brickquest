@@ -6225,6 +6225,106 @@ push #9 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.47 — Arc walls "taller" than rings: arc-only projectile block + visual height
+
+> "ring walls should not block projectiles, only arc walls...they
+> are 'taller' than ring walls..."
+
+Two refinements per design lock:
+
+**1. Projectile collision narrowed to arc walls only.**
+
+v0.16.46 added universal projectile-vs-gray-wall collision (rings
++ arcs). Per design clarification, rings should NOT block — they're
+"shorter" containment fences that projectiles arc over. Arcs are
+"taller" vertical barriers that erect at max armor.
+
+Code change: gate the projectile collision check with
+`!w.isArc → continue`. One-line filter; rest of collision logic
+unchanged.
+
+**2. Visual height cue for arc walls.**
+
+To communicate that arc walls are "taller" structures, the render
+now draws arcs with:
+- Heavier primary stroke (lineWidth 7+ vs ring's 4+)
+- Solid bright highlight stroke inside the dashed primary
+  (suggests top edge of vertical barrier catching light)
+
+Both are subtle — arc walls still read as gray vocabulary, just
+with more visual weight. Players should perceive arcs as "more
+substantial" without needing explicit explanation.
+
+**Mechanical/visual design coherence:**
+
+| Wall variant | Visual | Mechanical |
+|---|---|---|
+| Ring wall | Thin dashed gray ring | Cages entities, blocks player melee, projectiles pass over |
+| Arc wall | Heavy dashed gray arc + bright highlight | Solid in cone direction, blocks projectiles, blocks BS from escaping outward through cone |
+
+The split makes lore sense: drag-cast rings are quick traps placed
+around the field (low containment fence), self-cast arcs at max
+armor are erected vertical barriers (full-height defensive walls).
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Ring wall + projectile:** projectile passes through normally.
+   No wall HP damage. (Reverts v0.16.46 universal block.)
+3. **Arc wall + projectile in cone:** projectile absorbed, wall
+   HP -1, projectile dies.
+4. **Arc wall + projectile from open side:** projectile passes
+   through to BS normally.
+5. **Visual:** arc walls look notably "thicker" / more substantial
+   than ring walls. Highlight stroke visible.
+6. **All other v0.16.46 behaviors:** mode-switch (self-cast at max
+   = arc, drag-cast = ring), solid arc collision (player + entity),
+   wallDeathArmorRegen on arc death — all still work.
+
+---
+
+**Risk surfaces:**
+
+- Visual change is subtle. If arc walls don't read as "taller"
+  in playtest, can dial up — thicker lineWidth, more saturated
+  highlight, or add a faux-shadow drop below the arc.
+- Projectile collision narrowing: any feature that USED to expect
+  rings to block (e.g. a tutorial scenario) may now break. Audit:
+  no current scenarios depend on ring walls blocking projectiles
+  (the v0.16.46 behavior was only 1 push old).
+
+---
+
+**Standards audit (rule #17 — push #66 in S015 continuation,
+push #10 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #11 (data/runtime/UI): UNITY held. Mechanical split is
+  data-driven (w.isArc); visual split lives in render branch.
+- Rule #14 (UNITY): MECHANICAL/VISUAL coherence achieved. Arc
+  walls have one mechanical AND one visual differentiator from
+  rings, both reading the same `w.isArc` flag.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: arc identity expressed mechanically AND visually,
+    both keyed off `w.isArc`.
+  - ELEGANCE: 1-line filter for projectile narrowing.
+  - EFFICIENCY: visual height cue is 2 extra strokes during
+    render (only for arcs, which are rare on screen).
+- Rule #19 (intuition): designer feedback "they are taller than
+  ring walls" was the spec. Implementation matched directly —
+  visual + mechanical split that maps to "taller" intuition.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
