@@ -85,30 +85,36 @@ function freshState() {
     rumbleBattle: null,        // active real-time battle state (see rumble handlers below)
     log: [],
     players: {
-      // v0.16.40 — Starting bricks now read from CHARACTERS[cls].startingKit
-      // (canonical class data in characters.js). Server.js no longer
-      // hardcodes class-specific brick counts. Adding/changing a class kit
-      // = data change in characters.js, no server logic surgery.
-      // HP / icon / color still hardcoded here — TODO move those too in
-      // future unification pass.
-      breaker:     mkPlayer('breaker',    '⚔️', '#993C1D', 14, CHARACTERS.breaker.startingKit),
-      formwright:  mkPlayer('formwright', '🔮', '#3C3489',  6, CHARACTERS.formwright.startingKit),
-      snapstep:    mkPlayer('snapstep',   '🏃', '#085041',  9, CHARACTERS.snapstep.startingKit),
-      blocksmith:  mkPlayer('blocksmith', '🔧', '#C87800', 12, CHARACTERS.blocksmith.startingKit),
-      fixer:       mkPlayer('fixer',      '💊', '#72243E',  8, CHARACTERS.fixer.startingKit),
-      wild_one:    mkPlayer('wild_one',   '🐾', '#27500A', 10, CHARACTERS.wild_one.startingKit),
+      // v0.16.41 — All class data read from CHARACTERS canonical source.
+      // Server no longer duplicates icon/color/hp/name/startingKit literals.
+      // Adding/changing class data = update characters.js, no server changes.
+      breaker:     mkPlayer('breaker'),
+      formwright:  mkPlayer('formwright'),
+      snapstep:    mkPlayer('snapstep'),
+      blocksmith:  mkPlayer('blocksmith'),
+      fixer:       mkPlayer('fixer'),
+      wild_one:    mkPlayer('wild_one'),
     }
   };
 }
 
-function mkPlayer(cls, icon, color, hp, bricks) {
+function mkPlayer(cls) {
+  // v0.16.41 — Reads all class data from CHARACTERS. Was 5-arg signature
+  // with class data duplicated as literals at every call site. Now: single
+  // source of truth.
+  const cdata = CHARACTERS[cls];
+  if (!cdata) throw new Error('mkPlayer: unknown class ' + cls);
   const allBricks = {red:0,blue:0,green:0,white:0,gray:0,purple:0,yellow:0,orange:0,black:0};
-  const startBricks = {...allBricks,...bricks};
+  const startBricks = {...allBricks, ...cdata.startingKit};
   return {
-    cls, icon, color,
-    name: {breaker:'Breaker',formwright:'Formwright',snapstep:'Snapstep',blocksmith:'Blocksmith',fixer:'Fixer',wild_one:'Wild One'}[cls]||cls,
-    hp, hpMax:hp, armor:0, gold:3,
-    space:0, alive:true,
+    cls,
+    icon: cdata.icon,
+    color: cdata.color,
+    name: cdata.name,
+    hp: cdata.hp,
+    hpMax: cdata.hp,
+    armor: 0, gold: 3,
+    space: 0, alive: true,
     bricks: startBricks,            // owned inventory (ceiling)
     bricksCharged: {...startBricks},// active charges (<= bricks[c]). Spent on action; refreshed at rumble entry + zone gate crossing. See DESIGN_S012_PROPOSAL_V2 §1.1.
     lastDropped: {},                // per-color last-spend timestamp (§1.2 pulse timing). Map color → ms since epoch.
@@ -1128,8 +1134,10 @@ wss.on('connection', (ws, req) => {
       const { cls, name } = P;
       if (G.players[cls]) {
         G.players[cls].playerName = (name||'').trim().slice(0,24);
-        const clsNames = {breaker:'Breaker',formwright:'Formwright',snapstep:'Snapstep',blocksmith:'Blocksmith',fixer:'Fixer',wild_one:'Wild One'};
-        log(`${clsNames[cls]||cls} registered as "${G.players[cls].playerName}"`, 'connect');
+        // v0.16.41: read class display name from CHARACTERS canonical data
+        // (was duplicate name map literal).
+        const displayName = (CHARACTERS[cls] && CHARACTERS[cls].name) || cls;
+        log(`${displayName} registered as "${G.players[cls].playerName}"`, 'connect');
       }
     }
 

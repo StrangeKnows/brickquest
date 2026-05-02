@@ -5411,6 +5411,100 @@ push #3 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.41 — UNITY audit Tier 2: strip remaining class-data literals from server
+
+> "audit grep patterns, lets lock this in moving forward. no
+> hardcoded moments, only elegant flow"
+
+After v0.16.40 caught the starting-kit literals, ran a comprehensive
+audit for all hardcoded class-data patterns. Found three tiers:
+
+**Tier 1 — Class-name checks (`cls === 'X'`, 36 matches):**
+- rumble.js:1280-1336 — armor pip rendering switch (UI only, acceptable)
+- server.js:1170-1486 — event identity flags (`isFormwright`, `isFixer`, etc).
+  Tagging events with class for downstream routing — pattern could be
+  unified to `eventMeta.cls = cls` but each tag is a one-line check.
+  Acceptable for now.
+- server.js:1708-2256 — local class-id vars for branch logic (genuine
+  per-class behavior). Some candidates for migration to data fields,
+  noted in parking lot.
+- players-core.js:3402-7866 — UI gating per class (Snapstep scout,
+  Fixer cleanse, etc). Display-layer affordances. Acceptable.
+
+**Tier 2 — Class-data object literals (real violations, fixed):**
+
+This is what v0.16.40 partially caught. Comprehensive sweep here:
+
+- `mkPlayer` had 5-arg signature with `(cls, icon, color, hp, bricks)`.
+  All four trailing args were class data already in CHARACTERS.
+  Stripped to `mkPlayer(cls)` reading everything from
+  `CHARACTERS[cls].{icon,color,hp,name,startingKit}`.
+- Class name map `{breaker:'Breaker', formwright:'Formwright', ...}`
+  duplicated TWICE: server.js:109 and server.js:1131. Both replaced
+  with `CHARACTERS[cls].name` reads. Pure duplication eliminated.
+
+**Tier 3 — Brick color hex hardcoding (91 instances across files):**
+Parking-lot project — large enough to deserve dedicated push. Pattern:
+`'#D01012'`, `'#006DB7'`, `'#AAAAAA'` etc scattered through render
+sites. Should read from BRICK_COLORS table that already exists.
+Tracked in design parking lot for future sweep.
+
+**Memory rule added (rule #27):** "BrickQuest UNITY audit grep
+patterns" — codifies the three patterns to grep for, when to flag
+each, and which sessions caught which. Future audits mandatory
+before feature pushes.
+
+---
+
+**Files changed:** `server.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, rumble.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh + restart server.
+2. **Class display data:** all 6 classes show correct icon, color, HP,
+   name in dashboard. BS shows 🔧, BK shows ⚔️, etc.
+3. **Class HP correct:** BK 14, BS 12, WO 10, SS 9, Fixer 8, FW 6.
+4. **Starting kit:** all kits correct per characters.js startingKit.
+5. **Player name registration:** "X registered as Y" log message
+   uses correct display name.
+6. **No regressions** — gameplay otherwise unchanged.
+
+---
+
+**Risk surfaces:**
+
+- mkPlayer signature changed. If anything else calls mkPlayer
+  with old args, it would silently fail (cls becomes undefined).
+  Verified: only one caller (line 90-95). Safe.
+- Server requires restart (signature change in player init).
+
+---
+
+**Standards audit (rule #17 — push #60 in S015 continuation,
+push #4 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (server.js only)
+- Rule #11 (data/runtime/UI): UNITY restored. Server reads zero
+  class data as literals — all from CHARACTERS canonical source.
+- Rule #14 (UNITY): Tier 2 class-data leaks fully closed in
+  server.js. Class display data (icon, color, name), gameplay
+  data (HP, startingKit), all single-source.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: one source for all class data. Adding a 7th class =
+    add one entry to CHARACTERS, ZERO server changes.
+  - ELEGANCE: mkPlayer became simpler (1 arg vs 5).
+  - EFFICIENCY: removed ~20 bytes of duplicate string literals.
+- Rule #19 (intuition): held — Ross's directive was clear ("no
+  hardcoded moments, only elegant flow"). Audited comprehensively,
+  fixed Tier 2 in scope, parked Tier 3 with explicit rationale.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
