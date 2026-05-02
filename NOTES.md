@@ -4662,6 +4662,99 @@ push #2 in S016 unification arc):**
 
 ---
 
+### v0.16.35 — Passive visual: 1s delay so cinematic has settling beat
+
+> "may need a 1s delay before firing 1, or maybe better to have
+> duration 1s longer at rumble start"
+
+After v0.16.34 playtest, Ross noted the passive banner fires
+immediately at rumble start when the player hasn't settled.
+Two-option call: delay the visual vs longer duration. Locked
+delay (Option A) for two reasons:
+
+1. **Cleaner narrative beat:** rumble start → settling moment →
+   "OH, here's my passive." Like a hero shot after the establishing
+   shot. The player has visual context for what they're seeing.
+
+2. **Duration option had infrastructure cost:** `spawnCritBanner` is
+   shared infrastructure used for crit firings during combat. Bumping
+   the duration globally would lengthen ALL crit banners (wrong).
+   Custom-per-call duration would require adding a parameter the
+   other callers don't need. Delay sidesteps both.
+
+**Implementation:** `setTimeout(visual, 1000)` inside applyRumblePassive.
+Mechanic effects (BS armor, SS invuln, BK first-hit flag, etc.)
+apply IMMEDIATELY at rumble start. Only the visual cinematic is
+deferred. Edge case handled: if player dies in the 1s window, the
+deferred visual checks `!player || player.hp <= 0` and skips the
+banner + flourish.
+
+Same approach applies whether the passive is firstHitMod (BK),
+invulnMs (SS), armorBonus (BS), hpOverheal (Fixer), or
+firstEnemyDebuff (WO). All five wait 1s for the banner regardless
+of what the passive does.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Each class entering rumble:** rumble starts immediately with
+   passive effect active, but banner + flourish appear 1 second
+   later. Player has time to register the rumble before the reveal.
+3. **BK:** first hit still +50% from t=0. Banner fires at t=1s.
+4. **SS:** invuln window is 3s from t=0 (so 2 more seconds after
+   banner appears at t=1). Damage shows "EVADED" during entire window.
+5. **BS:** +1 armor pip at t=0. Banner at t=1.
+6. **Fixer:** hp = hpMax+1 at t=0. Banner at t=1.
+7. **WO:** first enemy gets poison stack at post-spawn (immediate).
+   Player banner at t=1, "BLIGHT MARK" on enemy can be at any time.
+8. **FW:** no banner ever (rumblePassive null). Unchanged.
+9. **Edge case:** if you can die in the first second somehow (taking
+   damage during a non-invuln passive), banner skips gracefully.
+
+---
+
+**Cross-machine note (housekeeping):**
+
+The v0.16.34 push diff showed "11,932 insertions, 11,673 deletions"
+in 5 files. The actual code change was small (one new dispatcher
+function + 5 class data fields + 3 consumer renames). Inflated diff
+is CRLF↔LF round-trip from cross-machine workflow (Linux dev
+container edits with LF, Windows commits added CRLF, then Mac sync
+saw all lines as changed because LF mismatch).
+
+**Cosmetic only — code is correct, push succeeded, GitHub diff is
+just noisy.** Worth a one-time housekeeping push to add
+`.gitattributes` with `* text=auto eol=lf` so all files normalize
+to LF on commit regardless of OS. Future commits would have small
+diffs again. Park as a separate cleanup; not blocking work.
+
+---
+
+**Standards audit (rule #17 — push #54 in S015 continuation,
+push #3 in S016 unification arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A this push (rumble.js only)
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: timing change applies to all 5 passives uniformly via
+    one setTimeout. No per-class delay variation.
+  - ELEGANCE: 5-line change inside an existing function, not a new
+    layer. Edge case (death-during-delay) handled in the deferred
+    callback, not in the call site.
+  - EFFICIENCY: one setTimeout, no new state, no new abstractions.
+- Rule #19 (intuition): held — chose delay over longer duration
+  because the latter had infrastructure cost (shared crit banner).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

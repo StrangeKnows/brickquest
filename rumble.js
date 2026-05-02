@@ -6598,12 +6598,20 @@ function applyRumblePassive() {
   // Banner is the bigger presence; flourish reinforces it as a moment
   // worth noticing. Same visual vocabulary as crit firings so the player
   // already reads it as "something just happened."
-  if (typeof spawnCritBanner === 'function' && p.label) {
-    spawnCritBanner(player.x, player.y - 50, p.label, p.color || '#FFFFFF');
-  }
-  if (typeof spawnCritFlourish === 'function') {
-    spawnCritFlourish(player.x, player.y, p.color || '#FFFFFF', 18);
-  }
+  // v0.16.35: 1s delay before visual fires. Mechanic effects above
+  // apply immediately (SS invuln starts at t=0, BK flag set at t=0,
+  // etc.) but the cinematic plays after a settling beat so the player
+  // has context for what they're seeing. Skip if player died in the
+  // delay window.
+  setTimeout(function() {
+    if (!player || player.hp <= 0) return;
+    if (typeof spawnCritBanner === 'function' && p.label) {
+      spawnCritBanner(player.x, player.y - 50, p.label, p.color || '#FFFFFF');
+    }
+    if (typeof spawnCritFlourish === 'function') {
+      spawnCritFlourish(player.x, player.y, p.color || '#FFFFFF', 18);
+    }
+  }, 1000);
 }
 
 // v0.16.34 — Deferred passive application for firstEnemyDebuff kind.
