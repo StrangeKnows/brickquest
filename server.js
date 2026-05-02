@@ -581,10 +581,11 @@ const httpServer = http.createServer((req, res) => {
 // ── RUMBLE SESSION (v0.16.56) ─────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════
 // Multiplayer rumble sandbox foundation. Independent from G.rumbleBattle
-// (which is the single-player production flow). Sessions live in
-// G.rumbleSessions, keyed by session ID. v0.16.56 ships networking
-// foundation only — players see each other moving, but entities still
-// run client-authoritatively (no entity sync until v0.16.57).
+// (which is the single-player production flow). Sessions live in module-
+// scope `rumbleSessions` (NOT on G — ephemeral, never serialized).
+// v0.16.56 ships networking foundation only — players see each other
+// moving, but entities still run client-authoritatively (no entity sync
+// until v0.16.57).
 //
 // Architecture per MULTIPLAYER_PROPOSAL.md:
 //   Server-authoritative for player state (HP, position, bricks)
@@ -834,8 +835,8 @@ wss.on('connection', (ws, req) => {
     // ═══════════════════════════════════════════════════════════════
     // Multiplayer rumble sandbox messages. Self-contained — return
     // early so they don't fall through to board-game state mutations.
-    // Session state lives in G.rumbleSessions, lifecycle independent
-    // from G.rumbleBattle.
+    // Session state lives in module-scope `rumbleSessions`, lifecycle
+    // independent from G.rumbleBattle.
     // ═══════════════════════════════════════════════════════════════
 
     if (type === 'rumble_session_join') {
@@ -891,7 +892,7 @@ wss.on('connection', (ws, req) => {
       // position but server validates HP changes.
       const reg = rumbleClientSession.get(ws);
       if (!reg) return;  // unregistered socket — ignore
-      const sess = G.rumbleSessions[reg.sessionId];
+      const sess = rumbleSessions[reg.sessionId];
       if (!sess) return;
       const p = sess.players[reg.playerId];
       if (!p) return;

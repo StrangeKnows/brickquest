@@ -7401,6 +7401,240 @@ push #7 in S016 SS red arc):**
 
 ---
 
+### v0.16.56 — Multiplayer foundation: websocket plumbing + ally rendering
+
+> "lets get a multiplayer function ready for waves on rumble test,
+> it is time!!!"
+>
+> Locks: server-authoritative, co-op only, 6 players, no friendly
+> fire, walls=caster-only-regen, death=spectate-respawn-at-wave,
+> sandbox first then production. Two devices on local network.
+
+**S016 NEW ARC START.** SS red identity arc closed at v0.16.55. This
+push opens the multiplayer rumble arc. Per
+`MULTIPLAYER_PROPOSAL.md` (delivered prior turn): five-push plan,
+v0.16.56 = networking foundation only.
+
+**What this push delivers:**
+
+1. **Server-side (server.js):**
+   - New module-scope state: `rumbleSessions` dict (keyed by session
+     ID), `rumbleClientSession` reverse-lookup map (ws → reg). NOT
+     on G — sessions are ephemeral, never serialized to save file
+     or broadcast in board-state messages.
+   - Three new message handlers: `rumble_session_join`,
+     `rumble_session_leave`, `rumble_player_state`. Self-contained
+     block at top of message handler, returns early so they don't
+     fall through to board-game logic.
+   - Single 20 Hz broadcast loop (`setInterval` at module scope)
+     that broadcasts `rumble_session_state` to clients in each
+     active session.
+   - Stale-player cleanup at 5s timeout — catches dead sockets
+     that didn't trigger `close`.
+   - `ws.on('close')` cleanup handler removes player from any
+     session they were in.
+   - Constants: `RUMBLE_TICK_HZ = 20`, `RUMBLE_TICK_MS = 50`,
+     `RUMBLE_PLAYER_TIMEOUT_MS = 5000`.
+
+2. **Client-side (rumble_test.html):**
+   - New COOP mode card (4th picker option, 🤝 icon).
+   - New self-contained block: `mpConnect`, `mpStartPushLoop`,
+     `mpDisconnect`. Opens websocket to same host:port as
+     players.html, joins session 'sandbox', pushes player state
+     at 20 Hz, receives session state and forwards ally array
+     to `Rumble.setAllyState`.
+   - `startTestRumble` extended to detect coop mode and call
+     `mpConnect` after `Rumble.start`.
+   - `setMode` extended to handle coop card active toggle.
+   - `beforeunload` listener disconnects cleanly on tab close.
+
+3. **Client-side (rumble.js):**
+   - New top-level state: `_allyState = []` array.
+   - New function: `drawAllies()` — renders each ally as
+     translucent circle (alpha 0.55 alive, 0.2 spectating) with
+     class color/icon from CHARACTERS. HP bar above.
+   - `draw()` extended to call `drawAllies()` BEFORE local player
+     so local player stays on top.
+   - New API: `Rumble.setAllyState(arr)` — host page passes
+     ally state, rumble draws them.
+   - `_computeState()` extended with `playerX`, `playerY` so coop
+     client can read position via getState (was missing).
+
+**What this push does NOT do:**
+
+- Entity sync — each client still computes own goblins. Allies
+  visible but enemies don't match across clients.
+- Damage authority — purely client-side still.
+- Wave authority — `_waveState` still local.
+- Friendly fire / wall ownership — design landing in v0.16.59 polish.
+- Death/respawn lifecycle — design landing in v0.16.58.
+
+These are deliberately deferred to keep this push small and testable
+in isolation. Foundation goal: "two browsers connect, both see each
+other moving in same arena." That's it.
+
+---
+
+**Files changed:** `server.js`, `rumble.js`, `rumble_test.html`,
+`NOTES.md`. Plus `MULTIPLAYER_PROPOSAL.md` (committed prior turn).
+
+UNTOUCHED: characters.js, players-core.js, players.html,
+test_players.html, dm_screen.html, boardFx, save.sh.
+
+---
+
+**Test focus:**
+
+1. **Restart server** — new module-scope state + setInterval need
+   fresh node process.
+2. **Open two devices/tabs on local network** — both navigate to
+   `http://<server-ip>:8080/rumble_test.html`.
+3. **Both pick COOP mode** in picker.
+4. **Both pick a class** (different classes recommended for visual
+   distinction).
+5. **Both should land in waves arena.** Look for:
+   - Other player visible as translucent circle with their class
+     color/icon.
+   - HP bar above ally tracks their health (drops when goblin hits).
+   - When ally moves, you see them move in real-time (~50ms latency).
+   - Goblins on each screen are DIFFERENT (no entity sync yet) — this
+     is expected for v0.16.56.
+6. **Console verification:**
+   - `[MP] Joined session sandbox — playerCount N`
+   - No `[MP] Server error` messages.
+7. **Disconnect test** — close one tab, the other should see ally
+   disappear within 5s (stale-timeout cleanup).
+
+If 2-device test works, foundation is solid → v0.16.57 entity
+authority is next. If anything weird → console output, paste here.
+
+---
+
+**Risk surfaces:**
+
+- `broadcastState()` (board-game state) sends to ALL connected
+  clients including rumble_session ones. Wasteful but harmless —
+  the rumble client ignores `type:'state'` messages. Worth gating
+  in a polish push, not now.
+- Connection params: rumble client uses `?role=rumble_session`.
+  Server's `clients.set(ws, {role})` registers this but
+  `G.players[role]` is undefined → no log emitted. Connection
+  works, but the connect/disconnect log is silent for rumble
+  clients. By design — these aren't board game players.
+- Stale-timeout (5s) means a player with bad network might appear
+  to pop in/out. Acceptable for sandbox; tighter heartbeat could
+  come later.
+- Player HP/bricks are CLIENT-AUTHORITATIVE in v0.16.56 (server
+  trusts whatever client sends). When v0.16.57 ships entity
+  authority, damage events route through server and HP becomes
+  server-owned. v0.16.56 is pre-validation foundation only.
+
+---
+
+**Standards audit (rule #17 — push #1 of S016 multiplayer arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html / test_players.html
+  untouched. rumble_test.html is single-purpose; no pair to maintain.
+- Rule #14 (UNITY): single `rumbleSessions` map, single broadcast
+  function, single message handler block. Server is sole source
+  of truth for session membership; clients are render-only for
+  ally state.
+- Rule #11 (data/runtime/UI):
+  - Data: CHARACTERS table drives ally render colors/icons (no
+    hardcoded class palette in drawAllies).
+  - Runtime: server.js owns session lifecycle; rumble.js owns
+    render.
+  - UI: rumble_test.html owns picker + connection bridge.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: ally render mirrors local-player render shape (circle
+    + icon + HP bar) so visual vocabulary stays consistent.
+  - ELEGANCE: networking is ~150 lines client + ~120 lines server.
+    No new files for the foundation.
+  - EFFICIENCY: 20 Hz broadcast keeps bandwidth modest. Per-ally
+    draw is O(1) per ally, max 6 allies = trivial cost.
+- Rule #28 (unify-at-choke-point): rumbleClientSession Map is
+  THE single source of truth for "which ws is in which session" —
+  used by broadcast, leave, and disconnect cleanup. No duplication.
+- Rule #15 (handoff hygiene): new arc kicked off with full
+  pre-code architecture proposal (`MULTIPLAYER_PROPOSAL.md`).
+  Locks captured before any code landed.
+
+---
+
+### v0.16.57 — HOTFIX: server crash on rumble_player_state
+
+> Terminal: `[CRASH] Uncaught exception: Cannot read properties of
+> undefined (reading 'sandbox')`
+>
+> Client: connected fine, joined session, then immediate disconnect.
+> Server entered emergency-save state.
+
+**Single-line bug from v0.16.56 refactor.** When pulling
+`rumbleSessions` out of G to module scope (so it wouldn't pollute
+the save file), I missed updating ONE reference inside the
+`rumble_player_state` handler. Server crashed on the first state
+push (50ms after successful join), which caused the connection
+interruption the client saw.
+
+**The fix:** changed `G.rumbleSessions[reg.sessionId]` →
+`rumbleSessions[reg.sessionId]` at line 894. Plus cleanup of two
+stale comments that still referenced the old `G.rumbleSessions`
+location.
+
+**Why this slipped past parse-check:** `G.rumbleSessions` is valid
+JavaScript — `G` is defined, accessing an undefined property
+returns `undefined`. The bug only triggers at runtime when
+`undefined['sandbox']` is read. Parser can't catch this.
+
+**Why it didn't fire on join:** the join handler used
+`_ensureRumbleSession(sessionId)` which correctly references
+module-scope `rumbleSessions`. Only the state-push handler had
+the stale reference. Client successfully joined, then crashed
+on first state tick.
+
+**Lesson:** when refactoring a name across many sites, grep
+EVERY reference, not just the obvious ones. I caught the
+function-internal references but missed the message-handler
+reference (which lived ~250 lines away from the function
+definitions).
+
+---
+
+**Files changed:** `server.js` (1 fix + 2 comment cleanups), `NOTES.md`.
+
+UNTOUCHED: rumble.js, rumble_test.html (client side was correct).
+
+---
+
+**Test focus:**
+
+1. **Restart server.** Verify clean startup banner.
+2. **Two devices into COOP mode** — same as v0.16.56 test.
+3. **Server terminal should NOT show `[CRASH]`** when state pushes
+   start arriving.
+4. **Both clients should see each other** as ghost-circles with
+   class color/icon, real-time movement.
+5. **HP bar above ally tracks their actual HP.**
+6. **Disconnect test** — close one tab, ally disappears within 5s.
+
+If clean → v0.16.58 entity authority (or whatever next push you call).
+If still issues → terminal output again.
+
+---
+
+**Standards audit (rule #17 — hotfix push):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #20 (grep-for-symptoms): SHOULD have caught this in v0.16.56
+  by grepping `G\\.rumbleSessions` after the refactor. I greped for
+  forward references but not backward ones. Lesson logged.
+- Rule #28 (unify-at-choke-point): rumbleSessions IS now a single
+  source. The bug was a residue of a partial refactor; fix
+  completes the unification.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
