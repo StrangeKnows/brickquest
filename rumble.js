@@ -3606,10 +3606,16 @@ function updateEnemyProjectiles(dt) {
         if (wdist < w.r - p.r) continue;
         // Cone check (always — arc walls only block in their wedge).
         if (!_pointInArc(w, p.x, p.y)) continue;
-        // Collision: damage wall, kill projectile.
-        w.hp = Math.max(0, w.hp - 1);
-        w.flashTimer = 0.15;
-        blockedByWall = true;
+        // v0.16.49 — Damage only from outside the arc. Projectiles
+        // crossing through the arc segment from inside (rare; e.g.
+        // BS arsenal effects fired outward from BS position) do not
+        // damage the wall. Mirrors player + entity rules.
+        var fromOutside = (wdist >= w.r);
+        if (fromOutside) {
+          w.hp = Math.max(0, w.hp - 1);
+          w.flashTimer = 0.15;
+          blockedByWall = true;
+        }
         break;
       }
       if (blockedByWall) { p.done = true; return; }
@@ -9157,29 +9163,44 @@ function updateGrayWalls(dt) {
       var pdx = player.x - w.x, pdy = player.y - w.y;
       var pdist = Math.sqrt(pdx*pdx+pdy*pdy) || 1;
       if (w.isArc) {
-        // v0.16.46 — Arc wall collision for player (the OWNER, BS).
-        // BS starts at the arc center. The arc segment is solid: BS
-        // can't push outward through the cone direction. If BS is
-        // about to cross the arc's inner edge AND is in the cone,
-        // clamp them inside. The open side of the arc (outside cone)
-        // is freely passable in either direction.
-        var innerEdge = w.r - player.r;
-        if (innerEdge > 0 && pdist > innerEdge && _pointInArc(w, player.x, player.y)) {
-          // Push BS back inside along player→center vector
-          player.x = w.x + (pdx/pdist) * innerEdge;
-          player.y = w.y + (pdy/pdist) * innerEdge;
-          var _wb = getRumbleBounds();
-          player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
-          player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
-          w._playerCooldown = (w._playerCooldown || 0) - dt;
-          if (w._playerCooldown <= 0) {
-            w._playerCooldown = 0.6;
-            w.hp = Math.max(0, w.hp - 1);
-            w.flashTimer = 0.15;
+        // v0.16.49 — Arc wall collision for player (the OWNER, BS).
+        // BS starts at the arc center. Two fixes vs v0.16.46:
+        //   1. Collision band is now a NARROW ring around the arc edge
+        //      (within player.r of w.r), not "anywhere along cone direction
+        //      and farther than innerEdge." The old version pulled BS to
+        //      a point near the arc's center even when BS was far away
+        //      from the arc, as long as their angle-from-center was within
+        //      the cone.
+        //   2. BS bumping arc from INSIDE the arc radius gets a soft-block
+        //      (clamped to inner edge) but does NOT damage wall HP. Only
+        //      enemies hitting the arc from OUTSIDE damage it. The owner
+        //      shouldn't break their own wall by leaning on it.
+        // Open side of arc (outside cone) is fully passable.
+        var inCone = _pointInArc(w, player.x, player.y);
+        if (inCone) {
+          var innerEdgeArc = w.r - player.r;
+          var outerEdgeArc = w.r + player.r;
+          if (pdist >= innerEdgeArc && pdist <= outerEdgeArc) {
+            // BS is touching the arc segment. Determine side by checking
+            // whether they're pushing outward (was inside, now at edge)
+            // or were ever-outside (e.g. teleport/warp). Default treatment:
+            // soft-block. Use sign of (pdist - w.r) to pick which edge to
+            // clamp to. If BS center is inside w.r → clamp to innerEdge
+            // (no damage). If outside → clamp to outerEdge (no damage
+            // from owner; this rarely happens for BS but is symmetric).
+            var clampR = (pdist < w.r) ? innerEdgeArc : outerEdgeArc;
+            if (clampR > 0) {
+              player.x = w.x + (pdx/pdist) * clampR;
+              player.y = w.y + (pdy/pdist) * clampR;
+              var _wb = getRumbleBounds();
+              player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
+              player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
+            }
+            // No HP damage — owner doesn't break their own arc by leaning.
           }
-        } else {
-          w._playerCooldown = 0;
         }
+        // Else (outside cone, or far from arc edge): freely passable.
+        w._playerCooldown = 0;
       } else {
         // Standard ring wall — player blocked from outside.
         var pEdge = w.r + player.r;
@@ -9215,19 +9236,31 @@ function updateGrayWalls(dt) {
       var dist = Math.sqrt(dx*dx+dy*dy) || 1;
       var isContained = w.containedIds && w.containedIds.indexOf(gi) >= 0;
 
-      // v0.16.45 — Arc wall collision branch. Arc walls only block in
-      // their wedge; entities outside the cone pass freely. Same HP-tick
-      // mechanics as outer-bump on a ring wall (2.0s cooldown).
+      // v0.16.49 — Arc wall collision branch (entities). Two changes
+      // vs v0.16.45:
+      //   1. Narrow collision band (around w.r ± g.r) instead of
+      //      "anywhere inside outer radius." Prevents teleporting
+      //      entities to outer edge when they happen to be inside
+      //      the arc radius for any other reason.
+      //   2. Damage to wall HP ONLY fires when entity is OUTSIDE the
+      //      arc (dist > w.r) approaching inward. Inside-arc soft-block
+      //      mirrors player behavior — only outside hits damage.
       if (w.isArc) {
-        var outerEdgeArc = w.r + g.r;
-        if (dist < outerEdgeArc && dist > 0) {
-          // Entity is inside arc radius — check if within arc cone.
-          // We test the entity's CENTER against the wedge angle. Close
-          // enough for gameplay; entities are small relative to the cone.
-          if (_pointInArc(w, g.x, g.y)) {
-            // Push entity outward to wall edge (outside the wall)
-            g.x = w.x + (dx/dist) * outerEdgeArc;
-            g.y = w.y + (dy/dist) * outerEdgeArc;
+        var innerBand = w.r - g.r;
+        var outerBand = w.r + g.r;
+        if (dist >= innerBand && dist <= outerBand && _pointInArc(w, g.x, g.y)) {
+          // Entity is touching the arc segment. Pick clamp side by
+          // whether they're outside or inside the arc radius.
+          var entClampR = (dist >= w.r) ? outerBand : Math.max(0, innerBand);
+          if (entClampR > 0) {
+            g.x = w.x + (dx/dist) * entClampR;
+            g.y = w.y + (dy/dist) * entClampR;
+          }
+          // Only damage wall when hit comes from outside the arc.
+          // Inside hits are soft-block with no HP loss (matching the
+          // player rule — leaning on the arc from inside doesn't
+          // destroy it).
+          if (dist >= w.r) {
             w._entityCooldowns[gi] = (w._entityCooldowns[gi]||0) - dt;
             if (w._entityCooldowns[gi] <= 0) {
               w._entityCooldowns[gi] = 2.0;
@@ -9235,10 +9268,10 @@ function updateGrayWalls(dt) {
               w.flashTimer = 0.15;
             }
           } else {
-            // Inside radius but outside cone — pass freely.
             w._entityCooldowns[gi] = 0;
           }
         } else {
+          // Outside band entirely OR outside cone — pass freely.
           w._entityCooldowns[gi] = 0;
         }
         return; // arc-wall branch done; skip ring-wall logic below

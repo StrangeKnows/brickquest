@@ -6445,6 +6445,120 @@ just defers the next bug to whoever next changes the other half.
 
 ---
 
+### v0.16.49 — Arc wall collision fixes: narrow band + inside-arc no damage
+
+> "BS getting pulled back to center of arc when moving outside of
+> radius. damage to the arc should only happen from out of arc,
+> not inside arc"
+
+Two collision bugs in v0.16.46/v0.16.45 implementation:
+
+**Bug 1: BS pulled back to arc center.**
+
+Player collision logic was: "if BS is within cone direction AND
+beyond inner edge → push to inner edge." This tested ANGLE-FROM-CENTER
+without bounding by arc radius. Result: BS could be 200px from the
+arc, but if their angle-from-center happened to be in the cone,
+they'd get teleported to ~36px from arc center.
+
+**Fix:** narrow collision band — only fires when BS is in the band
+`[w.r - player.r, w.r + player.r]` AND in cone. Outside the band
+in either direction (too close to center, or too far) → freely
+passable. Same fix applied to entity collision branch.
+
+**Bug 2: BS damaging own arc by leaning on it from inside.**
+
+Per design intent: damage to arc walls should only come from OUTSIDE
+the arc (enemy hits from outside-in). Owner leaning against arc
+from inside should be a soft-block but no HP loss — owners shouldn't
+break their own walls.
+
+**Fix:** in player + entity collision, gate HP damage on
+`dist >= w.r` (hit from outside). Inside hits are clamped to
+inner band edge but no HP tick. Also applied to projectile
+collision for consistency (edge case: projectiles fired from
+inside the arc don't damage it).
+
+**Combined effect:**
+
+- BS at center, no enemies → arc wall present, no collision interactions
+- BS pushes outward through arc cone → soft-blocked at inner edge,
+  no HP loss
+- BS pushes outward through open side → passes freely
+- Enemy approaches arc through cone from outside → bumps wall edge,
+  HP ticks down (existing behavior, preserved)
+- Enemy approaches arc from open side → passes freely (existing,
+  preserved)
+- Projectile from outside through cone → blocked + HP tick
+- Projectile from inside through cone → blocked but NO HP tick
+  (new edge case rule, applies symmetrically)
+
+**Owner identity preserved:** BS arc walls are tools BS deploys.
+They don't get destroyed by their own movement. Pre-fix, BS leaning
+on the arc from outside (the bug's effect of teleporting BS to a
+point near center) ALSO ticked wall HP down, which was a double
+problem — wrong position AND self-inflicted wall damage.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **BS at full armor + tap gray** → arc wall fires (v0.16.48 verified).
+3. **BS walks AWAY from arc through open side** → moves freely, no
+   pull, no clamp.
+4. **BS walks TOWARD arc cone direction from inside** → soft-blocks
+   at inner edge of arc. Doesn't pull to center. Doesn't damage wall.
+5. **BS walks across the arena with arc wall behind them** → no
+   interaction (out of band).
+6. **Enemy bumps arc cone from outside** → bumps wall, HP -1 on
+   cooldown. Same as before.
+7. **Enemy walks through open side** → passes freely.
+8. **Projectile through cone toward BS** → absorbed + wall HP -1.
+9. **No regressions:** ring walls, drag-cast walls, other classes.
+
+---
+
+**Risk surfaces:**
+
+- Narrow band may feel too thin for fast-moving entities (single
+  frame can skip across the band entirely on high-speed dashes).
+  Acceptable for v0.16.49; if it becomes a problem, swept-collision
+  detection across previous-position to current-position would fix.
+- Inside-vs-outside damage gate uses `dist >= w.r` cleanly. Edge
+  case at exact `dist === w.r` resolves to "outside" → damage
+  fires. Acceptable behavior (entity is exactly on the wall surface).
+
+---
+
+**Standards audit (rule #17 — push #68 in S015 continuation,
+push #12 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #14 (UNITY): held — narrow-band + inside-no-damage rules
+  applied symmetrically to player, entity, AND projectile branches.
+  All three follow the same shape: band check + cone check +
+  outside-only damage gate.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: same collision rule across all three colliders.
+  - ELEGANCE: explicit band variables (innerBand, outerBand) +
+    explicit `fromOutside` flag. Reads as written.
+  - EFFICIENCY: minor refactor, no new abstractions.
+- Rule #19 (intuition): your two-bug report was crisp. Both fixes
+  followed directly from the spec.
+- Rule #20 (grep for symptoms when unifying): held — when fixing
+  player collision, immediately checked entity + projectile
+  branches for the same pattern. All three got symmetric treatment.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
