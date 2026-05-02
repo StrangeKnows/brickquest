@@ -466,6 +466,13 @@ var rumble = {};
 var timerLeft = RUMBLE_DURATION;
 var timerInterval = null;
 
+// ── Multiplayer allies (v0.16.56) ─────────────────────────
+// Populated by host page via Rumble.setAllyState(arr). Each ally:
+//   { id, cls, x, y, hp, hpMax, alive, spectating }
+// Rendered by drawAllies() before local player so local player
+// stays on top. Empty array = offline / no allies = no render.
+var _allyState = [];
+
 // Touch/drag state
 var dragActive = false;
 var dragTarget = null;
@@ -1059,6 +1066,73 @@ function update(dt) {
 // ═══════════════════════════════════════════════════
 // DRAW
 // ═══════════════════════════════════════════════════
+// ── Multiplayer ally render (v0.16.56) ────────────────────
+// Called from main draw() before local player render. Each ally is
+// drawn as a translucent circle with class color + class icon at
+// their reported (x, y). Ghost styling (alpha 0.55) reads as "team
+// member but not me." Spectating allies show with extra-low alpha.
+//
+// UNITY: reads class metadata from CHARACTERS table — same source
+// of truth as local player. Adding a new class = data change in
+// characters.js, NOT a render edit here.
+//
+// EFFICIENCY: bails early if no allies. The loop is per-ally, not
+// per-frame-per-class — six allies max means six draw calls.
+function drawAllies() {
+  if (!_allyState || _allyState.length === 0) return;
+  if (!ctx) return;
+  for (var ai = 0; ai < _allyState.length; ai++) {
+    var ally = _allyState[ai];
+    if (!ally || typeof ally.x !== 'number' || typeof ally.y !== 'number') continue;
+    var meta = (typeof CHARACTERS !== 'undefined' && CHARACTERS[ally.cls]) ? CHARACTERS[ally.cls] : null;
+    var color = (meta && meta.color) || '#888';
+    var icon = (meta && meta.icon) || '?';
+    var radius = (meta && meta.r) || 22;
+    // Spectating allies render ghosted further; alive allies at 0.55
+    var baseAlpha = ally.spectating ? 0.2 : 0.55;
+    ctx.save();
+    // Outer aura — same shape as local player but lower alpha
+    ctx.globalAlpha = baseAlpha * 0.6;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = color + '99';
+    ctx.beginPath();
+    ctx.arc(ally.x, ally.y, radius, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    // Inner circle
+    ctx.save();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(ally.x, ally.y, radius - 4, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    // Icon
+    ctx.save();
+    ctx.globalAlpha = baseAlpha + 0.3;
+    ctx.font = '16px serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(icon, ally.x, ally.y);
+    ctx.restore();
+    // HP bar — small bar above the ally so we can read team status
+    if (ally.hp != null && ally.hpMax) {
+      var barW = 28, barH = 4;
+      var barX = ally.x - barW / 2;
+      var barY = ally.y - radius - 10;
+      var pct = Math.max(0, Math.min(1, ally.hp / ally.hpMax));
+      ctx.save();
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = '#222';
+      ctx.fillRect(barX, barY, barW, barH);
+      ctx.fillStyle = pct > 0.5 ? '#3FB46C' : pct > 0.25 ? '#F5D000' : '#E24B4A';
+      ctx.fillRect(barX, barY, barW * pct, barH);
+      ctx.restore();
+    }
+  }
+}
+
 function draw() {
   ctx.clearRect(0, 0, W, H);
 
@@ -1176,6 +1250,12 @@ function draw() {
   drawShrapnel();   // v0.16.39 — Blocksmith reactive shrapnel
   drawPierceTrails();   // v0.16.51 — Snapstep slipstream trail (under entities)
   drawDroppedBricks();
+
+  // ── Allies (v0.16.56) ──
+  // Multiplayer allies render BEFORE local player so local player
+  // stays on top. Hosts pass ally state via Rumble.setAllyState().
+  // No-op when offline / no allies. See drawAllies() below.
+  drawAllies();
 
   // ── Player ──
   if (player) {
@@ -12299,6 +12379,11 @@ function _computeState() {
     playerCheese: player.cheese || 0,
     playerBricks: Object.assign({}, player.bricks),
     playerBrickMax: Object.assign({}, player.brickMax || {}),
+    // v0.16.56 — position included for multiplayer state push.
+    // No-op for single-player consumers; coop client reads these
+    // and forwards to server via rumble_player_state.
+    playerX:     player.x,
+    playerY:     player.y,
     enemyHp:     first ? first.hp : 0,
     enemyHpMax:  first ? first.hpMax : 0,
     elapsed:     _startedAt ? (performance.now() - _startedAt) / 1000 : 0,
@@ -12527,6 +12612,16 @@ window.Rumble = {
       halfMin: Math.min(b.w, b.h) / 2,
       halfDiag: Math.sqrt(b.w*b.w + b.h*b.h) / 2,
     };
+  },
+
+  // ── Multiplayer (v0.16.56) ──
+  // Host page (rumble_test.html or similar) passes an array of ally
+  // states. Each: { id, cls, x, y, hp, hpMax, alive, spectating }.
+  // No filtering — host should already have removed local player from
+  // the list. Empty array = solo mode (no render). Called frequently
+  // (~20 Hz) from a websocket message handler.
+  setAllyState: function(allies) {
+    _allyState = Array.isArray(allies) ? allies : [];
   },
 
   // ── DM tools ──

@@ -854,6 +854,11 @@
       <div class="mode-name">WAVES</div>
       <div class="mode-desc">Staged enemy reveals. Auto-cheese. How far can you push?</div>
     </div>
+    <div class="mode-card" id="mode-coop" onclick="setMode('coop')">
+      <div class="mode-icon">🤝</div>
+      <div class="mode-name">COOP</div>
+      <div class="mode-desc">Multiplayer waves. Up to 6 players on local network.</div>
+    </div>
   </div>
 
   <div class="section-head">CHOOSE CLASS</div>
@@ -981,6 +986,8 @@ function setMode(m) {
   document.getElementById('mode-sandbox').classList.toggle('active', m === 'sandbox');
   document.getElementById('mode-spec').classList.toggle('active', m === 'spec');
   document.getElementById('mode-waves').classList.toggle('active', m === 'waves');
+  var coopCard = document.getElementById('mode-coop');
+  if (coopCard) coopCard.classList.toggle('active', m === 'coop');
   renderClassGrid();
 }
 
@@ -2280,6 +2287,157 @@ Rumble.init({
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ── MULTIPLAYER COOP CLIENT (v0.16.56) ────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Sandbox multiplayer foundation. When mode === 'coop':
+//   1. Open websocket to server (same host:port as players.html)
+//   2. Send rumble_session_join with class + initial player state
+//   3. Loop at ~20 Hz: send rumble_player_state to server
+//   4. Receive rumble_session_state broadcasts → update _mpAllyState
+//   5. Pass ally state into Rumble.setAllyState() each tick
+//
+// v0.16.56 ships networking foundation only. Entities still run
+// client-authoritatively (each client computes own goblins). Allies
+// are visible (positions sync) but enemies don't sync yet — that
+// lands in v0.16.57.
+//
+// UNITY: single connection, single session, single state-push loop.
+// ELEGANCE: bails cleanly when not in coop mode (no overhead in
+// other modes). EFFICIENCY: 20 Hz push matches server tick.
+// ═══════════════════════════════════════════════════════════════════
+
+var _mpWS = null;
+var _mpSessionId = 'sandbox';   // single hardcoded session for v0.16.56
+var _mpPlayerId = null;          // assigned at join (random per-tab)
+var _mpPushInterval = null;      // setInterval handle for state push
+var _mpAllyState = [];           // last-received ally array (excludes self)
+
+function _mpGenPlayerId() {
+  return 'p_' + Math.random().toString(36).slice(2, 10);
+}
+
+function mpConnect(cls, m, onReady) {
+  // Already connected from a prior coop session? close + reopen so
+  // the join carries the current class.
+  if (_mpWS && _mpWS.readyState === 1) {
+    try { _mpWS.close(); } catch (e) {}
+    _mpWS = null;
+  }
+  var host = location.hostname;
+  var port = location.port || 8080;
+  _mpPlayerId = _mpGenPlayerId();
+  _mpWS = new WebSocket('ws://' + host + ':' + port + '?role=rumble_session');
+  _mpWS.onopen = function() {
+    // Send the join. Server records us in the session and starts
+    // broadcasting state to us at 20 Hz.
+    _mpWS.send(JSON.stringify({
+      type: 'rumble_session_join',
+      payload: {
+        sessionId: _mpSessionId,
+        playerId: _mpPlayerId,
+        cls: cls,
+        hp: m.hp,
+        hpMax: m.hp,
+        armor: 0,
+        bricks: Object.assign({}, m.kit),
+        x: 400, y: 300,
+      },
+    }));
+    if (typeof onReady === 'function') onReady();
+  };
+  _mpWS.onmessage = function(evt) {
+    var msg; try { msg = JSON.parse(evt.data); } catch (e) { return; }
+    if (msg.type === 'rumble_session_state') {
+      // Build ally array (everyone except local player) for Rumble render
+      var allies = [];
+      var pids = Object.keys(msg.players || {});
+      for (var i = 0; i < pids.length; i++) {
+        if (pids[i] === _mpPlayerId) continue;
+        var p = msg.players[pids[i]];
+        if (!p) continue;
+        allies.push({
+          id: pids[i],
+          cls: p.cls,
+          x: p.x, y: p.y,
+          hp: p.hp, hpMax: p.hpMax,
+          alive: p.alive !== false,
+          spectating: !!p.spectating,
+        });
+      }
+      _mpAllyState = allies;
+      if (typeof Rumble !== 'undefined' && Rumble.setAllyState) {
+        Rumble.setAllyState(allies);
+      }
+    } else if (msg.type === 'rumble_session_joined') {
+      console.log('[MP] Joined session', msg.sessionId, '— playerCount', msg.playerCount);
+    } else if (msg.type === 'rumble_error') {
+      console.warn('[MP] Server error:', msg.msg);
+    }
+  };
+  _mpWS.onclose = function() {
+    console.log('[MP] Connection closed');
+    if (_mpPushInterval) { clearInterval(_mpPushInterval); _mpPushInterval = null; }
+    _mpAllyState = [];
+    if (typeof Rumble !== 'undefined' && Rumble.setAllyState) {
+      Rumble.setAllyState([]);
+    }
+  };
+  _mpWS.onerror = function(e) {
+    console.warn('[MP] Socket error', e);
+  };
+}
+
+// Push local player state to server every ~50ms (20 Hz). Reads from
+// Rumble.getState() which returns the live in-game player snapshot.
+// getState shape is FLAT (playerX, playerY, playerHp, etc.) not
+// nested — see _computeState in rumble.js.
+function mpStartPushLoop() {
+  if (_mpPushInterval) clearInterval(_mpPushInterval);
+  _mpPushInterval = setInterval(function() {
+    if (!_mpWS || _mpWS.readyState !== 1) return;
+    var st = (typeof Rumble !== 'undefined' && Rumble.getState) ? Rumble.getState() : null;
+    if (!st || typeof st.playerX !== 'number') return;
+    _mpWS.send(JSON.stringify({
+      type: 'rumble_player_state',
+      payload: {
+        x: st.playerX,
+        y: st.playerY,
+        hp: st.playerHp,
+        hpMax: st.playerHpMax,
+        armor: st.playerArmor || 0,
+        bricks: st.playerBricks || {},
+        alive: st.playerHp > 0,
+        spectating: false,
+      },
+    }));
+  }, 50);
+}
+
+function mpDisconnect() {
+  if (_mpPushInterval) { clearInterval(_mpPushInterval); _mpPushInterval = null; }
+  if (_mpWS) {
+    try {
+      if (_mpWS.readyState === 1) {
+        _mpWS.send(JSON.stringify({ type: 'rumble_session_leave' }));
+      }
+      _mpWS.close();
+    } catch (e) {}
+    _mpWS = null;
+  }
+  _mpAllyState = [];
+  if (typeof Rumble !== 'undefined' && Rumble.setAllyState) {
+    Rumble.setAllyState([]);
+  }
+}
+
+// Cleanup if user closes tab mid-rumble
+window.addEventListener('beforeunload', function() { mpDisconnect(); });
+
+// ═══════════════════════════════════════════════════════════════════
+// ── END MULTIPLAYER COOP CLIENT ───────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
 function startTestRumble(cls) {
   document.getElementById('overlay').style.display = 'none';
   document.body.classList.remove('picker-active');
@@ -2287,19 +2445,27 @@ function startTestRumble(cls) {
 
   var m = SPEC_CLASSES[cls];
   var isWaves = currentMode === 'waves';
+  var isCoop = currentMode === 'coop';
+  // v0.16.56 — Coop mode runs the local rumble like a waves run
+  // (canonical kit, staged spawns, suppress respawn) but ALSO opens
+  // a websocket session so other clients can see this player. Each
+  // client still computes its own entities locally in v0.16.56;
+  // entity authority lands in v0.16.57.
+  var useCanonicalKit = currentMode === 'spec' || isWaves || isCoop;
+  var useStagedWaves = isWaves || isCoop;
   var startConfig = {
     cls: cls,
     hp: m.hp,
     hpMax: m.hp,
     armor: 0,
     mode: currentMode,
-    // Waves mode uses the canonical class starter kit (2 sig + 1 sec) — same
+    // Waves/coop modes use the canonical class starter kit (2 sig + 1 sec) — same
     // as spec mode. Tests class identity progression with the intended
     // baseline rather than muddying with random sandbox quantities.
-    bricks: (currentMode === 'spec' || isWaves) ? Object.assign({}, m.kit) : randomSandboxBricks(),
-    // In waves mode, start with 0 entities — wave 1 spawns immediately
+    bricks: useCanonicalKit ? Object.assign({}, m.kit) : randomSandboxBricks(),
+    // In waves/coop modes, start with 0 entities — wave 1 spawns immediately
     // after Rumble.start via spawnWave(1).
-    entityCount: isWaves ? 0 : currentEntityCount,
+    entityCount: useStagedWaves ? 0 : currentEntityCount,
     // Entity type — either a specific type name from ENTITY_REGISTRY or
     // the literal string 'random' which tells rumble.js to roll a fresh
     // type per spawn (initial + respawns). See _resolveEntityType in
@@ -2308,15 +2474,15 @@ function startTestRumble(cls) {
     // Per-color resistance overrides from the dialer UI. Applied to every
     // spawned entity. See rumble.js startup code.
     entityResistances: Object.assign({}, currentResistances),
-    // Waves mode bypasses the sandbox auto-respawn — the test page manages
+    // Waves/coop mode bypasses the sandbox auto-respawn — the test page manages
     // wave-to-wave spawns externally via Rumble.spawnEntity.
-    suppressRespawn: isWaves,
-    // Waves mode also disables the revive-stacks-loot-penalty so we can
+    suppressRespawn: useStagedWaves,
+    // Waves/coop mode also disables the revive-stacks-loot-penalty so we can
     // observe true drop rates uncorrupted by death history.
-    suppressLootPenalty: isWaves,
+    suppressLootPenalty: useStagedWaves,
     // Cheese applied on pickup (+1 hp max immediately) for waves stress test —
     // visible feedback per pickup, no inventory bookkeeping between waves.
-    cheeseAutoApply: isWaves,
+    cheeseAutoApply: useStagedWaves,
   };
   Rumble.start(startConfig);
 
@@ -2324,8 +2490,8 @@ function startTestRumble(cls) {
   var readout = document.getElementById('readout');
   readout.classList.toggle('hidden', currentMode !== 'spec');
 
-  // Initialize waves mode if selected
-  if (isWaves) {
+  // Initialize waves OR coop mode (both use staged wave spawns)
+  if (useStagedWaves) {
     _waveState.active = true;
     _waveState.currentWave = 1;
     _waveState.advancing = false;
@@ -2337,9 +2503,20 @@ function startTestRumble(cls) {
     _waveState.active = false;
     hideWaveHud();
   }
+
+  // v0.16.56 — Coop mode opens server connection AFTER Rumble.start,
+  // so when the websocket reports our player state for the first
+  // tick, Rumble.getState() already has a player to read. Push loop
+  // is a one-shot spin-up — runs until tab close or mode change.
+  if (isCoop) {
+    mpConnect(cls, m, function() {
+      mpStartPushLoop();
+    });
+  }
+
   // Debug icon + overload-audit panel are useful in every mode (sandbox,
-  // spec, waves) — gate-free so screenshots and tier-output checks can
-  // happen wherever the rumble is running.
+  // spec, waves, coop) — gate-free so screenshots and tier-output checks
+  // can happen wherever the rumble is running.
   startLiveDebug();
 }
 

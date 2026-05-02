@@ -577,6 +577,121 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ── RUMBLE SESSION (v0.16.56) ─────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Multiplayer rumble sandbox foundation. Independent from G.rumbleBattle
+// (which is the single-player production flow). Sessions live in
+// G.rumbleSessions, keyed by session ID. v0.16.56 ships networking
+// foundation only — players see each other moving, but entities still
+// run client-authoritatively (no entity sync until v0.16.57).
+//
+// Architecture per MULTIPLAYER_PROPOSAL.md:
+//   Server-authoritative for player state (HP, position, bricks)
+//   Server broadcasts at 20 Hz to each session's connected clients
+//   No entity state on server in this push (deferred to v0.16.57)
+//
+// UNITY: single broadcast function, single tick interval, single
+// session lookup. ELEGANCE: minimal state shape. EFFICIENCY: only
+// broadcasts to clients in the same session, not all connected.
+// ═══════════════════════════════════════════════════════════════════
+
+const RUMBLE_TICK_HZ = 20;
+const RUMBLE_TICK_MS = 1000 / RUMBLE_TICK_HZ;
+const RUMBLE_PLAYER_TIMEOUT_MS = 5000;  // drop player if no state update in 5s
+
+// Map from sessionId → session state. Multiple sessions allowed for
+// future matchmaking; v0.16.56 expects a single 'sandbox' session.
+// NOT stored on G — sessions are ephemeral, never serialized to save
+// file, never sent in broadcastState messages. Lives at module scope.
+let rumbleSessions = {};
+
+// Reverse lookup: ws → { sessionId, playerId } so we can clean up on
+// disconnect without scanning all sessions. Set on rumble_session_join,
+// cleared on close/leave.
+const rumbleClientSession = new Map();
+
+function _ensureRumbleSession(sessionId) {
+  if (!rumbleSessions[sessionId]) {
+    rumbleSessions[sessionId] = {
+      id: sessionId,
+      players: {},                  // playerId → { cls, x, y, hp, hpMax, armor, bricks, alive, lastInputTs }
+      // v0.16.57+ adds: entities, walls, projectiles, traps, wave, status
+      startedAt: Date.now(),
+    };
+  }
+  return rumbleSessions[sessionId];
+}
+
+function _broadcastRumbleSession(sessionId) {
+  const sess = rumbleSessions[sessionId];
+  if (!sess) return;
+  const msg = JSON.stringify({
+    type: 'rumble_session_state',
+    sessionId: sessionId,
+    players: sess.players,
+    serverTs: Date.now(),
+  });
+  // Only send to clients registered for this session
+  rumbleClientSession.forEach((reg, ws) => {
+    if (reg.sessionId !== sessionId) return;
+    if (ws.readyState !== 1) return;
+    ws.send(msg);
+  });
+}
+
+// Drop a player from a session and broadcast the change. Called on
+// explicit leave, disconnect, or stale-timeout. Cleans up the reverse
+// lookup map as well.
+function _removePlayerFromRumbleSession(ws, reason) {
+  const reg = rumbleClientSession.get(ws);
+  if (!reg) return;
+  const sess = rumbleSessions[reg.sessionId];
+  rumbleClientSession.delete(ws);
+  if (!sess) return;
+  delete sess.players[reg.playerId];
+  // v0.16.56 — empty session cleanup. No entities to preserve yet, so
+  // safe to drop the session struct entirely once last player leaves.
+  // (When v0.16.57 ships entity authority, this changes — sessions
+  // persist for waves regardless of player count.)
+  if (Object.keys(sess.players).length === 0) {
+    delete rumbleSessions[reg.sessionId];
+  } else {
+    _broadcastRumbleSession(reg.sessionId);
+  }
+}
+
+// 20 Hz broadcast tick — fires once per session that has players.
+// Single setInterval covers all sessions (no per-session timers).
+// Broadcasts current player state to that session's connected clients.
+setInterval(() => {
+  const now = Date.now();
+  const sessionIds = Object.keys(rumbleSessions);
+  for (let i = 0; i < sessionIds.length; i++) {
+    const sess = rumbleSessions[sessionIds[i]];
+    if (!sess) continue;
+    // Stale-player cleanup: if a client stopped sending state for
+    // more than RUMBLE_PLAYER_TIMEOUT_MS, evict them. Catches dead
+    // sockets that didn't trigger 'close'.
+    let dirty = false;
+    Object.keys(sess.players).forEach((pid) => {
+      const p = sess.players[pid];
+      if (p && p.lastInputTs && (now - p.lastInputTs) > RUMBLE_PLAYER_TIMEOUT_MS) {
+        delete sess.players[pid];
+        dirty = true;
+      }
+    });
+    _broadcastRumbleSession(sessionIds[i]);
+    if (dirty && Object.keys(sess.players).length === 0) {
+      delete rumbleSessions[sessionIds[i]];
+    }
+  }
+}, RUMBLE_TICK_MS);
+
+// ═══════════════════════════════════════════════════════════════════
+// ── END RUMBLE SESSION (v0.16.56) ─────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
 // ── WEBSOCKET ─────────────────────────────────────────────
 const wss = new WebSocket.Server({ server: httpServer });
 const clients = new Map();
@@ -713,6 +828,90 @@ wss.on('connection', (ws, req) => {
   ws.on('message', raw => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
     const { type, payload: P } = msg;
+
+    // ═══════════════════════════════════════════════════════════════
+    // ── RUMBLE SESSION HANDLERS (v0.16.56) ────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // Multiplayer rumble sandbox messages. Self-contained — return
+    // early so they don't fall through to board-game state mutations.
+    // Session state lives in G.rumbleSessions, lifecycle independent
+    // from G.rumbleBattle.
+    // ═══════════════════════════════════════════════════════════════
+
+    if (type === 'rumble_session_join') {
+      // Payload: { sessionId, playerId, cls, hp, hpMax, armor, bricks, x, y }
+      // Client picked a class on rumble_test.html and is entering the
+      // shared arena. Server records the player and broadcasts the
+      // updated session to all connected clients in that session.
+      const { sessionId, playerId, cls, hp, hpMax, armor, bricks, x, y } = P || {};
+      if (!sessionId || !playerId) {
+        ws.send(JSON.stringify({ type:'rumble_error', msg:'sessionId + playerId required' }));
+        return;
+      }
+      // If this socket was already in a session, leave it first.
+      if (rumbleClientSession.has(ws)) {
+        _removePlayerFromRumbleSession(ws, 'rejoin');
+      }
+      const sess = _ensureRumbleSession(sessionId);
+      sess.players[playerId] = {
+        cls: cls || 'breaker',
+        hp: typeof hp === 'number' ? hp : 10,
+        hpMax: typeof hpMax === 'number' ? hpMax : 10,
+        armor: typeof armor === 'number' ? armor : 0,
+        bricks: bricks || {},
+        x: typeof x === 'number' ? x : 400,
+        y: typeof y === 'number' ? y : 300,
+        alive: true,
+        spectating: false,
+        lastInputTs: Date.now(),
+      };
+      rumbleClientSession.set(ws, { sessionId, playerId });
+      // Acknowledge so client knows the join landed
+      ws.send(JSON.stringify({
+        type: 'rumble_session_joined',
+        sessionId, playerId,
+        playerCount: Object.keys(sess.players).length,
+      }));
+      _broadcastRumbleSession(sessionId);
+      return;
+    }
+
+    if (type === 'rumble_session_leave') {
+      _removePlayerFromRumbleSession(ws, 'explicit');
+      ws.send(JSON.stringify({ type: 'rumble_session_left' }));
+      return;
+    }
+
+    if (type === 'rumble_player_state') {
+      // Payload: { x, y, hp, hpMax, armor, bricks, alive, spectating }
+      // Client tick — update server's record of this player's state.
+      // Validation is light in v0.16.56 (trusts client). When v0.16.57
+      // ships entity authority, damage events become authoritative
+      // and HP becomes server-owned; this handler still receives
+      // position but server validates HP changes.
+      const reg = rumbleClientSession.get(ws);
+      if (!reg) return;  // unregistered socket — ignore
+      const sess = G.rumbleSessions[reg.sessionId];
+      if (!sess) return;
+      const p = sess.players[reg.playerId];
+      if (!p) return;
+      const { x, y, hp, hpMax, armor, bricks, alive, spectating } = P || {};
+      if (typeof x === 'number') p.x = x;
+      if (typeof y === 'number') p.y = y;
+      if (typeof hp === 'number') p.hp = hp;
+      if (typeof hpMax === 'number') p.hpMax = hpMax;
+      if (typeof armor === 'number') p.armor = armor;
+      if (bricks && typeof bricks === 'object') p.bricks = bricks;
+      if (typeof alive === 'boolean') p.alive = alive;
+      if (typeof spectating === 'boolean') p.spectating = spectating;
+      p.lastInputTs = Date.now();
+      // No broadcast here — broadcast loop handles it at 20 Hz
+      return;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ── END RUMBLE SESSION HANDLERS ───────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
 
     // ── GAME FLOW ──
     if (type === 'setPhase')        { G.phase = P.phase; }
@@ -2858,6 +3057,11 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    // v0.16.56 — Clean up rumble session registration first so the
+    // dropped player doesn't linger in the broadcast list.
+    if (rumbleClientSession.has(ws)) {
+      _removePlayerFromRumbleSession(ws, 'disconnect');
+    }
     const info = clients.get(ws);
     if(info?.role && G.players[info.role]) { G.players[info.role].connected=false; broadcastState(); }
     clients.delete(ws);
