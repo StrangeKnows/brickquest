@@ -6559,6 +6559,153 @@ push #12 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.50 — SS red identity foundation: pierce-dash
+
+> "SS red identity first"
+>
+> "1 and 3 together [pierce + trail]"
+>
+> "No cap — hit everything in path"
+
+**Snapstep red identity depth pass.** SS had only `redProfile: { rangeBase: 240, rangeAffinityBonus: 1.25 }` — just extended reach, no signature mechanic. v0.16.50 ships the foundation; v0.16.51 will add the slipstream trail + push-back burst.
+
+**The Pierce-Dash:**
+
+SS dashes through entities — multi-hit along the path, no recoil, no AOE blast. Hits every entity in line at full damage, no entity cap. Light knockback (slipped past, didn't punch). Dash terminates at max range or wall block.
+
+**Mechanical contrast with BK red:**
+
+| | BK red | SS red |
+|---|---|---|
+| Model | aoe-blast | pierce |
+| First-hit terminates | Yes | No |
+| Damage targets | First + AOE radius | Every entity in path |
+| Knockback | 2.0× radial | 0.4× forward |
+| Recoil | No | No |
+| Visual | Heavy blast ring + central bloom | Streaking trail particles + per-target sparks |
+| Identity | "Stop, hit big, push everything outward" | "Go through, hit everyone, don't slow down" |
+
+Same color, same dash gesture, completely different identity. Schema-driven via `dashProfile.dashModel`.
+
+**Schema additions to SS redProfile:**
+
+```javascript
+redProfile: {
+  rangeBase: 240, rangeAffinityBonus: 1.25,
+  hitboxScale: 1.0,
+  knockbackScale: 0.4,                // light, slipped past
+  dashModel: 'pierce',                // v0.16.50 new model
+  pierceDamageFalloff: 1.0,           // full dmg to all pierced
+  knockbackMode: 'forward',
+  recoilOnHit: false,
+  blastVisual: null,
+  critScreenShake: null,
+  // v0.16.51 trail config (parking-lot for next push):
+  // trail: { damageFraction: 0.5, duration: 1.7, tailBehindOrigin: 100, ... }
+}
+```
+
+**Engine additions:**
+
+- `dashModel === 'pierce'` branch in dash hit detection. Each frame
+  during charge, finds ALL entities inside the bubble that aren't in
+  `_hitSet`, applies damage to each, adds to `_hitSet`. Does NOT set
+  `brickAction.hit` — dash continues until range cap or wall block.
+- Pierce charge-phase trail particles: small red trail behind player
+  during dash. Schema-gated to pierce model (other models unchanged).
+- Per-target spark on each pierce hit (small flourish, not a full
+  blast).
+- Crit visual on first pierce hit: thinner shockwave (smaller than
+  recoil/blast — pierce identity is fast, not flashy).
+- `getRedDashProfile` extended to normalize `pierceDamageFalloff`
+  and `trail` fields. Default values match baseline (no pierce, no
+  trail) so other classes are unaffected.
+
+**Forge cycle for SS red (post-v0.16.50, pre-trail):**
+
+1. Position SS at one end of a line of enemies
+2. Drag-cast red toward the line
+3. Dash flies through, hits every entity in the bubble path
+4. Dash terminates at max range or hits a wall
+5. Each entity took full damage, no recoil, SS is now at the far end
+
+This sets up tactical positioning play — SS aligns with multiple
+enemies for max value per dash. Future v0.16.51 trail will reward
+the followup ("they pursue, they eat trail damage").
+
+---
+
+**Files changed:** `characters.js`, `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **SS dashes through aligned line of 3 enemies** → all 3 take full
+   damage, dash continues to range cap or wall.
+3. **SS dashes through 1 enemy** → enemy takes damage, dash continues.
+4. **SS dashes into empty space** → no damage, dash continues to
+   range cap as before.
+5. **SS dashes into wall** → blocked, dash terminates (existing wall
+   sweep behavior preserved).
+6. **BK dash unchanged** → still single-hit + AOE blast + radial
+   knockback, no recoil. SS-only mechanic isolated by data.
+7. **Other classes (Fixer, FW, WO) red dash unchanged** → recoil
+   model with single-hit + recoil to start.
+8. **Visual:** SS dash leaves a trail of red particles. Each pierce
+   hit shows a small red flourish at the entity. Crit on first hit
+   shows a small orange shockwave.
+9. **Crit pierce:** first pierce hit triggers a thinner shockwave
+   ring (not the full BK-style two-ring blast). Per-target sparks
+   (4 each).
+
+---
+
+**Risk surfaces:**
+
+- Pierce damage scales linearly with entities aligned. 6 enemies in
+  a line = 6× full damage. This is intended — rewards positioning —
+  but could feel OP if enemies cluster naturally. Tune via
+  pierceDamageFalloff if needed (e.g. 0.85 = first full, then 85%
+  cumulative).
+- Knockback is forward (push along dash direction). With pierce, the
+  pushed entities might end up just outside the dash bubble for the
+  rest of the path, dodging the multi-hit. Acceptable behavior — the
+  knockback is slight (0.4×) so they should still mostly stay in path.
+- _hitSet reset between dashes via brickAction lifecycle — when
+  brickAction = null, hitSet goes with it. Safe.
+- Drag preview still shows the recoil-style bubble (no pierce-line
+  preview). Polish for later if pierce identity needs more visual
+  communication.
+
+---
+
+**Standards audit (rule #17 — push #69 in S015 continuation,
+push #1 in S016 SS red arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js + characters.js)
+- Rule #11 (data/runtime/UI): UNITY held. Pierce is dispatched
+  via dashModel field. Engine reads schema, no class-name checks.
+- Rule #14 (UNITY): pierce model lives alongside recoil + aoe-blast
+  in the same schema. New behavior = new dashModel value, no
+  parallel system. Symmetric extension of v0.15.13 architecture.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: same dispatch shape (charge → hit detection → terminate),
+    pierce diverges only in the hit-detection branch.
+  - ELEGANCE: pierce branch is one if/else block in the existing
+    function; doesn't restructure the dispatcher.
+  - EFFICIENCY: per-frame entity sweep is O(n) for both pierce
+    and recoil; same cost.
+- Rule #19 (intuition): your "1+3 combined" answer was bolder than
+  my proposal (which leaned pierce-only). Building both identity
+  beats together makes the SS arc complete instead of split.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

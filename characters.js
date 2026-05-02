@@ -263,9 +263,50 @@ var CHARACTERS = {
       // stackingCurve(N) = min(stackingMaxMult, 1 + 0.5 × (N - 1))
       // Inlined in engine; field documents the design intent.
     },
-    // Red signature: longest reach class (light weight + sig affinity).
-    // Matches hit-and-run identity. No hitbox/knockback bonus (those are BK).
-    redProfile: { rangeBase: 240, rangeAffinityBonus: 1.25 },
+    // Red signature: SS red identity is the PIERCE-DASH + SLIPSTREAM
+    // TRAIL (v0.16.50/51). SS dashes through entities — multi-hit along
+    // the path, no recoil, no AOE blast. Hits every entity in line.
+    // Light knockback (slipped past, didn't punch). Mechanical contrast
+    // with BK red (wrecking-ball single-hit + AOE blast + recoil):
+    //   BK red = "stop, hit big, push everything outward"
+    //   SS red = "go through, hit everyone, don't slow down"
+    //
+    // Per S016 design lock at v0.16.50:
+    //   - dashModel: 'pierce' — engine branch dispatches multi-hit logic
+    //   - pierceDamageFalloff: 1.0 (full damage to all pierced)
+    //   - No entity cap (hit everything in path)
+    //   - No recoil (dash continues to max range or wall block)
+    //   - Light knockback (0.4×)
+    //   - knockbackMode: 'forward' (entity nudged in dash direction)
+    //   - blastVisual: null (no impact ring; per-target sparks instead)
+    //
+    // v0.16.51 layers slipstream trail (deferred to keep this push scoped):
+    //   - Trail covers (A - 100px) → B (dash path + 100px tail behind origin)
+    //   - 50% pierce damage to entities crossing trail, one-time per trail
+    //   - 1.7s duration, fades out
+    //   - Push-back burst at point A on dash completion
+    //
+    // Engine reads via getRedDashProfile(cls); other classes get baseline
+    // (recoil model, no pierce, no trail).
+    redProfile: {
+      rangeBase: 240, rangeAffinityBonus: 1.25,
+      hitboxScale: 1.0,                  // baseline hitbox; identity is path, not size
+      knockbackScale: 0.4,               // light — slipped past, didn't punch
+      dashModel: 'pierce',               // v0.16.50 pierce variant
+      pierceDamageFalloff: 1.0,          // full damage to all entities in path
+      knockbackMode: 'forward',          // small forward nudge in dash direction
+      recoilOnHit: false,                // dash continues; no spring-back
+      blastVisual: null,                 // no central impact ring
+      critScreenShake: null,             // SS is a runner, not a slammer
+      // v0.16.51 slipstream trail config (parking-lot for next push)
+      // trail: {
+      //   damageFraction: 0.5,
+      //   duration: 1.7,
+      //   tailBehindOrigin: 100,        // px extension backward from A
+      //   pushBackBurstRadius: 60,      // burst radius at point A
+      //   pushBackBurstStrength: 240,   // knockback velocity
+      // },
+    },
   },
   blocksmith: {
     name: 'Blocksmith', icon: '🔧',
@@ -517,16 +558,21 @@ function getRedDashProfile(cls) {
     // ── DASH MODEL ──
     // 'recoil'    — single target, recoil after hit (default Model 3)
     // 'aoe-blast' — AOE blast at impact, no recoil (Model 2, BK identity)
+    // 'pierce'    — multi-hit through entities, no recoil (SS identity, v0.16.50)
     dashModel: p.dashModel || 'recoil',
 
     // ── MODEL PARAMS ──
     blastRadiusMult: (typeof p.blastRadiusMult === 'number') ? p.blastRadiusMult : 1.0,
     knockbackMode: p.knockbackMode || 'forward', // 'radial' | 'forward'
     recoilOnHit: (typeof p.recoilOnHit === 'boolean') ? p.recoilOnHit : true,
+    // Pierce model params (v0.16.50)
+    pierceDamageFalloff: (typeof p.pierceDamageFalloff === 'number') ? p.pierceDamageFalloff : 1.0,
 
     // ── VISUAL ──
     blastVisual: p.blastVisual || null,    // { ringColors:[...], bloomCount, bloomColor }
     critScreenShake: p.critScreenShake || null,  // { mag, ms }
+    // Trail config (v0.16.51 — null in v0.16.50)
+    trail: p.trail || null,
   };
 }
 

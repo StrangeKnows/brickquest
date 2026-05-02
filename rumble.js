@@ -7735,25 +7735,105 @@ function updateBrickAction(dt, bounds) {
       }
       player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
       player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
-      // ── DASH HIT DETECTION (S015 v0.15.13) ──
-      // Two models, dispatched by class:
-      //   BK (cls === 'breaker') uses Model 2: dash stops at first entity
-      //     hit, then triggers an AOE blast at impact location. All
-      //     entities in blast radius take full damage. Knockback radial
-      //     outward from impact center. No recoil — BK plants and
-      //     unleashes. Visual: shockwave ring + central particle bloom +
-      //     screen shake on crit.
-      //   All other classes use Model 3: dash stops at first entity hit,
+
+      // v0.16.50 — Pierce charge-phase trail particles. Only fires for
+      // pierce model — recoil + aoe-blast models don't have a charge-trail
+      // (recoil leaves its trail in the return phase, blast is stationary).
+      // Pierce needs a visible dash-through streak so the multi-hit reads
+      // as a continuous flying lane rather than instantaneous teleport-hits.
+      if (dashProfile.dashModel === 'pierce') {
+        var _ptBackAngle = Math.atan2(-brickAction.dirY, -brickAction.dirX);
+        for (var _pti2 = 0; _pti2 < 2; _pti2++) {
+          var _pta = _ptBackAngle + (Math.random() - 0.5) * 0.8;
+          var _pts = 40 + Math.random() * 60;
+          purpleParticles.push({
+            x: player.x + Math.cos(_pta) * (player.r * 0.5),
+            y: player.y + Math.sin(_pta) * (player.r * 0.5),
+            vx: Math.cos(_pta) * _pts,
+            vy: Math.sin(_pta) * _pts,
+            r: 2 + Math.random() * 2,
+            alpha: 0.7,
+            color: '#E24B4A',
+          });
+        }
+      }
+      // ── DASH HIT DETECTION (S015 v0.15.13, extended v0.16.50) ──
+      // Three models, dispatched by class via dashProfile.dashModel:
+      //   'recoil' (default Model 3): dash stops at first entity hit,
       //     single entity damaged, knockback in dash direction, then
       //     recoil back to start (return phase). Hit-and-run rhythm.
+      //   'aoe-blast' (Model 2, BK identity): dash stops at first entity
+      //     hit, AOE blast at impact, all entities in blast radius take
+      //     damage. No recoil. Visual: shockwave ring + central bloom.
+      //   'pierce' (Model 4, SS identity, v0.16.50): dash CONTINUES
+      //     through entities. Each frame, ALL entities inside the bubble
+      //     that haven't been hit yet (via _hitSet) take damage. No
+      //     blast, no recoil. Dash terminates at max range or wall block.
+      //     Identity: "go through, hit everyone, don't slow down."
       //
-      // Bubble radius for first-hit detection: (player.r + 14) × hitboxScale.
-      // Same as drag indicator visual. For BK, also serves as blast radius.
-      // brickAction._hitSet ensures Model 2's AOE doesn't double-hit the
-      // primary target.
+      // Bubble radius for hit detection: (player.r + 14) × hitboxScale.
+      // brickAction._hitSet tracks already-hit entities to prevent
+      // double-hitting in pierce model and double-counting in blast model.
       if (!brickAction.hit) {
         if (!brickAction._hitSet) brickAction._hitSet = [];
         var hbR = (player.r + 14) * hitboxScale;
+        var isPierceModel = (dashProfile.dashModel === 'pierce');
+
+        // ── PIERCE PATH ──
+        // Each frame during dash, hit ALL new entities inside the bubble.
+        // Don't terminate the dash; let it continue to max range or wall.
+        if (isPierceModel) {
+          var pierceTargets = [];
+          for (var _phi = 0; _phi < entities.length; _phi++) {
+            var _peg = entities[_phi];
+            if (!_peg || _peg.hp <= 0) continue;
+            // Already hit by this dash? skip.
+            if (brickAction._hitSet.indexOf(_peg) >= 0) continue;
+            var _ped = Math.hypot(player.x - _peg.x, player.y - _peg.y);
+            if (_ped < hbR + (_peg.r || 0)) {
+              pierceTargets.push(_peg);
+            }
+          }
+          if (pierceTargets.length > 0) {
+            var pTier = brickAction.dmgMult || 1;
+            var pCrit = !!brickAction.isCrit;
+            var pCritMult = pCrit ? 2.0 : 1.0;
+            var pKnockMult = (pCrit ? 2.0 : 1.0) * knockbackScale;
+            var pFx = _fx('red', pTier);
+            var pBaseDmg = Math.ceil((pFx ? pFx.dmg : 3) * pCritMult);
+            // Apply pierce damage to each new target.
+            for (var _pti = 0; _pti < pierceTargets.length; _pti++) {
+              var pHitG = pierceTargets[_pti];
+              brickAction._hitSet.push(pHitG);
+              // Pierce damage (full or falloff per schema).
+              var pDmg = Math.ceil(pBaseDmg * (dashProfile.pierceDamageFalloff || 1.0));
+              var pRes = damageEntity(pHitG, pDmg, undefined, 'red');
+              pHitG.flashTimer = 0.3;
+              showDamageNumber(pHitG.x, pHitG.y - 30, pRes.applied,
+                pCrit ? '#FFAA00' : '#E24B4A', pRes.tier, pHitG.x, pHitG.y,
+                undefined, pRes.witherBoost, pHitG, 'red');
+              // Light forward knockback — slipped past, didn't punch.
+              pHitG.bounceVx = brickAction.dirX * 300 * pKnockMult;
+              pHitG.bounceVy = brickAction.dirY * 300 * pKnockMult;
+              pHitG.bounceTimer = 0.25;
+              pHitG.state = 'bounce';
+              // Per-target spark (small visual cue at each pierce point)
+              if (typeof spawnCritFlourish === 'function') {
+                spawnCritFlourish(pHitG.x, pHitG.y, '#E24B4A', 4);
+              }
+              // Crit visuals if applicable (less heavy than recoil/blast
+              // models — pierce identity is fast, not flashy).
+              if (pCrit && _pti === 0) {
+                spawnCritShockwave(pHitG.x, pHitG.y, '#FFAA00',
+                  { r0: 4, maxR: scaleDist(80), thickness: 2, growth: 280 });
+              }
+            }
+          }
+          // Pierce DOES NOT set brickAction.hit — dash continues until
+          // range cap or wall block (handled by the wall-sweep above
+          // and the maxRange clamp earlier in this same frame).
+        } else {
+        // ── SINGLE-HIT PATH (recoil + aoe-blast models) ──
         // Find first entity inside bubble (closest preferred).
         var firstHit = null;
         var firstHitDist = Infinity;
@@ -7888,6 +7968,7 @@ function updateBrickAction(dt, bounds) {
             brickAction._trailRMult = rTier;
           }
         }
+        }  // close non-pierce branch
       }
       // Stop charge / transition. Per S015 v0.15.13 (Model 2/3 split):
       //   Model 2 (BK): brickAction.hit set + phase still 'charge' →
