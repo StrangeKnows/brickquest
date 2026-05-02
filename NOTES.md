@@ -5505,6 +5505,149 @@ push #4 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.42 — Centralize triggerVictory in damageEntity (UNITY restoration)
+
+> "why does every attack have to trigger victory, isnt there a
+> better way to do this? UNITY ELEGANCE EFFICIENCY?"
+
+Ross caught a pattern Claude was about to enshrine — the v0.16.40
+shrapnel fix and v0.16.42 confuse-attack fix were treating SYMPTOMS
+of a deeper UNITY violation, not the root cause.
+
+**The pre-existing pattern was wrong:**
+
+Every damage source (red dash, blue bolt, orange chain, green
+poison, purple tick, black DoT, witherbolt, shrapnel,
+confuse-attack — 16 sites total) manually called
+`triggerVictory()` after `damageEntity()`. That's the textbook
+anti-pattern: scatter the same concern across every site instead
+of centralizing.
+
+This violated UNITY (single concept implemented in 16 places),
+ELEGANCE (16 lines of duplicate guard logic instead of 1), and
+EFFICIENCY (every new damage source = remember-the-trigger tax).
+Confuse-attack was missing the trigger, but adding it manually
+would have just added a 17th site to the same anti-pattern. Ross
+declined the v0.16.42 push and asked for the right architecture.
+
+**The right architecture: centralize at the damage choke point.**
+
+`damageEntity` is the single function every damage path flows
+through. Verified by grepping `g.hp = 0` / `g.hp = -` — no entity
+death paths bypass damageEntity. Adding the victory check there
+catches every damage source automatically.
+
+**Implementation:**
+
+```javascript
+// At the bottom of damageEntity, before return:
+if (g.hp <= 0 && typeof triggerVictory === 'function') {
+  triggerVictory();
+}
+```
+
+Then strip the 16 scattered call sites. Behavior identical;
+architecture unified.
+
+**Sites stripped:**
+
+- 3759 (shrapnel update — added v0.16.40, same pattern)
+- 5807 (confuse-attack — was the original symptom)
+- 6372 (witherbolt impact)
+- 7733 (red dash hit)
+- 8009 (blue fixedPoint impact)
+- 8052 (blue bolt direct hit)
+- 8545 (orange chain detonation)
+- 8646 (orange sealed-trap spawn)
+- 8705 (orange bleed tick)
+- 8786 (orange trap explosion)
+- 9415 (green poison tick)
+- 9814 (purple tick)
+- 9990 (black weaken DoT)
+
+Plus the dead `hitFired` tracking variable in shrapnel update —
+no longer needed since shrapnel doesn't conditionally call
+victory anymore.
+
+**Standards lesson (rule #20 — grep for symptoms when unifying):**
+the comprehensive damageEntity audit in v0.16.40-42 was the right
+instinct, but the conclusion "fix each site individually" missed
+the bigger pattern. UNITY-ELEGANCE-EFFICIENCY didn't permit the
+scattered approach. Always look for the choke point.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Confuse-kill (BS Forge cycle):** plant wall + yellow + confused
+   enemies kill each other → victory fires.
+3. **Shrapnel kill:** BS armor absorbs hit → shrapnel kills
+   attacker → victory fires.
+4. **All other damage sources:** red dash kill, blue bolt kill,
+   orange chain kill, poison tick kill, purple drain kill, black
+   weaken kill, witherbolt kill — every kill path triggers victory.
+5. **No regressions** — kill counts, loot drops, victory screen,
+   stats display all work.
+6. **Edge case:** if an entity gets revived (bone_rise) during the
+   frame after a damageEntity that took it to 0 HP, the victory
+   trigger should defer to the bonePending guard inside
+   triggerVictory (existing behavior). Re-verify by killing a
+   skeleton with a small hit.
+
+---
+
+**Risk surfaces:**
+
+- triggerVictory has internal guards (`bonePending`, `running`,
+  `entityRespawnPending`) that suppress spurious calls. Already
+  hardened from prior development.
+- Centralizing means triggerVictory fires more frequently than
+  before (every damage that takes HP to 0, not just specific
+  paths). Internal guards handle the multi-fire case correctly.
+- Visual: spurious calls during death animations? Verified
+  triggerVictory has the bonePending guard which handles
+  bone_rise revives. Other death-but-not-really paths (if any
+  exist in future) would similarly need guards inside
+  triggerVictory.
+
+---
+
+**Standards audit (rule #17 — push #61 in S015 continuation,
+push #5 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #14 (UNITY): MAJOR win. Pattern that violated UNITY since
+  the early game design (16+ scattered calls) finally centralized.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: "did the rumble end?" lives in ONE place now.
+  - ELEGANCE: 16 scattered triggerVictory calls → 1 central check.
+    Stripped ~25 lines of duplicate guard logic + dead variables.
+  - EFFICIENCY: new damage sources need zero awareness of victory
+    mechanics. Adding a hypothetical new damage path = no
+    triggerVictory bookkeeping required.
+- Rule #19 (intuition): caught BY ROSS this push. The v0.16.42
+  draft I made (adding 17th scattered site) was the wrong answer.
+  Should have recognized the pattern myself when auditing v0.16.40
+  shrapnel fix.
+- Rule #20 (grep-for-symptoms when unifying): held — grepped all
+  damageEntity sites and identified the choke point. Just had to
+  step UP to the right architecture instead of flat-fixing each
+  site.
+
+**Lesson for future audits:** when finding multiple sites with the
+same fix pattern, ASK FIRST: "is there a choke point upstream
+where this fix could live once?" Don't replicate the fix N times.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

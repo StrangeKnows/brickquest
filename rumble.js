@@ -3728,11 +3728,9 @@ function updateShrapnel(dt) {
       // Impact resolution. Prefer the linked entity if still alive (it may
       // have moved since spawn). Fall back to position-based hit at the
       // original target point — small radius forgives misses.
-      var hitFired = false;
       var tgt = s.targetEntity;
       if (tgt && tgt.hp > 0) {
         damageEntity(tgt, s.dmg);
-        hitFired = true;
         if (typeof spawnCritFlourish === 'function') {
           spawnCritFlourish(tgt.x, tgt.y, '#EF9F27', 6);
         }
@@ -3743,7 +3741,6 @@ function updateShrapnel(dt) {
           var g = entities[ei];
           if (Math.hypot(g.x - s.tx, g.y - s.ty) <= hitR + (g.r || 12)) {
             damageEntity(g, s.dmg);
-            hitFired = true;
             if (typeof spawnCritFlourish === 'function') {
               spawnCritFlourish(g.x, g.y, '#EF9F27', 6);
             }
@@ -3751,12 +3748,8 @@ function updateShrapnel(dt) {
           }
         }
       }
-      // v0.16.40 — call triggerVictory after damage so a shrapnel killing
-      // blow can end the rumble. Pattern matches blue bolts, traps, chain
-      // detonations, and other damage sources. Without this, shrapnel could
-      // kill the last entity but the victory screen never appears because
-      // no other damage source ran triggerVictory().
-      if (hitFired && typeof triggerVictory === 'function') triggerVictory();
+      // v0.16.42 — victory check now centralized in damageEntity.
+      // Every damageEntity call auto-triggers victory if it killed.
       s.done = true;
     }
   }
@@ -5059,6 +5052,17 @@ function damageEntity(g, dmg, aggro, source) {
   if (aggro !== false) {
     g.aggroed = true;
     g.state = 'chase';
+  }
+  // v0.16.42 — UNITY: victory check lives at the single damage choke point.
+  // Every damage path (player attacks, projectiles, traps, DoTs, shrapnel,
+  // confused-entity attacks, etc) flows through this function. If this
+  // damage application killed the target, check whether the rumble should
+  // end. Replaces 16 scattered triggerVictory() calls at individual damage
+  // sites — those were a UNITY violation (same concern, distributed
+  // implementation). Adding a new damage source no longer requires
+  // remembering to manually trigger victory.
+  if (g.hp <= 0 && typeof triggerVictory === 'function') {
+    triggerVictory();
   }
   return { applied: finalDmg, tier: resistTier(rMult), source: source, witherBoost: _witherBoost };
 }
@@ -6365,7 +6369,6 @@ function updateWitherbolts(dt) {
         spawnCritFlourish(b.target.x, b.target.y, '#CC99FF', 10);
       }
       b.dead = true;
-      triggerVictory();
     }
   });
 }
@@ -7727,7 +7730,6 @@ function updateBrickAction(dt, bounds) {
             brickAction.returnTimer = 0;
             brickAction._trailRMult = rTier;
           }
-          triggerVictory();
         }
       }
       // Stop charge / transition. Per S015 v0.15.13 (Model 2/3 split):
@@ -8004,7 +8006,6 @@ function updateBlueBolts(dt, bounds) {
         });
       }
       b.dead = true;
-      triggerVictory();
       return;
     }
     // Require minimum travel before hit registers
@@ -8048,7 +8049,6 @@ function updateBlueBolts(dt, bounds) {
         });
       }
       b.dead = true;
-      if (b.target.hp <= 0) triggerVictory();
       return;
     }
     if (b.x < bounds.x || b.x > bounds.x+bounds.w || b.y < bounds.y || b.y > bounds.y+bounds.h) b.dead = true;
@@ -8542,7 +8542,6 @@ function detonateChainNetwork(seedTrap) {
     spawnCritFlourish(seedTrap.x, seedTrap.y, '#FF9933', 22);
     spawnCritFlourish(seedTrap.x, seedTrap.y, '#FFCC80', 14);
   }
-  triggerVictory();
 }
 
 // Visual links between linked chain traps when the network detonates.
@@ -8641,10 +8640,6 @@ function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit, chainOpts) {
         spawnCritFlourish(x, y, '#FF9933', 22);
         spawnCritFlourish(x, y, '#FFC080', 14);
       }
-      // BUGFIX (0.14.3): sealed traps fire damage on spawn. If this kills the
-      // last entity, no hit path will follow up to call triggerVictory. Same
-      // hang pattern as the unsealed-trap trigger site below.
-      triggerVictory();
     }
   }
 }
@@ -8707,7 +8702,6 @@ function updateBleeds(dt) {
       b.tick -= 1.0;
       var bRes2 = damageEntity(b.target, b.dmg, false, 'orange');
       showDamageNumber(b.target.x, b.target.y-20, bRes2.applied, '#cc2200', bRes2.tier, b.target.x, b.target.y, '🩸', bRes2.witherBoost, b.target, 'orange');
-      triggerVictory();
     }
   });
 }
@@ -8784,12 +8778,6 @@ function updateTraps(dt) {
             spawnCritFlourish(t.x, t.y, '#FF9933', 20);
             spawnCritFlourish(t.x, t.y, '#FFC080', 12);
           }
-          // BUGFIX: trap damage can be the killing blow on the last entity.
-          // Without this, damage applies but no callsite invokes triggerVictory
-          // until another hit occurs — which may never happen if this was the
-          // last enemy. The battle hangs: no victory screen, no loot, traps
-          // remain rendered. Bleeds already handle this at line ~6636.
-          triggerVictory();
         }
       });
     }
@@ -9424,7 +9412,6 @@ function updateEntityPoison(g, dt) {
     var pRes = damageEntity(g, poisonDmg, false, 'green');
     g.flashTimer = 0.08;
     showDamageNumber(g.x, g.y-30, pRes.applied, '#1D9E75', pRes.tier, g.x, g.y, '☠', pRes.witherBoost, g, 'green');
-    triggerVictory();
   }
 }
 
@@ -9824,7 +9811,6 @@ function updatePurpleBursts(dt) {
       // are all handled inside applyDrainHeal / updateDrain.
       var healAmt = Math.ceil(actualDmg / 3);
       if (healAmt > 0) applyDrainHeal(healAmt);
-      triggerVictory();
     }
   });
   if (purpleBurst.r >= purpleBurst.maxR) purpleBurst.done = true;
@@ -10001,7 +9987,6 @@ function updateBlackEffect(dt) {
       }
     });
   }
-  triggerVictory();
   if (blackEffect && blackEffect.timer <= 0) {
     var _ox = blackEffect.ox, _oy = blackEffect.oy, _r = blackEffect.RADIUS;
     blackEffect = null;
