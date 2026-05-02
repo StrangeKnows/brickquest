@@ -7011,6 +7011,130 @@ push #3 in S016 SS red arc):**
 
 ---
 
+### v0.16.53 — SS pierce resolver redirect + comprehensive dash diagnostic
+
+> "need diag for red dash, bizarre behavior for ss, getting caught
+> on entity, shaking around, starting in odd places"
+
+**Two threads in one push:**
+
+**1. Resolver redirect (fix attempt for caught/shaking/odd-start):**
+
+v0.16.52 attempted to bypass the player-vs-entity overlap resolver
+entirely during pierce dash. This solved the forward-displacement
+bug but introduced new symptoms:
+- "Caught on entity" — without overlap separation, player visually
+  clips into entities
+- "Shaking around" — wall-sweep + arena-clamp interacting weirdly
+  with overlapping bodies
+- "Starting in odd places" — likely visual artifact of dash starting
+  with player partially inside an entity hitbox
+
+v0.16.53 takes a different approach: keep the resolver running
+(visual separation matters), but during pierce dash redirect its
+push direction to PERPENDICULAR (matching the bounce knockback).
+This preserves visual cleanliness while keeping pierce identity
+intact (entities spin out sideways, not forward).
+
+Push direction is computed via cross product (entity_offset ×
+dashDir) — same logic as bounce knockback. So resolver and bounce
+agree on direction; entity gets pushed once by resolver, then bounce
+velocity layered on top continues the perpendicular movement.
+
+**2. Comprehensive dash diagnostic (DASH-DIAG family):**
+
+Added five new diagnostic blocks to capture full lifecycle telemetry:
+- `[DASH-DIAG create-drag]` — fires at drag-cast brickAction creation
+- `[DASH-DIAG create-auto]` — fires at auto-target brickAction creation
+- `[DASH-DIAG frame]` — throttled (every 4th frame) charge-phase log
+- `[DASH-DIAG range-cap]` — fires when range cap clamps the step
+- `[DASH-DIAG wall-block]` — fires when wall sweep stops the dash
+- `[DASH-DIAG terminate]` — fires at dash null-out, summary stats
+
+Combined with existing `[PIERCE-DIAG hit]`, `[PIERCE-DIAG bounce]`,
+and `[PIERCE-DIAG resolver-perp]` (renamed from `resolver` to mark
+the new branch), playtest will produce a complete trace:
+1. Did the dash start where expected? (create-drag log)
+2. Did the dash move smoothly each frame? (frame log)
+3. Did pierce hits land at expected positions? (hit log)
+4. Did the resolver fire and where? (resolver-perp log)
+5. Did the dash terminate cleanly? (terminate log)
+
+Console output should reveal whether "starting in odd places"
+means startXY is wrong (engine bug) or just visually surprising
+(design choice / animation artifact).
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Play SS, dash through goblin** — entity should now spin out
+   perpendicular AND visual should be clean (no clipping/shaking).
+3. **Open browser console (F12)** — capture full DASH-DIAG +
+   PIERCE-DIAG output for one full pierce dash.
+4. **Look for:**
+   - `[DASH-DIAG create-*]` startXY matches expected player position
+   - `[DASH-DIAG frame]` shows smooth incrementing position (no jitter)
+   - `[PIERCE-DIAG hit]` fires at expected entity positions
+   - `[PIERCE-DIAG resolver-perp]` shows perpendicular pushVec
+     matching dash direction's perpendicular
+   - `[DASH-DIAG terminate]` shows expected end position + traveled distance
+5. **If still bizarre behavior:** paste console output here and
+   I'll diagnose from telemetry.
+
+---
+
+**Risk surfaces:**
+
+- The resolver redirect mid-dash could feel weird if entity is
+  ALREADY moving via bounce velocity — the resolver might add to
+  bounce's perpendicular velocity (reinforcing) or fight it (if
+  entity has crossed the dash line and cross-product flipped sign).
+  Diagnostic will show whether this happens.
+- "Odd starting places" might NOT be a code bug — could be that
+  SS speed makes the dash appear to start "from somewhere else"
+  visually because the first frame already moves the player ~16px.
+  If so, no fix needed; explain to user.
+- Many console logs may slow performance during dash. Throttling
+  every 4th frame on the per-frame log helps but the others all
+  fire on events. Strip in v0.16.54 once root cause confirmed.
+
+---
+
+**Standards audit (rule #17 — push #72 in S015 continuation,
+push #5 in S016 SS red arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #6 (diagnostic-first): properly applied this push. Multiple
+  bizarre symptoms ≠ single clear gating restriction, so diagnostic
+  shipped FIRST to capture real telemetry. Resolver redirect
+  shipped alongside as best-guess fix; if telemetry shows it didn't
+  land, easy to revise in v0.16.54.
+- Rule #14 (UNITY): pierce identity expressed across BOTH bounce
+  velocity AND resolver displacement, both via the same cross-product
+  perpendicular computation. Single source of geometric truth.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: resolver + bounce agree on push direction now.
+  - ELEGANCE: resolver-redirect uses same cross-product math as
+    bounce — symmetric implementation.
+  - EFFICIENCY: per-frame throttle keeps diagnostic cost low.
+- Rule #19 (intuition): paused before patching. Recognized that
+  "multiple bizarre symptoms" = real diagnostic moment, not
+  patch-on-instinct. Per memory rule #6 strict reading.
+- Rule #20 (grep-for-symptoms): held — searched for existing
+  diagnostic patterns and aligned new logs to the same tag style
+  ([PIERCE-DIAG ...] / [DASH-DIAG ...]).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

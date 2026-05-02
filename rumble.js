@@ -854,51 +854,76 @@ function update(dt) {
 
   // Push player and entity apart if overlapping
   // Push entities away from player — player is not moved by collision
-  // v0.16.52 — Skip displacement during a pierce-dash. The pierce identity
-  // is "go through, hit everyone, don't slow down" — entities should NOT
-  // be teleported aside by player overlap. Pierce hit logic applies a
-  // perpendicular knockback velocity (in updateBrickAction) which the
-  // bounce-state branch consumes naturally; this resolver was overriding
-  // that velocity by instant-teleporting entity position every frame
-  // along the player→entity vector, accumulating displacement that
-  // pushed entities to the dash endpoint.
+  // v0.16.53 — Pierce dash redirect: keep resolver running (visual
+  // separation matters — without it, player visually clips into
+  // entities, reads as "caught" / "shaking"), but during pierce dash
+  // push the entity PERPENDICULAR to dash direction instead of along
+  // the player→entity vector. This preserves visual cleanliness while
+  // matching pierce identity (entities spin out sideways, not forward).
   //
-  // Detection: brickAction is a 'red' action in 'charge' phase AND the
-  // class profile has dashModel === 'pierce'. Other dash models still
-  // get the resolver (BK, recoil-default — entities get punched back
-  // physically as part of the impact).
+  // Other dash models (BK aoe-blast, recoil) keep the original
+  // player→entity push — their identity IS physical impact.
+  //
+  // (v0.16.52 attempted a full resolver bypass for pierce — it removed
+  // the forward-displacement bug but introduced caught/shaking
+  // symptoms because visual separation was lost. v0.16.53 restores
+  // the resolver and just redirects its push direction.)
   var _isPierceDashActive = false;
+  var _pierceDashDirX = 0, _pierceDashDirY = 0;
   if (brickAction && brickAction.type === 'red' && brickAction.phase === 'charge'
       && typeof getRedDashProfile === 'function') {
     var _ddProf = getRedDashProfile(player.cls);
-    if (_ddProf && _ddProf.dashModel === 'pierce') _isPierceDashActive = true;
+    if (_ddProf && _ddProf.dashModel === 'pierce') {
+      _isPierceDashActive = true;
+      _pierceDashDirX = brickAction.dirX;
+      _pierceDashDirY = brickAction.dirY;
+    }
   }
   entities.forEach(function(entity) {
-    if (_isPierceDashActive) return;  // pierce skips overlap displacement
     var odx = player.x - entity.x, ody = player.y - entity.y;
     var odist = Math.sqrt(odx*odx+ody*ody);
     var minDist = player.r + entity.r;
     if (odist < minDist && odist > 0) {
       var push = minDist - odist;
-      var nx = odx/odist, ny = ody/odist;
-      var _preX = entity.x, _preY = entity.y;
-      entity.x -= nx*push;
-      entity.y -= ny*push;
-      entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
-      entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
-      // v0.16.52 DIAGNOSTIC — if this entity was just pierced, log how
-      // the overlap resolver displaced it. This is the suspect for
-      // entities ending up at "end of dash line" instead of perpendicular.
-      if (entity._pierceDiagFrame && typeof console !== 'undefined' && console.log) {
-        console.log('[PIERCE-DIAG resolver]', {
-          entityType: entity.type,
-          preXY: _preX.toFixed(1) + ',' + _preY.toFixed(1),
-          postXY: entity.x.toFixed(1) + ',' + entity.y.toFixed(1),
-          pushVec: (-nx*push).toFixed(1) + ',' + (-ny*push).toFixed(1),
-          playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
-          state: entity.state,
-          bounceVel: entity.bounceVx.toFixed(0) + ',' + entity.bounceVy.toFixed(0),
-        });
+      var nx, ny;
+      if (_isPierceDashActive) {
+        // Perpendicular push: pick side based on cross product
+        // (entity_offset × dashDir) to match the bounce knockback side.
+        var _ofx = entity.x - player.x, _ofy = entity.y - player.y;
+        var _cross = _ofx * _pierceDashDirY - _ofy * _pierceDashDirX;
+        if (_cross < 0) {
+          nx = -_pierceDashDirY; ny = _pierceDashDirX;   // entity left → push left
+        } else {
+          nx = _pierceDashDirY;  ny = -_pierceDashDirX;  // entity right or on line → push right
+        }
+        // Note: nx,ny here is "push direction for entity" (different
+        // sign convention than the original resolver, which used
+        // odx/odist as "away-from-player" then `entity -= nx*push`).
+        // We add directly since perpendicular IS the away direction
+        // when entity is exactly on the dash line.
+        var _preX = entity.x, _preY = entity.y;
+        entity.x += nx * push;
+        entity.y += ny * push;
+        entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
+        entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
+        if (entity._pierceDiagFrame && typeof console !== 'undefined' && console.log) {
+          console.log('[PIERCE-DIAG resolver-perp]', {
+            entityType: entity.type,
+            preXY: _preX.toFixed(1) + ',' + _preY.toFixed(1),
+            postXY: entity.x.toFixed(1) + ',' + entity.y.toFixed(1),
+            pushVec: (nx*push).toFixed(1) + ',' + (ny*push).toFixed(1),
+            dashDir: _pierceDashDirX.toFixed(2) + ',' + _pierceDashDirY.toFixed(2),
+            cross: _cross.toFixed(1),
+          });
+        }
+      } else {
+        // Standard push (away from player along player→entity vector)
+        nx = odx/odist; ny = ody/odist;
+        var _preX2 = entity.x, _preY2 = entity.y;
+        entity.x -= nx*push;
+        entity.y -= ny*push;
+        entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
+        entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
       }
     }
   });
@@ -7025,6 +7050,21 @@ function startRedChargeTo(dmgMult, tx, ty) {
     maxRange: maxRange,              // hard cap on travel distance
     isCrit: _currentCrit,
   };
+  // v0.16.53 DIAGNOSTIC — dash creation telemetry
+  if (typeof console !== 'undefined' && console.log) {
+    console.log('[DASH-DIAG create-drag]', {
+      cls: player.cls,
+      startXY: startX.toFixed(1) + ',' + startY.toFixed(1),
+      playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
+      dirXY: nx.toFixed(2) + ',' + ny.toFixed(2),
+      targetXY: endX.toFixed(1) + ',' + endY.toFixed(1),
+      maxRange: maxRange.toFixed(0),
+      endDist: endDist.toFixed(0),
+      origDist: dist.toFixed(0),
+      chargeSpeed: (player.speed * 4).toFixed(0),
+      _dmgMult: _dmgMult,
+    });
+  }
 }
 
 function startRedCharge(dmgMult, targetEntity) {
@@ -7059,6 +7099,21 @@ function startRedCharge(dmgMult, targetEntity) {
     maxRange: maxRange,
     isCrit: _currentCrit,
   };
+  // v0.16.53 DIAGNOSTIC — dash creation (auto-target)
+  if (typeof console !== 'undefined' && console.log) {
+    console.log('[DASH-DIAG create-auto]', {
+      cls: player.cls,
+      startXY: startX.toFixed(1) + ',' + startY.toFixed(1),
+      playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
+      targetEntityXY: entity.x.toFixed(1) + ',' + entity.y.toFixed(1),
+      targetEntityType: entity.type,
+      dirXY: nx.toFixed(2) + ',' + ny.toFixed(2),
+      maxRange: maxRange.toFixed(0),
+      origDist: dist.toFixed(0),
+      chargeSpeed: (player.speed * 4).toFixed(0),
+      _dmgMult: _dmgMult,
+    });
+  }
 }
 
 // ── WHITE — Heal ─────────────────────────────────
@@ -7889,6 +7944,20 @@ function updateBrickAction(dt, bounds) {
       }
       brickAction.chargeTimer = (brickAction.chargeTimer||0) + dt;
       var step = brickAction.chargeSpeed * dt;
+      // v0.16.53 DIAGNOSTIC — charge frame log, throttled (every 4th frame).
+      // Captures player position evolution during the dash to see if
+      // movement is jittery or smooth, and whether arena clamps fire.
+      brickAction._diagFrameNum = (brickAction._diagFrameNum || 0) + 1;
+      if (brickAction._diagFrameNum % 4 === 1 && typeof console !== 'undefined' && console.log) {
+        console.log('[DASH-DIAG frame]', {
+          frame: brickAction._diagFrameNum,
+          chargeTimer: brickAction.chargeTimer.toFixed(3),
+          playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
+          startXY: brickAction.startX.toFixed(1) + ',' + brickAction.startY.toFixed(1),
+          step: step.toFixed(1),
+          dirXY: brickAction.dirX.toFixed(2) + ',' + brickAction.dirY.toFixed(2),
+        });
+      }
       // Range cap: if travelling further would exceed maxRange, clamp the
       // step and end the charge (transition to return phase). Without this,
       // the dash would run unlimited toward target. Per S015 design:
@@ -7901,6 +7970,14 @@ function updateBrickAction(dt, bounds) {
         // dash termination + finalize (no return phase).
         step = Math.max(0, brickAction.maxRange - traveled);
         brickAction.hit = true;
+        if (typeof console !== 'undefined' && console.log) {
+          console.log('[DASH-DIAG range-cap]', {
+            frame: brickAction._diagFrameNum,
+            traveled: traveled.toFixed(1),
+            maxRange: brickAction.maxRange.toFixed(0),
+            clampedStep: step.toFixed(1),
+          });
+        }
       }
       // Wall sweep: test the line segment from current position to the
       // intended next position against each gray wall. If it intersects,
@@ -7932,6 +8009,15 @@ function updateBrickAction(dt, bounds) {
         player.y = player.y + dym * tStop;
         blocked = true;
         brickAction.hit = true; // terminates dash this frame (v0.15.12)
+        if (typeof console !== 'undefined' && console.log) {
+          console.log('[DASH-DIAG wall-block]', {
+            frame: brickAction._diagFrameNum,
+            wallXY: w.x.toFixed(1) + ',' + w.y.toFixed(1),
+            wallR: w.r.toFixed(0),
+            tHit: tHit.toFixed(3),
+            stopXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
+          });
+        }
       }
       if (!blocked) {
         player.x = nextX;
@@ -8254,6 +8340,19 @@ function updateBrickAction(dt, bounds) {
             : fallbackBaseDmg;
           spawnPierceTrail(brickAction.startX, brickAction.startY,
             player.x, player.y, trailBaseDmg, dashProfile);
+        }
+        // v0.16.53 DIAGNOSTIC — termination summary
+        if (typeof console !== 'undefined' && console.log) {
+          var _travFinal = Math.hypot(player.x - brickAction.startX, player.y - brickAction.startY);
+          console.log('[DASH-DIAG terminate]', {
+            totalFrames: brickAction._diagFrameNum || 0,
+            chargeTime: (brickAction.chargeTimer || 0).toFixed(3),
+            startXY: brickAction.startX.toFixed(1) + ',' + brickAction.startY.toFixed(1),
+            endXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
+            traveled: _travFinal.toFixed(1),
+            maxRange: (brickAction.maxRange || 0).toFixed(0),
+            hitCount: (brickAction._hitSet || []).length,
+          });
         }
         brickAction = null;
       } else if (brickAction && brickAction.chargeTimer >= 2.0) {
