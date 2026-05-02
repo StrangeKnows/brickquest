@@ -308,6 +308,31 @@ var CHARACTERS = {
       pipLostShrapnel: true,
       shrapnelDamageCurve: 'linear',  // dmg = armorBeforeLoss (1..armorMax)
       wallDeathArmorRegen: 1,         // +1 pip when BS-owned wall dies
+      // v0.16.44 — Arc Wall: payoff state for max armor.
+      // When BS armor === armorMax, a directional arc materializes around
+      // BS, tracking nearest enemy. Arc absorbs incoming damage (projectile
+      // OR melee) IN PLACE of a pip — free first hit while at max. After
+      // absorption, BS still loses no pip (because arc took the hit) but
+      // arc disappears (because... wait, actually, see engine logic below).
+      //
+      // Mechanic clarified at design lock:
+      //   - Hit lands inside arc cone → arc absorbs, no pip loss, no
+      //     shrapnel, brief amber flash. Arc REMAINS while still at max.
+      //   - Arc only disappears when BS is no longer at max armor (e.g.
+      //     a hit landed outside the arc cone, taking a pip normally).
+      //   - This means a smart enemy positioning (or a flank attack) can
+      //     bypass the arc; head-on attacks are absorbed.
+      //
+      // Future fusion-tier upgrade (parking lot): reflectProjectiles flag
+      // turns absorbed projectiles back at attackers. v0.16.44 baseline =
+      // absorb only; reflection lands later when fusion system arrives.
+      maxArmorArc: {
+        radius: 45,                   // px from BS center; arc inner edge
+        arcDegrees: 120,              // wedge size (1/3 of full circle)
+        blocksProjectiles: true,      // intercept enemy projectiles in cone
+        blocksMelee: true,            // intercept melee touch attacks in cone
+        // reflectProjectiles: false  // PARKING LOT: fusion-tier upgrade
+      },
     },
     // v0.16.38 — Yellow signature: confuse, always. BS yellow casts
     // (overload field, drag-burst, tier-scaled) ALWAYS apply confuse

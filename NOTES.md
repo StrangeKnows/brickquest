@@ -5756,6 +5756,118 @@ push #6 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.44 — Blocksmith max-armor arc wall (The Forge capstone)
+
+> "arc BS walls, what is BS wall health? all BS walls when armorpips
+> max become arc walls?"
+>
+> "ideas was that full armor creates wall around BS, but arc only"
+>
+> "Q: Lock the arc wall design — A: A only — personal arc around BS
+> at max armor"
+
+The deferred "BS arc wall variant" finally lands. The Forge's
+capstone payoff state — when BS reaches max armor (6 pips), a
+directional arc materializes around them tracking the nearest enemy
+and intercepts incoming hits IN PLACE of pip loss. A free first hit
+while at full armor.
+
+**BS gray wall HP context (clarified for record):**
+
+BS gray walls (the field-planted ring walls from overload-gray) use
+`getGrayWallHp(cls, tier) = round(5 × affinity × tier)` with
+affinity 1.25 for gray-sig classes. T1 = 6 HP, T2 = 13, T3 = 19,
+T4 = 25. This is universal universal, unchanged. Arc wall is a
+SEPARATE mechanic.
+
+**Three locked design decisions (this push):**
+
+1. **Geometry:** directional arc tracking nearest enemy. ~120°
+   wedge, ~45px radius. Smooth interpolation (8 rad/s).
+2. **Blocks:** projectiles AND melee touch. Flank attacks bypass.
+   Future fusion-tier upgrade reflects projectiles (parking lot).
+3. **Pip-loss:** arc absorbs IN PLACE of pip. No pip loss, no
+   shrapnel, no HP damage. Persists while at max armor.
+
+**Schema (BS grayProfile):**
+
+```javascript
+maxArmorArc: {
+  radius: 45, arcDegrees: 120,
+  blocksProjectiles: true, blocksMelee: true,
+  // reflectProjectiles: false — fusion-tier parking lot
+}
+```
+
+**Engine additions (rumble.js):**
+- `updateMaxArmorArc(dt)` — tick state, track nearest enemy, fade
+- `drawMaxArmorArc()` — amber arc with pulse, two-stroke render
+- `maxArmorArcInterceptsHit(srcX, srcY, hitType)` — predicate
+- `spawnArcAbsorbFlash(srcX, srcY)` — feedback particles + text
+
+**Damage path integration:** `_applyEnemyMeleeDamage` and direct
+entity touch both check arc BEFORE pip damage. If intercepted →
+skip damage, skip shrapnel, apply bounce + cooldown so entity
+reads the impact.
+
+**Forge cycle now has its capstone:**
+1. Plant walls + cast yellow + confused enemies attack each other
+2. They eventually hit BS → pip absorbs → shrapnel fires
+3. Walls die → BS gains pips
+4. **Reach max armor → arc materializes**
+5. **Frontal hits absorbed by arc, no pip loss**
+6. **Flanks/rears take pip → arc dissolves until next climb**
+
+---
+
+**Files changed:** `characters.js`, `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **BS at 6/6 armor:** amber arc visible, tracking nearest enemy.
+3. **Front hit at max:** "BLOCKED" + amber flash, no pip loss.
+4. **Flank hit at max:** standard pip loss + shrapnel + arc gone.
+5. **Climb back:** wall dies → +1 pip → arc returns at max.
+6. **Other classes:** no arc visible at their max.
+7. **Projectile vs arc:** intercepted in cone, normal outside.
+
+---
+
+**Risk surfaces:**
+
+- Arc cone (120°) generous. Tuning knob: tighten if too forgiving.
+- Smooth angle interp (8 rad/s) tunable.
+- Multiple enemies in cone all absorbed unconditionally — intended,
+  but watch for OP feel.
+- Reflect-projectiles flag is parking-lot only.
+
+---
+
+**Standards audit (rule #17 — push #63 in S015 continuation,
+push #7 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js + characters.js)
+- Rule #11 (data/runtime/UI): UNITY held. Arc data in characters.js,
+  engine reads via getGrayProfile. UI unchanged.
+- Rule #14 (UNITY): arc system follows same vocabulary as shrapnel
+  (spawn/update/draw/predicate/feedback). Parallel structure.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: state on player object matches existing transient
+    effects pattern (refreshBoost, warpState, etc).
+  - ELEGANCE: 4 helper functions, one schema field, two
+    integration sites. No new systems.
+  - EFFICIENCY: reuses spawnCritFlourish + showFloatingText.
+- Rule #19 (intuition): proposed concrete spec, asked for 3 locks,
+  built to spec without scope creep.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
