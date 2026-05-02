@@ -6706,6 +6706,192 @@ push #1 in S016 SS red arc):**
 
 ---
 
+### v0.16.52 — SS pierce polish (perpendicular knockback, slipstream trail) + riddle Collect button fix
+
+> "keep knockback, but away from path, not pushing entity through
+> path to end. all entities knockback same, all entities pierced,
+> armored entities only block half as well"
+>
+> "[riddle] Collect button doesn't appear or is non-functional"
+
+Combined push closing two threads at once: SS red identity polish
++ a bug fix on the riddle event Collect button that surfaced
+during testing.
+
+---
+
+**SS Pierce-Dash Polish (continuation of v0.16.50 foundation):**
+
+Several refinements after playtest:
+
+1. **Perpendicular knockback (was: forward 0.4×, then removed entirely
+   in v0.16.51 work, now: perpendicular fixed magnitude).**
+   Entities pierced by SS are knocked SIDEWAYS out of the dash path,
+   not forward through it. Side determined by cross-product of the
+   entity's offset from the player and the dash direction:
+   - Cross < 0 (entity left of dash) → knocked further left
+   - Cross >= 0 (entity right of dash) → knocked right
+   Magnitude is fixed (220 base, 360 on crit) — no per-entity
+   weight scaling. Identity beat: "you cut through them so fast
+   they spun out of the way."
+
+2. **Front-shield reduction softened to 25% for piercing hits**
+   (was 50%). Pierce attacks pass through defenses but don't
+   ignore them. damageEntity extended with `opts.piercing` flag;
+   shield block math reads it.
+
+3. **Slipstream trail spawned on dash completion.** Red highlight
+   line covering (origin - 100px in dash dir) → end point.
+   Persists 1.7s, fades alpha. Entities crossing the line take
+   50% pierce damage (one hit per entity per trail). Two-stroke
+   render: outer glow + bright core.
+
+4. **Push-back burst at origin point A on dash completion.**
+   Radial knockback within 60px of point A (240 velocity). Visual:
+   shockwave + flourish in red vocabulary. Anti-pursuit beat: "I
+   left, don't come this way."
+
+5. **Trail config in characters.js redProfile.trail** (was parking-
+   lotted in v0.16.50, now active):
+```javascript
+trail: {
+  damageFraction: 0.5,
+  duration: 1.7,
+  tailBehindOrigin: 100,
+  pushBackBurstRadius: 60,
+  pushBackBurstStrength: 240,
+}
+```
+
+**Forge cycle for SS red, complete:**
+
+1. Position SS at one end of a line of enemies (or pursue a target)
+2. Drag-cast red toward the line
+3. Pierce-dash flies through, hits every entity in path
+4. Each pierced entity spins out perpendicular (no path-blocking)
+5. Dash terminates at range cap or wall block
+6. **Slipstream trail persists 1.7s** behind SS — covers dash path
+   plus 100px tail extending behind origin
+7. **Push-back burst at origin** knocks back enemies near where
+   SS started
+8. Pursuing enemies cross the trail → take 50% damage
+9. Trail fades. Cycle ready to repeat.
+
+---
+
+**Riddle Collect Button Fix:**
+
+**Symptom:** When a player won a riddle (correct answer), the
+yellow brick was credited server-side immediately, but the Collect
+button didn't appear in the UI. The brick reveal FX never fired
+until DM resolved the event.
+
+**Root cause:** `_collectedResolutions` dict was not cleared when
+activeEvent became null between events. If the same player landed
+on two yellow-brick spaces (both events have `roll: 'SPACE'`,
+`evType: 'riddle'`, same cls), the second event inherited the
+`collected: true` flag from the first, suppressing its Collect
+button entirely. The flag check at `restoreActiveEvent()` line ~801
+wiped the entire `landing-result` panel for any "collected" event.
+
+**Fix:** add `_collectedResolutions = {};` to the existing cleanup
+block at render() top (line ~781) that already wipes other state
+dicts when `!G.activeEvent`. One-line addition; aligns
+`_collectedResolutions` with the cleanup pattern of its peer
+state dicts (`_drainedTokens`, `_cardFading`, etc).
+
+**Why this wasn't caught earlier:** the bug only manifests when
+the SAME signature key recurs. First-occurrence riddles always
+worked fine (no stale flag). Bug requires (a) player wins a
+riddle, (b) DM resolves, (c) same player lands on another
+riddle space later in the game.
+
+---
+
+**Files changed:** `characters.js`, `rumble.js`, `players-core.js`,
+`NOTES.md`.
+
+UNTOUCHED: server.js, html, boardFx.
+
+---
+
+**Test focus — SS pierce:**
+
+1. Hard refresh.
+2. **SS dashes through aligned line of 3 enemies** → all 3 pierced,
+   each spins out perpendicular (left or right depending on which
+   side of the dash they were on). Dash continues to range cap.
+3. **SS dashes through 1 enemy** → enemy knocked sideways
+   (not forward), dash continues.
+4. **Pierce + crit** → knockback magnitude 360 (was 220).
+5. **Pierce vs. front_shield knight** → shield reduces by 25%
+   (was 50%). Damage gets through better.
+6. **Slipstream trail visible** for 1.7s after dash, covers path
+   plus 100px behind origin. Two-stroke render.
+7. **Pursuing entity crosses trail** → takes 50% pierce damage,
+   marked as hit (no double-tick from same trail).
+8. **Push-back burst at origin** when dash completes — entities
+   near point A knocked outward radially.
+
+**Test focus — riddle Collect:**
+
+1. Player lands on yellow-brick space, answers riddle correctly.
+2. Collect button appears immediately in resolution card.
+3. Tap Collect → brick shower FX fires, yellow brick added to
+   inventory. ✓ (this was the FIRST riddle case, already worked.)
+4. **DM resolves the event. Player lands on ANOTHER yellow-brick
+   space (or any other riddle event). Answers correctly.**
+5. **Collect button NOW appears** (was missing pre-v0.16.52).
+
+---
+
+**Risk surfaces:**
+
+- Perpendicular knockback magnitude (220/360) is a tuning knob.
+  May need adjustment after extended playtest. Fixed values not
+  in characters.js schema yet — easy to expose later.
+- Trail damage fraction (50%) and duration (1.7s) are in schema.
+  Tunable per-class without engine touch.
+- Pierce damage scales linearly with entities aligned (no
+  falloff). 6 enemies in line = 6× full damage. Intended for
+  positioning reward; can dial back via `pierceDamageFalloff`
+  if it feels OP.
+- The riddle fix is broader than just riddles — applies to any
+  event where the same `cls + roll + evType` key recurs. Should
+  be net positive.
+
+---
+
+**Standards audit (rule #17 — push #70 in S015 continuation,
+push #2 in S016 SS red arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (changes go through players-core.js
+  which both players.html and test_players.html load)
+- Rule #11 (data/runtime/UI): UNITY held. Trail config lives in
+  characters.js, engine reads it. UI bug fix lives in players-
+  core.js render lifecycle.
+- Rule #14 (UNITY): pierce identity now mechanically AND visually
+  consistent — perpendicular knockback reads "you spun out of my
+  way," trail reads "I went THIS way and it's still hot," burst
+  reads "I left, don't come this way." Three beats, one identity.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: trail spawn lives at single dispatcher (pierce dash
+    termination). Collected-flag cleanup lives at single
+    activeEvent-null check.
+  - ELEGANCE: knockback math is one cross-product line. Fix is
+    one-line addition to existing cleanup block.
+  - EFFICIENCY: trail collision is O(n×trails) per frame; trails
+    typically 0-2 active at once.
+- Rule #19 (intuition): your "perpendicular not forward" feedback
+  was sharper than my "remove entirely" lean. Sideways spin reads
+  as both impactful and pierceable in a way zero-knockback didn't.
+- Rule #28 (unify-at-choke-point): held — added cleanup at the
+  single existing null-check site rather than creating a new
+  transition tracker. Simpler, more aligned with the pattern.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

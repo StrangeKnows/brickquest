@@ -298,14 +298,14 @@ var CHARACTERS = {
       recoilOnHit: false,                // dash continues; no spring-back
       blastVisual: null,                 // no central impact ring
       critScreenShake: null,             // SS is a runner, not a slammer
-      // v0.16.51 slipstream trail config (parking-lot for next push)
-      // trail: {
-      //   damageFraction: 0.5,
-      //   duration: 1.7,
-      //   tailBehindOrigin: 100,        // px extension backward from A
-      //   pushBackBurstRadius: 60,      // burst radius at point A
-      //   pushBackBurstStrength: 240,   // knockback velocity
-      // },
+      // v0.16.51 — slipstream trail spawned on dash completion
+      trail: {
+        damageFraction: 0.5,             // entities crossing trail take 50% pierce dmg
+        duration: 1.7,                   // seconds before trail fades fully
+        tailBehindOrigin: 100,           // px extension backward from origin point A
+        pushBackBurstRadius: 60,         // burst radius at point A (knockback origin)
+        pushBackBurstStrength: 240,      // knockback velocity for entities near A
+      },
     },
   },
   blocksmith: {

@@ -967,6 +967,8 @@ function update(dt) {
   updateBoulders(dt);
   // v0.16.39 — Blocksmith reactive shrapnel (pip-loss → projectile)
   updateShrapnel(dt);
+  // v0.16.51 — Snapstep pierce-dash slipstream trails (lifecycle + collision)
+  updatePierceTrails(dt);
 
   // Blue bolts, traps, armor
   updateBlueBolts(dt, bounds);
@@ -1124,6 +1126,7 @@ function draw() {
   drawEnemyProjectiles();
   drawBoulders();
   drawShrapnel();   // v0.16.39 — Blocksmith reactive shrapnel
+  drawPierceTrails();   // v0.16.51 — Snapstep slipstream trail (under entities)
   drawDroppedBricks();
 
   // ── Player ──
@@ -3875,6 +3878,151 @@ function maybeSpawnPipShrapnel(armorBeforeLoss, srcX, srcY, srcEntity) {
   spawnShrapnel(player.x, player.y, srcX, srcY, dmg, srcEntity);
 }
 
+// ── SNAPSTEP SLIPSTREAM TRAIL (v0.16.51) ──────────────────────────────
+// Spawned on pierce-dash completion. The trail is a line segment from
+// (origin - tailBehindOrigin in dash direction) through origin to the
+// dash endpoint. Persists for trail.duration seconds, fading alpha
+// linearly. Entities crossing the line (within trail.lineWidth radius)
+// take trail.damageFraction × pierce damage, ONE TIME per entity per
+// trail (entity is added to .hitEntities Set).
+//
+// On spawn, also fires a push-back burst at the origin point — radial
+// knockback for entities within pushBackBurstRadius. Anti-pursuit beat:
+// "I left, don't come this way."
+//
+// Architecture: trail config lives in characters.js redProfile.trail.
+// Other classes have no trail config → no trail spawned (engine reads
+// dashProfile.trail; null means baseline pierce only). Only pierce
+// model spawns trails (the spawn site checks dashModel === 'pierce').
+var redDashTrails = [];
+
+function spawnPierceTrail(originX, originY, endX, endY, baseDamage, dashProfile) {
+  var cfg = dashProfile && dashProfile.trail;
+  if (!cfg) return;
+  // Compute dash direction (from origin to end) for the tail extension.
+  var dx = endX - originX, dy = endY - originY;
+  var len = Math.hypot(dx, dy);
+  if (len < 1) return;  // degenerate — skip
+  var dirX = dx / len, dirY = dy / len;
+  // Tail extends BEHIND origin in the OPPOSITE of dash direction.
+  var tailX = originX - dirX * (cfg.tailBehindOrigin || 100);
+  var tailY = originY - dirY * (cfg.tailBehindOrigin || 100);
+  redDashTrails.push({
+    // Geometry: trail line goes from (tailX, tailY) → (endX, endY)
+    tailX: tailX, tailY: tailY,
+    originX: originX, originY: originY,
+    endX: endX, endY: endY,
+    // Lifecycle
+    life: cfg.duration || 1.7,
+    maxLife: cfg.duration || 1.7,
+    // Damage config
+    baseDamage: baseDamage,
+    damageFraction: cfg.damageFraction || 0.5,
+    // Per-entity damage tracking — one hit per entity per trail
+    hitEntities: [],
+    // Visual
+    lineWidth: 18,  // collision band width (entities within this distance from line take dmg)
+  });
+  // Push-back burst at origin point A — knockback for entities within radius.
+  var burstR = cfg.pushBackBurstRadius || 60;
+  var burstStr = cfg.pushBackBurstStrength || 240;
+  for (var bi = 0; bi < entities.length; bi++) {
+    var bg = entities[bi];
+    if (!bg || bg.hp <= 0) continue;
+    var bdx = bg.x - originX, bdy = bg.y - originY;
+    var bdist = Math.hypot(bdx, bdy);
+    if (bdist > burstR) continue;
+    if (bdist < 1) bdist = 1;  // avoid division by zero
+    bg.bounceVx = (bdx / bdist) * burstStr;
+    bg.bounceVy = (bdy / bdist) * burstStr;
+    bg.bounceTimer = 0.4;
+    bg.state = 'bounce';
+  }
+  // Visual burst at point A
+  if (typeof spawnCritShockwave === 'function') {
+    spawnCritShockwave(originX, originY, '#E24B4A',
+      { r0: 8, maxR: burstR * 1.2, thickness: 3, growth: 320 });
+  }
+  if (typeof spawnCritFlourish === 'function') {
+    spawnCritFlourish(originX, originY, '#FF6644', 12);
+  }
+}
+
+// Returns the perpendicular distance from point (px, py) to the line
+// segment defined by (ax, ay) → (bx, by). Used for trail-collision
+// detection. Returns Infinity if point projects outside the segment
+// (i.e. before A or beyond B along the line direction).
+function _distFromLineSegment(px, py, ax, ay, bx, by) {
+  var dx = bx - ax, dy = by - ay;
+  var len2 = dx * dx + dy * dy;
+  if (len2 < 0.001) return Math.hypot(px - ax, py - ay);
+  var t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  if (t < 0 || t > 1) return Infinity;  // outside segment
+  var projX = ax + t * dx, projY = ay + t * dy;
+  return Math.hypot(px - projX, py - projY);
+}
+
+function updatePierceTrails(dt) {
+  for (var ti = redDashTrails.length - 1; ti >= 0; ti--) {
+    var trail = redDashTrails[ti];
+    trail.life -= dt;
+    if (trail.life <= 0) {
+      redDashTrails.splice(ti, 1);
+      continue;
+    }
+    // Damage detection — entities crossing the trail line.
+    for (var ei = 0; ei < entities.length; ei++) {
+      var g = entities[ei];
+      if (!g || g.hp <= 0) continue;
+      // Already hit by this trail? skip.
+      if (trail.hitEntities.indexOf(g) >= 0) continue;
+      var d = _distFromLineSegment(g.x, g.y, trail.tailX, trail.tailY, trail.endX, trail.endY);
+      if (d > trail.lineWidth + (g.r || 0)) continue;
+      // Trail hit. Apply damage, mark entity as hit.
+      trail.hitEntities.push(g);
+      var trailDmg = Math.max(1, Math.ceil(trail.baseDamage * trail.damageFraction));
+      var tRes = damageEntity(g, trailDmg, undefined, 'red', { piercing: true });
+      g.flashTimer = 0.2;
+      showDamageNumber(g.x, g.y - 25, tRes.applied, '#E24B4A', tRes.tier,
+        g.x, g.y, undefined, tRes.witherBoost, g, 'red');
+      if (typeof spawnCritFlourish === 'function') {
+        spawnCritFlourish(g.x, g.y, '#E24B4A', 4);
+      }
+    }
+  }
+}
+
+function drawPierceTrails() {
+  if (!ctx) return;
+  for (var ti = 0; ti < redDashTrails.length; ti++) {
+    var trail = redDashTrails[ti];
+    var alpha = trail.life / trail.maxLife;
+    if (alpha <= 0) continue;
+    ctx.save();
+    // Outer glow stroke (wider, lower alpha — reads as the "hot lane")
+    ctx.globalAlpha = 0.45 * alpha;
+    ctx.strokeStyle = '#E24B4A';
+    ctx.shadowColor = '#E24B4A';
+    ctx.shadowBlur = 18;
+    ctx.lineWidth = trail.lineWidth + 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(trail.tailX, trail.tailY);
+    ctx.lineTo(trail.endX, trail.endY);
+    ctx.stroke();
+    // Inner bright core (narrower, brighter — reads as the dash line itself)
+    ctx.globalAlpha = 0.85 * alpha;
+    ctx.strokeStyle = '#FF6644';
+    ctx.shadowBlur = 8;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(trail.tailX, trail.tailY);
+    ctx.lineTo(trail.endX, trail.endY);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 // ── BLOCKSMITH MAX-ARMOR ARC WALL (v0.16.46) ──────────────────────────
 // Payoff state for maxing armor: when BS armor === armorMax AND BS
 // uses SELF-CAST gray (tap), the cast produces an ARC WALL instead
@@ -5042,7 +5190,13 @@ function vScale(tier) { return tier <= 1 ? 1.5 : 0.5; }
 //   source: color string ('red', 'blue', ...) or family string ('physical'),
 //           or null/undefined for untyped (bypasses resistance)
 // Returns { applied, tier } so caller can render a floater matching result.
-function damageEntity(g, dmg, aggro, source) {
+function damageEntity(g, dmg, aggro, source, opts) {
+  // v0.16.51 — opts param for damage variants. Currently supports:
+  //   { piercing: true } — SS pierce-dash hits. Front-shield reduction
+  //     softens from 50% to 25% (pierce is designed to pass through
+  //     defenses; reduces the effectiveness of guard but doesn't ignore).
+  // Other damage paths pass undefined and get baseline behavior.
+  opts = opts || {};
   // PHASE D — phase_fade signature: wraith is fully invulnerable during
   // the brief post-teleport window. Damage is absorbed to zero with a
   // "PHASED" floater telling the player why their hit didn't land.
@@ -5055,6 +5209,9 @@ function damageEntity(g, dmg, aggro, source) {
   // "facing" is the direction from knight → player (tracked continuously).
   // For player-origin hits, the incoming angle is from knight → player.
   // Shield absorbs frontal, ignores side/back.
+  // v0.16.51: piercing hits (SS pierce-dash) reduce shield effectiveness
+  // from 50% block to 25% block. Pierce is designed to pass through
+  // defenses but not ignore them entirely.
   var _shieldBlockedPct = 0;
   if (g.signature === 'front_shield' && player) {
     // Knight's current facing vector (always points at player)
@@ -5085,7 +5242,8 @@ function damageEntity(g, dmg, aggro, source) {
     var dotFacing = facingX * toPlayerX + facingY * toPlayerY;
     // dot > 0.5 ≡ within 60° of facing direction ≡ player in front arc
     if (dotFacing > 0.5) {
-      _shieldBlockedPct = 0.5;
+      // v0.16.51: piercing hits reduce shield block from 50% to 25%.
+      _shieldBlockedPct = opts.piercing ? 0.25 : 0.5;
     }
   }
   // BLUE MARK: target takes +50% damage from all sources while marked.
@@ -7801,25 +7959,60 @@ function updateBrickAction(dt, bounds) {
             var pKnockMult = (pCrit ? 2.0 : 1.0) * knockbackScale;
             var pFx = _fx('red', pTier);
             var pBaseDmg = Math.ceil((pFx ? pFx.dmg : 3) * pCritMult);
+            // v0.16.51 — stash base damage for trail spawn at termination.
+            // Captures the exact damage that pierce hits dealt so the
+            // trail's 50% fraction is consistent with what the dash did.
+            brickAction._pierceBaseDmg = pBaseDmg;
             // Apply pierce damage to each new target.
             for (var _pti = 0; _pti < pierceTargets.length; _pti++) {
               var pHitG = pierceTargets[_pti];
               brickAction._hitSet.push(pHitG);
               // Pierce damage (full or falloff per schema).
               var pDmg = Math.ceil(pBaseDmg * (dashProfile.pierceDamageFalloff || 1.0));
-              var pRes = damageEntity(pHitG, pDmg, undefined, 'red');
+              var pRes = damageEntity(pHitG, pDmg, undefined, 'red', { piercing: true });
               pHitG.flashTimer = 0.3;
               showDamageNumber(pHitG.x, pHitG.y - 30, pRes.applied,
                 pCrit ? '#FFAA00' : '#E24B4A', pRes.tier, pHitG.x, pHitG.y,
                 undefined, pRes.witherBoost, pHitG, 'red');
-              // Light forward knockback — slipped past, didn't punch.
-              pHitG.bounceVx = brickAction.dirX * 300 * pKnockMult;
-              pHitG.bounceVy = brickAction.dirY * 300 * pKnockMult;
-              pHitG.bounceTimer = 0.25;
+              // v0.16.52 — Pierce knockback is PERPENDICULAR to dash
+              // direction. Entities get spun out sideways from the path,
+              // not punched forward through it. Side is determined by
+              // which side of the dash line the entity is on (cross
+              // product). Magnitude is fixed for all entities — no
+              // weight-class scaling — reads as "you cut through them
+              // so fast they spun out of the way."
+              //
+              // Cross product (entity_offset × dashDir) sign:
+              //   positive → entity is on left of dash direction
+              //   negative → entity is on right
+              //   zero     → exactly on the line (pick right by default)
+              var _ofx = pHitG.x - player.x;
+              var _ofy = pHitG.y - player.y;
+              var _cross = _ofx * brickAction.dirY - _ofy * brickAction.dirX;
+              // Perpendicular vectors:
+              //   right of dash: ( dirY, -dirX)
+              //   left of dash:  (-dirY,  dirX)
+              var _perpX, _perpY;
+              if (_cross < 0) {
+                // Entity left of dash → knock further left
+                _perpX = -brickAction.dirY;
+                _perpY = brickAction.dirX;
+              } else {
+                // Entity on right or on line → knock right
+                _perpX = brickAction.dirY;
+                _perpY = -brickAction.dirX;
+              }
+              // Fixed magnitude — all entities knocked back same amount.
+              // Crit doubles velocity (matches existing crit visual beat).
+              var _pierceKnockMag = pCrit ? 360 : 220;
+              pHitG.bounceVx = _perpX * _pierceKnockMag;
+              pHitG.bounceVy = _perpY * _pierceKnockMag;
+              pHitG.bounceTimer = 0.3;
               pHitG.state = 'bounce';
-              // Per-target spark (small visual cue at each pierce point)
+              // Per-target spark (visual cue at each pierce point)
               if (typeof spawnCritFlourish === 'function') {
-                spawnCritFlourish(pHitG.x, pHitG.y, '#E24B4A', 4);
+                spawnCritFlourish(pHitG.x, pHitG.y, '#E24B4A', 6);
+                spawnCritFlourish(pHitG.x, pHitG.y, '#FF6644', 3);
               }
               // Crit visuals if applicable (less heavy than recoil/blast
               // models — pierce identity is fast, not flashy).
@@ -7980,6 +8173,20 @@ function updateBrickAction(dt, bounds) {
       //     'charge', hit flag set → terminate immediately.
       // The phase check is the discriminator.
       if (brickAction && brickAction.hit && brickAction.phase === 'charge') {
+        // v0.16.51 — Pierce dash spawns a slipstream trail at termination
+        // (before the brickAction is nulled). Trail covers the dash path
+        // from origin → end, plus a tail extension behind origin. Other
+        // dashModels (recoil, aoe-blast) skip this — only pierce profiles
+        // have the trail config.
+        if (dashProfile.dashModel === 'pierce' && dashProfile.trail) {
+          var pierceFx = _fx('red', brickAction.dmgMult || 1);
+          var fallbackBaseDmg = Math.ceil((pierceFx ? pierceFx.dmg : 3) * (brickAction.isCrit ? 2.0 : 1.0));
+          var trailBaseDmg = (typeof brickAction._pierceBaseDmg === 'number')
+            ? brickAction._pierceBaseDmg
+            : fallbackBaseDmg;
+          spawnPierceTrail(brickAction.startX, brickAction.startY,
+            player.x, player.y, trailBaseDmg, dashProfile);
+        }
         brickAction = null;
       } else if (brickAction && brickAction.chargeTimer >= 2.0) {
         brickAction = null;
@@ -10650,6 +10857,8 @@ function _internalStart(config) {
   boulders = [];
   // v0.16.39 — reset reactive shrapnel
   shrapnelPieces = [];
+  // v0.16.51 — reset SS pierce trails
+  redDashTrails = [];
   // Remove any leftover DOM overlays (exit card, victory screen) from a
   // previous battle that didn't tear down cleanly.
   var stale;

@@ -39,9 +39,10 @@ var lastRoll = null;
 // state broadcast (server still has activeEvent until DM marks resolved).
 // Keyed by event signature (cls + roll + evType) — the same shape used by
 // _burstFiredFor. Render functions check this; if set for the current event,
-// the resolution card is skipped. Reset implicitly when activeEvent changes
-// (new key = new entry, never matches old).
+// the resolution card is skipped. Reset when activeEvent goes null
+// (cleared in render() top alongside other dicts) — see v0.16.52 fix.
 var _collectedResolutions = {};
+
 
 // v0.15.39 — When _collectedResolutions has the active-event key, the entire
 // active-event panel collapses (not just the resolution card). This lets the
@@ -741,6 +742,14 @@ function render() {
     _cardFading = {};
     _cardEntered = {};
     _cardFlavors = {};
+    // v0.16.52 — Also clear _collectedResolutions when activeEvent is
+    // null. Previously this dict persisted across event boundaries,
+    // causing the Collect button to never appear on a second event
+    // with the same signature key (cls + roll + evType). Surfaced
+    // via riddle events where the same player can land on multiple
+    // yellow-brick spaces with roll='SPACE' — second occurrence's
+    // collect was suppressed by stale flag from the first.
+    _collectedResolutions = {};
   }
   renderPhaseBanner(me);
   // restoreActiveEvent MUST run AFTER renderDashboard. The active-event host
