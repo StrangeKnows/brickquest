@@ -5648,6 +5648,114 @@ where this fix could live once?" Don't replicate the fix N times.
 
 ---
 
+### v0.16.43 — Fixer overheal climbs to 2× hpMax over multiple rumbles
+
+> "shouldnt fixer 9/8 hp rise to 10/8 on rumble open? or is it capped?"
+>
+> "feels like fixer should keep climbing until reaching max overheal,
+> which is 100% max hp"
+>
+> "fixer is only 16 max total when base hp is 8 and overheal is 8,
+> every tumble start +1 hp. if at 1/8 and initiate rumble, start at 2/8"
+
+Fixer's hpOverheal passive previously capped at hpMax + 1 (Fixer 9
+max). After playtest, Ross identified the design intent: Fixer
+should climb +1 per rumble entry until reaching 2× hpMax (16 max
+for Fixer). Tank fantasy earned over a full board run. Mid-build
+clarification corrected an over-engineered "requireFullHp" gate I
+nearly shipped — final spec is simpler: +1 every rumble entry, no
+gate, no reset on damage.
+
+**hpOverheal schema extended (characters.js):**
+
+```javascript
+rumblePassive: {
+  kind: 'hpOverheal',
+  amount: 1,
+  capMult: 2.0,    // ceiling = hpMax × 2 (Fixer 8 → 16)
+  // ... label, color
+}
+```
+
+**Behavior summary:**
+
+| Starting HP | After rumble entry |
+|---|---|
+| 1/8 | 2/8 |
+| 7/8 | 8/8 |
+| 8/8 | 9/8 |
+| 9/8 | 10/8 (overheal climb) |
+| 15/8 | 16/8 (one rumble from cap) |
+| 16/8 | 16/8 (capped) |
+
+**Damage model:** overheal pips lost like normal HP. Take 4 dmg from
+16/8 → 12/8. Climb resumes from 12/8 next rumble entry → 13/8.
+Doesn't reset to baseline on damage.
+
+**Heal interaction:** existing white-brick heal still caps at hpMax
+(unchanged). Only the rumble-entry passive can push above hpMax. So
+falling below hpMax → standard heal recovers to 8/8, then next
+rumble-entry passive bumps to 9/8 and starts climbing again.
+
+**Tank fantasy realized:** Fixer at 16/8 over 8+ rumbles is a
+genuine tank state. Pairs with healer identity (white/black sig,
+heal-self, drain). Steady fighting over a full board run earns the
+buffer.
+
+---
+
+**Files changed:** `characters.js`, `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Fixer 8/8 → enter rumble → 9/8 → exit/re-enter → 10/8.** Climb
+   visible per rumble.
+3. **Fixer at 1/8 → enter rumble → 2/8.** Climbs even when injured.
+4. **Fixer at 16/8 → enter rumble → 16/8.** Cap holds.
+5. **Damage from overheal:** take a hit at 14/8 → 13/8 (or whatever
+   damage). Pips lost like normal. Next rumble entry → 14/8 (climb
+   resumes from current).
+6. **Healing during overheal:** white-brick heal at 16/8 → no effect
+   (cap held by heal logic). Heal at 13/8 → up to hpMax (8) only.
+7. **Banner still fires** as "✚ MEND READY" with 1s delay (existing).
+
+---
+
+**Risk surfaces:**
+
+- The cap is `Math.floor(hpMax × capMult)`. For Fixer hpMax=8 ×
+  2.0 = 16. Exact. Other classes with non-integer caps would
+  floor (8 × 1.5 = 12). Not a concern for current spec.
+- Existing players may currently be at 9/8 (old cap). On next
+  rumble entry, they'll go to 10/8, then climb normally. No
+  back-compat issues.
+
+---
+
+**Standards audit (rule #17 — push #62 in S015 continuation,
+push #6 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (characters.js + rumble.js, no UI)
+- Rule #11 (data/runtime/UI): UNITY held. capMult lives in data,
+  dispatcher reads it. Adding another hpOverheal class with
+  different cap = data change only.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: capMult is a schema field, not a hardcoded literal.
+  - ELEGANCE: 4-line dispatcher case, no special-casing.
+  - EFFICIENCY: simple math, no allocations.
+- Rule #19 (intuition): mid-spec clarification caught me overshooting
+  with a requireFullHp gate. Final spec simpler than what I started
+  to code. Always re-check the spec when adding a "feature" before
+  it lands.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

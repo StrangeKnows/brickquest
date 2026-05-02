@@ -52,7 +52,7 @@
 //                        firstHitMod       — { mult }
 //                        invulnMs          — { duration }
 //                        armorBonus        — { amount }
-//                        hpOverheal        — { amount }
+//                        hpOverheal        — { amount, capMult }
 //                        firstEnemyDebuff  — { effect, stacks, duration }
 //
 //   Affinity (per design doc §2.2 — the canonical spec)
@@ -337,12 +337,19 @@ var CHARACTERS = {
     weight: 'mid', dashBreakChance: 0.50, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
     armorCapMult: 0.50,    // 8 × 0.50 = 4 max armor
     grayCritChance: 0.10,
-    //   hpOverheal: { amount } — start with hp = hpMax + N (overheal pip)
+    //   hpOverheal: { amount, capMult }
+    //     amount  — pips added per rumble entry
+    //     capMult — overheal ceiling as multiplier of hpMax (2.0 = double HP)
+    // v0.16.43 — Fixer overheal climbs over multiple rumbles. +1 to current
+    // hp every rumble entry, cap at hpMax × 2 (Fixer 8 → 16 max). Damage
+    // model: overheal pips lost like normal HP, no reset on hit. Climbs
+    // even when injured (1/8 → 2/8 next rumble).
     rumblePassive: {
       kind: 'hpOverheal',
       label: '✚ MEND READY',
       color: '#D4537E',
       amount: 1,
+      capMult: 2.0,           // max overheal = hpMax × 2 (Fixer 8 → 16)
     },
     // Red baseline: mid weight, no signature affinity. Standard reach.
     redProfile: { rangeBase: 200, rangeAffinityBonus: 1.0 },

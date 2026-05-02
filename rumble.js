@@ -6758,12 +6758,16 @@ function applyRumblePassive() {
       player.armor = Math.min(aMax || 99, (player.armor || 0) + (p.amount || 1));
       break;
     case 'hpOverheal':
-      // v0.16.36: ADD overheal to current hp (was setting absolute hp = hpMax+amount,
-      // which secretly healed players who entered damaged). Now matches BS armorBonus
-      // semantics — additive, cap-aware. Ceiling is hpMax + amount (the overheal
-      // ceiling). 7/8 → 8/8 (no free heal). 8/8 → 9/8 (overheal pip).
+      // v0.16.43 — Fixer overheal climbs over multiple rumbles. Spec:
+      //   - Add `amount` pips on every rumble entry (no gate)
+      //   - Cap at hpMax × capMult (default 2.0 = double HP max)
+      //   - Damage model: overheal lost like normal HP, no reset on hit
+      // Per S016 design lock: Fixer at 1/8 → 2/8 next rumble. Climbs
+      // every rumble regardless of HP state. 8 rumbles from full = 16/8
+      // cap. Damage takes pips off; resume climb on next rumble entry.
       var _ohAmount = p.amount || 1;
-      var _ohCap = (player.hpMax || 1) + _ohAmount;
+      var _ohCapMult = (typeof p.capMult === 'number') ? p.capMult : 2.0;
+      var _ohCap = Math.floor((player.hpMax || 1) * _ohCapMult);
       player.hp = Math.min(_ohCap, (player.hp || 0) + _ohAmount);
       break;
     case 'firstEnemyDebuff':
