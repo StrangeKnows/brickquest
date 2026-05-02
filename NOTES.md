@@ -7135,6 +7135,131 @@ push #5 in S016 SS red arc):**
 
 ---
 
+### v0.16.54 — SS pierce direction lock (telemetry-confirmed root cause)
+
+> Console log paste: dirXY values flipping every few frames during
+> a single dash — 0.88 → -0.99 → 0.86 → 0.87 → -0.95 → -0.96 → 0.83 → -0.96.
+
+**Telemetry from v0.16.53 diagnostic revealed the actual root cause** —
+not the overlap resolver, not the bounce velocity, not visual clipping.
+The dash direction itself was being recomputed every frame to track
+the nearest entity. As the player moved through pierced entities,
+"nearest entity" kept changing — sometimes flipping to the OTHER
+side of the player after overshooting — producing the chaotic
+zigzag motion that read as "shaking, caught, odd positions."
+
+**Why only pierce showed this:** other dash models (recoil, aoe-blast)
+STOP on first hit. The retarget block runs ONCE before impact, then
+the dash terminates. So zigzag wasn't visible — direction couldn't
+flip in a single frame's window. Pierce continues through entities,
+so the retarget block runs repeatedly across the dash duration,
+producing visible direction flips.
+
+**The diagnostic frame logs made this immediately legible:**
+
+```
+frame 5:  dirXY: "0.88,-0.47"   playerXY: 717,370
+frame 9:  dirXY: "-0.99,0.11"   playerXY: 707,361
+frame 13: dirXY: "0.86,-0.50"   playerXY: 711,347
+frame 17: dirXY: "0.87,-0.50"   playerXY: 750,324
+frame 21: dirXY: "-0.95,-0.31"  playerXY: 789,302
+frame 25: dirXY: "-0.96,-0.26"  playerXY: 784,253
+```
+
+Direction flipping between 0.88 and -0.99 between consecutive frames —
+that's the dash literally turning around. Player was retargeting to
+a different entity every cycle.
+
+**The fix:** add `_lockDirection: true` flag on pierce dash creation.
+The retarget block in `updateBrickAction` skips the recompute when
+this flag is set. Direction stays locked at the cast-time vector
+toward the initial target, and the dash flies in a STRAIGHT LINE
+until range cap or wall block.
+
+This is a 4-line fix once the cause was identified — but identifying
+it required real telemetry, which v0.16.53's diagnostic provided.
+Memory rule #6 paid off here: the bizarre symptoms WERE single-cause,
+just not the cause I would have guessed from first principles.
+
+**Lesson reinforced:** when symptoms feel weird and multi-faceted,
+ship the diagnostic and let the data speak. My v0.16.52 instinct
+("overlap resolver is the problem") was wrong; v0.16.53's resolver
+redirect was a defensive layered fix that didn't address the actual
+issue. v0.16.54 fixes the real cause.
+
+**The v0.16.53 perpendicular resolver redirect is still good** —
+it preserves visual cleanliness during overlap AND aligns with
+pierce identity. Worth keeping. The combination of (a) direction
+lock + (b) perpendicular resolver push + (c) perpendicular bounce
+velocity gives clean, coherent pierce identity:
+- Dash flies straight from origin to range/wall (locked)
+- Entities in path get hit, get visual separation via resolver,
+  and continue spinning out via bounce
+- All three motion vectors agree on direction
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **SS dashes through goblin** — should now be a STRAIGHT line from
+   cast position to range cap (or wall block). No zigzag, no shaking.
+3. **Console verification** — `[DASH-DIAG frame]` logs should show
+   dirXY remaining CONSTANT across frames during a single dash
+   (allowing tiny floating-point drift but no sign flips).
+4. **Multiple aligned enemies** — dash should pierce all of them
+   without zigzagging. Each entity spins out perpendicular cleanly.
+5. **No regressions for other classes** — BK and other red-dash
+   classes still auto-target and recoil-on-hit normally.
+
+If straight-line dashes confirmed → v0.16.55 strips all DIAG blocks.
+If still flipping → console output again, deeper investigation.
+
+---
+
+**Risk surfaces:**
+
+- Pierce dash now ignores entity movement during the dash window.
+  If an entity teleports across the dash path mid-dash, the dash
+  doesn't redirect to chase. Acceptable for pierce identity (straight
+  line is the design); other dash models still track if needed.
+- Initial cast-time target selection still uses nearest-entity logic.
+  If multiple entities are equidistant, JS reduce picks the first;
+  edge case but rare.
+
+---
+
+**Standards audit (rule #17 — push #73 in S015 continuation,
+push #6 in S016 SS red arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #6 (diagnostic-first): VINDICATED. v0.16.53 diagnostic
+  ship was correct call; telemetry surfaced the real cause that
+  patch-on-instinct would have missed.
+- Rule #11 (data/runtime/UI): runtime fix; pierce model detection
+  reads schema. UNITY held.
+- Rule #14 (UNITY): pierce identity now coherent across direction
+  (locked), resolver push (perpendicular), and bounce velocity
+  (perpendicular). Three systems, one consistent geometry.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: single flag (_lockDirection) controls both retarget skip
+    AND signals pierce mechanics through the rest of the dispatch.
+  - ELEGANCE: 4-line fix once root cause was identified.
+  - EFFICIENCY: skips the per-frame entity scan during pierce
+    (small perf win — previously O(n) per frame for retargeting).
+- Rule #19 (intuition): paused before patching on hypothesis,
+  shipped diagnostic per rule #6, telemetry pointed to the real
+  fix. Discipline paid off.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

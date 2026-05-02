@@ -7099,6 +7099,16 @@ function startRedCharge(dmgMult, targetEntity) {
     maxRange: maxRange,
     isCrit: _currentCrit,
   };
+  // v0.16.54 — Pierce dashes lock direction at cast time. Without this,
+  // the auto-target retarget block flips direction every frame as the
+  // player moves through entities (nearest entity changes after each
+  // pierce hit), producing the "shaking / odd positions" visual.
+  // Other dash models (recoil, aoe-blast) STOP on first hit, so they
+  // don't suffer this — they want auto-tracking until impact.
+  var _ddProf2 = (typeof getRedDashProfile === 'function') ? getRedDashProfile(player.cls) : null;
+  if (_ddProf2 && _ddProf2.dashModel === 'pierce') {
+    brickAction._lockDirection = true;
+  }
   // v0.16.53 DIAGNOSTIC — dash creation (auto-target)
   if (typeof console !== 'undefined' && console.log) {
     console.log('[DASH-DIAG create-auto]', {
@@ -7933,6 +7943,17 @@ function updateBrickAction(dt, bounds) {
       var knockbackScale = dashProfile.knockbackScale;
       if (brickAction.usePoint) {
         // Fixed direction toward dropped point
+      } else if (brickAction._lockDirection) {
+        // v0.16.54 — Pierce dashes lock direction at cast time. The
+        // standard auto-target retargets every frame to the nearest
+        // entity, which causes pierce dashes to zigzag as the player
+        // moves through entities (nearest entity changes after each
+        // pierce hit, sometimes flipping to the opposite side of the
+        // player → direction snaps → visual "shaking" + entities
+        // ending up at unexpected positions because dash isn't a
+        // straight line). Pierce identity = straight-line motion;
+        // the initial cast-time target sets direction, and that's
+        // what the dash follows.
       } else {
         // Track nearest entity
         var nearestG = entities.length ? entities.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null;
