@@ -965,6 +965,8 @@ function update(dt) {
   updateThornShards(dt);
   // PHASE E — arcing projectiles (troll boulder toss)
   updateBoulders(dt);
+  // v0.16.39 — Blocksmith reactive shrapnel (pip-loss → projectile)
+  updateShrapnel(dt);
 
   // Blue bolts, traps, armor
   updateBlueBolts(dt, bounds);
@@ -1121,6 +1123,7 @@ function draw() {
   entities.forEach(function(g) { drawEntity(g); });
   drawEnemyProjectiles();
   drawBoulders();
+  drawShrapnel();   // v0.16.39 — Blocksmith reactive shrapnel
   drawDroppedBricks();
 
   // ── Player ──
@@ -3681,6 +3684,138 @@ function drawBoulders() {
   }
 }
 
+// ── BLOCKSMITH SHRAPNEL (v0.16.39) ────────────────────────────────────
+// Reactive damage: when an attacker removes a Blocksmith armor pip,
+// a shrapnel projectile flies from BS to the attacker. Visible plate/
+// spike falls off and travels through the air — cinematic at range.
+// Damage = pip count BEFORE loss (1..armorMax). Pure linear curve.
+//
+// Projectile state: { sx, sy, tx, ty, t, dur, dmg, targetEntity, done }
+//   sx/sy   — start position (BS at moment of pip loss)
+//   tx/ty   — target position (attacker's position at moment of pip loss)
+//   t       — 0..1 progress
+//   dur     — flight duration (scaled by distance for consistent feel)
+//   dmg     — damage to deal on hit (linear curve, =armorBeforeLoss)
+//   targetEntity — soft-link to entity if still alive at impact
+var shrapnelPieces = [];
+
+function spawnShrapnel(sx, sy, tx, ty, dmg, targetEntity) {
+  if (typeof dmg !== 'number' || dmg <= 0) return;
+  var dist = Math.hypot(tx - sx, ty - sy);
+  // Flight duration scales gently with distance — close attackers hit
+  // fast, distant attackers see the shrapnel travel. Floor 0.18s, ceiling
+  // 0.55s. Tuned for visibility without slowing combat pace.
+  var dur = Math.max(0.18, Math.min(0.55, dist / 480));
+  shrapnelPieces.push({
+    sx: sx, sy: sy,
+    tx: tx, ty: ty,
+    t: 0,
+    dur: dur,
+    dmg: dmg,
+    targetEntity: targetEntity || null,
+    done: false,
+    // Random rotation for visual variety — each shard tumbles in flight.
+    rotStart: Math.random() * Math.PI * 2,
+    rotSpeed: (Math.random() * 12 - 6),
+  });
+}
+
+function updateShrapnel(dt) {
+  for (var i = shrapnelPieces.length - 1; i >= 0; i--) {
+    var s = shrapnelPieces[i];
+    s.t += dt / s.dur;
+    if (s.t >= 1) {
+      // Impact resolution. Prefer the linked entity if still alive (it may
+      // have moved since spawn). Fall back to position-based hit at the
+      // original target point — small radius forgives misses.
+      var tgt = s.targetEntity;
+      if (tgt && tgt.hp > 0) {
+        damageEntity(tgt, s.dmg);
+        if (typeof spawnCritFlourish === 'function') {
+          spawnCritFlourish(tgt.x, tgt.y, '#EF9F27', 6);
+        }
+      } else {
+        // Target gone — find any entity at impact point within forgiving radius.
+        var hitR = 28;
+        for (var ei = 0; ei < entities.length; ei++) {
+          var g = entities[ei];
+          if (Math.hypot(g.x - s.tx, g.y - s.ty) <= hitR + (g.r || 12)) {
+            damageEntity(g, s.dmg);
+            if (typeof spawnCritFlourish === 'function') {
+              spawnCritFlourish(g.x, g.y, '#EF9F27', 6);
+            }
+            break;
+          }
+        }
+      }
+      s.done = true;
+    }
+  }
+  shrapnelPieces = shrapnelPieces.filter(function(s) { return !s.done; });
+}
+
+function drawShrapnel() {
+  if (!ctx) return;
+  for (var i = 0; i < shrapnelPieces.length; i++) {
+    var s = shrapnelPieces[i];
+    // Linear interpolation with a slight arc — shrapnel pieces tumble
+    // through the air with a subtle peak (smaller than boulders since
+    // shards are lighter). Adds 2D flight feel without overcomplicating.
+    var x = s.sx + (s.tx - s.sx) * s.t;
+    var y = s.sy + (s.ty - s.sy) * s.t;
+    var arcH = -18 * 4 * s.t * (1 - s.t);  // small peak (~18px) at t=0.5
+    var rot = s.rotStart + s.rotSpeed * s.t;
+    ctx.save();
+    ctx.translate(x, y + arcH);
+    ctx.rotate(rot);
+    // Shadow blur for visibility against any background
+    ctx.shadowColor = '#EF9F27';
+    ctx.shadowBlur = 6;
+    // Shrapnel shape: small jagged plate (gray with amber glow edge).
+    // Gray core matches armor pip color; amber glow ties to BS class
+    // palette so the projectile reads as "Blocksmith damage."
+    ctx.fillStyle = '#AAAAAA';
+    ctx.strokeStyle = '#EF9F27';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    // Irregular pentagon — looks like a shard of plate metal
+    ctx.moveTo(-5, -3);
+    ctx.lineTo(4, -4);
+    ctx.lineTo(6, 2);
+    ctx.lineTo(2, 5);
+    ctx.lineTo(-4, 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ── BLOCKSMITH PIP-LOSS HOOK (v0.16.39) ──────────────────────────────
+// Called from armor-absorb sites whenever a BS armor pip is removed by
+// enemy damage. Reads grayProfile.pipLostShrapnel + shrapnelDamageCurve
+// and spawns a shrapnel projectile from BS toward the attacker. Damage
+// is the PRE-LOSS armor count (linear curve: 1..armorMax). Other classes
+// (no pipLostShrapnel) skip silently.
+//
+// Args:
+//   armorBeforeLoss — pip count BEFORE the attack absorbed the pip.
+//                     Linear damage curve uses this directly.
+//   srcX, srcY      — attacker position (where shrapnel flies TO)
+//   srcEntity       — attacker entity (optional; lets shrapnel track
+//                     a moving target if still alive at impact)
+function maybeSpawnPipShrapnel(armorBeforeLoss, srcX, srcY, srcEntity) {
+  if (!player) return;
+  var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
+  if (!prof || !prof.pipLostShrapnel) return;
+  if (armorBeforeLoss <= 0) return;
+  // Pure linear curve: dmg = pre-loss armor count. shrapnelDamageCurve
+  // field is read but currently only 'linear' is supported. Future
+  // curves (exponential, capped, etc.) extend this dispatch.
+  var dmg = armorBeforeLoss;
+  spawnShrapnel(player.x, player.y, srcX, srcY, dmg, srcEntity);
+}
+
 
 // PHASE C/D — fire one slinger shot, tagging for orange shrapnel (every 3rd)
 // or yellow daze (every 5th). Extracted into a helper so both legacy
@@ -3944,10 +4079,32 @@ function _applyEnemyMeleeDamage(g, dmg, dx, dy, dist) {
   // Armor absorb first.
   if ((player.armor||0) > 0) {
     var absorbed = Math.min(player.armor, dmgLeft);
+    var _bsArmorBefore = player.armor;  // v0.16.39 — capture pre-loss for shrapnel
     player.armor -= absorbed;
     dmgLeft -= absorbed;
     if (_battleStats) _battleStats.armorAbsorbed += absorbed;
     showFloatingText(player.x, player.y - 55, absorbed + ' 🛡', '#AAAAAA', player);
+    // v0.16.39 — Blocksmith reactive shrapnel. Pip lost → projectile flies
+    // back to the attacker. damage = pre-loss armor count (linear curve).
+    // Source position: prefer g.x/g.y if provided (full entity), else
+    // resolve from dx/dy passed by caller (boulder/projectile path).
+    if (typeof maybeSpawnPipShrapnel === 'function') {
+      var srcX, srcY, srcEnt;
+      if (g && typeof g.x === 'number' && typeof g.y === 'number') {
+        srcX = g.x; srcY = g.y;
+        srcEnt = (g.hp !== undefined) ? g : null;  // only link if real entity
+      } else if (typeof dx === 'number' && typeof dy === 'number') {
+        // dx/dy is offset from attacker to player (player.x - g.x = dx).
+        // Reverse: attacker = player - (dx, dy).
+        srcX = player.x - dx;
+        srcY = player.y - dy;
+        srcEnt = null;
+      } else {
+        srcX = player.x; srcY = player.y - 60;  // last-resort fallback
+        srcEnt = null;
+      }
+      maybeSpawnPipShrapnel(_bsArmorBefore, srcX, srcY, srcEnt);
+    }
   }
   if (dmgLeft > 0) {
     if (_battleStats) {
@@ -5647,10 +5804,17 @@ function updateEntity(g, dt, bounds) {
     var dmgLeft = Math.ceil((g.dmg || 1) * playerDamageTakenMult());
     if ((player.armor||0) > 0) {
       var absorbed = Math.min(player.armor, dmgLeft);
+      var _bsArmorBefore = player.armor;  // v0.16.39 — capture pre-loss for shrapnel curve
       player.armor -= absorbed;
       dmgLeft -= absorbed;
       if (_battleStats) _battleStats.armorAbsorbed += absorbed;
       showFloatingText(player.x, player.y - 55, absorbed + ' 🛡', '#AAAAAA', player);
+      // v0.16.39 — Blocksmith reactive shrapnel. Pip lost → projectile flies
+      // back to the attacker. damage = pre-loss armor count (linear curve).
+      // Other classes have no pipLostShrapnel profile → no-op.
+      if (typeof maybeSpawnPipShrapnel === 'function') {
+        maybeSpawnPipShrapnel(_bsArmorBefore, g.x, g.y, g);
+      }
     }
     if (dmgLeft > 0) {
       if (_battleStats) {
@@ -7199,7 +7363,14 @@ function updateYellowAura(dt) {
   // crit just routes which flag fires. Top-up duration is half the seed.
   var seed = yellowAura.yellowSeed || 2.0;
   var topUp = seed * 0.5;
-  var isCrit = !!yellowAura.isCrit;
+  // v0.16.39 — Blocksmith yellow forces confuse instead of daze.
+  // forcesConfuse profile flag overrides the isCrit gate so BS yellow
+  // ALWAYS applies confuse regardless of universal crit roll. Other
+  // classes still go through standard isCrit-based daze/confuse routing.
+  // Per The Forge identity: confuse → enemies attack each other →
+  // indirect damage that pairs with gray walls funneling them.
+  var _yProf = (typeof getYellowProfile === 'function' && player) ? getYellowProfile(player.cls) : null;
+  var isCrit = !!yellowAura.isCrit || !!(_yProf && _yProf.forcesConfuse);
   entities.forEach(function(g) {
     if (Math.hypot(g.x - cx, g.y - cy) <= r) {
       if (isCrit) {
@@ -7275,7 +7446,11 @@ function startYellowConfuse(ox, oy, radius) {
   var r = radius || (fx ? clampRadiusToArena(fx.radiusPx) : scaleDist(50));
   var hit = 0;
   var dazedThisCast = 0, confusedThisCast = 0;
-  var isCrit = _currentCrit;
+  // v0.16.39 — BS forcesConfuse overrides isCrit gate (same logic as
+  // updateYellowAura). Burst-yellow always confuses for BS regardless
+  // of crit roll.
+  var _yProf = (typeof getYellowProfile === 'function' && player) ? getYellowProfile(player.cls) : null;
+  var isCrit = _currentCrit || !!(_yProf && _yProf.forcesConfuse);
   entities.forEach(function(g) {
     if (Math.hypot(g.x-cx, g.y-cy) <= r) {
       if (isCrit) {
@@ -8782,6 +8957,12 @@ function startGrayWall(cx, cy, tier) {
     expanding: true,
     alpha: 1, pulse: 0,
     containedIds: containedIds,
+    // v0.16.39 — owner class stamp. Used for class-specific wall-death
+    // reactions (e.g. Blocksmith wallDeathArmorRegen — when a BS-owned
+    // wall HP hits zero, BS gains +1 armor pip). Other classes' walls
+    // (currently only player.cls 'breaker' since BK shares 1.25 affinity)
+    // can declare similar reactions via their grayProfile.
+    ownerCls: player ? player.cls : null,
   });
   if (_currentCrit) {
     spawnCritShockwave(cx, cy, '#CCCCCC', { r0: 12, maxR: maxR, thickness: 4, growth: 280 });
@@ -8790,6 +8971,37 @@ function startGrayWall(cx, cy, tier) {
 }
 
 function updateGrayWalls(dt) {
+  // v0.16.39 — Detect wall death (hp transition to 0) and fire owner-class
+  // reactions before the alpha filter removes faded walls. Today: only
+  // Blocksmith uses wallDeathArmorRegen (+1 armor pip when their wall dies).
+  // Other classes get no death reaction (their grayProfile.wallDeathArmorRegen
+  // is undefined). Marker `_deathFired` prevents double-firing as the wall
+  // alpha-fades away over multiple frames.
+  grayWalls.forEach(function(w) {
+    if (w.hp <= 0 && !w._deathFired) {
+      w._deathFired = true;
+      var ownerProf = (typeof getGrayProfile === 'function' && w.ownerCls)
+        ? getGrayProfile(w.ownerCls) : null;
+      if (ownerProf && ownerProf.wallDeathArmorRegen && player && player.cls === w.ownerCls) {
+        var aMax = (typeof getArmorMax === 'function') ? getArmorMax() : 99;
+        var regen = ownerProf.wallDeathArmorRegen;
+        var prev = player.armor || 0;
+        player.armor = Math.min(aMax, prev + regen);
+        var actual = player.armor - prev;
+        if (actual > 0) {
+          // Visual: small armor flourish at player + floating "+N 🛡" tag.
+          // Reuses the existing armor-pip vocabulary so the player reads
+          // it as "I just gained armor" without needing a new visual layer.
+          if (typeof showFloatingText === 'function') {
+            showFloatingText(player.x, player.y - 60, '+' + actual + ' 🛡', '#EF9F27', player);
+          }
+          if (typeof spawnCritFlourish === 'function') {
+            spawnCritFlourish(player.x, player.y, '#EF9F27', 8);
+          }
+        }
+      }
+    }
+  });
   grayWalls = grayWalls.filter(function(w) { return w.alpha > 0.02; });
   grayWalls.forEach(function(w) {
     w.pulse = (w.pulse + dt * 2) % (Math.PI * 2);
@@ -10098,6 +10310,8 @@ function _internalStart(config) {
   thornShards = [];
   // PHASE E — reset arcing projectiles
   boulders = [];
+  // v0.16.39 — reset reactive shrapnel
+  shrapnelPieces = [];
   // Remove any leftover DOM overlays (exit card, victory screen) from a
   // previous battle that didn't tear down cleanly.
   var stale;

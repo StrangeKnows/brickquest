@@ -5135,6 +5135,167 @@ push #1 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.39 — Blocksmith engine wiring: shrapnel + wall regen + forced confuse
+
+> "lets roll!"
+
+The Forge identity comes alive. Three engine hooks wire up the
+v0.16.38 data lock.
+
+**Hook 1: Yellow forces confuse for BS (the simplest).**
+
+Both `updateYellowAura` and `startYellowConfuse` had an `isCrit`
+gate determining confuse-vs-daze. Now read
+`getYellowProfile(player.cls)?.forcesConfuse` and OR with the crit
+flag — BS forces confuse regardless of crit roll. Other classes
+unchanged. Two 2-line additions, one in each function.
+
+**Hook 2: Wall ownership stamp + wall-death armor regen.**
+
+Wall creation (`startGrayWall` push) now stamps `ownerCls: player.cls`
+so future class-specific wall-death reactions can route by owner.
+New death-detection block at top of `updateGrayWalls` checks
+`w.hp <= 0 && !w._deathFired` and fires `getGrayProfile(w.ownerCls)
+.wallDeathArmorRegen` if present. Currently only Blocksmith populates
+this field (regen: 1).
+
+Visual: `+1 🛡` floating text + 8-particle amber flourish at player
+position when regen fires. Reuses existing armor-pip vocabulary so
+the player reads it immediately without learning a new visual.
+
+**Hook 3: Shrapnel projectile system + pip-loss reactive.**
+
+The meaty visual addition. Three new functions:
+
+- `spawnShrapnel(sx, sy, tx, ty, dmg, targetEntity)` — pushes a
+  shrapnel piece into the global array. Flight duration scales
+  gently with distance (0.18s floor, 0.55s ceiling).
+- `updateShrapnel(dt)` — tick lifecycle, fire `damageEntity` on
+  impact. Prefers tracking the target entity (shrapnel follows
+  moving targets); falls back to position-based hit at original
+  target point.
+- `drawShrapnel()` — renders an irregular pentagon shape (gray
+  fill, amber stroke + glow) tumbling in flight. Subtle 18px arc
+  peak for 2D feel.
+
+`maybeSpawnPipShrapnel(armorBeforeLoss, srcX, srcY, srcEntity)`
+helper reads `getGrayProfile(player.cls).pipLostShrapnel` and
+fires shrapnel toward the attacker. Damage = pre-loss armor count
+(pure linear curve: 1..6 for BS).
+
+**Wired into both armor-absorb sites:**
+
+- `_applyEnemyMeleeDamage` — handles all proxied damage (boulders,
+  projectiles via dispatcher). Source position resolution: prefer
+  `g.x/g.y` if real entity, else reverse-resolve from dx/dy offset,
+  else fallback to player position.
+- Direct entity touch — full entity in scope, use `g.x/g.y` directly
+  with entity link for moving-target tracking.
+
+**Cleanup:** `shrapnelPieces = []` added to rumble cleanup site.
+
+**Game loop:** `updateShrapnel(dt)` after `updateBoulders`,
+`drawShrapnel()` after `drawBoulders`. Same render layer as other
+projectiles.
+
+**Behavior summary:**
+
+- BS rumble entry: +1 armor pip (existing v0.16.34 passive), banner.
+- BS melee hit while armored: pip absorbed → shrapnel fires from BS
+  to attacker, amber tumble in flight, hit deals N damage (pre-loss
+  armor count). Attacker takes damage, gets amber flourish.
+- BS overload-gray creates wall: stamps ownerCls=blocksmith.
+- BS wall HP hits 0: BS gains +1 armor pip (cap-aware), `+1 🛡`
+  text + amber flourish on player.
+- BS yellow cast: ALWAYS confuses enemies (instead of crit-gated
+  daze/confuse). Confused enemies attack each other.
+
+**Forge cycle in motion:**
+1. BS plants wall via overload-gray (existing)
+2. Yellow field confuses enemies → they attack each other (NEW)
+3. Confused/attacking enemies hit BS → armor absorbs → shrapnel fires (NEW)
+4. Wall HP eventually depletes → BS gains armor pip (NEW)
+5. Loop continues
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js (data already locked v0.16.38), server.js,
+players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **BS yellow cast (any tier):** spawn enemies, fire yellow, watch
+   them all turn confused (purple ring around entities, attack each
+   other instead of player). Even on non-crit casts.
+3. **BS gray wall + entity inside:** drag-place gray-overload wall
+   around enemy. Watch wall HP tick down as entity contacts it.
+   When wall hp hits 0: BS gains +1 armor pip with floating text +
+   amber flourish. Verify pip count goes up and respects cap.
+4. **BS armor absorb:** start with 6 armor, take a melee hit. Pip
+   absorbs damage, shrapnel piece tumbles from BS toward the
+   attacker, hits for 6 damage. Take next hit at 5 armor: shrapnel
+   for 5. Etc. Linear curve all the way down to 1 = 1 dmg.
+5. **Other classes unchanged:** verify BK gray wall doesn't grant
+   armor pip on death. Verify BK/SS/etc yellow still rolls for
+   crit confuse vs daze. Verify other classes don't fire shrapnel.
+6. **Edge cases:**
+   - Attacker dies before shrapnel arrives (shrapnel falls back
+     to position-based hit; should hit any entity at original
+     target point within 28px).
+   - Multiple pip losses in rapid succession (each spawns its own
+     shrapnel, all visible in flight).
+   - Boulder/projectile pip loss (source resolution from dx/dy,
+     shrapnel flies in correct direction).
+
+---
+
+**Risk surfaces:**
+
+- Shrapnel direction relies on dx/dy resolution for proxied damage.
+  If dx/dy is wrong (zero, NaN), shrapnel may fire toward player
+  position. Fallback handles this gracefully.
+- Wall death detection uses `_deathFired` marker. If wall HP gets
+  reset to >0 after hitting 0 (unlikely but possible via DM tools),
+  marker prevents re-firing.
+- Yellow forcesConfuse override is called on every entity update
+  tick (cheap function call). Performance impact negligible.
+- Shrapnel could potentially friendly-fire if entity arrays change
+  unexpectedly. Damage application uses `damageEntity(g, dmg)` which
+  has its own safety checks.
+
+---
+
+**Standards audit (rule #17 — push #58 in S015 continuation,
+push #2 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #11 (data/runtime/UI): pure runtime push reading data from
+  characters.js (locked v0.16.38). No data shape changes. UI
+  unchanged.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: shrapnel system follows existing projectile pattern
+    (boulders, enemyProjectiles). Same array+update+draw shape.
+    forcesConfuse override mirrors the same isCrit gate in two
+    sites identically.
+  - ELEGANCE: 3 new functions (spawn/update/draw), 1 helper
+    (`maybeSpawnPipShrapnel`). Wall-death check is one block at
+    top of updateGrayWalls. No new abstractions.
+  - EFFICIENCY: minimal additions. Shrapnel reuses spawnCritFlourish
+    for impact visual. Wall-regen reuses showFloatingText +
+    spawnCritFlourish for armor-gain visual.
+- Rule #19 (intuition): held — implemented The Forge identity per
+  locked design without scope creep. No "while we're here, let's
+  also..." additions.
+- Rule #6 (diagnostic-first): N/A — feature work, not bug fix.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
