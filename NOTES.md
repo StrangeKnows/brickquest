@@ -7635,6 +7635,105 @@ If still issues → terminal output again.
 
 ---
 
+### v0.16.58 — Coord normalization (cross-device viewport fix)
+
+> Mac sees Android player jittery, Android doesn't see Mac player at
+> all. Both connected (`playerCount 2`). Asymmetry traced to viewport
+> coordinate space mismatch.
+
+**Root cause:** Mac and Android have different canvas sizes (different
+viewport pixels). v0.16.56 sent raw `x/y` pixel coords. Mac player at
+`x=600` sent literal 600 to Android, where 600 was off-screen. Android
+player at `x=200` sent 200 to Mac, where 200 was a valid (but wrong)
+position — visible but jittery as positions arrived faster than
+pixel-equivalent device updates.
+
+**The fix: normalized coords (0-1) as wire format.** Each client
+divides by its own arena bounds before sending. Each client multiplies
+incoming `nx/ny` by its own arena bounds before rendering. UNITY:
+arena is now a shared LOGICAL space, not a shared pixel space.
+
+**Implementation:**
+
+1. `rumble.js` — `_computeState()` adds `playerNX`, `playerNY` (computed
+   from `getRumbleBounds()`). Public API gets `Rumble.getArenaBounds()`
+   helper for completeness. Legacy `playerX`/`playerY` kept for any
+   non-multiplayer consumers (HUD, etc.).
+2. `rumble.js` — `drawAllies()` reads `ally.nx/ny` and maps to local
+   bounds at render time. Falls back to legacy `x/y` if a sender
+   somehow still sends pixel coords (defensive, for graceful
+   transition during deploy).
+3. `rumble_test.html` — push loop sends `nx/ny`. Receive handler
+   forwards `nx/ny` to `Rumble.setAllyState`. Join payload sends
+   `nx: 0.5, ny: 0.5` (center spawn).
+4. `server.js` — `rumble_session_join` and `rumble_player_state`
+   handlers accept `nx/ny`. Session player struct stores `nx/ny`
+   instead of `x/y`. Broadcast just relays this — server doesn't
+   care about coord space, just stores and forwards.
+
+**Why "jittery" specifically:** Android's small canvas + small coord
+values + 30fps mobile render combined with Mac's 60fps render of those
+positions = perceived jitter. With normalized coords, both clients
+render at full local fps using the same logical positions.
+
+---
+
+**Files changed:** `server.js`, `rumble.js`, `rumble_test.html`,
+`NOTES.md`. UNTOUCHED: characters.js, players-core.js, html files,
+boardFx.
+
+---
+
+**Test focus:**
+
+1. Restart server.
+2. **Two devices on local network into COOP** — same as v0.16.56/57
+   test. Mac browser + Android browser.
+3. **Mac should see Android ally at correct logical position.** Move
+   Android player to top-right corner — Mac should see ally at
+   top-right of ITS arena (even though Mac's arena is bigger).
+4. **Android should see Mac ally at correct logical position.** Move
+   Mac player around — Android should see ally tracking proportionally.
+5. **Smooth render** — no jitter. Both clients update at local frame
+   rate using normalized values.
+6. **No regressions** — solo modes (sandbox, spec, waves) untouched
+   by this change. Test those still work.
+
+---
+
+**Risk surfaces:**
+
+- `_computeState()` calls `getRumbleBounds()` twice per call (once for
+  X, once for Y). Tiny perf hit; could memoize within the function but
+  not worth the complexity for 20 Hz sample rate.
+- `drawAllies()` falls back to legacy `x/y` if `nx/ny` absent. This
+  was for graceful deploy across mixed-version clients. After
+  v0.16.59 stabilizes, the fallback path can be stripped.
+- Aspect ratio: a tall mobile screen + wide desktop will produce
+  arenas with different W/H ratios. An ally at nx=0.5, ny=0.5 will
+  render at the CENTER of each arena, but the same nx=0.5 horizontal
+  movement will translate to different absolute pixel distances.
+  This is correct (logical position is shared, physical extent isn't),
+  but worth noting if it feels weird.
+
+---
+
+**Standards audit (rule #17 — push #2 of S016 multiplayer arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #14 (UNITY): coord space is unified as 0-1 logical, NOT pixel.
+  Single transformation rule (multiply by bounds) used everywhere.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: nx/ny is the single coord protocol on the wire.
+  - ELEGANCE: 4-line transform on send, 4-line transform on receive.
+  - EFFICIENCY: server stores normalized (small floats), clients
+    transform once per frame. No double-conversion on the wire.
+- Rule #28 (unify-at-choke-point): _computeState is THE place player
+  position becomes wire-ready. drawAllies is THE place ally coords
+  become render-ready. No duplicate transformation logic anywhere.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

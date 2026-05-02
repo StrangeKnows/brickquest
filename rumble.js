@@ -1068,9 +1068,15 @@ function update(dt) {
 // ═══════════════════════════════════════════════════
 // ── Multiplayer ally render (v0.16.56) ────────────────────
 // Called from main draw() before local player render. Each ally is
-// drawn as a translucent circle with class color + class icon at
-// their reported (x, y). Ghost styling (alpha 0.55) reads as "team
-// member but not me." Spectating allies show with extra-low alpha.
+// drawn as a translucent circle with class color + class icon. Ghost
+// styling (alpha 0.55) reads as "team member but not me." Spectating
+// allies show with extra-low alpha.
+//
+// COORDS: ally.nx / ally.ny are normalized (0-1) values relative to
+// SENDER's arena bounds. We map them to OUR arena bounds at render
+// time so each device sees the ally at the correct logical position
+// even though canvas pixel sizes differ across devices. UNITY:
+// arena is a shared logical 0-1 space, not a shared pixel space.
 //
 // UNITY: reads class metadata from CHARACTERS table — same source
 // of truth as local player. Adding a new class = data change in
@@ -1081,9 +1087,22 @@ function update(dt) {
 function drawAllies() {
   if (!_allyState || _allyState.length === 0) return;
   if (!ctx) return;
+  var bounds = getRumbleBounds();
   for (var ai = 0; ai < _allyState.length; ai++) {
     var ally = _allyState[ai];
-    if (!ally || typeof ally.x !== 'number' || typeof ally.y !== 'number') continue;
+    if (!ally) continue;
+    // Normalized coords (preferred) — map to local arena pixel space.
+    // Fallback to legacy x/y for safety; v0.16.58 strips that path.
+    var ax, ay;
+    if (typeof ally.nx === 'number' && typeof ally.ny === 'number') {
+      ax = bounds.x + ally.nx * bounds.w;
+      ay = bounds.y + ally.ny * bounds.h;
+    } else if (typeof ally.x === 'number' && typeof ally.y === 'number') {
+      ax = ally.x;
+      ay = ally.y;
+    } else {
+      continue;
+    }
     var meta = (typeof CHARACTERS !== 'undefined' && CHARACTERS[ally.cls]) ? CHARACTERS[ally.cls] : null;
     var color = (meta && meta.color) || '#888';
     var icon = (meta && meta.icon) || '?';
@@ -1097,7 +1116,7 @@ function drawAllies() {
     ctx.shadowBlur = 18;
     ctx.fillStyle = color + '99';
     ctx.beginPath();
-    ctx.arc(ally.x, ally.y, radius, 0, Math.PI*2);
+    ctx.arc(ax, ay, radius, 0, Math.PI*2);
     ctx.fill();
     ctx.restore();
     // Inner circle
@@ -1105,7 +1124,7 @@ function drawAllies() {
     ctx.globalAlpha = baseAlpha;
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.arc(ally.x, ally.y, radius - 4, 0, Math.PI*2);
+    ctx.arc(ax, ay, radius - 4, 0, Math.PI*2);
     ctx.fill();
     ctx.restore();
     // Icon
@@ -1114,13 +1133,13 @@ function drawAllies() {
     ctx.font = '16px serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(icon, ally.x, ally.y);
+    ctx.fillText(icon, ax, ay);
     ctx.restore();
     // HP bar — small bar above the ally so we can read team status
     if (ally.hp != null && ally.hpMax) {
       var barW = 28, barH = 4;
-      var barX = ally.x - barW / 2;
-      var barY = ally.y - radius - 10;
+      var barX = ax - barW / 2;
+      var barY = ay - radius - 10;
       var pct = Math.max(0, Math.min(1, ally.hp / ally.hpMax));
       ctx.save();
       ctx.globalAlpha = 0.7;
@@ -12384,6 +12403,19 @@ function _computeState() {
     // and forwards to server via rumble_player_state.
     playerX:     player.x,
     playerY:     player.y,
+    // v0.16.58 — Normalized position (0-1) relative to arena bounds.
+    // Mobile and desktop have different canvas sizes, so raw x/y
+    // don't translate across devices. Coop client sends nx/ny over
+    // the wire; recipient maps back to local arena bounds at render.
+    // UNITY: arena is shared as logical 0-1 space, not pixel space.
+    playerNX:    (function() {
+                   var b = getRumbleBounds();
+                   return b.w > 0 ? (player.x - b.x) / b.w : 0;
+                 })(),
+    playerNY:    (function() {
+                   var b = getRumbleBounds();
+                   return b.h > 0 ? (player.y - b.y) / b.h : 0;
+                 })(),
     enemyHp:     first ? first.hp : 0,
     enemyHpMax:  first ? first.hpMax : 0,
     elapsed:     _startedAt ? (performance.now() - _startedAt) / 1000 : 0,
@@ -12616,12 +12648,21 @@ window.Rumble = {
 
   // ── Multiplayer (v0.16.56) ──
   // Host page (rumble_test.html or similar) passes an array of ally
-  // states. Each: { id, cls, x, y, hp, hpMax, alive, spectating }.
-  // No filtering — host should already have removed local player from
-  // the list. Empty array = solo mode (no render). Called frequently
-  // (~20 Hz) from a websocket message handler.
+  // states. Each: { id, cls, nx, ny, hp, hpMax, alive, spectating }
+  // where nx/ny are normalized coords (0-1) — multiplied by THIS
+  // client's arena bounds for render. Each client has different
+  // viewport pixels, so raw x/y don't translate. Empty array = solo.
   setAllyState: function(allies) {
     _allyState = Array.isArray(allies) ? allies : [];
+  },
+  // Returns current arena bounds in pixel space. Used by multiplayer
+  // host page to convert local player coords → normalized (0-1) for
+  // sending, and to convert received normalized ally coords back to
+  // local pixel space for render via setAllyState. Each client's
+  // bounds differ (viewport size); normalization is the bridge.
+  getArenaBounds: function() {
+    if (!_initialized) return null;
+    return getRumbleBounds();
   },
 
   // ── DM tools ──

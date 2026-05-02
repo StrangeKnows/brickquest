@@ -840,11 +840,13 @@ wss.on('connection', (ws, req) => {
     // ═══════════════════════════════════════════════════════════════
 
     if (type === 'rumble_session_join') {
-      // Payload: { sessionId, playerId, cls, hp, hpMax, armor, bricks, x, y }
+      // Payload: { sessionId, playerId, cls, hp, hpMax, armor, bricks, nx, ny }
       // Client picked a class on rumble_test.html and is entering the
       // shared arena. Server records the player and broadcasts the
       // updated session to all connected clients in that session.
-      const { sessionId, playerId, cls, hp, hpMax, armor, bricks, x, y } = P || {};
+      // v0.16.58: position uses nx/ny (0-1 normalized). Each client
+      // has different canvas size, so raw x/y don't translate.
+      const { sessionId, playerId, cls, hp, hpMax, armor, bricks, nx, ny } = P || {};
       if (!sessionId || !playerId) {
         ws.send(JSON.stringify({ type:'rumble_error', msg:'sessionId + playerId required' }));
         return;
@@ -860,8 +862,8 @@ wss.on('connection', (ws, req) => {
         hpMax: typeof hpMax === 'number' ? hpMax : 10,
         armor: typeof armor === 'number' ? armor : 0,
         bricks: bricks || {},
-        x: typeof x === 'number' ? x : 400,
-        y: typeof y === 'number' ? y : 300,
+        nx: typeof nx === 'number' ? nx : 0.5,
+        ny: typeof ny === 'number' ? ny : 0.5,
         alive: true,
         spectating: false,
         lastInputTs: Date.now(),
@@ -884,21 +886,22 @@ wss.on('connection', (ws, req) => {
     }
 
     if (type === 'rumble_player_state') {
-      // Payload: { x, y, hp, hpMax, armor, bricks, alive, spectating }
+      // Payload: { nx, ny, hp, hpMax, armor, bricks, alive, spectating }
       // Client tick — update server's record of this player's state.
-      // Validation is light in v0.16.56 (trusts client). When v0.16.57
-      // ships entity authority, damage events become authoritative
-      // and HP becomes server-owned; this handler still receives
-      // position but server validates HP changes.
+      // Position is nx/ny (0-1 normalized) so coords translate across
+      // device viewports. Validation is light in v0.16.56 (trusts
+      // client). When v0.16.57 ships entity authority, damage events
+      // become authoritative and HP becomes server-owned; this
+      // handler still receives position but server validates HP.
       const reg = rumbleClientSession.get(ws);
       if (!reg) return;  // unregistered socket — ignore
       const sess = rumbleSessions[reg.sessionId];
       if (!sess) return;
       const p = sess.players[reg.playerId];
       if (!p) return;
-      const { x, y, hp, hpMax, armor, bricks, alive, spectating } = P || {};
-      if (typeof x === 'number') p.x = x;
-      if (typeof y === 'number') p.y = y;
+      const { nx, ny, hp, hpMax, armor, bricks, alive, spectating } = P || {};
+      if (typeof nx === 'number') p.nx = nx;
+      if (typeof ny === 'number') p.ny = ny;
       if (typeof hp === 'number') p.hp = hp;
       if (typeof hpMax === 'number') p.hpMax = hpMax;
       if (typeof armor === 'number') p.armor = armor;

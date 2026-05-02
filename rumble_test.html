@@ -2341,7 +2341,10 @@ function mpConnect(cls, m, onReady) {
         hpMax: m.hp,
         armor: 0,
         bricks: Object.assign({}, m.kit),
-        x: 400, y: 300,
+        // v0.16.58 — Initial position as normalized coords (0.5/0.5
+        // = center). First push-loop tick replaces these with actual
+        // player position from Rumble.getState() within ~50ms.
+        nx: 0.5, ny: 0.5,
       },
     }));
     if (typeof onReady === 'function') onReady();
@@ -2349,7 +2352,9 @@ function mpConnect(cls, m, onReady) {
   _mpWS.onmessage = function(evt) {
     var msg; try { msg = JSON.parse(evt.data); } catch (e) { return; }
     if (msg.type === 'rumble_session_state') {
-      // Build ally array (everyone except local player) for Rumble render
+      // Build ally array (everyone except local player) for Rumble render.
+      // Coords are normalized (nx/ny 0-1); rumble.js drawAllies maps
+      // them to local arena bounds at render time.
       var allies = [];
       var pids = Object.keys(msg.players || {});
       for (var i = 0; i < pids.length; i++) {
@@ -2359,7 +2364,7 @@ function mpConnect(cls, m, onReady) {
         allies.push({
           id: pids[i],
           cls: p.cls,
-          x: p.x, y: p.y,
+          nx: p.nx, ny: p.ny,
           hp: p.hp, hpMax: p.hpMax,
           alive: p.alive !== false,
           spectating: !!p.spectating,
@@ -2390,19 +2395,24 @@ function mpConnect(cls, m, onReady) {
 
 // Push local player state to server every ~50ms (20 Hz). Reads from
 // Rumble.getState() which returns the live in-game player snapshot.
-// getState shape is FLAT (playerX, playerY, playerHp, etc.) not
-// nested — see _computeState in rumble.js.
+// getState shape is FLAT (playerX, playerY, playerNX, playerNY,
+// playerHp, etc.) — see _computeState in rumble.js.
+//
+// v0.16.58 — Sends nx/ny (0-1 normalized) instead of raw pixel x/y.
+// Each client has different canvas size, so raw coords don't
+// translate. Recipient maps nx/ny back to its own arena bounds at
+// render. UNITY: shared logical space, not shared pixel space.
 function mpStartPushLoop() {
   if (_mpPushInterval) clearInterval(_mpPushInterval);
   _mpPushInterval = setInterval(function() {
     if (!_mpWS || _mpWS.readyState !== 1) return;
     var st = (typeof Rumble !== 'undefined' && Rumble.getState) ? Rumble.getState() : null;
-    if (!st || typeof st.playerX !== 'number') return;
+    if (!st || typeof st.playerNX !== 'number') return;
     _mpWS.send(JSON.stringify({
       type: 'rumble_player_state',
       payload: {
-        x: st.playerX,
-        y: st.playerY,
+        nx: st.playerNX,
+        ny: st.playerNY,
         hp: st.playerHp,
         hpMax: st.playerHpMax,
         armor: st.playerArmor || 0,
