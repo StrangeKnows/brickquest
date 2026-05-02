@@ -854,17 +854,52 @@ function update(dt) {
 
   // Push player and entity apart if overlapping
   // Push entities away from player — player is not moved by collision
+  // v0.16.52 — Skip displacement during a pierce-dash. The pierce identity
+  // is "go through, hit everyone, don't slow down" — entities should NOT
+  // be teleported aside by player overlap. Pierce hit logic applies a
+  // perpendicular knockback velocity (in updateBrickAction) which the
+  // bounce-state branch consumes naturally; this resolver was overriding
+  // that velocity by instant-teleporting entity position every frame
+  // along the player→entity vector, accumulating displacement that
+  // pushed entities to the dash endpoint.
+  //
+  // Detection: brickAction is a 'red' action in 'charge' phase AND the
+  // class profile has dashModel === 'pierce'. Other dash models still
+  // get the resolver (BK, recoil-default — entities get punched back
+  // physically as part of the impact).
+  var _isPierceDashActive = false;
+  if (brickAction && brickAction.type === 'red' && brickAction.phase === 'charge'
+      && typeof getRedDashProfile === 'function') {
+    var _ddProf = getRedDashProfile(player.cls);
+    if (_ddProf && _ddProf.dashModel === 'pierce') _isPierceDashActive = true;
+  }
   entities.forEach(function(entity) {
+    if (_isPierceDashActive) return;  // pierce skips overlap displacement
     var odx = player.x - entity.x, ody = player.y - entity.y;
     var odist = Math.sqrt(odx*odx+ody*ody);
     var minDist = player.r + entity.r;
     if (odist < minDist && odist > 0) {
       var push = minDist - odist;
       var nx = odx/odist, ny = ody/odist;
+      var _preX = entity.x, _preY = entity.y;
       entity.x -= nx*push;
       entity.y -= ny*push;
       entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
       entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
+      // v0.16.52 DIAGNOSTIC — if this entity was just pierced, log how
+      // the overlap resolver displaced it. This is the suspect for
+      // entities ending up at "end of dash line" instead of perpendicular.
+      if (entity._pierceDiagFrame && typeof console !== 'undefined' && console.log) {
+        console.log('[PIERCE-DIAG resolver]', {
+          entityType: entity.type,
+          preXY: _preX.toFixed(1) + ',' + _preY.toFixed(1),
+          postXY: entity.x.toFixed(1) + ',' + entity.y.toFixed(1),
+          pushVec: (-nx*push).toFixed(1) + ',' + (-ny*push).toFixed(1),
+          playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
+          state: entity.state,
+          bounceVel: entity.bounceVx.toFixed(0) + ',' + entity.bounceVy.toFixed(0),
+        });
+      }
     }
   });
 
@@ -5649,6 +5684,17 @@ function updateEntity(g, dt, bounds) {
     // Clamp
     g.x = Math.max(bounds.x + g.r, Math.min(bounds.x + bounds.w - g.r, g.x));
     g.y = Math.max(bounds.y + g.r, Math.min(bounds.y + bounds.h - g.r, g.y));
+    // v0.16.52 DIAGNOSTIC — log bounce frame for tagged entity, then clear flag
+    if (g._pierceDiagFrame && typeof console !== 'undefined' && console.log) {
+      console.log('[PIERCE-DIAG bounce]', {
+        entityType: g.type,
+        xy: g.x.toFixed(1) + ',' + g.y.toFixed(1),
+        bounceVel: g.bounceVx.toFixed(0) + ',' + g.bounceVy.toFixed(0),
+        bounceTimer: g.bounceTimer.toFixed(2),
+        state: g.state,
+      });
+      g._pierceDiagFrame = 0;
+    }
     return;
   }
 
@@ -8009,6 +8055,28 @@ function updateBrickAction(dt, bounds) {
               pHitG.bounceVy = _perpY * _pierceKnockMag;
               pHitG.bounceTimer = 0.3;
               pHitG.state = 'bounce';
+              // v0.16.52 DIAGNOSTIC — log entity state at pierce hit so
+              // we can trace how/where it moves over subsequent frames.
+              // Capture pre-knockback position, dash direction, perp dir,
+              // and entity ID. STRIP THIS once root cause identified.
+              if (typeof console !== 'undefined' && console.log) {
+                console.log('[PIERCE-DIAG hit]', {
+                  entityType: pHitG.type,
+                  entityId: pHitG._id || '?',
+                  entityXY: pHitG.x.toFixed(1) + ',' + pHitG.y.toFixed(1),
+                  playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
+                  dashDir: brickAction.dirX.toFixed(2) + ',' + brickAction.dirY.toFixed(2),
+                  cross: _cross.toFixed(1),
+                  perpDir: _perpX.toFixed(2) + ',' + _perpY.toFixed(2),
+                  knockVel: pHitG.bounceVx.toFixed(0) + ',' + pHitG.bounceVy.toFixed(0),
+                  bounceTimer: pHitG.bounceTimer,
+                  state: pHitG.state,
+                });
+              }
+              // Tag entity for one-frame post-hit telemetry — overlap
+              // resolver and bounce update can clobber the velocity. We
+              // log on the NEXT frame too to see what survived.
+              pHitG._pierceDiagFrame = 1;
               // Per-target spark (visual cue at each pierce point)
               if (typeof spawnCritFlourish === 'function') {
                 spawnCritFlourish(pHitG.x, pHitG.y, '#E24B4A', 6);

@@ -6892,6 +6892,125 @@ push #2 in S016 SS red arc):**
 
 ---
 
+### v0.16.52 — SS pierce overlap resolver fix + diagnostic
+
+> "goblin and skeleton knight are pushed to end of dash line, not
+> perpendicular. lets solve this!"
+
+**Root cause:** the player-vs-entity overlap resolver at
+rumble.js line 855-869 was running every frame during the dash,
+instant-teleporting entities along the player→entity vector to
+maintain `minDist = player.r + entity.r` separation. During a
+dash, the player moves forward at ~1040 px/sec — the resolver
+pushes entities aside on each frame, accumulating displacement
+that overwrote the perpendicular knockback velocity set at
+pierce hit.
+
+The bounce-state movement (line 5639-5652) was firing AFTER the
+overlap resolver, so velocity-based knockback was fighting against
+the resolver's instant teleport. Resolver won.
+
+**Clear gating restriction (per memory rule #6):** the resolver
+was a UNITY violation against pierce identity ("go through, hit
+everyone, don't slow down"). Promoted directly to fix; diagnostic
+ships alongside to confirm root cause via console logs over a
+single playtest, then strips next push.
+
+**Fix:** detect pierce-dash via `brickAction.type === 'red'
+&& phase === 'charge' && getRedDashProfile(cls).dashModel === 'pierce'`.
+When active, skip the entity overlap resolver entirely. Pierce
+identity restored: entities stay where the pierce hit them, then
+get knocked perpendicular via bounce velocity over the next ~0.3s.
+
+Other dash models (BK aoe-blast, recoil-default) still get the
+resolver — they're physical-impact dashes where entity displacement
+is part of the design.
+
+**Diagnostic blocks** (will strip in v0.16.53):
+- At pierce hit: log entity position, dash direction, computed perp
+  vector, knockback velocity. Tag `entity._pierceDiagFrame = 1`.
+- In overlap resolver: if entity is tagged, log pre/post position
+  and push vector. (Now bypassed since resolver skips during pierce
+  dash, so this log won't fire if the fix is correct.)
+- In bounce update: if entity is tagged, log final position +
+  velocity, then clear tag.
+
+If diagnostic shows resolver-displacement still firing on tagged
+entities, the gate condition in step 1 is wrong and we need
+deeper investigation. If diagnostic shows clean perpendicular
+movement only via bounce, fix is confirmed and we strip.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **SS dashes through goblin** → goblin gets knocked PERPENDICULAR
+   to dash, not displaced forward to dash endpoint.
+3. **SS dashes through skeleton knight** → same, perpendicular spin-out.
+4. **SS dashes through line of 3 enemies** → all 3 spin out
+   sideways (some left, some right based on which side of dash
+   line they were on).
+5. **BK dash unchanged** → entities get bumped/blasted as before
+   (pierce-only fix doesn't affect aoe-blast model).
+6. **Other classes' red dash unchanged** → recoil model preserved.
+7. **Console logs** — open browser console during pierce dash.
+   Should see [PIERCE-DIAG hit] then [PIERCE-DIAG bounce] but
+   NOT [PIERCE-DIAG resolver]. If resolver fires, gate is wrong.
+
+---
+
+**Risk surfaces:**
+
+- The pierce-dash detection runs per-frame in the player-update
+  block. Cost is one function call + property access per frame
+  during the dash window only — negligible.
+- If pierce-dash player encounters an entity at frame 1 (entity
+  spawned ON player or teleported in), no overlap resolver means
+  player and entity could occupy the same space. Pierce hit logic
+  still fires and damages the entity, then bounce velocity moves
+  entity out. Brief visual overlap acceptable for the brief moment.
+- Other dash models (recoil, aoe-blast) unaffected — their
+  overlap resolver behavior is unchanged.
+
+---
+
+**Standards audit (rule #17 — push #71 in S015 continuation,
+push #3 in S016 SS red arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #6 (diagnostic-first): exception applied. Clear gating
+  restriction (overlap resolver overriding pierce knockback).
+  Diagnostic ships alongside fix to confirm via real telemetry.
+- Rule #11 (data/runtime/UI): runtime fix; pierce model detection
+  reads schema. UNITY held.
+- Rule #14 (UNITY): pierce identity now consistent across BOTH
+  hit detection AND collision resolution. Two systems, same flag,
+  same dispatch shape.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: single gate condition (pierce dash detection) covers
+    all entities for the resolver bypass.
+  - ELEGANCE: 3-line detection block + 1-line guard in forEach.
+  - EFFICIENCY: pierce-dash check is one function call/frame
+    during dash window only.
+- Rule #19 (intuition): caught suspect via grep for "push" pattern
+  in entity-update code; clear gating restriction surfaced
+  immediately. Skipped extended diagnostic-first phase per rule #6.
+- Rule #20 (grep-for-symptoms): held — searched for patterns
+  matching "entity displacement during dash" before ruling out
+  candidate causes.
+- Rule #28 (unify-at-choke-point): held — single resolver site
+  carries the pierce-dash bypass, not duplicated per entity type.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
