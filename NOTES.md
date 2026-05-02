@@ -7260,6 +7260,147 @@ push #6 in S016 SS red arc):**
 
 ---
 
+### v0.16.55 — SS pierce trail progressive draw + diagnostic strip
+
+> "trail needs to blast out of back first, then trace along path
+> to apex and persist for duration"
+>
+> "blast out 3x speed in reverse for 100px rear facing blast while
+> forward trail is being drawn at speed of dash"
+
+Trail is now a self-animating reveal instead of a single line spawned
+at termination.
+
+**Animation spec:**
+
+| Segment | Direction | Speed |
+|---|---|---|
+| Forward path | A → B (apex) | chargeSpeed (~1040 px/s, matches dash speed) |
+| Rearward tail | A → tailEnd (100px backward) | 3× chargeSpeed (~3120 px/s) |
+
+Both segments START at point A simultaneously when the trail spawns.
+- Tail blasts backward at 3× speed → finishes in ~0.032s for 100px
+- Forward path traces at dash speed → finishes when full traveled
+  distance / chargeSpeed (e.g. 250px / 1040 ≈ 0.24s)
+- After both complete, trail persists at full length for the
+  remainder of `duration` (1.7s total)
+- Alpha fades linearly across the full duration
+
+**Visual story:**
+
+The forward path is the "afterimage" of the dash that just happened —
+trail extends along the dash path at the same speed the player flew,
+echoing the motion. The rearward tail is the "blast out the back" —
+faster, snap-quick, anti-pursuit beat. Both grow from point A
+because that's where the dash started; the forward direction is
+where SS went, and the rearward tail is where SS came from
+(a streak left behind that anyone chasing has to cross).
+
+**Implementation:**
+
+Trail data structure now tracks:
+- `drawnFwdLen` (current forward draw progress)
+- `drawnTailLen` (current rearward draw progress)
+- `fullFwdLen`, `fullTailLen` (target lengths)
+- `fwdDrawSpeed`, `tailDrawSpeed` (px/sec)
+- `dirX, dirY` (forward unit vector — used to interpolate drawn endpoints)
+
+Each frame, `updatePierceTrails`:
+- Grows `drawnFwdLen` by `fwdDrawSpeed * dt` (capped at `fullFwdLen`)
+- Grows `drawnTailLen` by `tailDrawSpeed * dt` (capped at `fullTailLen`)
+- Computes current drawn endpoints from origin
+- Damages entities along the CURRENTLY-DRAWN segment (not the full
+  target line — entity in path of forward draw can't take damage from
+  the unrendered rearward portion yet, and vice versa)
+
+Render uses the same drawn endpoints — only renders the visible
+portion at any moment.
+
+**Spawn API:** `spawnPierceTrail()` now takes `chargeSpeed` as 7th
+arg. Call site at dash termination passes `brickAction.chargeSpeed`.
+
+---
+
+**Diagnostic blocks stripped (all v0.16.52/53 DIAG markers):**
+
+- `[PIERCE-DIAG hit]` (in pierce hit block)
+- `[PIERCE-DIAG resolver-perp]` (in entity overlap resolver)
+- `[PIERCE-DIAG bounce]` (in bounce-state movement)
+- `[DASH-DIAG create-drag]` (in startRedChargeTo)
+- `[DASH-DIAG create-auto]` (in startRedCharge)
+- `[DASH-DIAG frame]` (per-frame charge log)
+- `[DASH-DIAG range-cap]` (range cap clamp event)
+- `[DASH-DIAG wall-block]` (wall sweep event)
+- `[DASH-DIAG terminate]` (termination summary)
+- `_pierceDiagFrame` flag and `_diagFrameNum` counter
+
+The diagnostic served its purpose — telemetry from v0.16.53 revealed
+the direction-flip bug that v0.16.54 fixed. Pierce dash is now
+straight-line and clean. Strip restores production console output.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **SS pierce dash with trail** — dash through entity. Watch for:
+   - Tail snaps backward from origin almost instantly (3× speed)
+   - Forward path traces along dash route at the SAME speed the
+     dash itself flew (echo / afterimage effect)
+   - Once both drawn, full trail holds and fades over remaining ~1.4s
+3. **Entity crossing trail mid-draw** — should only take damage if
+   it's within the DRAWN portion. If trail hasn't reached entity's
+   position yet, no damage. Once draw passes through entity → damage.
+4. **Console clean** — no DASH-DIAG or PIERCE-DIAG output during dashes.
+5. **No regressions** — pierce mechanics, knockback, range cap, wall
+   block all still work; just the trail visual is now progressive.
+
+---
+
+**Risk surfaces:**
+
+- Trail draw is tied to chargeSpeed, which scales with player speed.
+  Future class with different speed → different trail draw rate.
+  Acceptable: trail SHOULD echo the dash, so faster classes get
+  faster trail-draw.
+- Tail drawSpeed multiplier (3×) is hardcoded in `spawnPierceTrail`.
+  Could expose as schema field if other classes need different
+  rearward-blast speeds. Not urgent.
+- Damage detection along the drawn segment may produce a "trail
+  catches you" beat where entity sees trail extend toward them and
+  then take damage — that's intentional but worth confirming feel.
+
+---
+
+**Standards audit (rule #17 — push #74 in S015 continuation,
+push #7 in S016 SS red arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #14 (UNITY): trail draw + collision share same
+  drawn-endpoint computation (single source of geometric truth).
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: forward and rearward segments share lifecycle, fade,
+    collision logic — only the speed differs.
+  - ELEGANCE: drawnFwdLen/drawnTailLen progressively grow each
+    frame; cap-and-clamp pattern is uniform.
+  - EFFICIENCY: per-frame trail update is O(trails × entities).
+    Trails typically 0-2 active simultaneously; cost is negligible.
+- Rule #19 (intuition): your "blast out 3x speed in reverse" was
+  more specific than my proposed sequential phasing. Concurrent
+  with different speeds is the cleaner mental model — both draws
+  start at A, just race outward at different rates.
+- Rule #20 (grep-for-symptoms): held — verified all diagnostic
+  markers stripped via final grep.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

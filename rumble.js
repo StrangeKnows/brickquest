@@ -901,25 +901,13 @@ function update(dt) {
         // odx/odist as "away-from-player" then `entity -= nx*push`).
         // We add directly since perpendicular IS the away direction
         // when entity is exactly on the dash line.
-        var _preX = entity.x, _preY = entity.y;
         entity.x += nx * push;
         entity.y += ny * push;
         entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
         entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
-        if (entity._pierceDiagFrame && typeof console !== 'undefined' && console.log) {
-          console.log('[PIERCE-DIAG resolver-perp]', {
-            entityType: entity.type,
-            preXY: _preX.toFixed(1) + ',' + _preY.toFixed(1),
-            postXY: entity.x.toFixed(1) + ',' + entity.y.toFixed(1),
-            pushVec: (nx*push).toFixed(1) + ',' + (ny*push).toFixed(1),
-            dashDir: _pierceDashDirX.toFixed(2) + ',' + _pierceDashDirY.toFixed(2),
-            cross: _cross.toFixed(1),
-          });
-        }
       } else {
         // Standard push (away from player along player→entity vector)
         nx = odx/odist; ny = ody/odist;
-        var _preX2 = entity.x, _preY2 = entity.y;
         entity.x -= nx*push;
         entity.y -= ny*push;
         entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
@@ -3956,7 +3944,7 @@ function maybeSpawnPipShrapnel(armorBeforeLoss, srcX, srcY, srcEntity) {
 // model spawns trails (the spawn site checks dashModel === 'pierce').
 var redDashTrails = [];
 
-function spawnPierceTrail(originX, originY, endX, endY, baseDamage, dashProfile) {
+function spawnPierceTrail(originX, originY, endX, endY, baseDamage, dashProfile, chargeSpeed) {
   var cfg = dashProfile && dashProfile.trail;
   if (!cfg) return;
   // Compute dash direction (from origin to end) for the tail extension.
@@ -3964,14 +3952,35 @@ function spawnPierceTrail(originX, originY, endX, endY, baseDamage, dashProfile)
   var len = Math.hypot(dx, dy);
   if (len < 1) return;  // degenerate — skip
   var dirX = dx / len, dirY = dy / len;
+  var tailLen = cfg.tailBehindOrigin || 100;
   // Tail extends BEHIND origin in the OPPOSITE of dash direction.
-  var tailX = originX - dirX * (cfg.tailBehindOrigin || 100);
-  var tailY = originY - dirY * (cfg.tailBehindOrigin || 100);
+  var tailX = originX - dirX * tailLen;
+  var tailY = originY - dirY * tailLen;
+  // v0.16.55 — Progressive trail draw. Both segments start at point A
+  // simultaneously when trail spawns:
+  //   - Forward path (A → endXY) extends at chargeSpeed (matches the
+  //     speed the dash itself flew; trail visually echoes the dash).
+  //   - Rearward tail (A → tailXY) extends at 3× chargeSpeed (snap-quick
+  //     blast backward — anti-pursuit beat).
+  // Segments are tracked independently via drawnFwdLen / drawnTailLen.
+  // Once both reach their full length, trail enters hold/fade phase
+  // until life runs out.
+  var fwdDrawSpeed = chargeSpeed || 1040;        // px/sec
+  var tailDrawSpeed = (chargeSpeed || 1040) * 3; // 3× speed for backward blast
   redDashTrails.push({
-    // Geometry: trail line goes from (tailX, tailY) → (endX, endY)
-    tailX: tailX, tailY: tailY,
-    originX: originX, originY: originY,
-    endX: endX, endY: endY,
+    // Geometry: full target endpoints (drawn-to over time)
+    tailX: tailX, tailY: tailY,                   // far end of rearward tail
+    originX: originX, originY: originY,           // anchor — both segments grow from here
+    endX: endX, endY: endY,                       // far end of forward path
+    fullFwdLen: len,                              // forward target length
+    fullTailLen: tailLen,                         // rearward target length
+    // Direction unit vectors — used during render to interpolate drawn endpoints
+    dirX: dirX, dirY: dirY,                       // forward unit
+    // Progressive-draw state
+    drawnFwdLen: 0,                               // current drawn forward length
+    drawnTailLen: 0,                              // current drawn rearward length
+    fwdDrawSpeed: fwdDrawSpeed,
+    tailDrawSpeed: tailDrawSpeed,
     // Lifecycle
     life: cfg.duration || 1.7,
     maxLife: cfg.duration || 1.7,
@@ -3981,7 +3990,7 @@ function spawnPierceTrail(originX, originY, endX, endY, baseDamage, dashProfile)
     // Per-entity damage tracking — one hit per entity per trail
     hitEntities: [],
     // Visual
-    lineWidth: 18,  // collision band width (entities within this distance from line take dmg)
+    lineWidth: 18,  // collision band width
   });
   // Push-back burst at origin point A — knockback for entities within radius.
   var burstR = cfg.pushBackBurstRadius || 60;
@@ -4030,13 +4039,29 @@ function updatePierceTrails(dt) {
       redDashTrails.splice(ti, 1);
       continue;
     }
-    // Damage detection — entities crossing the trail line.
+    // v0.16.55 — Grow drawn segments at their respective speeds.
+    // Each segment caps at its full target length once drawn.
+    if (trail.drawnFwdLen < trail.fullFwdLen) {
+      trail.drawnFwdLen = Math.min(trail.fullFwdLen, trail.drawnFwdLen + trail.fwdDrawSpeed * dt);
+    }
+    if (trail.drawnTailLen < trail.fullTailLen) {
+      trail.drawnTailLen = Math.min(trail.fullTailLen, trail.drawnTailLen + trail.tailDrawSpeed * dt);
+    }
+    // Compute current drawn endpoints for collision detection.
+    // Forward: from origin extending toward endX/endY by drawnFwdLen.
+    var fwdEndX = trail.originX + trail.dirX * trail.drawnFwdLen;
+    var fwdEndY = trail.originY + trail.dirY * trail.drawnFwdLen;
+    // Tail: from origin extending OPPOSITE direction by drawnTailLen.
+    var tailEndX = trail.originX - trail.dirX * trail.drawnTailLen;
+    var tailEndY = trail.originY - trail.dirY * trail.drawnTailLen;
+    // Damage detection — entities crossing the DRAWN segment.
+    // Compute distance to the currently-drawn line (tailEndXY → fwdEndXY).
     for (var ei = 0; ei < entities.length; ei++) {
       var g = entities[ei];
       if (!g || g.hp <= 0) continue;
       // Already hit by this trail? skip.
       if (trail.hitEntities.indexOf(g) >= 0) continue;
-      var d = _distFromLineSegment(g.x, g.y, trail.tailX, trail.tailY, trail.endX, trail.endY);
+      var d = _distFromLineSegment(g.x, g.y, tailEndX, tailEndY, fwdEndX, fwdEndY);
       if (d > trail.lineWidth + (g.r || 0)) continue;
       // Trail hit. Apply damage, mark entity as hit.
       trail.hitEntities.push(g);
@@ -4058,6 +4083,14 @@ function drawPierceTrails() {
     var trail = redDashTrails[ti];
     var alpha = trail.life / trail.maxLife;
     if (alpha <= 0) continue;
+    // v0.16.55 — Compute current drawn endpoints from origin outward
+    // along respective directions.
+    var fwdEndX = trail.originX + trail.dirX * trail.drawnFwdLen;
+    var fwdEndY = trail.originY + trail.dirY * trail.drawnFwdLen;
+    var tailEndX = trail.originX - trail.dirX * trail.drawnTailLen;
+    var tailEndY = trail.originY - trail.dirY * trail.drawnTailLen;
+    // Skip render if both segments are zero-length (initial frame edge case).
+    if (trail.drawnFwdLen < 0.5 && trail.drawnTailLen < 0.5) continue;
     ctx.save();
     // Outer glow stroke (wider, lower alpha — reads as the "hot lane")
     ctx.globalAlpha = 0.45 * alpha;
@@ -4067,8 +4100,8 @@ function drawPierceTrails() {
     ctx.lineWidth = trail.lineWidth + 4;
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(trail.tailX, trail.tailY);
-    ctx.lineTo(trail.endX, trail.endY);
+    ctx.moveTo(tailEndX, tailEndY);
+    ctx.lineTo(fwdEndX, fwdEndY);
     ctx.stroke();
     // Inner bright core (narrower, brighter — reads as the dash line itself)
     ctx.globalAlpha = 0.85 * alpha;
@@ -4076,8 +4109,8 @@ function drawPierceTrails() {
     ctx.shadowBlur = 8;
     ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.moveTo(trail.tailX, trail.tailY);
-    ctx.lineTo(trail.endX, trail.endY);
+    ctx.moveTo(tailEndX, tailEndY);
+    ctx.lineTo(fwdEndX, fwdEndY);
     ctx.stroke();
     ctx.restore();
   }
@@ -5709,17 +5742,6 @@ function updateEntity(g, dt, bounds) {
     // Clamp
     g.x = Math.max(bounds.x + g.r, Math.min(bounds.x + bounds.w - g.r, g.x));
     g.y = Math.max(bounds.y + g.r, Math.min(bounds.y + bounds.h - g.r, g.y));
-    // v0.16.52 DIAGNOSTIC — log bounce frame for tagged entity, then clear flag
-    if (g._pierceDiagFrame && typeof console !== 'undefined' && console.log) {
-      console.log('[PIERCE-DIAG bounce]', {
-        entityType: g.type,
-        xy: g.x.toFixed(1) + ',' + g.y.toFixed(1),
-        bounceVel: g.bounceVx.toFixed(0) + ',' + g.bounceVy.toFixed(0),
-        bounceTimer: g.bounceTimer.toFixed(2),
-        state: g.state,
-      });
-      g._pierceDiagFrame = 0;
-    }
     return;
   }
 
@@ -7050,21 +7072,6 @@ function startRedChargeTo(dmgMult, tx, ty) {
     maxRange: maxRange,              // hard cap on travel distance
     isCrit: _currentCrit,
   };
-  // v0.16.53 DIAGNOSTIC — dash creation telemetry
-  if (typeof console !== 'undefined' && console.log) {
-    console.log('[DASH-DIAG create-drag]', {
-      cls: player.cls,
-      startXY: startX.toFixed(1) + ',' + startY.toFixed(1),
-      playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
-      dirXY: nx.toFixed(2) + ',' + ny.toFixed(2),
-      targetXY: endX.toFixed(1) + ',' + endY.toFixed(1),
-      maxRange: maxRange.toFixed(0),
-      endDist: endDist.toFixed(0),
-      origDist: dist.toFixed(0),
-      chargeSpeed: (player.speed * 4).toFixed(0),
-      _dmgMult: _dmgMult,
-    });
-  }
 }
 
 function startRedCharge(dmgMult, targetEntity) {
@@ -7108,21 +7115,6 @@ function startRedCharge(dmgMult, targetEntity) {
   var _ddProf2 = (typeof getRedDashProfile === 'function') ? getRedDashProfile(player.cls) : null;
   if (_ddProf2 && _ddProf2.dashModel === 'pierce') {
     brickAction._lockDirection = true;
-  }
-  // v0.16.53 DIAGNOSTIC — dash creation (auto-target)
-  if (typeof console !== 'undefined' && console.log) {
-    console.log('[DASH-DIAG create-auto]', {
-      cls: player.cls,
-      startXY: startX.toFixed(1) + ',' + startY.toFixed(1),
-      playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
-      targetEntityXY: entity.x.toFixed(1) + ',' + entity.y.toFixed(1),
-      targetEntityType: entity.type,
-      dirXY: nx.toFixed(2) + ',' + ny.toFixed(2),
-      maxRange: maxRange.toFixed(0),
-      origDist: dist.toFixed(0),
-      chargeSpeed: (player.speed * 4).toFixed(0),
-      _dmgMult: _dmgMult,
-    });
   }
 }
 
@@ -7965,20 +7957,6 @@ function updateBrickAction(dt, bounds) {
       }
       brickAction.chargeTimer = (brickAction.chargeTimer||0) + dt;
       var step = brickAction.chargeSpeed * dt;
-      // v0.16.53 DIAGNOSTIC — charge frame log, throttled (every 4th frame).
-      // Captures player position evolution during the dash to see if
-      // movement is jittery or smooth, and whether arena clamps fire.
-      brickAction._diagFrameNum = (brickAction._diagFrameNum || 0) + 1;
-      if (brickAction._diagFrameNum % 4 === 1 && typeof console !== 'undefined' && console.log) {
-        console.log('[DASH-DIAG frame]', {
-          frame: brickAction._diagFrameNum,
-          chargeTimer: brickAction.chargeTimer.toFixed(3),
-          playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
-          startXY: brickAction.startX.toFixed(1) + ',' + brickAction.startY.toFixed(1),
-          step: step.toFixed(1),
-          dirXY: brickAction.dirX.toFixed(2) + ',' + brickAction.dirY.toFixed(2),
-        });
-      }
       // Range cap: if travelling further would exceed maxRange, clamp the
       // step and end the charge (transition to return phase). Without this,
       // the dash would run unlimited toward target. Per S015 design:
@@ -7991,14 +7969,6 @@ function updateBrickAction(dt, bounds) {
         // dash termination + finalize (no return phase).
         step = Math.max(0, brickAction.maxRange - traveled);
         brickAction.hit = true;
-        if (typeof console !== 'undefined' && console.log) {
-          console.log('[DASH-DIAG range-cap]', {
-            frame: brickAction._diagFrameNum,
-            traveled: traveled.toFixed(1),
-            maxRange: brickAction.maxRange.toFixed(0),
-            clampedStep: step.toFixed(1),
-          });
-        }
       }
       // Wall sweep: test the line segment from current position to the
       // intended next position against each gray wall. If it intersects,
@@ -8030,15 +8000,6 @@ function updateBrickAction(dt, bounds) {
         player.y = player.y + dym * tStop;
         blocked = true;
         brickAction.hit = true; // terminates dash this frame (v0.15.12)
-        if (typeof console !== 'undefined' && console.log) {
-          console.log('[DASH-DIAG wall-block]', {
-            frame: brickAction._diagFrameNum,
-            wallXY: w.x.toFixed(1) + ',' + w.y.toFixed(1),
-            wallR: w.r.toFixed(0),
-            tHit: tHit.toFixed(3),
-            stopXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
-          });
-        }
       }
       if (!blocked) {
         player.x = nextX;
@@ -8162,28 +8123,6 @@ function updateBrickAction(dt, bounds) {
               pHitG.bounceVy = _perpY * _pierceKnockMag;
               pHitG.bounceTimer = 0.3;
               pHitG.state = 'bounce';
-              // v0.16.52 DIAGNOSTIC — log entity state at pierce hit so
-              // we can trace how/where it moves over subsequent frames.
-              // Capture pre-knockback position, dash direction, perp dir,
-              // and entity ID. STRIP THIS once root cause identified.
-              if (typeof console !== 'undefined' && console.log) {
-                console.log('[PIERCE-DIAG hit]', {
-                  entityType: pHitG.type,
-                  entityId: pHitG._id || '?',
-                  entityXY: pHitG.x.toFixed(1) + ',' + pHitG.y.toFixed(1),
-                  playerXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
-                  dashDir: brickAction.dirX.toFixed(2) + ',' + brickAction.dirY.toFixed(2),
-                  cross: _cross.toFixed(1),
-                  perpDir: _perpX.toFixed(2) + ',' + _perpY.toFixed(2),
-                  knockVel: pHitG.bounceVx.toFixed(0) + ',' + pHitG.bounceVy.toFixed(0),
-                  bounceTimer: pHitG.bounceTimer,
-                  state: pHitG.state,
-                });
-              }
-              // Tag entity for one-frame post-hit telemetry — overlap
-              // resolver and bounce update can clobber the velocity. We
-              // log on the NEXT frame too to see what survived.
-              pHitG._pierceDiagFrame = 1;
               // Per-target spark (visual cue at each pierce point)
               if (typeof spawnCritFlourish === 'function') {
                 spawnCritFlourish(pHitG.x, pHitG.y, '#E24B4A', 6);
@@ -8360,20 +8299,8 @@ function updateBrickAction(dt, bounds) {
             ? brickAction._pierceBaseDmg
             : fallbackBaseDmg;
           spawnPierceTrail(brickAction.startX, brickAction.startY,
-            player.x, player.y, trailBaseDmg, dashProfile);
-        }
-        // v0.16.53 DIAGNOSTIC — termination summary
-        if (typeof console !== 'undefined' && console.log) {
-          var _travFinal = Math.hypot(player.x - brickAction.startX, player.y - brickAction.startY);
-          console.log('[DASH-DIAG terminate]', {
-            totalFrames: brickAction._diagFrameNum || 0,
-            chargeTime: (brickAction.chargeTimer || 0).toFixed(3),
-            startXY: brickAction.startX.toFixed(1) + ',' + brickAction.startY.toFixed(1),
-            endXY: player.x.toFixed(1) + ',' + player.y.toFixed(1),
-            traveled: _travFinal.toFixed(1),
-            maxRange: (brickAction.maxRange || 0).toFixed(0),
-            hitCount: (brickAction._hitSet || []).length,
-          });
+            player.x, player.y, trailBaseDmg, dashProfile,
+            brickAction.chargeSpeed);
         }
         brickAction = null;
       } else if (brickAction && brickAction.chargeTimer >= 2.0) {
