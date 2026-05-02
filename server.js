@@ -1664,34 +1664,34 @@ wss.on('connection', (ws, req) => {
         const finalDmg = Math.max(0, rawDmg - blocked);
         p.hp = Math.max(0, p.hp - finalDmg); if(p.hp<=0)p.alive=false;
         const pName = p.playerName||p.name;
-        // v4: Perfect dodge reward — clean escape (zero dmg) gives +1 orange brick.
-        // Rewards skill, parallels Snapstep disarm. Partial dodges / sprung traps get nothing.
+        // v0.16.37 — Clean escape (zero damage taken) removes trap from board
+        // and rewards +1 orange brick. Anything else (partial dodge, full hit)
+        // leaves the trap on the board and gives no brick. Spec: "if 100%
+        // success, orange brick is removed from board and they gain it in
+        // inventory. if not 100% sucess, brick stays on board and they gain
+        // no brick."
         let cleanEscapeBrick = false;
+        if (!G.orangeSpaces) G.orangeSpaces = {};
         if (finalDmg === 0 && rawDmg > 0) {
           p.bricks.orange = (p.bricks.orange||0) + 1;
           cleanEscapeBrick = true;
-          log(`${pName} escaped the trap cleanly — +1 orange brick`,'reward');
+          // Remove trap(s) from this space — consumed by clean escape
+          G.orangeSpaces[p.space] = Math.max(0, (G.orangeSpaces[p.space]||0) - trapCount);
+          if (G.orangeSpaces[p.space] <= 0) delete G.orangeSpaces[p.space];
+          log(`${pName} escaped the trap cleanly — +1 orange brick, trap consumed`,'reward');
           clients.forEach((info,cws)=>{ if(info.role===cls&&cws.readyState===1) cws.send(JSON.stringify({type:'rewardPopup',kind:'brick',color:'orange',label:'Clean Escape! +1 Orange Brick',brickColor:'#E8610A'})); });
         }
+        // If not clean escape, trap state is preserved (no increment, no decrement).
+        // Previously this incremented orangeSpaces by trapCount which doubled
+        // the trap on every failed dodge — fixed in v0.16.37.
         log(`TRAP! ${pName} — ${trapCount} trap(s), ${rawDmg} raw, ${blocked} blocked, −${finalDmg} HP → ${p.hp}`,'damage');
-        if (!G.orangeSpaces) G.orangeSpaces = {};
-        G.orangeSpaces[p.space] = (G.orangeSpaces[p.space]||0) + trapCount;
         G.activeEvent = { ...G.activeEvent, trapResult:{ dmg:finalDmg, rawDmg, dodged:blocked, trapCount, disarmed:false, cleanEscape:cleanEscapeBrick } };
         broadcastState(); return;
       }
-      if (eventType === 'disarmTrap') {
-        // Snapstep disarms trap — costs 1 gray brick, gains 1 orange brick
-        if ((p.bricks.gray||0) < 1) {
-          ws.send(JSON.stringify({type:'error',msg:'Need 1 gray brick to disarm'}));
-          broadcastState(); return;
-        }
-        p.bricks.gray--;
-        p.bricks.orange = (p.bricks.orange||0)+1;
-        log(`${p.playerName||p.name} disarmed the trap! (1 gray → 1 orange brick)`,'action');
-        G.activeEvent = { ...G.activeEvent, trapResult:{ dmg:0, disarmed:true } };
-        clients.forEach((info,cws)=>{ if(info.role===cls&&cws.readyState===1) cws.send(JSON.stringify({type:'rewardPopup',kind:'brick',color:'orange',label:'Trap Disarmed! +1 Orange Brick',brickColor:'#E8610A'})); });
-        broadcastState(); return;
-      }
+      // v0.16.37 — disarmTrap event handler removed. Universal trap resolution
+      // is now: clean escape removes trap + awards brick; otherwise trap persists.
+      // No proactive disarm action exists currently. Future class-action UI
+      // will reintroduce class-specific disarm options via brick gestures.
       if (eventType === 'blackCurse') {
         // Player stopped on black brick space
         const pen = rollRange(1,3);
@@ -2497,47 +2497,12 @@ wss.on('connection', (ws, req) => {
     }
 
 
-    // ── TRAP DISARM ──
-    // REVISIT (S015 strip): Snapstep "Disarm Trap" UI button stripped from
-    // players.html in v0.15.x as part of legacy class-action button cleanup.
-    // Handler stays intact for future class-action overhaul where Snapstep's
-    // disarm becomes a brick-driven mechanic. UI text drops dice language.
-    if (type === 'disarmTrap') {
-      const { cls, spaceIdx } = P;
-      const p = G.players[cls];
-      if (!G.orangeSpaces) G.orangeSpaces = {};
-
-      if (cls === 'blocksmith') {
-        // Costs 1 gray brick
-        if ((p.bricks.gray||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 gray brick to disarm'})); broadcastState(); return; }
-        p.bricks.gray--;
-        G.orangeSpaces[spaceIdx] = Math.max(0, (G.orangeSpaces[spaceIdx]||1)-1);
-        if (G.orangeSpaces[spaceIdx]<=0) delete G.orangeSpaces[spaceIdx];
-        log(`Blocksmith disarmed trap at space ${spaceIdx+1} (1 gray spent)`,'action');
-      } else if (cls === 'snapstep') {
-        // Spend yellow brick, disarm 1, then RNG-decide chain continue
-        if ((p.bricks.yellow||0) < 1) { ws.send(JSON.stringify({type:'error',msg:'Need 1 yellow brick'})); broadcastState(); return; }
-        p.bricks.yellow--;
-        G.orangeSpaces[spaceIdx] = Math.max(0,(G.orangeSpaces[spaceIdx]||1)-1);
-        if (G.orangeSpaces[spaceIdx]<=0) delete G.orangeSpaces[spaceIdx];
-        log(`Snapstep disarmed trap at space ${spaceIdx+1}`,'action');
-        // 50% chance the disarm chain continues (uses roll(6) odd/even internally)
-        const r = roll(6);
-        ws.send(JSON.stringify({ type:'snapstepDisarmChain', roll:r, continueDisarm: r%2!==0 }));
-      } else {
-        // 50% disarm chance; on fail the trap fires for 1-3 damage
-        const r = roll(6);
-        if (r >= 4) {
-          G.orangeSpaces[spaceIdx] = Math.max(0,(G.orangeSpaces[spaceIdx]||1)-1);
-          if (G.orangeSpaces[spaceIdx]<=0) delete G.orangeSpaces[spaceIdx];
-          log(`${p.name} disarmed trap`,'action');
-        } else {
-          const dmg = rollRange(1,3);
-          p.hp = Math.max(0,p.hp-dmg); if(p.hp<=0)p.alive=false;
-          log(`${p.name} failed disarm — trap fires! −${dmg} HP`,'damage');
-        }
-      }
-    }
+    // v0.16.37 — disarmTrap action handler removed. Was three-way class
+    // discrimination (Blocksmith gray-cost, Snapstep yellow+chain, default
+    // RNG with damage on fail). UI button stripped in S015. With universal
+    // trap resolution now (clean escape removes trap + brick), proactive
+    // disarm is unnecessary. Future class-action UI will reintroduce
+    // class-specific disarm via brick gestures if desired.
 
     // ── TRAP TRIGGER ON LANDING ──
     if (type === 'triggerTrap') {

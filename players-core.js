@@ -3403,20 +3403,12 @@ function showLandingResult(ev, r, zone) {
     var double = ev.type === 'doubletrap';
     var trapResult = G.activeEvent && G.activeEvent.trapResult;
     if (trapResult) {
-      if (trapResult.disarmed) {
-        var disarmSpec = { bricks: { orange: 1 } };
-        var disarmIcons = renderRewardIcons({ bricks: { orange: 1 }, custom: '<span style="font-size:18px;color:var(--text-dim);margin:0 6px;">(from</span>' + '<span style="width:22px;height:22px;border-radius:3px;background:#AAAAAA;display:inline-block;vertical-align:middle;box-shadow:0 1px 4px rgba(0,0,0,.5);margin:0 2px;"></span><span style="font-size:18px;color:var(--text-dim);">)</span>' });
-        extra = buildResolutionCard({
-          themeColor: '#9adb9a',
-          borderColor: '#9adb9a66',
-          bgColor: '#0a1200',
-          title: '🔧 DISARMED',
-          rewardIcons: disarmIcons,
-          spec: disarmSpec,
-          flavor: 'Defused. The fortress concedes one brick.',
-          showerTint: '#9adb9a',
-        });
-      } else {
+      // v0.16.37 — `trapResult.disarmed` branch removed. With disarmTrap
+      // handler stripped from server, disarmed=true is never set. All
+      // trap outcomes flow through the cleanEscape vs damage path below.
+      // Clean escape (cleanEscape:true, dmg:0) → "DODGED" card with brick.
+      // Otherwise → "SPRUNG" card with damage flavor.
+      {
         var dodged = trapResult.dodged || 0;
         var TRAP_FLAVOR_BY_DMG = {
           0: [
@@ -3489,10 +3481,10 @@ function showLandingResult(ev, r, zone) {
         });
       }
     } else {
-      // Snapstep "Disarm Trap" class-action button stripped (S015) along
-      // with other class buttons; server `disarmTrap` handler preserved.
-      // Future overhaul will route via brick-bar gesture (drag yellow on
-      // trapped space). For now traps trigger normally on landing.
+      // v0.16.37 — Trap dodge mini-game host. Empty container before
+      // the dodge sequence renders; tap-burst-container is populated
+      // by the dodge handler. Successful clean dodge (zero damage)
+      // → +1 orange brick + trap removed from board.
       extra = '<div style="margin-top:10px;padding:10px;background:#1a0500;border:2px solid var(--orange);border-radius:12px;">'
         + '<div id="tap-burst-container"></div>'
         + '</div>';
@@ -6276,13 +6268,9 @@ function showDashResult(data) {
   render();
 }
 
-function handleDisarmChain(data) {
-  if(data.continueDisarm) {
-    toast('Disarm continues!', 'success');
-  } else {
-    toast('Disarm stopped', 'normal');
-  }
-}
+// v0.16.37 — handleDisarmChain function removed alongside snapstepDisarmChain
+// server message + disarmTrap handler. Universal trap resolution (clean
+// escape removes trap + brick) replaces all proactive disarm UX.
 
 // ═══════════════════════════════════════════════════════
 // v4 CHEESE / POISON / PURPLE FATED CHOICE FUNCTIONS

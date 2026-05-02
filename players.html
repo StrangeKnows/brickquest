@@ -722,7 +722,6 @@ function connectWS() {
       var declinerName = G&&G.players[data.toCls]?(G.players[data.toCls].playerName||G.players[data.toCls].name):data.toCls;
       toast(declinerName + ' declined the trade', 'warn');
     }
-    if (event === 'snapstepDisarmChain') { handleDisarmChain(data); }
     if (event === 'error') {
       // S015 DIAGNOSTIC: tracing full-HP toast investigation
       console.log('[DIAG error received]', data);

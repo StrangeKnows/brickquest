@@ -4870,6 +4870,125 @@ push #4 in S016 unification arc):**
 
 ---
 
+### v0.16.37 — Strip disarmTrap entirely + universal clean-escape trap consumption
+
+> "this is old, broken content. lets remove disarm trap completely
+> for now. all classes should gain 1 orange brick for 100% success
+> on orange trap event, otherwise trap persists on that space."
+>
+> "if player lands on orange space or they roll an orange space,
+> they trigger trap. if they complete the event with 100% success,
+> orange brick is removed from board and they gain it in inventory.
+> if not 100% sucess, brick stays on board and they gain no brick"
+
+Closes the Tier 3 thread of the v0.16.33 unification arc. The
+disarmTrap action handler was identified as dead-code class
+discrimination (3-way switch: BS gray-cost, SS yellow+chain,
+default RNG with damage). UI button stripped in S015. Per Ross
+spec: not worth refactoring dead code that no client invokes —
+just remove it. Universal trap resolution handles everything now.
+
+**Audit found a pre-existing bug:** trap-dodge resolution
+incremented `G.orangeSpaces[p.space] += trapCount` on every
+event resolution. Combined with the line-1330 trap-trigger path
+(which doesn't decrement orangeSpaces), this meant **every failed
+dodge DOUBLED the trap count on that space**. Players were
+inadvertently building up traps by failing to dodge. Fixed in
+this push as a side-effect of the universal-resolution logic.
+
+**Behavior changes:**
+
+1. **Clean escape (zero damage taken on dodge):**
+   - +1 orange brick (existing reward, unchanged)
+   - **NEW: trap REMOVED from space** (orangeSpaces[X] decrements
+     by trapCount, deletes if zero)
+
+2. **Partial / failed dodge:**
+   - Damage taken normally (unchanged)
+   - **NEW: trap STAYS on space** (no increment, no decrement —
+     was previously incrementing, now stable)
+
+3. **disarmTrap action handler removed entirely.**
+   - server.js line 2500 area (3-way class switch) gone
+   - server.js line 1682 area (event-trigger handler) gone
+   - players-core.js handleDisarmChain function gone
+   - players.html snapstepDisarmChain message listener gone
+
+4. **Trap "DISARMED" UI card removed.**
+   - players-core.js dead branch (`if (trapResult.disarmed)`)
+     removed — server never sets disarmed=true anymore.
+   - All trap outcomes now flow through cleanEscape vs damage path.
+   - Card titles: "✓ DODGED" (clean escape) or "🗡 SPRUNG" (damage).
+
+**Files changed:** `server.js`, `players-core.js`, `players.html`,
+`NOTES.md`.
+
+UNTOUCHED: characters.js, rumble.js, test_players.html, boardFx,
+dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Land on orange trap, dodge cleanly (zero damage):** card shows
+   "✓ DODGED" + 1 orange brick reward. Trap removed from board map
+   — verify on board view.
+3. **Land on orange trap, take partial damage:** card shows "🗡 SPRUNG"
+   with damage. Trap STAYS on board for next visitor.
+4. **Land on orange trap, fail dodge entirely:** card shows "🗡 SPRUNG"
+   with full damage. Trap stays on board.
+5. **Roll a new trap on space already trapped:** stacks (existing
+   behavior in line 1401-1403).
+6. **Multi-landing test:** land repeatedly on same trap, fail dodge
+   each time. Trap count should stay STABLE (was previously doubling).
+7. **No DM panel disarm action visible** — those handlers are stripped.
+   DM still has adjustHP / adjustBrick / adjustGold for emergency
+   adjustment.
+
+---
+
+**Risk surfaces:**
+
+- The `trapResult.disarmed` field still gets set to false in the
+  server response (line 1679). Inert — client doesn't branch on
+  it anymore. Could clean up the field later but harmless to leave.
+- "DISARMED" card with green theme + "Defused. The fortress concedes
+  one brick." flavor is GONE. Clean escape now uses the existing
+  "DODGED" card with same brick reward. Visual is slightly less
+  ceremonial but consistent — a clean escape is a clean escape.
+- Pre-existing bug fixed: repeat-dodge-failure no longer doubles
+  trap count. Old saves with bloated orangeSpaces values from this
+  bug will normalize over time as players clean-escape them away.
+
+---
+
+**Standards audit (rule #17 — push #56 in S015 continuation,
+push #5 in S016 unification arc — TIER 3 CLOSE):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): players.html stripped (1 line removed),
+  test_players.html unchanged (no disarm refs there). ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: trap resolution is now universal — all classes treated
+    identically. Class data file has no trap-disarm fields.
+  - ELEGANCE: dead code removed entirely (3 sites + dead UI branch
+    + dead helper function). Pre-existing trap-doubling bug fixed
+    as side effect.
+  - EFFICIENCY: ~80 lines removed across server + client. No new
+    abstractions added.
+- Rule #14 (UNITY): tier 3 closes the v0.16.33 unification arc.
+  Three pushes (33, 34, 37) collectively unified armor cap, gray
+  crit chance, rumble passives, and stripped class-action dead
+  code. Class data discipline restored.
+- Rule #19 (intuition): held — Ross's "this is old, broken content"
+  was the right read. I almost defended Tier 3 schema work; pivoted
+  to strip when Ross flagged it as dead code.
+- Rule #6 (diagnostic-first): N/A — strip + spec implementation,
+  no debugging needed. Bug found incidentally during audit.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
