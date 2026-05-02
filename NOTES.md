@@ -5296,6 +5296,121 @@ push #2 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.40 — Server starting kit unification + shrapnel-kill victory trigger
+
+> "BS still has orange, no yellow. shrapnel looks to work, not seeing
+> any victory screen on entity defeat, though"
+
+Two distinct fixes from v0.16.39 playtest.
+
+**Fix 1: BS starting kit didn't apply (server hardcoded brick literals).**
+
+Symptom: BS starting kit in characters.js was already updated to
+`{gray:2, yellow:1}` in v0.16.38, but rumble showed BS with
+`{gray:2, orange:1}`. Found server.js line 93 hardcoded the kit
+inline:
+```javascript
+blocksmith: mkPlayer('blocksmith', '🔧', '#C87800', 12, {gray:2, orange:1}),
+```
+
+**Same UNITY violation pattern we've been hunting.** Class data
+living as runtime literals in a non-data file. Server was
+duplicating the brick counts independently of characters.js.
+
+Fixed: server.js now imports `CHARACTERS` and reads
+`CHARACTERS[cls].startingKit` directly in `mkPlayer` calls.
+Adding/changing a class kit = data change in characters.js, no
+server logic surgery. HP / icon / color still hardcoded in mkPlayer
+calls — TODO move those too in a future unification pass (parking
+lot item, not blocking).
+
+Also fixed: `getYellowProfile` was defined in characters.js
+(v0.16.38) but never added to the `module.exports` list. Server-side
+imports would have failed if it tried to use it. Added to exports
+alongside other profile getters.
+
+**Fix 2: Shrapnel kills didn't trigger victory screen.**
+
+Symptom: kill enemy with shrapnel as last hit → no victory screen,
+rumble hangs.
+
+Root cause: damage sources in rumble.js individually call
+`triggerVictory()` after their damage application (blue bolts at
+line 7998, traps, chain detonations, etc). The pattern is:
+
+```javascript
+damageEntity(target, dmg);
+if (target.hp <= 0) triggerVictory();
+```
+
+My v0.16.39 shrapnel only called `damageEntity`, never followed
+up with `triggerVictory`. So shrapnel kills succeeded mechanically
+(entity HP hit 0, _lootDropped fired, loot spawned) but the victory
+overlay was never invoked because the trigger didn't fire.
+
+Fix: `updateShrapnel` now calls `triggerVictory()` after any
+damage application, matching the established pattern.
+
+**Caveat for playtest:** if you're testing in `rumble_test.html`
+(sandbox mode), no victory screen ever appears regardless of damage
+source — sandbox mode RESPAWNS entities continuously by design.
+Spec mode (real battles from board) is where victory triggers.
+
+---
+
+**Files changed:** `characters.js`, `server.js`, `rumble.js`,
+`NOTES.md`.
+
+UNTOUCHED: players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh + restart server (server changes need restart).
+2. **BS starting kit:** new game / Reset → BS starts with 2 gray + 1
+   yellow bricks. Was 2 gray + 1 orange.
+3. **Shrapnel kill victory:** play BS in spec mode (real battle).
+   Take a hit while armored → shrapnel fires back → if shrapnel
+   kills the last enemy, victory screen appears. Should work
+   regardless of which damage source kills the last entity.
+4. **Other regressions check:** all classes still get correct
+   starting kits. BK should be `{red:2, gray:1}`, Fixer
+   `{white:2, black:1}`, etc.
+
+---
+
+**Risk surfaces:**
+
+- Server changes require server restart to take effect, not just
+  client refresh. If kit still wrong after refresh, restart node
+  process.
+- The hardcoded HP/icon/color in mkPlayer are still violations
+  but lower priority. Move in a future pass.
+
+---
+
+**Standards audit (rule #17 — push #59 in S015 continuation,
+push #3 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (no paired UI changes)
+- Rule #11 (data/runtime/UI): UNITY restored. Starting kit data
+  in characters.js, server reads from CHARACTERS, no duplicate
+  literals. Future HP/color/icon migration noted but parked.
+- Rule #14 (UNITY): caught a UNITY violation that survived the
+  v0.16.33-37 unification arc because the audit only grepped for
+  hardcoded class checks (`cls === 'X'`), not hardcoded class
+  literals (object literals like `{gray:2, orange:1}`). Worth
+  noting for future audits — broaden the grep pattern.
+- Rule #19 (intuition): held — Ross's symptom was specific enough
+  to find the actual root cause quickly (server hardcoding)
+  rather than a wild-goose chase through client state.
+- Rule #6 (diagnostic-first): N/A — both bugs had clear root
+  causes from symptoms.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -3728,9 +3728,11 @@ function updateShrapnel(dt) {
       // Impact resolution. Prefer the linked entity if still alive (it may
       // have moved since spawn). Fall back to position-based hit at the
       // original target point — small radius forgives misses.
+      var hitFired = false;
       var tgt = s.targetEntity;
       if (tgt && tgt.hp > 0) {
         damageEntity(tgt, s.dmg);
+        hitFired = true;
         if (typeof spawnCritFlourish === 'function') {
           spawnCritFlourish(tgt.x, tgt.y, '#EF9F27', 6);
         }
@@ -3741,6 +3743,7 @@ function updateShrapnel(dt) {
           var g = entities[ei];
           if (Math.hypot(g.x - s.tx, g.y - s.ty) <= hitR + (g.r || 12)) {
             damageEntity(g, s.dmg);
+            hitFired = true;
             if (typeof spawnCritFlourish === 'function') {
               spawnCritFlourish(g.x, g.y, '#EF9F27', 6);
             }
@@ -3748,6 +3751,12 @@ function updateShrapnel(dt) {
           }
         }
       }
+      // v0.16.40 — call triggerVictory after damage so a shrapnel killing
+      // blow can end the rumble. Pattern matches blue bolts, traps, chain
+      // detonations, and other damage sources. Without this, shrapnel could
+      // kill the last entity but the victory screen never appears because
+      // no other damage source ran triggerVictory().
+      if (hitFired && typeof triggerVictory === 'function') triggerVictory();
       s.done = true;
     }
   }

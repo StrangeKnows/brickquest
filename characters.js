@@ -882,7 +882,7 @@ if (typeof module !== 'undefined' && module.exports) {
     STARTING_KIT_COUNTS,
     CLASS_AFFINITY,
     getChar, getCharName, getCharIcon, getCharColor, getCharUiStyle,
-    getSignature, getSecondary, getPurpleProfile, getBlueProfile, getOrangeProfile, getRedProfile, getRedDashProfile, getRedRange, getGrayProfile, getGrayPips, getGrayWallHp,
+    getSignature, getSecondary, getPurpleProfile, getBlueProfile, getOrangeProfile, getRedProfile, getRedDashProfile, getRedRange, getGrayProfile, getYellowProfile, getGrayPips, getGrayWallHp,
     baseHeal,
     affinityMult,
     brickTier,

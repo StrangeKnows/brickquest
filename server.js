@@ -21,7 +21,11 @@ const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDI
 // Canonical character data + combat formulas (shared with browser-side rumble + dashboard).
 // Single source of truth — if a formula value changes in characters.js, server + client
 // + rumble all see the same new value automatically. No drift possible.
-const { computeHeal, affinityMult, baseHeal } = require('./characters.js');
+// v0.16.40 — Import CHARACTERS canonical class data so server reads
+// starting kit (and other class-specific data) from one source instead
+// of duplicating literals. Was: hardcoded {gray:2, orange:1} etc per
+// class in mkPlayer calls.
+const { CHARACTERS, computeHeal, affinityMult, baseHeal } = require('./characters.js');
 
 // Family palette per doc §2.1 Per-Color Role Matrix — 3 brick colors per
 // expression family. Called at rumble-event initiate so each encounter rolls
@@ -81,18 +85,18 @@ function freshState() {
     rumbleBattle: null,        // active real-time battle state (see rumble handlers below)
     log: [],
     players: {
-      // Starting state follows Combat & Economy v1 spec (canonical in
-      // rumble.js CLASS_META and game.js PLAYER_META):
-      //   HP: breaker 14, formwright 6, snapstep 9, blocksmith 12, fixer 8, wild_one 10
-      //   Starting bricks: 2 signature + 1 secondary (3 total per class).
-      // Players earn more bricks through play (loot drops, landing events,
-      // rewards); these are just the opening kit.
-      breaker:     mkPlayer('breaker',    '⚔️', '#993C1D', 14, {red:2,  gray:1}),
-      formwright:  mkPlayer('formwright', '🔮', '#3C3489',  6, {blue:2, purple:1}),
-      snapstep:    mkPlayer('snapstep',   '🏃', '#085041',  9, {orange:2, red:1}),
-      blocksmith:  mkPlayer('blocksmith', '🔧', '#C87800', 12, {gray:2, orange:1}),
-      fixer:       mkPlayer('fixer',      '💊', '#72243E',  8, {white:2, black:1}),
-      wild_one:    mkPlayer('wild_one',   '🐾', '#27500A', 10, {green:2, yellow:1}),
+      // v0.16.40 — Starting bricks now read from CHARACTERS[cls].startingKit
+      // (canonical class data in characters.js). Server.js no longer
+      // hardcodes class-specific brick counts. Adding/changing a class kit
+      // = data change in characters.js, no server logic surgery.
+      // HP / icon / color still hardcoded here — TODO move those too in
+      // future unification pass.
+      breaker:     mkPlayer('breaker',    '⚔️', '#993C1D', 14, CHARACTERS.breaker.startingKit),
+      formwright:  mkPlayer('formwright', '🔮', '#3C3489',  6, CHARACTERS.formwright.startingKit),
+      snapstep:    mkPlayer('snapstep',   '🏃', '#085041',  9, CHARACTERS.snapstep.startingKit),
+      blocksmith:  mkPlayer('blocksmith', '🔧', '#C87800', 12, CHARACTERS.blocksmith.startingKit),
+      fixer:       mkPlayer('fixer',      '💊', '#72243E',  8, CHARACTERS.fixer.startingKit),
+      wild_one:    mkPlayer('wild_one',   '🐾', '#27500A', 10, CHARACTERS.wild_one.startingKit),
     }
   };
 }
