@@ -6582,7 +6582,13 @@ function applyRumblePassive() {
       player.armor = Math.min(aMax || 99, (player.armor || 0) + (p.amount || 1));
       break;
     case 'hpOverheal':
-      player.hp = (player.hpMax || 1) + (p.amount || 1);
+      // v0.16.36: ADD overheal to current hp (was setting absolute hp = hpMax+amount,
+      // which secretly healed players who entered damaged). Now matches BS armorBonus
+      // semantics — additive, cap-aware. Ceiling is hpMax + amount (the overheal
+      // ceiling). 7/8 → 8/8 (no free heal). 8/8 → 9/8 (overheal pip).
+      var _ohAmount = p.amount || 1;
+      var _ohCap = (player.hpMax || 1) + _ohAmount;
+      player.hp = Math.min(_ohCap, (player.hp || 0) + _ohAmount);
       break;
     case 'firstEnemyDebuff':
       // Deferred — applied after entities spawn, see applyPendingEnemyDebuff
@@ -9965,18 +9971,28 @@ function _internalStart(config) {
   _startedAt = performance.now();
   renderBrickBar();
 
-  // v4: FW Formwright buff — 2× brick refresh speed for first 10s (from blue-event success).
-  // Server sends refreshBoost = { multiplier, durationMs }; we stash the expiry time and
-  // playerRefreshMult() checks it on every tick.
+  // v0.16.34: FW Formwright buff — 2× brick refresh speed for first 10s
+  // (from blue-event success). Server sends refreshBoost = { multiplier,
+  // durationMs }; we stash the expiry time and playerRefreshMult() checks
+  // it on every tick.
+  // v0.16.36: cinematic upgraded to match other classes — banner + flourish,
+  // 1s delayed. Was small floating text. Now FW gets the same visual moment
+  // every other class gets, when conditions warrant.
   var _rb = cfg.refreshBoost;
   if (_rb && typeof _rb.multiplier === 'number' && _rb.durationMs > 0) {
     player.refreshBoost = {
       multiplier: _rb.multiplier,
       endsAt: performance.now() + _rb.durationMs,
     };
-    if (typeof showFloatingText === 'function') {
-      showFloatingText(player.x, player.y - 30, '⚡ FORMWRIGHT CHARGE', '#4db8ff');
-    }
+    setTimeout(function() {
+      if (!player || player.hp <= 0) return;
+      if (typeof spawnCritBanner === 'function') {
+        spawnCritBanner(player.x, player.y - 50, '⚡ RHYTHM SHIFT', '#4db8ff');
+      }
+      if (typeof spawnCritFlourish === 'function') {
+        spawnCritFlourish(player.x, player.y, '#4db8ff', 18);
+      }
+    }, 1000);
   }
 
   // ─────────────────────────────────────────────────────────────

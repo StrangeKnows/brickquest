@@ -4755,6 +4755,121 @@ push #3 in S016 unification arc):**
 
 ---
 
+### v0.16.36 — Fixer overheal fix + FW gets banner cinematic when refreshBoost active
+
+> "fixer passive, does it always raise hp to +1 of max health, even
+> if damaged? dropped hp to 7/8 and still started rumble with 9/8,
+> lets look into. also, should all byt FW have starting banners?"
+
+Two fixes from playtest.
+
+**Bug 1: Fixer hpOverheal SET hp absolutely, secretly healing damaged players.**
+
+Previous code: `player.hp = (hpMax + amount)` — wrote 9 unconditionally for an
+8 HP class. If player entered at 7/8 (one damage), rumble started at 9/8 — a
+free 2 HP heal disguised as the +1 overheal pip. At 1/8, rumble started at
+9/8 — an 8-HP free heal.
+
+Fix: ADDITIVE +1 to current hp, capped at hpMax+amount (the overheal ceiling).
+
+| Starting HP | Before fix | After fix |
+|---|---|---|
+| 8/8 (full) | 9/8 ✓ | 9/8 ✓ |
+| 7/8 (mild) | 9/8 ✗ heals 2 | 8/8 (heals 1) |
+| 1/8 (critical) | 9/8 ✗ heals 8 | 2/8 (heals 1) |
+
+Picked the additive interpretation over "only fire at full hp" because it
+matches BS armorBonus semantics (always +1, cap-aware). UNITY: same shape
+across both cap-aware additive passives. Other interpretation (passive
+lapses if injured) creates a gotcha — player wonders why passive didn't
+fire when damaged. Additive is simpler and forgiving without being
+broken (small +1 heal isn't game-breaking).
+
+If playtest reveals the +1 heal at low HP feels wrong (e.g. "I should be
+punished for entering damaged"), trivial swap to the conditional form
+`if hp >= hpMax then hp = hpMax + amount`.
+
+**Issue 2: FW had no banner cinematic on rumble entry.**
+
+Other 5 classes get the v0.16.35 banner+flourish cinematic at t=1s.
+FW had `rumblePassive: null` (intentional — FW's refreshBoost is
+event-conditional, not unconditional rumble-start).
+
+Fixed by upgrading the existing refreshBoost intake block. When server
+sends `cfg.refreshBoost`, the visual now matches other classes:
+banner + flourish, 1s delay, death-during-delay edge case handled.
+Same vocabulary as other class banners. Different code path (still
+fires from refreshBoost block, not from applyRumblePassive) but
+visually unified.
+
+**FW banner only fires when refreshBoost is queued.** If FW player
+hasn't earned a refreshBoost from a recent blue event success, no
+banner — silence is correct (nothing to announce).
+
+**Banner label changed: "⚡ FORMWRIGHT CHARGE" → "⚡ RHYTHM SHIFT".**
+
+Other classes use action-word banners (FIRST STRIKE, FIRST STEP,
+BUILDER'S GUARD, MEND READY, BLIGHT MARK). "FORMWRIGHT CHARGE" was
+class+effect. "RHYTHM SHIFT" is action. Better fits the family. If
+you want different wording, trivial swap.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Fixer at full HP (8/8):** rumble entry → hp goes to 9/8.
+   Banner "✚ MEND READY" at t=1s.
+3. **Fixer damaged (e.g. 7/8):** rumble entry → hp goes to 8/8 (only
+   +1, not free heal to 9/8). Banner still fires at t=1s.
+4. **Fixer critical (e.g. 1/8):** rumble entry → hp goes to 2/8 (only
+   +1). Banner fires.
+5. **Fixer already at 9/8 (multi-rumble overheal):** rumble entry →
+   stays at 9/8 (no overflow). Banner fires.
+6. **FW with no refreshBoost** (no recent blue event): rumble entry,
+   no banner. Player gets silence. Other classes still banner.
+7. **FW with refreshBoost queued:** "⚡ RHYTHM SHIFT" banner +
+   flourish at t=1s, in FW blue. Refresh boost active during 10s
+   window.
+
+---
+
+**Risk surfaces:**
+
+- Fixer overheal at near-cap edge case: at 9/8 (already overhealed),
+  Math.min(9, 9+1) = 9, no change. ✓
+- The interpretation choice (additive vs conditional) is a gameplay
+  call. If the +1 heal at low HP feels wrong, easy revert.
+- FW banner code path is separate from applyRumblePassive — refreshBoost
+  is event-conditional. The visual is unified but the dispatch path
+  isn't. UNITY: deferred to when we unify event-conditional buffs as
+  a class data shape (probably v0.16.4x or later).
+
+---
+
+**Standards audit (rule #17 — push #55 in S015 continuation,
+push #4 in S016 unification arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: hpOverheal now matches armorBonus semantics (additive,
+    cap-aware). FW visual now matches other class banner family.
+  - ELEGANCE: 3-line fix for the bug, ~15-line upgrade for FW
+    visual. No new abstractions.
+  - EFFICIENCY: reused setTimeout + spawnCritBanner + spawnCritFlourish
+    pattern from v0.16.35.
+- Rule #19 (intuition): held — chose additive over conditional for
+  hpOverheal because UNITY (matches armorBonus shape).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
