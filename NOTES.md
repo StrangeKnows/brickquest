@@ -6325,6 +6325,126 @@ push #10 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.48 — UNITY consolidation: delete startGrayArmor, route all gray casts through fireOverloadGray
+
+> "arc wall is not coming up on full armor for bs, only seeing
+> ring wall on closest entity for bs"
+>
+> "do it now, do not wait. unity first"
+
+**Symptom:** BS at full armor + tap gray brick → overflow ring wall
+around nearest entity instead of arc wall around BS. The Forge cycle
+was broken for the brick-tap cast path.
+
+**Root cause:** the v0.16.46 mode-switch was added to
+`fireOverloadGray` but NOT to `startGrayArmor`. Both functions
+implemented essentially the same gray cast pip flow + overflow ring
+logic — drag/tap split, pip yield via `getGrayPips`, pip distribution
+with overflow ring, mode-switch gate. Two functions doing one job.
+User's tap path went through `startGrayArmor` (called from line ~6601
+via `color === 'gray'` brick-tap dispatcher), which lacked the
+mode-switch added in v0.16.46.
+
+**Initial fix instinct (rejected):** mirror the gate to startGrayArmor,
+flag the duplication in parking lot. This would have shipped the bug
+fix but left the UNITY violation in place — guaranteeing a future bug
+when someone else changes one function and forgets the other.
+
+**Correct fix per Ross feedback ("do it now, unity first"):** delete
+`startGrayArmor` entirely, route both call sites to `fireOverloadGray`.
+Single canonical gray cast handler. The duplication caused this bug;
+patching one half of the duplication just defers the next one.
+
+**Implementation:**
+
+1. **Line 6601** (brick-tap color dispatcher):
+   `startGrayArmor(player.x, player.y)` → `fireOverloadGray(1, player.x, player.y)`
+2. **Line 2680** (gesture dispatcher table):
+   `startGrayArmor(cx,cy,1)` → `fireOverloadGray(1, cx, cy)`
+3. **Function deleted:** `startGrayArmor(targetX, targetY, tier)` removed
+   from rumble.js entirely. Comment marker left at the deletion site
+   pointing to fireOverloadGray as the canonical entry.
+
+Both call sites now route through ONE function. Future changes to
+gray cast behavior live in one place. Mode-switch, pip flow, overflow
+ring, drag-vs-tap split — all centralized.
+
+**Memory rule alignment:**
+
+- Rule #6 (diagnostic-first): exception applied. Bug had a clear
+  gating restriction (mode-switch in only one of two duplicate
+  functions). Skipped diagnostic phase per the "promote to TOP of
+  response when finding clear gating restriction contradicting
+  design intent" guidance.
+- Rule #28 (unify-at-choke-point): the choke point WAS the gray
+  cast handler — split into two functions. UNITY restored by
+  collapsing back to one.
+
+**Net code reduction:** ~50 lines deleted from rumble.js (full
+startGrayArmor body removed). Net delete after this push.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: characters.js, server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **BS at full armor (6/6) + tap gray brick:** ARC WALL appears
+   centered on BS, facing nearest enemy. (Was missing pre-v0.16.48.)
+3. **BS at full armor + drag gray brick:** ring wall at drag location.
+4. **BS at half armor + tap gray brick:** standard pip flow.
+5. **BS at full armor + tier 2 gray cast:** arc wall with T2 HP scaling.
+6. **Other classes at their max armor + tap gray:** standard overflow
+   ring (no arc data, mode-switch never fires).
+7. **No regressions:** ring wall behavior unchanged for non-BS, drag
+   casts, and below-max BS casts.
+
+---
+
+**Risk surfaces:**
+
+- Single-function consolidation means any bug in `fireOverloadGray`
+  now affects BOTH cast paths. This is the correct trade-off —
+  centralization makes bugs visible once, not duplicated invisibly.
+- Visual differences between the two old functions (crit shockwave
+  maxR `scaleDist(160)` vs `scaleDist(140)`, particles 18 vs 14,
+  armorBursts alpha 0.9 vs 0.8) — `fireOverloadGray` values now
+  apply uniformly. Slightly bigger crit visual on tap path.
+  Acceptable; visually consistent now.
+
+---
+
+**Standards audit (rule #17 — push #67 in S015 continuation,
+push #11 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only)
+- Rule #6 (diagnostic-first): exception (clear gating restriction).
+- Rule #14 (UNITY): MAJOR win. Two functions → one. Pre-existing
+  duplication that caused this bug (and would have caused future
+  bugs) eliminated.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: gray cast = one function, period.
+  - ELEGANCE: 50 lines deleted, no logic added.
+  - EFFICIENCY: net code reduction. Future changes to gray cast
+    economy = one place.
+- Rule #19 (intuition): caught by Ross's "unity first, do it now"
+  feedback. Initial instinct (patch + parking-lot) was wrong;
+  the right move was to fix the duplication itself.
+- Rule #28 (unify-at-choke-point): held — the choke point is now
+  ACTUALLY a single point. Was split, now unified.
+
+**Lesson:** when a bug is caused by duplicated logic, fix the
+duplication, not just the bug. Patching one half of a duplication
+just defers the next bug to whoever next changes the other half.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

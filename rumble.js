@@ -2677,7 +2677,7 @@ function onBrickDown(e, color) {
       }
     },
     white:  function(cx,cy,isDrag){ if(isDrag && Math.hypot(cx-player.x,cy-player.y) < player.r+30){ startWhiteRegen(1); } else { doWhiteHeal(cx,cy); } },
-    gray:   function(cx,cy){ startGrayArmor(cx,cy,1); },
+    gray:   function(cx,cy){ fireOverloadGray(1, cx, cy); },
   };
 
   function onMove(ev) {
@@ -6598,7 +6598,7 @@ function useBrickAction(color) {
   }
   if (color === 'blue')   startBlueBolt(null);
   if (color === 'orange') startOrangeTrap(player.x, player.y);
-  if (color === 'gray')   startGrayArmor(player.x, player.y);
+  if (color === 'gray')   fireOverloadGray(1, player.x, player.y);
   if (color === 'purple') startPurpleBurst(player.x, player.y);
   if (color === 'black') {
     var fired = startWitherbolt();
@@ -9019,37 +9019,15 @@ function drawTraps() {
 var armorBursts = [];
 var grayWalls = []; // drag-placed walls
 
-function startGrayArmor(targetX, targetY, tier) {
-  var isDrag = targetX !== undefined && Math.hypot(targetX-player.x, targetY-player.y) > scaleDist(40);
-  if (isDrag) {
-    startGrayWall(targetX, targetY, tier || 1);
-  } else {
-    var aMax = getArmorMax();
-    var prevArmor = player.armor || 0;
-    // Tap-gray pips per S015 unified gray economy. Same formula as
-    // fireOverloadGray uses — getGrayPips(cls, tier) × crit doubler.
-    // Tap = T1 (tier 1) since this path is single-brick consume.
-    var critMult = _currentCrit ? 2.0 : 1.0;
-    var pips = Math.max(1, Math.round(getGrayPips(player.cls, tier || 1) * critMult));
-    // Excess-pip overflow → wall around nearest entity (universal mechanic).
-    var spaceForArmor = Math.max(0, aMax - prevArmor);
-    var pipsToArmor = Math.min(pips, spaceForArmor);
-    var pipsOverflow = pips - pipsToArmor;
-    player.armor = prevArmor + pipsToArmor;
-    if (pipsOverflow > 0 && entities.length > 0) {
-      var nearest = entities.reduce(function(a, b) {
-        return Math.hypot(a.x - player.x, a.y - player.y) < Math.hypot(b.x - player.x, b.y - player.y) ? a : b;
-      });
-      startGrayWall(nearest.x, nearest.y, pipsOverflow);
-    }
-    if (_currentCrit) {
-      // GRAY flourish: stone-colored shockwave + silvery sparkle burst
-      spawnCritShockwave(player.x, player.y, '#CCCCCC', { r0: 8, maxR: scaleDist(140), thickness: 4, growth: 200 });
-      spawnCritFlourish(player.x, player.y, '#DDDDDD', 14);
-    }
-    armorBursts.push({ x: player.x, y: player.y, r: player.r, alpha: 0.8 });
-  }
-}
+// v0.16.48 — `startGrayArmor` deleted as part of UNITY consolidation.
+// Was a duplicate of fireOverloadGray (rumble.js:2190) — both implemented
+// the same drag/tap split + pip flow + overflow ring wall logic. The
+// duplication caused a v0.16.46/v0.16.48 bug where the BS arc wall
+// mode-switch was added to fireOverloadGray but missed startGrayArmor,
+// silently breaking the BS Forge cycle for the brick-tap cast path.
+// Both call sites now route to fireOverloadGray. One canonical gray
+// cast handler. Adding/changing cast behavior = one function, no
+// "remember to update both" tax.
 
 function startGrayWall(cx, cy, tier) {
   var fx = _fx('gray', tier);
