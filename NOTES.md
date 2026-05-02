@@ -7734,6 +7734,118 @@ boardFx.
 
 ---
 
+### v0.16.59 — Ally interpolation polish (jitter fix)
+
+> Both visible, still a bit jittery.
+
+**Cause:** Server broadcasts at 20Hz (50ms). Client renders at 60fps
+(16ms). Without smoothing, ally position only updates every 3rd
+frame → step-step-step instead of smooth motion. v0.16.58 fixed
+the WHERE (coords proportional across viewports). v0.16.59 fixes
+the WHEN (frames between server updates render smooth motion).
+
+**The fix: time-based exponential smoothing of ally render position.**
+
+Each ally now has TWO position states:
+- `targetNX/NY` — last received from server snapshot
+- `currentNX/NY` — what's on screen RIGHT NOW (smoothed)
+
+On `setAllyState`: target updates from server. Current does NOT change.
+
+In `drawAllies` (every frame): current lerps toward target using
+exponential smoothing with τ = 100ms. Render uses current.
+
+**Why exponential, not linear:**
+- Exponential smoothing handles arbitrary frame rate uniformly.
+  60fps and 30fps converge identically over the same wall-clock time.
+- No discontinuity if a snapshot arrives mid-lerp — the new target
+  just changes the destination; current keeps smoothing.
+- Standard pattern in real-time multiplayer rendering.
+
+**Math:** `lerpAlpha = 1 - exp(-dt / τ)`, then
+`current += (target - current) * lerpAlpha`.
+- At 60fps, τ=100ms → ~15% per frame, 95% closed at ~333ms
+- At 30fps, τ=100ms → ~28% per frame, same wall-clock convergence
+
+**New ally appearance:** First time we see an ally id, current
+SNAPS to target (not lerps from origin). Otherwise allies would
+slide in from (0,0) every join.
+
+**Ally departure:** Ally pruned from render if absent from snapshots
+for `_MP_ALLY_GRACE_MS = 1500ms`. Short grace absorbs network blips
+where one update is missing without making the ally flicker.
+
+**Implementation:**
+
+- `_mpAllyTargets` (dict by id) replaces flat `_allyState` array.
+  Each entry holds full per-ally state including the smoothed
+  position. Persists across snapshots so currentNX/NY is continuous.
+- `_mpAllyOrder` (array of ids) preserves render order.
+- `setAllyState` becomes a target-updater: matches incoming allies
+  to existing records by id, snaps new entries, prunes stale ones.
+- `drawAllies` iterates `_mpAllyOrder`, lerps each entry's current
+  toward target using time-based factor, renders at current.
+
+**Files changed:** `rumble.js`, `NOTES.md`. UNTOUCHED: server.js
+(no protocol changes — interpolation is purely client-side polish).
+
+---
+
+**Test focus:**
+
+1. Restart server. (Just to be safe, though server.js is unchanged.)
+2. **Two devices into COOP** — Mac + Android.
+3. **Move continuously on one device.** Ally on the other should
+   move smoothly, not in 50ms steps.
+4. **Quick direction changes** — verify no overshoot or weird
+   easing artifacts. Ally should track changes within ~100ms.
+5. **Stand still** — ally renders stationary, no drift or wobble.
+6. **One device disconnects** — ally vanishes after ~1.5s grace.
+7. **Solo modes still work** — sandbox/spec/waves untouched.
+
+If both directions render smoothly → multiplayer foundation done.
+v0.16.60+ becomes entity authority (separate handoff scan).
+
+---
+
+**Risk surfaces:**
+
+- Time constant τ=100ms is a tuning knob. If motion still feels
+  "draggy," lower to 60-80ms (snappier, less smoothing). If still
+  "jittery," raise to 150-200ms (smoother, more lag). 100ms is the
+  middle ground that matches a 50ms snapshot interval doubled.
+- Memory: one record per active ally, max 6 allies, ~10 fields each
+  → trivial.
+- The exp() call is per-frame-per-ally, max 6 × 60fps = 360 calls/s.
+  Negligible.
+- Mobile Firefox with variable framerate: exponential smoothing
+  handles this correctly because it's time-based. But if mobile
+  is sending position updates IRREGULARLY (not just rendering at
+  variable fps), the smoothing window absorbs ≤100ms variance.
+  Larger network jitter would still be visible. Likely fine on
+  local network; cross-internet might want τ=200ms.
+
+---
+
+**Standards audit (rule #17 — push #3 of S016 multiplayer arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js only).
+- Rule #14 (UNITY): one ally state structure (_mpAllyTargets), one
+  smoothing rule (exponential, τ=100ms), applied to all allies.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: target/current pattern is the standard idiom for this.
+  - ELEGANCE: ~30 lines of new logic in drawAllies, similar
+    rewrite of setAllyState to keep target-updates clean.
+  - EFFICIENCY: O(N) per frame for N ≤ 6 allies. Trivial.
+- Rule #20 (grep-for-symptoms): VERIFIED — `grep -n "_allyState"`
+  after the rewrite returned zero. Unlike the v0.16.56 → 57 stale
+  reference miss, this push completed the rename cleanly.
+- Rule #28 (unify-at-choke-point): drawAllies remains THE single
+  render point for all ally smoothing + drawing.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

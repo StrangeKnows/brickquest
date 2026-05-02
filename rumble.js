@@ -466,12 +466,26 @@ var rumble = {};
 var timerLeft = RUMBLE_DURATION;
 var timerInterval = null;
 
-// ── Multiplayer allies (v0.16.56) ─────────────────────────
-// Populated by host page via Rumble.setAllyState(arr). Each ally:
-//   { id, cls, x, y, hp, hpMax, alive, spectating }
-// Rendered by drawAllies() before local player so local player
-// stays on top. Empty array = offline / no allies = no render.
-var _allyState = [];
+// ── Multiplayer allies (v0.16.56, interp v0.16.59) ────────
+// Two-layer ally state for smooth render:
+//   _mpAllyTargets — keyed by ally.id, stores last-received server
+//     snapshot (targetNX/NY, hp, alive, etc.) PLUS the smoothed
+//     render coords (currentNX/NY). On each setAllyState call,
+//     targets update; renderer lerps current toward target each
+//     frame so motion looks smooth instead of step-stepping at
+//     the 20Hz server tick rate.
+//   Snapshot-arrival timestamp is stored so renderer can do
+//     time-based interpolation rather than per-frame fixed lerp
+//     (handles variable framerate cleanly).
+//
+// Entries persist across snapshots (so currentNX/NY stay continuous
+// for the same ally). Allies absent from a snapshot are pruned
+// after a short grace period (handles momentary network blips
+// without flickering allies in/out).
+var _mpAllyTargets = {};       // id → { cls, targetNX, targetNY, currentNX, currentNY, hp, hpMax, alive, spectating, lastSnapshotMs, lastSeenMs }
+var _mpAllyOrder = [];         // render order (insertion order, stable across frames)
+var _MP_ALLY_GRACE_MS = 1500;  // prune ally if no snapshot for this long
+var _lastDrawAlliesMs = 0;     // perf.now of last drawAllies call (for time-based interp)
 
 // Touch/drag state
 var dragActive = false;
@@ -1066,11 +1080,11 @@ function update(dt) {
 // ═══════════════════════════════════════════════════
 // DRAW
 // ═══════════════════════════════════════════════════
-// ── Multiplayer ally render (v0.16.56) ────────────────────
+// ── Multiplayer ally render (v0.16.56, interp v0.16.59) ───
 // Called from main draw() before local player render. Each ally is
-// drawn as a translucent circle with class color + class icon. Ghost
-// styling (alpha 0.55) reads as "team member but not me." Spectating
-// allies show with extra-low alpha.
+// drawn as a translucent circle with class color + class icon.
+// Ghost styling (alpha 0.55) reads as "team member but not me."
+// Spectating allies show with extra-low alpha.
 //
 // COORDS: ally.nx / ally.ny are normalized (0-1) values relative to
 // SENDER's arena bounds. We map them to OUR arena bounds at render
@@ -1078,39 +1092,46 @@ function update(dt) {
 // even though canvas pixel sizes differ across devices. UNITY:
 // arena is a shared logical 0-1 space, not a shared pixel space.
 //
+// INTERPOLATION (v0.16.59): server broadcasts at 20Hz (50ms). Client
+// renders at ~60Hz (16ms). Without smoothing, ally would step every
+// 3rd frame → visible jitter. We lerp currentNX/NY toward targetNX/NY
+// each frame using a time-based factor so motion is smooth across
+// the 50ms gap. Lerp duration ≈ 100ms (slightly longer than snapshot
+// interval to absorb network jitter).
+//
 // UNITY: reads class metadata from CHARACTERS table — same source
 // of truth as local player. Adding a new class = data change in
 // characters.js, NOT a render edit here.
-//
-// EFFICIENCY: bails early if no allies. The loop is per-ally, not
-// per-frame-per-class — six allies max means six draw calls.
 function drawAllies() {
-  if (!_allyState || _allyState.length === 0) return;
   if (!ctx) return;
+  if (!_mpAllyOrder || _mpAllyOrder.length === 0) return;
   var bounds = getRumbleBounds();
-  for (var ai = 0; ai < _allyState.length; ai++) {
-    var ally = _allyState[ai];
-    if (!ally) continue;
-    // Normalized coords (preferred) — map to local arena pixel space.
-    // Fallback to legacy x/y for safety; v0.16.58 strips that path.
-    var ax, ay;
-    if (typeof ally.nx === 'number' && typeof ally.ny === 'number') {
-      ax = bounds.x + ally.nx * bounds.w;
-      ay = bounds.y + ally.ny * bounds.h;
-    } else if (typeof ally.x === 'number' && typeof ally.y === 'number') {
-      ax = ally.x;
-      ay = ally.y;
-    } else {
-      continue;
-    }
-    var meta = (typeof CHARACTERS !== 'undefined' && CHARACTERS[ally.cls]) ? CHARACTERS[ally.cls] : null;
+  var now = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now() : Date.now();
+  // Lerp factor — fraction of remaining distance to close per frame.
+  // _lastDrawAlliesMs lets us time-base the lerp so framerate doesn't
+  // affect smoothing. 100ms lerp window: ~63% closed at 100ms, ~95%
+  // at 300ms. Visually instant for human-paced motion, smooth across
+  // 50ms server snapshots.
+  var dt = _lastDrawAlliesMs ? Math.min(0.1, (now - _lastDrawAlliesMs) / 1000) : 0.016;
+  _lastDrawAlliesMs = now;
+  var INTERP_TAU_S = 0.10;  // 100ms time constant
+  var lerpAlpha = 1 - Math.exp(-dt / INTERP_TAU_S);  // exponential smoothing
+  for (var ai = 0; ai < _mpAllyOrder.length; ai++) {
+    var rec = _mpAllyTargets[_mpAllyOrder[ai]];
+    if (!rec) continue;
+    // Advance current toward target (exponential smoothing)
+    rec.currentNX += (rec.targetNX - rec.currentNX) * lerpAlpha;
+    rec.currentNY += (rec.targetNY - rec.currentNY) * lerpAlpha;
+    // Map normalized to local pixel space
+    var ax = bounds.x + rec.currentNX * bounds.w;
+    var ay = bounds.y + rec.currentNY * bounds.h;
+    var meta = (typeof CHARACTERS !== 'undefined' && CHARACTERS[rec.cls]) ? CHARACTERS[rec.cls] : null;
     var color = (meta && meta.color) || '#888';
     var icon = (meta && meta.icon) || '?';
     var radius = (meta && meta.r) || 22;
-    // Spectating allies render ghosted further; alive allies at 0.55
-    var baseAlpha = ally.spectating ? 0.2 : 0.55;
+    var baseAlpha = rec.spectating ? 0.2 : 0.55;
     ctx.save();
-    // Outer aura — same shape as local player but lower alpha
     ctx.globalAlpha = baseAlpha * 0.6;
     ctx.shadowColor = color;
     ctx.shadowBlur = 18;
@@ -1119,7 +1140,6 @@ function drawAllies() {
     ctx.arc(ax, ay, radius, 0, Math.PI*2);
     ctx.fill();
     ctx.restore();
-    // Inner circle
     ctx.save();
     ctx.globalAlpha = baseAlpha;
     ctx.fillStyle = color;
@@ -1127,7 +1147,6 @@ function drawAllies() {
     ctx.arc(ax, ay, radius - 4, 0, Math.PI*2);
     ctx.fill();
     ctx.restore();
-    // Icon
     ctx.save();
     ctx.globalAlpha = baseAlpha + 0.3;
     ctx.font = '16px serif';
@@ -1135,12 +1154,11 @@ function drawAllies() {
     ctx.textBaseline = 'middle';
     ctx.fillText(icon, ax, ay);
     ctx.restore();
-    // HP bar — small bar above the ally so we can read team status
-    if (ally.hp != null && ally.hpMax) {
+    if (rec.hp != null && rec.hpMax) {
       var barW = 28, barH = 4;
       var barX = ax - barW / 2;
       var barY = ay - radius - 10;
-      var pct = Math.max(0, Math.min(1, ally.hp / ally.hpMax));
+      var pct = Math.max(0, Math.min(1, rec.hp / rec.hpMax));
       ctx.save();
       ctx.globalAlpha = 0.7;
       ctx.fillStyle = '#222';
@@ -12646,14 +12664,60 @@ window.Rumble = {
     };
   },
 
-  // ── Multiplayer (v0.16.56) ──
-  // Host page (rumble_test.html or similar) passes an array of ally
-  // states. Each: { id, cls, nx, ny, hp, hpMax, alive, spectating }
-  // where nx/ny are normalized coords (0-1) — multiplied by THIS
-  // client's arena bounds for render. Each client has different
-  // viewport pixels, so raw x/y don't translate. Empty array = solo.
+  // ── Multiplayer (v0.16.56, interp v0.16.59) ──
+  // Host page passes ally snapshots from server. Each: { id, cls,
+  // nx, ny, hp, hpMax, alive, spectating }. Coords are normalized
+  // (0-1). Receiving call updates the per-ally TARGET; the renderer
+  // interpolates currentNX/NY toward targetNX/NY each frame so motion
+  // is smooth even at 20Hz server tick rate. New allies snap on first
+  // sight (no lerp from (0,0) to first position). Allies absent from
+  // a snapshot are pruned after _MP_ALLY_GRACE_MS to handle blips.
   setAllyState: function(allies) {
-    _allyState = Array.isArray(allies) ? allies : [];
+    if (!Array.isArray(allies)) allies = [];
+    var now = (typeof performance !== 'undefined' && performance.now)
+              ? performance.now() : Date.now();
+    var seenIds = {};
+    for (var i = 0; i < allies.length; i++) {
+      var a = allies[i];
+      if (!a || !a.id) continue;
+      if (typeof a.nx !== 'number' || typeof a.ny !== 'number') continue;
+      seenIds[a.id] = true;
+      var rec = _mpAllyTargets[a.id];
+      if (!rec) {
+        // First time seeing this ally — snap currentNX/NY to target
+        // so they appear at the right place, not slide in from (0,0).
+        rec = {
+          id: a.id, cls: a.cls,
+          targetNX: a.nx, targetNY: a.ny,
+          currentNX: a.nx, currentNY: a.ny,
+          hp: a.hp, hpMax: a.hpMax,
+          alive: a.alive !== false, spectating: !!a.spectating,
+          lastSnapshotMs: now, lastSeenMs: now,
+        };
+        _mpAllyTargets[a.id] = rec;
+        _mpAllyOrder.push(a.id);
+      } else {
+        // Update target — currentNX/NY stays where it was, renderer
+        // will lerp it toward the new target over the next frames.
+        rec.cls = a.cls;
+        rec.targetNX = a.nx; rec.targetNY = a.ny;
+        rec.hp = a.hp; rec.hpMax = a.hpMax;
+        rec.alive = a.alive !== false; rec.spectating = !!a.spectating;
+        rec.lastSnapshotMs = now;
+        rec.lastSeenMs = now;
+      }
+    }
+    // Prune allies absent from this snapshot for too long. Short
+    // grace period absorbs blip-frames where one update is missing.
+    for (var oi = _mpAllyOrder.length - 1; oi >= 0; oi--) {
+      var oid = _mpAllyOrder[oi];
+      var orec = _mpAllyTargets[oid];
+      if (!orec) { _mpAllyOrder.splice(oi, 1); continue; }
+      if (!seenIds[oid] && (now - orec.lastSeenMs) > _MP_ALLY_GRACE_MS) {
+        delete _mpAllyTargets[oid];
+        _mpAllyOrder.splice(oi, 1);
+      }
+    }
   },
   // Returns current arena bounds in pixel space. Used by multiplayer
   // host page to convert local player coords → normalized (0-1) for
