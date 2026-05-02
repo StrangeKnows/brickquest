@@ -308,30 +308,33 @@ var CHARACTERS = {
       pipLostShrapnel: true,
       shrapnelDamageCurve: 'linear',  // dmg = armorBeforeLoss (1..armorMax)
       wallDeathArmorRegen: 1,         // +1 pip when BS-owned wall dies
-      // v0.16.44 — Arc Wall: payoff state for max armor.
-      // When BS armor === armorMax, a directional arc materializes around
-      // BS, tracking nearest enemy. Arc absorbs incoming damage (projectile
-      // OR melee) IN PLACE of a pip — free first hit while at max. After
-      // absorption, BS still loses no pip (because arc took the hit) but
-      // arc disappears (because... wait, actually, see engine logic below).
+      // v0.16.45 — Arc Wall: payoff state for max armor (redesigned).
+      // When BS armor crosses up to armorMax, a STATIC arc-shaped wall
+      // is placed centered on BS at that moment, facing the nearest
+      // enemy at trigger time. The wall is just a normal gray wall in
+      // every way (HP, alpha fade, ownerCls, wallDeathArmorRegen, gray
+      // visual vocabulary) — but its collision and rendering are
+      // restricted to a wedge instead of a full ring.
       //
-      // Mechanic clarified at design lock:
-      //   - Hit lands inside arc cone → arc absorbs, no pip loss, no
-      //     shrapnel, brief amber flash. Arc REMAINS while still at max.
-      //   - Arc only disappears when BS is no longer at max armor (e.g.
-      //     a hit landed outside the arc cone, taking a pip normally).
-      //   - This means a smart enemy positioning (or a flank attack) can
-      //     bypass the arc; head-on attacks are absorbed.
+      // Mechanic:
+      //   - Triggers ONCE per armor-max-crossing event. If BS is hit
+      //     and drops below max, then climbs back to max, a NEW arc
+      //     wall is placed at the new position. (At most one BS arc
+      //     wall exists at a time — old one persists until destroyed
+      //     or overwritten by next placement.)
+      //   - Wall HP from getGrayWallHp(cls, tier=1) — T1 BS = 6 HP.
+      //   - Wall death triggers existing wallDeathArmorRegen → +1 pip
+      //     to BS. Forge cycle continues.
+      //   - Geometry: arcDegrees wedge centered on BS, facing nearest
+      //     enemy at trigger time. Static — does NOT track.
+      //   - Collision: entities within arc wedge contact damage the
+      //     wall on bump (same as ring walls). Outside wedge, entities
+      //     pass freely (no collision).
       //
-      // Future fusion-tier upgrade (parking lot): reflectProjectiles flag
-      // turns absorbed projectiles back at attackers. v0.16.44 baseline =
-      // absorb only; reflection lands later when fusion system arrives.
-      maxArmorArc: {
-        radius: 45,                   // px from BS center; arc inner edge
-        arcDegrees: 120,              // wedge size (1/3 of full circle)
-        blocksProjectiles: true,      // intercept enemy projectiles in cone
-        blocksMelee: true,            // intercept melee touch attacks in cone
-        // reflectProjectiles: false  // PARKING LOT: fusion-tier upgrade
+      // v0.16.44's auto-tracking absorbing arc was OP and replaced by
+      // this static wall version per design lock at v0.16.45.
+      maxArmorArcWall: {
+        arcDegrees: 120,              // wedge span (1/3 of full circle)
       },
     },
     // v0.16.38 — Yellow signature: confuse, always. BS yellow casts

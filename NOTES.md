@@ -5868,6 +5868,187 @@ push #7 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.45 — Strip v0.16.44 OP arc, add static arc wall (redesign)
+
+> "too op, should be the same shape, but a static wall that is placed
+> at that moment. just like normal walls, but it is in place in front
+> of BS, looks like regular walls, but only arc facing nearest enemy
+> and is static in arena"
+
+The v0.16.44 auto-tracking absorbing arc was OP. Permanent shield
+that tracked enemies and absorbed every frontal hit at max armor =
+free defensive layer. Ross flagged immediately on playtest.
+
+**Redesign per design lock:**
+
+The arc wall is a STATIC wall, placed once at the moment BS armor
+maxes, facing the nearest enemy at trigger time. It's just a normal
+gray wall in every way — same HP from getGrayWallHp formula (T1 BS =
+6 HP), same alpha fade lifecycle, same gray visual vocabulary, same
+wallDeathArmorRegen reaction. The ONLY difference: collision and
+rendering are restricted to a wedge instead of a full ring.
+
+**Architecture: reuse existing grayWalls[] system**
+
+Massive UNITY win compared to v0.16.44's separate arc system. The
+existing wall lifecycle handles everything; arc walls are just a
+data variant pushed into the same array.
+
+Wall data shape: same as ring walls + `{ isArc: true, arcAngle, arcSpan }`.
+Branches in updateGrayWalls (collision) and drawGrayWalls (render)
+check `w.isArc` and use wedge geometry instead of full ring.
+
+Net code SHRUNK vs v0.16.44 — stripped ~150 lines of separate arc
+system (updateMaxArmorArc, drawMaxArmorArc, maxArmorArcInterceptsHit,
+spawnArcAbsorbFlash, damage-path absorption hooks, player._arcWall
+state). Added ~80 lines of arc-wall integration (trigger function,
+spawn function, point-in-arc helper, branches in update/draw).
+
+**Schema (BS grayProfile):**
+
+```javascript
+maxArmorArcWall: {
+  arcDegrees: 120,    // wedge span (1/3 of full circle)
+}
+```
+
+That's it. No radius (fixed at 50px in spawn function — sensible
+default; tunable knob if needed). No "blocksProjectiles/Melee" (it's
+just a wall — entities bump into it, projectiles aren't a special
+case). No reflectProjectiles (parking lot dropped — when fusion
+lands, fusion-tier upgrades will be expressed via different schema
+fields, this one stays simple).
+
+**Engine:**
+
+- `checkMaxArmorArcTrigger()` — runs each frame. Detects rising
+  edge of `armor === armorMax` via `player._lastArmorAtMax` flag.
+  On rising edge, calls spawnMaxArmorArcWall.
+- `spawnMaxArmorArcWall(arcCfg)` — pushes into grayWalls[] with
+  arc fields. Reads HP via getGrayWallHp(cls, 1). Resolves arcAngle
+  from nearest enemy at this moment.
+- `_pointInArc(w, px, py)` — predicate used by both collision and
+  render. Tests if point is within wedge angle range.
+
+**Wall lifecycle integration:**
+
+- Player-pushback collision (in updateGrayWalls): SKIPPED for arc
+  walls (`w.isArc`). BS is the center; pushback math doesn't apply.
+  Standard ring walls still block player as before.
+- Entity collision: arc walls block entities within wedge cone,
+  pass freely outside cone. Same HP-tick mechanics as ring walls'
+  outer-bump (2.0s cooldown per entity).
+- Wall death: existing wallDeathArmorRegen path fires. Arc wall
+  death = +1 BS armor pip (same as ring walls). Forge cycle continues.
+
+**Forge cycle now:**
+
+1. Plant ring walls + cast yellow + confused enemies attack each other
+2. They eventually hit BS → pip absorbs → shrapnel fires
+3. Walls die → BS gains pips (existing)
+4. **At max armor (rising edge): static arc wall placed, facing
+   nearest enemy at that moment** (NEW)
+5. **Enemies bump arc, take wall HP down (or pass freely outside cone)**
+6. **Arc wall dies → +1 pip to BS** (regen, same as ring walls)
+7. **If BS climbs back to max: NEW arc wall at NEW position**
+
+The cycle now has a tactical positioning element — the arc wall
+faces wherever the threat was when armor maxed. BS plays around
+that placement.
+
+**Stripped from v0.16.44:**
+
+- `updateMaxArmorArc(dt)` and game-loop call
+- `drawMaxArmorArc()` and draw-loop call
+- `maxArmorArcInterceptsHit(srcX, srcY, hitType)` predicate
+- `spawnArcAbsorbFlash(srcX, srcY)` feedback
+- `player._arcWall` state + cleanup reset
+- Arc absorption logic in `_applyEnemyMeleeDamage` (top of function)
+- Arc absorption logic in direct entity touch (updateEntity)
+- `maxArmorArc` schema field in BS grayProfile
+
+---
+
+**Files changed:** `characters.js`, `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **BS climbs to max armor:** static arc wall appears centered on
+   BS, facing nearest enemy. Same gray visual as ring walls, just
+   arc-shaped. Has HP bar.
+3. **Enemy walks into arc cone:** bumps wall, wall HP ticks down
+   on cooldown. Enemy bounces or stops at wall edge.
+4. **Enemy approaches from outside cone:** passes freely (no
+   collision), can reach BS normally.
+5. **Arc wall HP depletes → wall dies → +1 pip to BS** (existing
+   wallDeathArmorRegen). +1 🛡 floater appears.
+6. **BS at full → arc fires.** BS takes pip-loss hit (drops from
+   max). BS's own walls die → climbs back to max → NEW arc wall
+   placed at new position (relative to current nearest enemy).
+7. **BS moves around at max:** arc wall STAYS at trigger position
+   (not at BS's current position). Static.
+8. **No regressions** — ring walls (overload-gray drag-cast) still
+   work normally. Other classes have no arc walls (no maxArmorArcWall
+   data in their grayProfile).
+
+---
+
+**Risk surfaces:**
+
+- Spawn position is at `player.x, player.y` at trigger moment. If
+  BS is at arena edge, the arc could cap into the arena bounds.
+  Existing wall-spawn code clamps cx/cy for ring walls; arc walls
+  don't go through that path. Watch for visual oddities at edges.
+- Trigger fires on RISING EDGE only. If BS starts at max armor (e.g.
+  rumble entry passive on Tier 2+), the rising edge may not detect
+  initial state. Verified `_lastArmorAtMax` defaults false on player
+  init (cleared on rumble cleanup); first frame at max armor → rising
+  edge → fires. Should work but worth verifying.
+- Entity collision tests entity CENTER against wedge. Entities with
+  large radii (bosses) might visually overlap the wall edge when
+  they should logically collide. Acceptable for v0.16.45; tune later
+  if it feels wrong.
+
+---
+
+**Standards audit (rule #17 — push #64 in S015 continuation,
+push #8 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js + characters.js)
+- Rule #11 (data/runtime/UI): UNITY restored. Arc wall data lives
+  alongside other grayProfile fields. Engine reads via getGrayProfile.
+- Rule #14 (UNITY): MAJOR win. Arc walls reuse the existing ring
+  wall infrastructure (grayWalls[] array, lifecycle, draw, regen).
+  Just a data variant via `isArc` flag. v0.16.44 was a separate
+  parallel system; v0.16.45 is a branch in the existing one.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: one wall system, two geometry variants (ring/arc).
+  - ELEGANCE: schema is one field (`arcDegrees: 120`). Engine is
+    rising-edge detect + push-into-array + branch in 2 places.
+  - EFFICIENCY: net code SHRINKS vs v0.16.44 (~70 lines saved).
+- Rule #19 (intuition): caught by Ross on playtest. v0.16.44 felt OP,
+  redesign returned to fundamentals — "what's the simplest thing that
+  matches the spec?" Static wall in grayWalls[] was the answer.
+- Rule #20 (grep-for-symptoms when unifying): held — when stripping
+  v0.16.44, grepped for all references to `_arcWall`, `maxArmorArc`,
+  `updateMaxArmorArc`, `drawMaxArmorArc`, `maxArmorArcInterceptsHit`,
+  `spawnArcAbsorbFlash`. All cleaned in single sweep.
+- Rule #28 (unify-at-choke-point): held — the choke point was
+  grayWalls[] lifecycle. Adding arc as data variant beat building
+  parallel system.
+
+**Lesson: when designing a new mechanic, ask "is this a variant of
+something I already have?" before "is this a new system?" The OP
+v0.16.44 was a new system. The right v0.16.45 was a variant.**
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

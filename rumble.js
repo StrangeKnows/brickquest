@@ -967,8 +967,8 @@ function update(dt) {
   updateBoulders(dt);
   // v0.16.39 — Blocksmith reactive shrapnel (pip-loss → projectile)
   updateShrapnel(dt);
-  // v0.16.44 — Blocksmith max-armor arc state tracking
-  updateMaxArmorArc(dt);
+  // v0.16.45 — Blocksmith max-armor arc wall trigger check (rising edge)
+  checkMaxArmorArcTrigger();
 
   // Blue bolts, traps, armor
   updateBlueBolts(dt, bounds);
@@ -1127,10 +1127,6 @@ function draw() {
   drawBoulders();
   drawShrapnel();   // v0.16.39 — Blocksmith reactive shrapnel
   drawDroppedBricks();
-
-  // v0.16.44 — Blocksmith max-armor arc renders before player sprite
-  // so the player draws on top of the arc band. Reads cleaner visually.
-  drawMaxArmorArc();
 
   // ── Player ──
   if (player) {
@@ -3824,48 +3820,56 @@ function maybeSpawnPipShrapnel(armorBeforeLoss, srcX, srcY, srcEntity) {
   spawnShrapnel(player.x, player.y, srcX, srcY, dmg, srcEntity);
 }
 
-// ── BLOCKSMITH MAX-ARMOR ARC WALL (v0.16.44) ──────────────────────────
-// Payoff state for maxing armor: a directional arc materializes around
-// BS, tracking the nearest enemy. The arc absorbs incoming damage
-// (projectile OR melee) in place of a pip — free first hit while at
-// max. After absorption the arc REMAINS as long as armor stays at max.
-// Arc only disappears when BS drops below max (e.g. flank attack
-// outside the cone takes a pip normally → next frame, no arc).
+// ── BLOCKSMITH MAX-ARMOR ARC WALL (v0.16.45) ──────────────────────────
+// Payoff state for maxing armor: when BS armor crosses UP to armorMax,
+// a STATIC arc wall is placed centered on BS at that moment, facing the
+// nearest enemy. The wall is just a normal gray wall — same lifecycle
+// (HP, alpha fade, ownerCls, wallDeathArmorRegen, gray vocabulary) —
+// with collision and rendering restricted to a wedge instead of a full
+// ring.
 //
-// State: `player._arcWall` = { angle, fade } | null. Set/cleared each
-// frame in updateMaxArmorArc(dt) based on armor === armorMax.
+// Architecture:
+//   - State on player: `_lastArmorAtMax` (rising-edge detection)
+//   - Trigger frame (rising edge): spawnMaxArmorArcWall()
+//   - Wall lifecycle: existing grayWalls[] system (zero new code paths)
+//   - Wall data: same shape as ring walls + { isArc, arcAngle, arcSpan }
+//   - drawGrayWalls / updateGrayWalls branch on isArc for geometry
 //
-// Architecture: profile-driven via getGrayProfile(cls)?.maxArmorArc.
-// Other classes have no maxArmorArc field → no arc state, no draw,
-// no absorption. Adding the arc to other classes (e.g. via fusion)
-// = data field, no engine surgery.
-function updateMaxArmorArc(dt) {
+// Per S016 v0.16.45 design lock:
+//   - Re-trigger every climb to max (one wall per crossing event)
+//   - Standard getGrayWallHp(cls, 1) — T1 BS = 6 HP
+//   - Death gives +1 pip via existing wallDeathArmorRegen
+//   - Centered on BS at trigger moment, faces nearest enemy
+//   - Static — doesn't track. New crossing → new wall at new position.
+//
+// Other classes have no maxArmorArcWall data → trigger no-ops.
+function checkMaxArmorArcTrigger() {
   if (!player) return;
   var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
-  var arcCfg = prof && prof.maxArmorArc;
+  var arcCfg = prof && prof.maxArmorArcWall;
   if (!arcCfg) {
-    // Class has no arc data — clear state in case another class swap left it.
-    if (player._arcWall) player._arcWall = null;
+    // Class has no arc-wall data — clear edge state in case of class swap.
+    player._lastArmorAtMax = false;
     return;
   }
   var aMax = (typeof getArmorMax === 'function') ? getArmorMax() : 0;
   var atMax = aMax > 0 && (player.armor || 0) >= aMax;
-  if (!atMax) {
-    // Below cap — fade out gracefully if currently active.
-    if (player._arcWall) {
-      player._arcWall.fade = Math.max(0, (player._arcWall.fade || 1) - dt / 0.3);
-      if (player._arcWall.fade <= 0) player._arcWall = null;
-    }
-    return;
+  var wasAtMax = !!player._lastArmorAtMax;
+  // Rising edge: was below max, is now at max → spawn the arc wall.
+  if (atMax && !wasAtMax) {
+    spawnMaxArmorArcWall(arcCfg);
   }
-  // At max armor — ensure state exists.
-  if (!player._arcWall) {
-    player._arcWall = { angle: 0, fade: 0, pulse: 0 };
-  }
-  player._arcWall.fade = Math.min(1, (player._arcWall.fade || 0) + dt / 0.2);
-  player._arcWall.pulse = ((player._arcWall.pulse || 0) + dt * 2.4) % (Math.PI * 2);
-  // Track angle to nearest living enemy. Smooth rotation so the arc
-  // doesn't snap when a closer enemy appears — interpolate at 8 rad/s.
+  player._lastArmorAtMax = atMax;
+}
+
+function spawnMaxArmorArcWall(arcCfg) {
+  if (!player) return;
+  // Resolve wall HP via standard formula (T1 by default — arc walls
+  // aren't cast at varying tiers; the player isn't choosing power level).
+  var hp = (typeof getGrayWallHp === 'function')
+    ? getGrayWallHp(player.cls, 1)
+    : 6;
+  // Resolve facing — angle to nearest living enemy at this moment.
   var nearest = null;
   var nearestDist = Infinity;
   for (var ei = 0; ei < entities.length; ei++) {
@@ -3874,90 +3878,50 @@ function updateMaxArmorArc(dt) {
     var d = Math.hypot(g.x - player.x, g.y - player.y);
     if (d < nearestDist) { nearest = g; nearestDist = d; }
   }
-  if (nearest) {
-    var targetAngle = Math.atan2(nearest.y - player.y, nearest.x - player.x);
-    // Shortest-path angle interpolation
-    var diff = targetAngle - player._arcWall.angle;
-    while (diff > Math.PI) diff -= 2 * Math.PI;
-    while (diff < -Math.PI) diff += 2 * Math.PI;
-    var maxStep = 8 * dt;
-    if (Math.abs(diff) <= maxStep) {
-      player._arcWall.angle = targetAngle;
-    } else {
-      player._arcWall.angle += Math.sign(diff) * maxStep;
-    }
+  // No enemy → arc faces "up" by default. Edge case (rumble starting,
+  // entities not yet active) — won't typically fire because armor goes
+  // to max via wall-death regen during combat, not pre-fight.
+  var arcAngle = nearest
+    ? Math.atan2(nearest.y - player.y, nearest.x - player.x)
+    : -Math.PI / 2;
+  var arcSpan = ((arcCfg.arcDegrees || 120) * Math.PI) / 180;
+  // Radius — a personal wall just outside the player's hit range. Arc
+  // walls aren't drag-cast so they don't read maxR from the cast; we
+  // use a fixed sensible value. Tuneable if it feels off.
+  var arcRadius = 50;
+  // Push into grayWalls[] — same shape as ring walls plus arc fields.
+  // expanding=false because arc is placed at full radius (no cast
+  // animation; it just appears).
+  grayWalls.push({
+    x: player.x, y: player.y,
+    r: arcRadius, maxR: arcRadius,
+    hp: hp, hpMax: hp,
+    expanding: false,
+    alpha: 1, pulse: 0,
+    containedIds: [],            // arc walls don't cage — just block in cone
+    ownerCls: player.cls,        // for wallDeathArmorRegen
+    isArc: true,                 // updateGrayWalls / drawGrayWalls branch on this
+    arcAngle: arcAngle,          // center angle of wedge (radians)
+    arcSpan: arcSpan,            // wedge span (radians)
+  });
+  // Visual cinematic — same vocabulary as ring-wall cast.
+  if (typeof spawnCritShockwave === 'function') {
+    spawnCritShockwave(player.x, player.y, '#AAAAAA',
+      { r0: 8, maxR: arcRadius * 1.2, thickness: 3, growth: 240 });
+  }
+  if (typeof spawnCritFlourish === 'function') {
+    spawnCritFlourish(player.x, player.y, '#DDDDDD', 12);
   }
 }
 
-function drawMaxArmorArc() {
-  if (!ctx || !player || !player._arcWall) return;
-  var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
-  var arcCfg = prof && prof.maxArmorArc;
-  if (!arcCfg) return;
-  var arcSpan = ((arcCfg.arcDegrees || 120) * Math.PI) / 180;
-  var radius = arcCfg.radius || 45;
-  var aw = player._arcWall;
-  var fade = Math.max(0, Math.min(1, aw.fade || 0));
-  if (fade <= 0.01) return;
-  var pulseScale = 1 + 0.04 * Math.sin(aw.pulse || 0);
-  var r = radius * pulseScale;
-  var startA = aw.angle - arcSpan / 2;
-  var endA = aw.angle + arcSpan / 2;
-  ctx.save();
-  // Outer glow stroke
-  ctx.globalAlpha = 0.55 * fade;
-  ctx.strokeStyle = '#EF9F27';
-  ctx.shadowColor = '#EF9F27';
-  ctx.shadowBlur = 18;
-  ctx.lineWidth = 8;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.arc(player.x, player.y, r, startA, endA);
-  ctx.stroke();
-  // Inner bright core
-  ctx.globalAlpha = 0.95 * fade;
-  ctx.strokeStyle = '#FAC775';
-  ctx.shadowBlur = 6;
-  ctx.lineWidth = 3.5;
-  ctx.beginPath();
-  ctx.arc(player.x, player.y, r, startA, endA);
-  ctx.stroke();
-  ctx.restore();
-}
-
-// Returns true if a hit from the given source position would be
-// intercepted by the arc — i.e. the arc is active AND the source's
-// angle relative to BS is within the arc cone. Used by armor-absorb
-// sites BEFORE applying pip-loss / shrapnel.
-function maxArmorArcInterceptsHit(srcX, srcY, hitType /* 'projectile' | 'melee' */) {
-  if (!player || !player._arcWall) return false;
-  if ((player._arcWall.fade || 0) < 0.5) return false;  // not fully formed yet
-  var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
-  var arcCfg = prof && prof.maxArmorArc;
-  if (!arcCfg) return false;
-  if (hitType === 'projectile' && !arcCfg.blocksProjectiles) return false;
-  if (hitType === 'melee' && !arcCfg.blocksMelee) return false;
-  // Source must be within the arc cone.
-  var srcAngle = Math.atan2(srcY - player.y, srcX - player.x);
-  var diff = srcAngle - player._arcWall.angle;
+// Helper: returns true if (px, py) is inside the wall's arc cone.
+// Used by both collision and render logic when w.isArc is true.
+function _pointInArc(w, px, py) {
+  var srcAngle = Math.atan2(py - w.y, px - w.x);
+  var diff = srcAngle - w.arcAngle;
   while (diff > Math.PI) diff -= 2 * Math.PI;
   while (diff < -Math.PI) diff += 2 * Math.PI;
-  var halfSpan = ((arcCfg.arcDegrees || 120) * Math.PI) / 360;
-  return Math.abs(diff) <= halfSpan;
-}
-
-// Visual + audio feedback when the arc absorbs a hit. Same vocabulary
-// as crit firings so the absorb reads as "something just happened."
-function spawnArcAbsorbFlash(srcX, srcY) {
-  if (!player) return;
-  // Flourish at impact point (where the hit hit the arc)
-  if (typeof spawnCritFlourish === 'function') {
-    spawnCritFlourish(srcX, srcY, '#FAC775', 8);
-    spawnCritFlourish(srcX, srcY, '#EF9F27', 5);
-  }
-  if (typeof showFloatingText === 'function') {
-    showFloatingText(player.x, player.y - 50, 'BLOCKED', '#FAC775', player);
-  }
+  return Math.abs(diff) <= (w.arcSpan / 2);
 }
 
 
@@ -4218,29 +4182,6 @@ function drawThornShards() {
 
 function _applyEnemyMeleeDamage(g, dmg, dx, dy, dist) {
   if (!player || player.iframes) return;
-  // v0.16.44 — Blocksmith max-armor arc intercept. Resolve attacker
-  // position first; if the arc is active and the attacker is within
-  // the arc cone, the arc absorbs the hit entirely. No pip loss, no
-  // HP damage, no shrapnel. Brief flash + "BLOCKED" text. Arc remains
-  // active (still at max armor). Other classes have no arc data, so
-  // maxArmorArcInterceptsHit returns false unconditionally.
-  var _arcSrcX, _arcSrcY;
-  if (g && typeof g.x === 'number' && typeof g.y === 'number') {
-    _arcSrcX = g.x; _arcSrcY = g.y;
-  } else if (typeof dx === 'number' && typeof dy === 'number') {
-    _arcSrcX = player.x - dx; _arcSrcY = player.y - dy;
-  } else {
-    _arcSrcX = player.x; _arcSrcY = player.y - 60;
-  }
-  var _hitType = (g && g.type === 'boulder') ? 'projectile' : 'melee';
-  if (typeof maxArmorArcInterceptsHit === 'function'
-      && maxArmorArcInterceptsHit(_arcSrcX, _arcSrcY, _hitType)) {
-    if (typeof spawnArcAbsorbFlash === 'function') {
-      spawnArcAbsorbFlash(_arcSrcX, _arcSrcY);
-    }
-    if (_battleStats) _battleStats.armorAbsorbed += (dmg || 1);
-    return;  // hit fully absorbed by arc
-  }
   // PHASE B — weaken amplifies incoming damage (×1.5 while active).
   var dmgLeft = Math.ceil((dmg || 1) * playerDamageTakenMult());
   // Armor absorb first.
@@ -5977,51 +5918,35 @@ function updateEntity(g, dt, bounds) {
     }
   }
   if (pat === 'touch' && !g.dazed && !g.confused && (g.silencedTimer||0) <= 0 && distToPlayer < contact && g.attackCooldown <= 0 && !player.iframes) {
-    // v0.16.44 — Blocksmith max-armor arc intercept. If active and the
-    // attacker is within the arc cone, hit absorbed entirely. No pip
-    // loss, no HP damage, no shrapnel. Bounce + cooldown still applied
-    // below so the entity reads the impact and doesn't lock into the arc.
-    var _arcAbsorbed = (typeof maxArmorArcInterceptsHit === 'function'
-                        && maxArmorArcInterceptsHit(g.x, g.y, 'melee'));
-    if (_arcAbsorbed) {
-      if (typeof spawnArcAbsorbFlash === 'function') spawnArcAbsorbFlash(g.x, g.y);
-      if (_battleStats) _battleStats.armorAbsorbed += (g.dmg || 1);
-    } else {
-      // Physical attack — absorbed by armor pips first.
-      // PHASE B — weaken amplifies incoming damage.
-      var dmgLeft = Math.ceil((g.dmg || 1) * playerDamageTakenMult());
-      if ((player.armor||0) > 0) {
-        var absorbed = Math.min(player.armor, dmgLeft);
-        var _bsArmorBefore = player.armor;  // v0.16.39 — capture pre-loss for shrapnel curve
-        player.armor -= absorbed;
-        dmgLeft -= absorbed;
-        if (_battleStats) _battleStats.armorAbsorbed += absorbed;
-        showFloatingText(player.x, player.y - 55, absorbed + ' 🛡', '#AAAAAA', player);
-        // v0.16.39 — Blocksmith reactive shrapnel. Pip lost → projectile flies
-        // back to the attacker. damage = pre-loss armor count (linear curve).
-        // Other classes have no pipLostShrapnel profile → no-op.
-        if (typeof maybeSpawnPipShrapnel === 'function') {
-          maybeSpawnPipShrapnel(_bsArmorBefore, g.x, g.y, g);
-        }
-      }
-      if (dmgLeft > 0) {
-        if (_battleStats) {
-          _battleStats.damageTaken += dmgLeft;
-          if ((player.hp - dmgLeft) < _battleStats.hpLow) _battleStats.hpLow = Math.max(0, player.hp - dmgLeft);
-          if (dmgLeft > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmgLeft;
-        }
-        showFloatingText(player.x, player.y - 40, dmgLeft + ' HP', '#E24B4A', player);
-        applyDamageToPlayer(dmgLeft);
+    // Physical attack — absorbed by armor pips first.
+    // PHASE B — weaken amplifies incoming damage.
+    var dmgLeft = Math.ceil((g.dmg || 1) * playerDamageTakenMult());
+    if ((player.armor||0) > 0) {
+      var absorbed = Math.min(player.armor, dmgLeft);
+      var _bsArmorBefore = player.armor;  // v0.16.39 — capture pre-loss for shrapnel curve
+      player.armor -= absorbed;
+      dmgLeft -= absorbed;
+      if (_battleStats) _battleStats.armorAbsorbed += absorbed;
+      showFloatingText(player.x, player.y - 55, absorbed + ' 🛡', '#AAAAAA', player);
+      // v0.16.39 — Blocksmith reactive shrapnel. Pip lost → projectile flies
+      // back to the attacker. damage = pre-loss armor count (linear curve).
+      // Other classes have no pipLostShrapnel profile → no-op.
+      if (typeof maybeSpawnPipShrapnel === 'function') {
+        maybeSpawnPipShrapnel(_bsArmorBefore, g.x, g.y, g);
       }
     }
-    // Unconditional impact response (whether arc absorbed or pip absorbed):
-    // iframes, arsenal effects (only if real damage path), bounce, cooldown,
-    // flash. Arc absorbs => skip arsenal (hit didn't actually land).
+    if (dmgLeft > 0) {
+      if (_battleStats) {
+        _battleStats.damageTaken += dmgLeft;
+        if ((player.hp - dmgLeft) < _battleStats.hpLow) _battleStats.hpLow = Math.max(0, player.hp - dmgLeft);
+        if (dmgLeft > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmgLeft;
+      }
+      showFloatingText(player.x, player.y - 40, dmgLeft + ' HP', '#E24B4A', player);
+      applyDamageToPlayer(dmgLeft);
+    }
     player.iframes = 0.9;
-    if (!_arcAbsorbed) {
-      // PHASE C — fire arsenal effects for entities with affinityColors.
-      applyArsenalOnTouch(g, dx, dy, distToPlayer);
-    }
+    // PHASE C — fire arsenal effects for entities with affinityColors.
+    applyArsenalOnTouch(g, dx, dy, distToPlayer);
 
     // Bounce entity back
     var nx = -dx/distToPlayer, ny = -dy/distToPlayer;
@@ -9209,7 +9134,10 @@ function updateGrayWalls(dt) {
     // active agent: deliberately crashing into a wall is destructive intent,
     // and this gives players a way to escape a containment wall in waves
     // mode without needing an explicit demolish action.
-    if (player && w.hp > 0) {
+    if (player && w.hp > 0 && !w.isArc) {
+      // v0.16.45 — Arc walls (BS max-armor wall) skip player pushback.
+      // The player IS the center of the arc; pushback math doesn't apply.
+      // Standard ring walls still block player as before.
       var pdx = player.x - w.x, pdy = player.y - w.y;
       var pdist = Math.sqrt(pdx*pdx+pdy*pdy) || 1;
       var pEdge = w.r + player.r;
@@ -9243,6 +9171,35 @@ function updateGrayWalls(dt) {
       var dx = g.x - w.x, dy = g.y - w.y;
       var dist = Math.sqrt(dx*dx+dy*dy) || 1;
       var isContained = w.containedIds && w.containedIds.indexOf(gi) >= 0;
+
+      // v0.16.45 — Arc wall collision branch. Arc walls only block in
+      // their wedge; entities outside the cone pass freely. Same HP-tick
+      // mechanics as outer-bump on a ring wall (2.0s cooldown).
+      if (w.isArc) {
+        var outerEdgeArc = w.r + g.r;
+        if (dist < outerEdgeArc && dist > 0) {
+          // Entity is inside arc radius — check if within arc cone.
+          // We test the entity's CENTER against the wedge angle. Close
+          // enough for gameplay; entities are small relative to the cone.
+          if (_pointInArc(w, g.x, g.y)) {
+            // Push entity outward to wall edge (outside the wall)
+            g.x = w.x + (dx/dist) * outerEdgeArc;
+            g.y = w.y + (dy/dist) * outerEdgeArc;
+            w._entityCooldowns[gi] = (w._entityCooldowns[gi]||0) - dt;
+            if (w._entityCooldowns[gi] <= 0) {
+              w._entityCooldowns[gi] = 2.0;
+              w.hp = Math.max(0, w.hp - 1);
+              w.flashTimer = 0.15;
+            }
+          } else {
+            // Inside radius but outside cone — pass freely.
+            w._entityCooldowns[gi] = 0;
+          }
+        } else {
+          w._entityCooldowns[gi] = 0;
+        }
+        return; // arc-wall branch done; skip ring-wall logic below
+      }
 
       if (isContained) {
         // Inside the cage — push toward center if beyond inner edge
@@ -9293,27 +9250,53 @@ function drawGrayWalls() {
     ctx.strokeStyle = wallColor;
     ctx.lineWidth = 4 + (w.hp <= 0 ? 0 : 2 * (1 - hpPct));
     ctx.setLineDash([8, 6]);
-    ctx.beginPath(); ctx.arc(w.x, w.y, w.r, 0, Math.PI*2); ctx.stroke();
+    if (w.isArc) {
+      // v0.16.45 — Arc wall: draw wedge segment instead of full ring.
+      // Same gray vocabulary; geometry is the only difference.
+      var startA = w.arcAngle - w.arcSpan / 2;
+      var endA = w.arcAngle + w.arcSpan / 2;
+      ctx.beginPath();
+      ctx.arc(w.x, w.y, w.r, startA, endA);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(w.x, w.y, w.r, 0, Math.PI*2);
+      ctx.stroke();
+    }
     ctx.setLineDash([]);
     // HP bar
     if (w.hp > 0) {
       var bw = 50, bh = 5;
       ctx.globalAlpha = w.alpha;
       ctx.shadowBlur = 0;
-      ctx.fillStyle = '#222'; ctx.fillRect(w.x-bw/2, w.y-w.r-14, bw, bh);
-      ctx.fillStyle = wallColor; ctx.fillRect(w.x-bw/2, w.y-w.r-14, bw*hpPct, bh);
+      // For arc walls, place HP bar above the arc's midpoint (at the
+      // farthest point of the arc) instead of above the center, so it
+      // doesn't visually overlap the player sprite.
+      var barX, barY;
+      if (w.isArc) {
+        barX = w.x + Math.cos(w.arcAngle) * w.r;
+        barY = w.y + Math.sin(w.arcAngle) * w.r - 14;
+      } else {
+        barX = w.x;
+        barY = w.y - w.r - 14;
+      }
+      ctx.fillStyle = '#222'; ctx.fillRect(barX-bw/2, barY, bw, bh);
+      ctx.fillStyle = wallColor; ctx.fillRect(barX-bw/2, barY, bw*hpPct, bh);
       ctx.strokeStyle = '#444'; ctx.lineWidth = 1;
-      ctx.strokeRect(w.x-bw/2, w.y-w.r-14, bw, bh);
+      ctx.strokeRect(barX-bw/2, barY, bw, bh);
     }
-    // Segment ticks around ring
-    var segs = 8;
-    ctx.strokeStyle = wallColor + '66'; ctx.lineWidth = 2; ctx.shadowBlur = 0;
-    for (var i=0; i<segs; i++) {
-      var a = (i/segs)*Math.PI*2;
-      ctx.beginPath();
-      ctx.moveTo(w.x+Math.cos(a)*(w.r-6), w.y+Math.sin(a)*(w.r-6));
-      ctx.lineTo(w.x+Math.cos(a)*(w.r+6), w.y+Math.sin(a)*(w.r+6));
-      ctx.stroke();
+    // Segment ticks — only for ring walls. Arc walls skip the ticks
+    // (their geometry already reads as "wall fragment").
+    if (!w.isArc) {
+      var segs = 8;
+      ctx.strokeStyle = wallColor + '66'; ctx.lineWidth = 2; ctx.shadowBlur = 0;
+      for (var i=0; i<segs; i++) {
+        var a = (i/segs)*Math.PI*2;
+        ctx.beginPath();
+        ctx.moveTo(w.x+Math.cos(a)*(w.r-6), w.y+Math.sin(a)*(w.r-6));
+        ctx.lineTo(w.x+Math.cos(a)*(w.r+6), w.y+Math.sin(a)*(w.r+6));
+        ctx.stroke();
+      }
     }
     if (w.flashTimer > 0) w.flashTimer -= 0.016;
     ctx.restore();
@@ -10491,8 +10474,9 @@ function _internalStart(config) {
   boulders = [];
   // v0.16.39 — reset reactive shrapnel
   shrapnelPieces = [];
-  // v0.16.44 — reset max-armor arc state on rumble cleanup
-  if (player) player._arcWall = null;
+  // v0.16.45 — reset BS arc-wall trigger state (rising-edge detection
+  // for max armor crossing).
+  if (player) player._lastArmorAtMax = false;
   // Remove any leftover DOM overlays (exit card, victory screen) from a
   // previous battle that didn't tear down cleanly.
   var stale;
