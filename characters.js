@@ -274,7 +274,11 @@ var CHARACTERS = {
     hp: 12, speed: 150,
     signature: ['gray', 'yellow'],
     secondary: ['orange'],
-    startingKit: { gray: 2, orange: 1 },
+    // v0.16.38 — starting kit swap (orange → yellow). Was gray:2 + orange:1
+    // (mismatched signature). Now gray:2 + yellow:1 matches signature colors.
+    // Orange remains as 2nd affinity (acquired via play, not in starting kit).
+    // Per S016 Blocksmith design lock — The Forge identity.
+    startingKit: { gray: 2, yellow: 1 },
     weight: 'heavy', dashBreakChance: 1.00, dashBreakDmg: [0, 3], dashDmgAlwaysRolls: false,
     armorCapMult: 0.50,    // 12 × 0.50 = 6 max armor
     grayCritChance: 0.25,  // BS signature: higher crit chance on gray-charge
@@ -284,6 +288,40 @@ var CHARACTERS = {
       label: '🛡 BUILDER\'S GUARD',
       color: '#EF9F27',
       amount: 1,
+    },
+    // v0.16.38 — Gray signature: THE FORGE. Indirect damage through defense.
+    // Two reactive triggers turn incoming aggression into outgoing damage:
+    //   1. Pip-lost shrapnel — when an attacker removes a BS armor pip,
+    //      a shrapnel projectile flies from BS to that attacker dealing
+    //      damage equal to current pip count BEFORE loss (1..6 linear).
+    //      Visible plate/spike falls off and travels through the air,
+    //      especially cinematic at range. Cinematic vocabulary similar
+    //      to Snapstep chain trigger / Breaker blast bloom.
+    //   2. Wall-death armor regen — when ANY BS-owned gray wall hits 0 HP,
+    //      BS gains +1 armor pip. Forge cycle: walls absorb → walls die
+    //      → BS armor refills → BS builds more walls.
+    // Wall HP scaling already handled by getGrayWallHp(cls, tier) reading
+    // 1.25 affinity (existing universal — same as Breaker).
+    // Engine reads via getGrayProfile(cls). Other classes return null →
+    // no shrapnel, no regen, just baseline gray behavior.
+    grayProfile: {
+      pipLostShrapnel: true,
+      shrapnelDamageCurve: 'linear',  // dmg = armorBeforeLoss (1..armorMax)
+      wallDeathArmorRegen: 1,         // +1 pip when BS-owned wall dies
+    },
+    // v0.16.38 — Yellow signature: confuse, always. BS yellow casts
+    // (overload field, drag-burst, tier-scaled) ALWAYS apply confuse
+    // status to enemies in radius — overrides the universal crit-roll
+    // gate that normally only flips daze→confuse on lucky rolls.
+    // Confuse semantics (engine, rumble.js:5606): confused entity walks
+    // toward NEAREST OTHER ENTITY at full speed, attacks them with own
+    // damage value (1.2s cooldown). Real damage between enemies. Pairs
+    // with gray walls — confused enemies funneled into wall corridors,
+    // attack each other in the kill zone. Indirect damage philosophy.
+    // Engine reads via getYellowProfile(cls)?.forcesConfuse. Other
+    // classes return null → standard crit-gated daze/confuse behavior.
+    yellowProfile: {
+      forcesConfuse: true,
     },
     // Red baseline: heavy weight, no signature affinity. Shortest reach.
     redProfile: { rangeBase: 160, rangeAffinityBonus: 1.0 },
@@ -486,6 +524,15 @@ function getRedRange(cls, owned) {
 // this to decide whether to trigger the save sequence.
 function getGrayProfile(cls) {
   return (CHARACTERS[cls] && CHARACTERS[cls].grayProfile) || null;
+}
+
+// v0.16.38 — Yellow profile getter (mirrors getGrayProfile / getOrangeProfile
+// pattern). Reads class-specific yellow signature data. Currently used by
+// rumble.js startYellowAura / startYellowConfuse to gate confuse-vs-daze
+// behavior on `forcesConfuse: true` (Blocksmith). Other classes return null
+// → standard crit-gated daze/confuse from universal yellow rules.
+function getYellowProfile(cls) {
+  return (CHARACTERS[cls] && CHARACTERS[cls].yellowProfile) || null;
 }
 
 // ── GRAY ECONOMY (S015 v0.15.8 unification) ─────────────────────────────

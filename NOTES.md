@@ -4989,6 +4989,152 @@ push #5 in S016 unification arc — TIER 3 CLOSE):**
 
 ---
 
+### v0.16.38 — Blocksmith data lock: grayProfile + yellowProfile + starting kit swap
+
+> "does DM board map show orange bricks on board? double check this
+> while starting bs profile work"
+
+DM map check confirmed: orange traps render correctly on DM board
+(dm_screen.html:789) — small orange square + ×N count badge per
+trapped space. Player-side board has no trap rendering (existing
+design — players don't see traps until they land). After v0.16.37,
+clean escape removes trap → DM map updates immediately. Failed
+dodge → trap stays. No client-side changes needed for the visual
+verification path.
+
+**Now: Blocksmith data lock.** First push of the Blocksmith arc
+this whole unification was clearing the way for. Pure data + one
+new helper. Engine wiring lands in v0.16.39.
+
+**The Forge identity (locked in S016 design conversation):**
+
+Indirect damage through defense. BS has zero "swing" abilities.
+All damage comes through reaction (shrapnel) or coercion (confuse).
+Class fantasy: "I plant my flag, and the world turns on itself
+trying to take it."
+
+**Three changes to characters.js:**
+
+1. **Starting kit swap:** gray:2 + orange:1 → gray:2 + **yellow:1**.
+   Was mismatched (orange not in signature). Now matches signature
+   colors directly. Orange remains as 2nd affinity (acquired via
+   play, not in starting kit).
+
+2. **grayProfile** (new):
+   ```javascript
+   {
+     pipLostShrapnel: true,
+     shrapnelDamageCurve: 'linear',  // dmg = armorBeforeLoss (1..6)
+     wallDeathArmorRegen: 1,
+   }
+   ```
+   - **pipLostShrapnel:** when attacker removes a BS armor pip,
+     a shrapnel projectile flies from BS to attacker dealing damage
+     equal to current armor count BEFORE pip loss. Visible plate/
+     spike falls off and travels — cinematic vocabulary similar to
+     Snapstep chain trigger / Breaker blast bloom.
+   - **wallDeathArmorRegen:** when ANY BS-owned gray wall hits 0 HP,
+     BS gains +1 armor pip. Forge cycle: walls absorb → walls die
+     → BS armor refills → BS builds more walls.
+
+3. **yellowProfile** (new):
+   ```javascript
+   {
+     forcesConfuse: true,
+   }
+   ```
+   - All BS yellow casts ALWAYS apply confuse (instead of daze).
+     Overrides universal crit-roll gate. Confuse semantics already
+     in engine (rumble.js:5606): confused entity walks toward
+     nearest OTHER entity at full speed, attacks them with own
+     damage value (1.2s cooldown). Real damage between enemies.
+     Pairs with gray walls → confused enemies funneled into wall
+     corridors → mutual destruction in kill zone.
+
+**One new helper in characters.js:**
+
+```javascript
+function getYellowProfile(cls) {
+  return (CHARACTERS[cls] && CHARACTERS[cls].yellowProfile) || null;
+}
+```
+
+Mirrors existing pattern (getGrayProfile, getOrangeProfile, getRedProfile,
+getBlueProfile). Engine reads via this getter — null = baseline behavior.
+
+**No engine wiring yet.** Profile fields exist but engine doesn't
+read them. Behavior unchanged this push:
+- BS still has standard gray (armor pip on tap, wall ring on overload)
+- BS still has standard yellow (crit-gated daze→confuse)
+- Pip loss does not trigger shrapnel
+- Wall death does not regen armor
+
+That's intentional — data locks first, runtime wires next. If data
+shape needs revision after eyeballing characters.js, we don't need
+to undo engine wiring. Standard pattern from prior class profile
+work (Breaker red/gray, Formwright blue/purple, Snapstep orange).
+
+---
+
+**Files changed:** `characters.js`, `NOTES.md`.
+
+UNTOUCHED: rumble.js, server.js, players-core.js, html, boardFx,
+dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **BS starting kit:** new game / reset → BS starts with 2 gray + 1
+   yellow bricks. Was 2 gray + 1 orange.
+3. **BS rumble passive:** still triggers "🛡 BUILDER'S GUARD" banner
+   at t=1s (unchanged from v0.16.34).
+4. **No new behavior:** shrapnel doesn't fire on pip loss yet, wall
+   death doesn't regen armor yet, yellow still crit-gated. All
+   v0.16.39 territory.
+
+**Verifying data lock:**
+
+5. **Console** `CHARACTERS.blocksmith.grayProfile` → object with
+   pipLostShrapnel:true, shrapnelDamageCurve:'linear', wallDeathArmorRegen:1.
+6. **Console** `CHARACTERS.blocksmith.yellowProfile` → object with
+   forcesConfuse:true.
+7. **Console** `getYellowProfile('blocksmith')` → returns the object.
+   `getYellowProfile('breaker')` → returns null.
+8. **Console** `CHARACTERS.blocksmith.startingKit` → `{gray: 2, yellow: 1}`.
+
+---
+
+**Risk surfaces:**
+
+- Starting kit change affects fresh games only. Existing saved
+  games keep whatever bricks the player has. Cosmetic — affects
+  initial state only.
+- yellowProfile.forcesConfuse field exists but engine doesn't
+  read it yet. Inert until v0.16.39 wires it up.
+
+---
+
+**Standards audit (rule #17 — push #57 in S015 continuation,
+push #1 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (characters.js only)
+- Rule #11 (data/runtime/UI): pure data push. Profile fields,
+  starting kit, getter helper. Zero runtime/UI changes. ✓
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: yellowProfile getter mirrors existing pattern
+    (getGrayProfile / getOrangeProfile / etc).
+  - ELEGANCE: 3 declarative fields, 1 small helper. No new
+    abstractions or schema invention.
+  - EFFICIENCY: data-only push leaves engine wiring as a separate
+    focused push. If field shape needs revision, undo is trivial.
+- Rule #19 (intuition): held — split data from engine wiring per
+  established pattern. Don't roll both into one push.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
