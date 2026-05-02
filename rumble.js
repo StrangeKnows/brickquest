@@ -4781,13 +4781,17 @@ function damageEntity(g, dmg, aggro, source) {
   if ((g.markedTimer || 0) > 0) {
     finalDmg = Math.ceil(dmg * 1.5);
   }
-  // BREAKER FIRST STRIKE: First entity-damage event in the rumble gets
-  // +50% damage. Flag clears once consumed. Stacks with blue mark since
-  // they're independent multipliers (blue mark is a debuff on target,
-  // first-strike is a class buff on player).
-  if (player && player.cls === 'breaker' && player.breakerFirstHit) {
-    finalDmg = Math.ceil(finalDmg * 1.5);
-    player.breakerFirstHit = false;
+  // FIRST STRIKE: First entity-damage event in the rumble gets a
+  // class-defined multiplier. Flag + multiplier come from rumblePassive
+  // (kind: 'firstHitMod'). Currently only Breaker has this passive, but
+  // the consumer is class-agnostic — any class with firstHitMod gets
+  // the multiplier. Stacks with blue mark since they're independent
+  // multipliers (blue mark is a debuff on target, first-strike is a
+  // class buff on player).
+  if (player && player.firstHitActive) {
+    var _fhMult = player.firstHitMult || 1.5;
+    finalDmg = Math.ceil(finalDmg * _fhMult);
+    player.firstHitActive = false;
     if (typeof showFloatingText === 'function') {
       showFloatingText(g.x, g.y - 50, 'FIRST STRIKE!', '#993C1D', g);
     }
@@ -6539,6 +6543,93 @@ function getArmorMax() {
     ? CHARACTERS[player.cls].armorCapMult : 0.5;
   return Math.floor(player.hpMax * mult);
 }
+
+// v0.16.34 — RUMBLE PASSIVE DISPATCHER
+// Reads CHARACTERS[player.cls].rumblePassive (declarative) and applies
+// the kind-specific effect at rumble start. Replaces the 6-class
+// hardcoded if/else switch that previously sat inline at the rumble
+// init site. Adding a passive variant = (1) add the kind to this
+// dispatcher and (2) populate the field for the class. No engine
+// site outside this function knows about per-class passives.
+//
+// Visual confirmation: every passive shows a Crit Banner (large
+// glowing text, 1.4s duration) PLUS a particle flourish ring. Bigger
+// presence than the previous showFloatingText, since the passive is
+// the player's identity moment at rumble start.
+//
+// Kinds (extend by adding case + populating class entry):
+//   firstHitMod       — { mult }      → flag for damageEntity
+//   invulnMs          — { duration }  → timestamp for applyDamageToPlayer
+//   armorBonus        — { amount }    → direct armor add (cap-aware)
+//   hpOverheal        — { amount }    → hp = hpMax + amount
+//   firstEnemyDebuff  — { effect, stacks, duration } → deferred to post-spawn
+function applyRumblePassive() {
+  if (!player) return;
+  var cdata = (typeof CHARACTERS !== 'undefined') ? CHARACTERS[player.cls] : null;
+  var p = cdata && cdata.rumblePassive;
+  if (!p) return;
+
+  switch (p.kind) {
+    case 'firstHitMod':
+      player.firstHitActive = true;
+      player.firstHitMult = p.mult || 1.5;
+      break;
+    case 'invulnMs':
+      player.passiveInvulnUntil = performance.now() + (p.duration || 0);
+      break;
+    case 'armorBonus':
+      var aMax = getArmorMax();
+      player.armor = Math.min(aMax || 99, (player.armor || 0) + (p.amount || 1));
+      break;
+    case 'hpOverheal':
+      player.hp = (player.hpMax || 1) + (p.amount || 1);
+      break;
+    case 'firstEnemyDebuff':
+      // Deferred — applied after entities spawn, see applyPendingEnemyDebuff
+      player._pendingEnemyDebuff = {
+        effect: p.effect,
+        stacks: p.stacks || 1,
+        duration: p.duration || 6.0
+      };
+      break;
+  }
+
+  // Visual confirmation — banner + particle flourish at player.
+  // Banner is the bigger presence; flourish reinforces it as a moment
+  // worth noticing. Same visual vocabulary as crit firings so the player
+  // already reads it as "something just happened."
+  if (typeof spawnCritBanner === 'function' && p.label) {
+    spawnCritBanner(player.x, player.y - 50, p.label, p.color || '#FFFFFF');
+  }
+  if (typeof spawnCritFlourish === 'function') {
+    spawnCritFlourish(player.x, player.y, p.color || '#FFFFFF', 18);
+  }
+}
+
+// v0.16.34 — Deferred passive application for firstEnemyDebuff kind.
+// Called after entities have spawned. Reads player._pendingEnemyDebuff
+// (set by applyRumblePassive earlier), applies to entities[0], clears
+// the flag. Today only 'poison' supported; future debuff types extend
+// this dispatcher (e.g. 'wither', 'slow', 'bleed').
+function applyPendingEnemyDebuff() {
+  if (!player || !player._pendingEnemyDebuff) return;
+  if (!entities || entities.length === 0) return;
+  var ed = player._pendingEnemyDebuff;
+  var target = entities[0];
+  if (target && target.hp > 0) {
+    if (ed.effect === 'poison') {
+      target.poisoned = true;
+      target.poisonStack = (target.poisonStack || 0) + ed.stacks;
+      target.poisonTimer = Math.max(target.poisonTimer || 0, ed.duration);
+      target.poisonTick = 0;
+      if (typeof showFloatingText === 'function') {
+        showFloatingText(target.x, target.y - 30, 'BLIGHT MARK', '#1D9E75', target);
+      }
+    }
+    // Future debuff effects added here (wither, slow, bleed, etc).
+  }
+  player._pendingEnemyDebuff = null;
+}
 function startWhiteRegen(tier) {
   var tap = tapScaleMult('white');
   var mult = affinityMult('white');
@@ -6603,11 +6694,11 @@ var BLEED_OVERFLOW_PENALTY_MS = 100; // ms shaved off duration per point of over
 
 function applyDamageToPlayer(dmg) {
   if (!player || dmg <= 0) return;
-  // SNAPSTEP "First Step" passive: all enemy attacks miss for first 3
-  // seconds of rumble. Snapstep evades early pressure during positioning.
-  // Window timestamp is set in pre-rumble passives block.
-  if (player.cls === 'snapstep' && player.snapstepInvulnUntil &&
-      performance.now() < player.snapstepInvulnUntil) {
+  // PASSIVE INVULN WINDOW: any class with rumblePassive.kind === 'invulnMs'
+  // gets a class-defined invuln period at rumble start (timestamp set in
+  // applyRumblePassive). Currently only Snapstep, but consumer is class-
+  // agnostic. Player skips ALL incoming damage during this window.
+  if (player.passiveInvulnUntil && performance.now() < player.passiveInvulnUntil) {
     showFloatingText(player.x, player.y - 40, 'EVADED', '#1D9E75', player);
     return;
   }
@@ -9882,64 +9973,27 @@ function _internalStart(config) {
 
   // ─────────────────────────────────────────────────────────────
   // PRE-RUMBLE PASSIVES (per design doc §2.5)
-  // Every class gets a passive applied at rumble start. No activation,
-  // no input — just felt immediately. FW's refreshBoost (above) is the
-  // legacy version of this and stays as the FW passive.
   // ─────────────────────────────────────────────────────────────
-
-  // BREAKER: First hit deals +50% damage. Flag clears after first
-  // entity-damage event (consumed in damageEntity).
-  if (player.cls === 'breaker') {
-    player.breakerFirstHit = true;
-    if (typeof showFloatingText === 'function') {
-      showFloatingText(player.x, player.y - 30, '💥 FIRST STRIKE', '#993C1D');
-    }
-  }
-
-  // BK gray death save — once per rumble. Reset state here so save is
-  // available again at start of every rumble. Read by tryDeathSave().
+  // CLASS PASSIVES — v0.16.34 unified dispatcher.
+  // Every class gets a passive applied at rumble start. No activation,
+  // no input — just felt immediately. Replaces the 6-class hardcoded
+  // switch (was breaker/snapstep/blocksmith/fixer/wild_one each in own
+  // if-block) with a single declarative dispatcher reading
+  // CHARACTERS[cls].rumblePassive. Adding a passive variant = add a
+  // case to the dispatcher + populate the field for that class.
+  //
+  // FW intentionally has no rumble-start passive (refreshBoost is
+  // event-conditional, separate system via nextRumbleBuff).
+  //
+  // BK gray death-save state is reset here too — universal across all
+  // classes (BK is the only one with deathSave today, but other classes
+  // could earn it via fusion later, so the reset is class-agnostic).
+  // ─────────────────────────────────────────────────────────────
   if (player) {
     player.deathSaveUsed = false;
     player.deathSave = null;
   }
-
-  // SNAPSTEP: All enemy attacks miss SS for first 3 seconds of rumble.
-  // Implemented as an invulnerability timestamp checked in applyDamageToPlayer.
-  if (player.cls === 'snapstep') {
-    player.snapstepInvulnUntil = performance.now() + 3000;
-    if (typeof showFloatingText === 'function') {
-      showFloatingText(player.x, player.y - 30, '✦ FIRST STEP', '#1D9E75');
-    }
-  }
-
-  // BLOCKSMITH: +1 armor pip at rumble start. Stacks above any starting
-  // armor (capped at armorMax in setArmor or assignment site).
-  if (player.cls === 'blocksmith') {
-    var _bsArmorMax = (typeof getArmorMax === 'function') ? getArmorMax() : 99;
-    player.armor = Math.min(_bsArmorMax, (player.armor || 0) + 1);
-    if (typeof showFloatingText === 'function') {
-      showFloatingText(player.x, player.y - 30, '🛡 BUILDER\'S GUARD', '#EF9F27');
-    }
-  }
-
-  // FIXER: Start at hpMax + 1 (overheal pip pre-fight). Player has
-  // existing overheal rendering for hp > hpMax so this just bumps once.
-  if (player.cls === 'fixer') {
-    player.hp = (player.hpMax || 1) + 1;
-    if (typeof showFloatingText === 'function') {
-      showFloatingText(player.x, player.y - 30, '✚ MEND READY', '#D4537E');
-    }
-  }
-
-  // WILD ONE: First enemy in rumble starts with 1 poison stack.
-  // Applied right after entities spawn (later in this function).
-  // Flag set here, applied in the entity-spawn block below.
-  if (player.cls === 'wild_one') {
-    player.wildOneFirstPoison = true;
-    if (typeof showFloatingText === 'function') {
-      showFloatingText(player.x, player.y - 30, '🐍 BLIGHT MARK', '#1D9E75');
-    }
-  }
+  applyRumblePassive();
 
   // v4: Apply queued poison from failed green/black board events.
   // Each stack adds a poison tick; the duration is 6s (standard arsenal poison).
@@ -9984,24 +10038,13 @@ function _internalStart(config) {
   });
   for (var pi = 0; pi < _packAdds.length; pi++) entities.push(_packAdds[pi]);
 
-  // WILD ONE "Blight Mark" passive: first enemy in the rumble starts
-  // with 1 poison stack. Applied AFTER entity spawn (and pack twins) so
-  // we always have at least one entity to mark when there's combat.
-  // Picks the first entity in the list — stable and predictable. Fields
-  // match the entity poison model: poisoned/poisonStack/poisonTick/poisonTimer.
-  if (player && player.cls === 'wild_one' && player.wildOneFirstPoison && entities.length > 0) {
-    var _wOneTarget = entities[0];
-    if (_wOneTarget && _wOneTarget.hp > 0) {
-      _wOneTarget.poisoned = true;
-      _wOneTarget.poisonStack = (_wOneTarget.poisonStack || 0) + 1;
-      _wOneTarget.poisonTimer  = Math.max(_wOneTarget.poisonTimer || 0, 6.0);
-      _wOneTarget.poisonTick = 0;
-      if (typeof showFloatingText === 'function') {
-        showFloatingText(_wOneTarget.x, _wOneTarget.y - 30, 'BLIGHT MARK', '#1D9E75', _wOneTarget);
-      }
-    }
-    player.wildOneFirstPoison = false;
-  }
+  // v0.16.34 — Generic post-spawn passive application. Reads
+  // player._pendingEnemyDebuff (set by applyRumblePassive when the
+  // class has firstEnemyDebuff kind), applies to entities[0]. Replaces
+  // the hardcoded Wild One-specific "Blight Mark" block. Future classes
+  // with debuff-on-first-enemy passives extend by adding their kind/effect
+  // to characters.js — no engine touch needed here.
+  applyPendingEnemyDebuff();
   // Apply resistance overrides from host (e.g. rumble_test dialer).
   // cfg.entityResistances is a flat color→multiplier map keyed by brick color
   // (red/blue/green/etc). Each entity's resistances object takes these as

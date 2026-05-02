@@ -4506,6 +4506,162 @@ push #1 in S016 Blocksmith arc):**
 
 ---
 
+### v0.16.34 — Tier 2 unification: rumblePassive schema + visual showcase
+
+> "carry on"
+>
+> "lets have visual confirmation of the passives, is there something
+> already? On rumble start, showcase what is going on"
+
+Tier 2 of the v0.16.33 unification arc. Replaces the 6-class
+hardcoded if/else passive switch (rumble.js:9885+) with a single
+declarative dispatcher reading `CHARACTERS[cls].rumblePassive`.
+
+**Schema:** each class declares its rumble-start passive as a
+declarative object with `kind` (enum) + payload fields. Engine
+dispatcher knows how to apply each kind. Adding a passive variant =
+add the kind to the dispatcher + populate the field for that class.
+
+```javascript
+breaker:    { kind: 'firstHitMod', label: '💥 FIRST STRIKE', mult: 1.5 }
+snapstep:   { kind: 'invulnMs',    label: '✦ FIRST STEP',   duration: 3000 }
+blocksmith: { kind: 'armorBonus',  label: '🛡 BUILDER\'S GUARD', amount: 1 }
+fixer:      { kind: 'hpOverheal',  label: '✚ MEND READY',   amount: 1 }
+wild_one:   { kind: 'firstEnemyDebuff', label: '🐍 BLIGHT MARK',
+              effect: 'poison', stacks: 1, duration: 6.0 }
+formwright: null  // no rumble-start passive (refreshBoost is event-conditional)
+```
+
+**Visual upgrade per Ross spec ("showcase what is going on"):**
+
+Replaced `showFloatingText` (small + brief) with `spawnCritBanner`
+(large + glowing, 1.4s, gentle upward drift). Also adds
+`spawnCritFlourish` particle ring (18 particles in class color)
+around player at trigger time. Same visual vocabulary as crit
+firings, so the reveal moment reads as "something just happened"
+without feeling out of place. No pause / no slowdown — the banner
+is non-blocking.
+
+**Two new helper functions in rumble.js:**
+
+- `applyRumblePassive()` — dispatcher. Called once at rumble start
+  after BK death-save reset. Reads class data, switches on kind,
+  applies effect, fires banner + flourish.
+- `applyPendingEnemyDebuff()` — deferred dispatcher. Called after
+  entities spawn. Reads `player._pendingEnemyDebuff` (set by
+  applyRumblePassive for `firstEnemyDebuff` kind), applies to
+  entities[0]. Currently handles `effect: 'poison'`; future debuff
+  effects extend by adding cases.
+
+**Consumer site cleanup** — class-name checks removed:
+
+- `damageEntity` first-hit consumer (rumble.js:4788) now reads
+  `player.firstHitActive` + `player.firstHitMult` (was
+  `player.cls === 'breaker' && player.breakerFirstHit`). Class-
+  agnostic — any class with firstHitMod kind gets the multiplier.
+- `applyDamageToPlayer` invuln consumer (rumble.js:6700) now reads
+  `player.passiveInvulnUntil` (was `cls === 'snapstep' &&
+  player.snapstepInvulnUntil`). Class-agnostic.
+- Wild One post-spawn block replaced with `applyPendingEnemyDebuff()`
+  call. Was a 14-line `cls === 'wild_one' && wildOneFirstPoison`
+  block; now a 1-line generic dispatcher invocation.
+
+**Renames** (player-state field names):
+- `breakerFirstHit` → `firstHitActive`
+- `snapstepInvulnUntil` → `passiveInvulnUntil`
+- `wildOneFirstPoison` → `_pendingEnemyDebuff` (object payload now,
+  carries effect + stacks + duration instead of bare boolean)
+
+**Behavior parity check:** the dispatcher applies identical effects
+in the same order as the old switch:
+- BK: sets first-hit flag (now generic) — identical
+- SS: sets invuln timestamp (now generic) — identical
+- BS: +1 armor pip (cap-aware via getArmorMax) — identical
+- Fixer: hp = hpMax + 1 — identical
+- WO: defers poison to post-spawn (now via deferred dispatcher) — identical
+
+Visual change is a UPGRADE, not parity:
+- OLD: showFloatingText (small, ~1s, no particles)
+- NEW: spawnCritBanner (large + glowing, 1.4s, drift) + spawnCritFlourish
+  (18-particle ring in class color)
+
+---
+
+**Files changed:** `characters.js`, `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **Each class entering rumble:** large class-colored banner + particle
+   flourish on player. Banner readable for ~1.4s, drifts upward, fades.
+3. **Breaker first hit:** still deals +50% damage, banner confirms it.
+   Hit a second entity — no bonus (consumed).
+4. **Snapstep invuln:** all incoming damage shows "EVADED" for first 3
+   seconds. Damage normal after window expires.
+5. **Blocksmith armor:** rumble starts with +1 armor pip. Banner shows
+   "🛡 BUILDER'S GUARD". Pip caps at 6 (BS armor cap).
+6. **Fixer overheal:** rumble starts with hp at hpMax + 1 (9/8).
+   Existing overheal rendering shows the extra pip.
+7. **Wild One blight:** first spawned enemy gets 1 poison stack,
+   floating "BLIGHT MARK" text on enemy. Poison ticks normally.
+8. **Formwright:** no banner (rumblePassive is null). RefreshBoost
+   from blue events still works as before (separate path).
+9. **All classes:** no console errors, no missing flag warnings.
+
+---
+
+**Risk surfaces:**
+
+- Renamed flags. If any external code (server.js, players-core.js)
+  was reading `player.breakerFirstHit` etc., that read returns
+  undefined now. Grepped — those flags are rumble-only state, not
+  serialized to server, so safe. Confirmed via `grep -n
+  "breakerFirstHit\|snapstepInvulnUntil\|wildOneFirstPoison"` in
+  server.js + players-core.js (zero matches).
+- BK death-save reset moved one step earlier in init order (was
+  immediately after BK passive block, now immediately before
+  applyRumblePassive). Functionally identical — both happen before
+  any combat begins.
+- spawnCritBanner is in CANVAS coordinates. Player.x/y at rumble
+  start should be valid (player just spawned). If banner doesn't
+  appear, check player position is valid pre-dispatch.
+
+---
+
+**Standards audit (rule #17 — push #53 in S015 continuation,
+push #2 in S016 unification arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A this push (rumble.js + characters.js,
+  no UI)
+- Rule #11 (data/runtime/UI): UNITY win continued — rumble-passive
+  data lives in characters.js (declarative), runtime engine reads
+  + dispatches based on kind. UI unchanged.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: 6 hardcoded if-blocks → 1 dispatcher reading 1 data field.
+    Class-name checks removed from 3 consumer sites.
+  - ELEGANCE: declarative schema with discriminated union (kind +
+    payload). Renamed flags drop "breakerX" / "snapstepX" / "wildOneX"
+    prefixes — names describe behavior, not class identity.
+  - EFFICIENCY: dispatcher is one function, not 6 if-blocks.
+    Visual upgrade adds spawnCritBanner + spawnCritFlourish (existing
+    infrastructure, zero new visual systems).
+- Rule #19 (intuition): held — when Ross asked for visual
+  confirmation, my read was "use existing critBanner system, not
+  build new visual layer." Right call per UNITY (reuse vocabulary)
+  and EFFICIENCY (no new code).
+- Rule #14 (UNITY): big win. Class-named state fields finally gone
+  from rumble.js — engine no longer knows or cares which class is
+  playing, only what the data says.
+- Rule #6 (diagnostic-first): N/A — refactor with identical-behavior
+  spec, no debugging needed.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

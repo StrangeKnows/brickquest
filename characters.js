@@ -41,6 +41,19 @@
 //                     players-core.js dashboard pip render.
 //     grayCritChance — 0..1 chance gray-charge yields  (0.10 base, 0.25 BS)
 //                      2 pips instead of 1.
+//     rumblePassive  — declarative passive applied at  ({ kind, label, ... })
+//                      rumble start. v0.16.34: replaces hardcoded
+//                      class-name switch in rumble.js. Engine
+//                      dispatcher reads `kind` and applies payload.
+//                      Set to null if class has no rumble-start passive
+//                      (e.g. Formwright — its refreshBoost is event-
+//                      conditional via nextRumbleBuff path).
+//                      Kinds:
+//                        firstHitMod       — { mult }
+//                        invulnMs          — { duration }
+//                        armorBonus        — { amount }
+//                        hpOverheal        — { amount }
+//                        firstEnemyDebuff  — { effect, stacks, duration }
 //
 //   Affinity (per design doc §2.2 — the canonical spec)
 //     signature     — array of high-output colors     (['red', 'gray'])
@@ -77,6 +90,16 @@ var CHARACTERS = {
     // grants 2 pips instead of 1.
     armorCapMult: 0.75,    // BK signature heavy-tank: 14 × 0.75 = 10 max armor
     grayCritChance: 0.10,
+    // v0.16.34 — rumble-start passive (declarative). Engine dispatcher
+    // applies this on rumble entry. kind drives behavior; payload fields
+    // vary per kind. label + color drive the floating-text announcement.
+    //   firstHitMod: { mult } — first hit dealt is multiplied by mult
+    rumblePassive: {
+      kind: 'firstHitMod',
+      label: '💥 FIRST STRIKE',
+      color: '#993C1D',
+      mult: 1.5,
+    },
     // Red signature: heavy hitter with extra reach via signature affinity,
     // larger hitbox, and stronger knockback. Per design doc §2.3
     // (BREAKER RED: larger hitbox, knockback 1.5× on attacks).
@@ -154,6 +177,11 @@ var CHARACTERS = {
     weight: 'light', dashBreakChance: 0.15, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
     armorCapMult: 0.50,    // 6 × 0.50 = 3 max armor
     grayCritChance: 0.10,
+    // v0.16.34 — FW has no rumble-start passive. Its blue-event refreshBoost
+    // is a CONDITIONAL buff (earned, then consumed) via nextRumbleBuff path,
+    // separate from the unconditional rumble-start passives that other
+    // classes have. Declared explicitly null for documentation.
+    rumblePassive: null,
     // Purple signature: drag-and-drop teleports player to the drop point,
     // fires DUAL blasts at scaled radii. Tap or hold-release on bar (no
     // drag) plays as a normal purple burst at self. Per design doc §2.3
@@ -207,6 +235,13 @@ var CHARACTERS = {
     weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
     armorCapMult: 0.50,    // 9 × 0.50 = 4 max armor (floored)
     grayCritChance: 0.10,
+    //   invulnMs: { duration } — player gets N ms invuln window from rumble start
+    rumblePassive: {
+      kind: 'invulnMs',
+      label: '✦ FIRST STEP',
+      color: '#1D9E75',
+      duration: 3000,
+    },
     // Orange signature: overload-orange traps form a CHAIN NETWORK. Each
     // trap dropped is "chain-linked" — when any trap in the network is
     // triggered (entity contact), all transitively-linked traps within
@@ -243,6 +278,13 @@ var CHARACTERS = {
     weight: 'heavy', dashBreakChance: 1.00, dashBreakDmg: [0, 3], dashDmgAlwaysRolls: false,
     armorCapMult: 0.50,    // 12 × 0.50 = 6 max armor
     grayCritChance: 0.25,  // BS signature: higher crit chance on gray-charge
+    //   armorBonus: { amount } — +N armor pip at rumble start (cap-aware)
+    rumblePassive: {
+      kind: 'armorBonus',
+      label: '🛡 BUILDER\'S GUARD',
+      color: '#EF9F27',
+      amount: 1,
+    },
     // Red baseline: heavy weight, no signature affinity. Shortest reach.
     redProfile: { rangeBase: 160, rangeAffinityBonus: 1.0 },
   },
@@ -257,6 +299,13 @@ var CHARACTERS = {
     weight: 'mid', dashBreakChance: 0.50, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
     armorCapMult: 0.50,    // 8 × 0.50 = 4 max armor
     grayCritChance: 0.10,
+    //   hpOverheal: { amount } — start with hp = hpMax + N (overheal pip)
+    rumblePassive: {
+      kind: 'hpOverheal',
+      label: '✚ MEND READY',
+      color: '#D4537E',
+      amount: 1,
+    },
     // Red baseline: mid weight, no signature affinity. Standard reach.
     redProfile: { rangeBase: 200, rangeAffinityBonus: 1.0 },
   },
@@ -271,6 +320,17 @@ var CHARACTERS = {
     weight: 'light', dashBreakChance: 0.35, dashBreakDmg: [1, 2], dashDmgAlwaysRolls: true,
     armorCapMult: 0.50,    // 10 × 0.50 = 5 max armor
     grayCritChance: 0.10,
+    //   firstEnemyDebuff: { effect, stacks, duration } — applied to first
+    //     spawned entity post-spawn. Today only 'poison' supported; future
+    //     debuff types extend the dispatcher.
+    rumblePassive: {
+      kind: 'firstEnemyDebuff',
+      label: '🐍 BLIGHT MARK',
+      color: '#1D9E75',
+      effect: 'poison',
+      stacks: 1,
+      duration: 6.0,
+    },
     // Red baseline: light weight, no signature affinity. Long reach baseline.
     redProfile: { rangeBase: 240, rangeAffinityBonus: 1.0 },
   },
