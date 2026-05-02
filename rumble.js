@@ -967,8 +967,6 @@ function update(dt) {
   updateBoulders(dt);
   // v0.16.39 — Blocksmith reactive shrapnel (pip-loss → projectile)
   updateShrapnel(dt);
-  // v0.16.45 — Blocksmith max-armor arc wall trigger check (rising edge)
-  checkMaxArmorArcTrigger();
 
   // Blue bolts, traps, armor
   updateBlueBolts(dt, bounds);
@@ -2192,10 +2190,31 @@ function fireOverloadOrange(count, ox, oy) {
 function fireOverloadGray(count, ox, oy) {
   var isDrag = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) > scaleDist(40);
   if (isDrag) {
+    // Drag-cast: always produces a ring wall at the drag location,
+    // regardless of armor state. Per S016 v0.16.46 design lock: gesture
+    // distinction maps to wall variant. Drag = ring (placed elsewhere).
     startGrayWall(ox, oy, count);
   } else {
+    // Self-cast (tap on player). v0.16.46 mode-switch:
+    //   - If BS at max armor AND has maxArmorArcWall data → spawn arc wall
+    //     centered on BS, facing nearest enemy. Cast tier scales arc HP.
+    //   - Otherwise: standard pip flow (pips → armor up to cap, overflow
+    //     → ring wall around nearest entity).
     var aMax2 = getArmorMax();
     var prevArmor = player.armor||0;
+    var atMax = aMax2 > 0 && prevArmor >= aMax2;
+    var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
+    var hasArcData = !!(prof && prof.maxArmorArcWall);
+    if (atMax && hasArcData) {
+      // v0.16.46 — Self-cast at full armor → arc wall (Forge identity beat).
+      // The cast still consumes its bricks (handled upstream), but instead
+      // of futilely trying to add pips to already-full armor and overflowing
+      // a ring, it spawns a directional arc wall around BS. Pure mode switch
+      // at the cast resolution point.
+      spawnArcWall(count);
+      armorBursts.push({ x:player.x, y:player.y, r:player.r, alpha:0.9 });
+      return;
+    }
     // Tap-gray pips per S015 unified gray economy:
     //   pips = max(1, round(1 × affinity × tier)) × critMult
     // Uses getGrayPips helper from characters.js. T1 = 1 pip universally,
@@ -2205,7 +2224,7 @@ function fireOverloadGray(count, ox, oy) {
     // Apply pips to armor up to cap. Excess pips (beyond cap) overflow into
     // a defensive wall around the nearest entity. Wall HP = surplus × 2
     // (matches universal pips:wall ratio). Universal mechanic — BS arc
-    // wall variant deferred to BS chunk.
+    // wall variant fires above (different code path).
     var spaceForArmor = Math.max(0, aMax2 - prevArmor);
     var pipsToArmor = Math.min(pips, spaceForArmor);
     var pipsOverflow = pips - pipsToArmor;
@@ -3565,6 +3584,32 @@ function updateEnemyProjectiles(dt) {
     p.y += p.vy * dt;
     p.ttl -= dt;
     if (p.ttl <= 0) { p.done = true; return; }
+    // v0.16.46 — Gray wall collision (ring + arc). Projectiles colliding
+    // with any gray wall are absorbed and damage the wall on impact.
+    // For arc walls, only the wedge portion blocks (open side passes
+    // freely). Universal mechanic — any class's gray walls block enemy
+    // projectiles. Pre-v0.16.46, projectiles passed through walls
+    // entirely; this restores expected solid-wall behavior.
+    if (typeof grayWalls !== 'undefined' && grayWalls.length > 0) {
+      var blockedByWall = false;
+      for (var wi = 0; wi < grayWalls.length; wi++) {
+        var w = grayWalls[wi];
+        if (!w || w.hp <= 0) continue;
+        var wdx = p.x - w.x, wdy = p.y - w.y;
+        var wdist = Math.sqrt(wdx*wdx + wdy*wdy);
+        // Within wall radius +/- projectile radius?
+        if (wdist > w.r + p.r) continue;
+        if (wdist < w.r - p.r) continue;
+        // For arc walls, only collide if projectile is in the cone.
+        if (w.isArc && !_pointInArc(w, p.x, p.y)) continue;
+        // Collision: damage wall, kill projectile.
+        w.hp = Math.max(0, w.hp - 1);
+        w.flashTimer = 0.15;
+        blockedByWall = true;
+        break;
+      }
+      if (blockedByWall) { p.done = true; return; }
+    }
     // Hit player?
     var pdx = player.x - p.x, pdy = player.y - p.y;
     if (Math.hypot(pdx, pdy) < p.r + player.r) {
@@ -3820,54 +3865,45 @@ function maybeSpawnPipShrapnel(armorBeforeLoss, srcX, srcY, srcEntity) {
   spawnShrapnel(player.x, player.y, srcX, srcY, dmg, srcEntity);
 }
 
-// ── BLOCKSMITH MAX-ARMOR ARC WALL (v0.16.45) ──────────────────────────
-// Payoff state for maxing armor: when BS armor crosses UP to armorMax,
-// a STATIC arc wall is placed centered on BS at that moment, facing the
-// nearest enemy. The wall is just a normal gray wall — same lifecycle
-// (HP, alpha fade, ownerCls, wallDeathArmorRegen, gray vocabulary) —
-// with collision and rendering restricted to a wedge instead of a full
-// ring.
+// ── BLOCKSMITH MAX-ARMOR ARC WALL (v0.16.46) ──────────────────────────
+// Payoff state for maxing armor: when BS armor === armorMax AND BS
+// uses SELF-CAST gray (tap), the cast produces an ARC WALL instead
+// of pumping armor + overflow ring wall. Arc faces the nearest enemy
+// at cast moment. Drag-cast still produces ring walls regardless of
+// armor state — gesture distinction maps directly to wall variant.
 //
 // Architecture:
-//   - State on player: `_lastArmorAtMax` (rising-edge detection)
-//   - Trigger frame (rising edge): spawnMaxArmorArcWall()
-//   - Wall lifecycle: existing grayWalls[] system (zero new code paths)
-//   - Wall data: same shape as ring walls + { isArc, arcAngle, arcSpan }
-//   - drawGrayWalls / updateGrayWalls branch on isArc for geometry
+//   - Cast dispatcher (fireOverloadGray) checks armor + maxArmorArcWall
+//     data + isDrag. If self-cast at max with arc data → spawnArcWall.
+//   - Wall lifecycle: existing grayWalls[] system. Arc walls share the
+//     same lifecycle (HP, alpha fade, ownerCls, wallDeathArmorRegen,
+//     gray vocabulary) but with collision/rendering restricted to a
+//     wedge AND solid (no pass-through) inside or outside the cone.
+//   - Wall data: same shape as ring walls + { isArc, arcAngle, arcSpan }.
+//   - drawGrayWalls / updateGrayWalls branch on isArc for geometry.
 //
-// Per S016 v0.16.45 design lock:
-//   - Re-trigger every climb to max (one wall per crossing event)
-//   - Standard getGrayWallHp(cls, 1) — T1 BS = 6 HP
-//   - Death gives +1 pip via existing wallDeathArmorRegen
-//   - Centered on BS at trigger moment, faces nearest enemy
-//   - Static — doesn't track. New crossing → new wall at new position.
+// Per S016 v0.16.46 design lock:
+//   - Trigger: self-cast (tap) at max armor (NOT auto-spawn — replaces
+//     v0.16.45 rising-edge trigger entirely).
+//   - HP from getGrayWallHp(cls, tier) — scales with cast tier like ring walls.
+//   - Death gives +1 pip via existing wallDeathArmorRegen.
+//   - Centered on BS at cast moment, faces nearest enemy.
+//   - Static — doesn't track. New cast at max → new arc at new position.
+//   - Solid: blocks player + entities + projectiles in arc cone.
+//   - Outside cone: open (no collision in that direction; passes freely).
 //
-// Other classes have no maxArmorArcWall data → trigger no-ops.
-function checkMaxArmorArcTrigger() {
+// Other classes have no maxArmorArcWall data → mode-switch never fires,
+// self-cast at max behaves as standard (pips → armor + overflow ring).
+function spawnArcWall(tier) {
   if (!player) return;
   var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
   var arcCfg = prof && prof.maxArmorArcWall;
-  if (!arcCfg) {
-    // Class has no arc-wall data — clear edge state in case of class swap.
-    player._lastArmorAtMax = false;
-    return;
-  }
-  var aMax = (typeof getArmorMax === 'function') ? getArmorMax() : 0;
-  var atMax = aMax > 0 && (player.armor || 0) >= aMax;
-  var wasAtMax = !!player._lastArmorAtMax;
-  // Rising edge: was below max, is now at max → spawn the arc wall.
-  if (atMax && !wasAtMax) {
-    spawnMaxArmorArcWall(arcCfg);
-  }
-  player._lastArmorAtMax = atMax;
-}
-
-function spawnMaxArmorArcWall(arcCfg) {
-  if (!player) return;
-  // Resolve wall HP via standard formula (T1 by default — arc walls
-  // aren't cast at varying tiers; the player isn't choosing power level).
+  if (!arcCfg) return;
+  // Resolve wall HP via standard formula. Self-cast tier scales HP just
+  // like drag-cast ring walls do.
+  var wcritMult = _currentCrit ? 2.0 : 1.0;
   var hp = (typeof getGrayWallHp === 'function')
-    ? getGrayWallHp(player.cls, 1)
+    ? Math.max(1, Math.round(getGrayWallHp(player.cls, tier || 1) * wcritMult))
     : 6;
   // Resolve facing — angle to nearest living enemy at this moment.
   var nearest = null;
@@ -3878,20 +3914,18 @@ function spawnMaxArmorArcWall(arcCfg) {
     var d = Math.hypot(g.x - player.x, g.y - player.y);
     if (d < nearestDist) { nearest = g; nearestDist = d; }
   }
-  // No enemy → arc faces "up" by default. Edge case (rumble starting,
-  // entities not yet active) — won't typically fire because armor goes
-  // to max via wall-death regen during combat, not pre-fight.
+  // No enemy → arc faces "up" by default. Edge case — typically the
+  // player has an enemy on screen by the time they're at max armor.
   var arcAngle = nearest
     ? Math.atan2(nearest.y - player.y, nearest.x - player.x)
     : -Math.PI / 2;
   var arcSpan = ((arcCfg.arcDegrees || 120) * Math.PI) / 180;
-  // Radius — a personal wall just outside the player's hit range. Arc
-  // walls aren't drag-cast so they don't read maxR from the cast; we
-  // use a fixed sensible value. Tuneable if it feels off.
+  // Radius — personal wall around BS. Fixed at 50px for now; can be
+  // surfaced as schema field if tuning needs per-class control.
   var arcRadius = 50;
   // Push into grayWalls[] — same shape as ring walls plus arc fields.
   // expanding=false because arc is placed at full radius (no cast
-  // animation; it just appears).
+  // animation; it just appears as the cast resolves).
   grayWalls.push({
     x: player.x, y: player.y,
     r: arcRadius, maxR: arcRadius,
@@ -3904,18 +3938,21 @@ function spawnMaxArmorArcWall(arcCfg) {
     arcAngle: arcAngle,          // center angle of wedge (radians)
     arcSpan: arcSpan,            // wedge span (radians)
   });
-  // Visual cinematic — same vocabulary as ring-wall cast.
-  if (typeof spawnCritShockwave === 'function') {
-    spawnCritShockwave(player.x, player.y, '#AAAAAA',
-      { r0: 8, maxR: arcRadius * 1.2, thickness: 3, growth: 240 });
-  }
-  if (typeof spawnCritFlourish === 'function') {
-    spawnCritFlourish(player.x, player.y, '#DDDDDD', 12);
+  // Visual cinematic — gray vocabulary, same as ring-wall cast.
+  if (_currentCrit) {
+    spawnCritShockwave(player.x, player.y, '#CCCCCC',
+      { r0: 12, maxR: arcRadius * 1.2, thickness: 4, growth: 280 });
+    spawnCritFlourish(player.x, player.y, '#DDDDDD', 18);
+  } else {
+    if (typeof spawnCritShockwave === 'function') {
+      spawnCritShockwave(player.x, player.y, '#AAAAAA',
+        { r0: 8, maxR: arcRadius * 1.2, thickness: 3, growth: 240 });
+    }
   }
 }
 
 // Helper: returns true if (px, py) is inside the wall's arc cone.
-// Used by both collision and render logic when w.isArc is true.
+// Used by collision + projectile + render logic when w.isArc is true.
 function _pointInArc(w, px, py) {
   var srcAngle = Math.atan2(py - w.y, px - w.x);
   var diff = srcAngle - w.arcAngle;
@@ -9134,33 +9171,57 @@ function updateGrayWalls(dt) {
     // active agent: deliberately crashing into a wall is destructive intent,
     // and this gives players a way to escape a containment wall in waves
     // mode without needing an explicit demolish action.
-    if (player && w.hp > 0 && !w.isArc) {
-      // v0.16.45 — Arc walls (BS max-armor wall) skip player pushback.
-      // The player IS the center of the arc; pushback math doesn't apply.
-      // Standard ring walls still block player as before.
+    if (player && w.hp > 0) {
       var pdx = player.x - w.x, pdy = player.y - w.y;
       var pdist = Math.sqrt(pdx*pdx+pdy*pdy) || 1;
-      var pEdge = w.r + player.r;
-      if (pdist < pEdge) {
-        // Push player to wall edge along the wall→player vector
-        player.x = w.x + (pdx/pdist) * pEdge;
-        player.y = w.y + (pdy/pdist) * pEdge;
-        // Safety net: clamp to arena. Spawn-time rules should make this
-        // a no-op, but keep the clamp as a backstop in case of edge
-        // cases (multiple overlapping walls, etc.).
-        var _wb = getRumbleBounds();
-        player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
-        player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
-        // Tick wall hp on sustained contact
-        w._playerCooldown = (w._playerCooldown || 0) - dt;
-        if (w._playerCooldown <= 0) {
-          w._playerCooldown = 0.6;
-          w.hp = Math.max(0, w.hp - 1);
-          w.flashTimer = 0.15;
+      if (w.isArc) {
+        // v0.16.46 — Arc wall collision for player (the OWNER, BS).
+        // BS starts at the arc center. The arc segment is solid: BS
+        // can't push outward through the cone direction. If BS is
+        // about to cross the arc's inner edge AND is in the cone,
+        // clamp them inside. The open side of the arc (outside cone)
+        // is freely passable in either direction.
+        var innerEdge = w.r - player.r;
+        if (innerEdge > 0 && pdist > innerEdge && _pointInArc(w, player.x, player.y)) {
+          // Push BS back inside along player→center vector
+          player.x = w.x + (pdx/pdist) * innerEdge;
+          player.y = w.y + (pdy/pdist) * innerEdge;
+          var _wb = getRumbleBounds();
+          player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
+          player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
+          w._playerCooldown = (w._playerCooldown || 0) - dt;
+          if (w._playerCooldown <= 0) {
+            w._playerCooldown = 0.6;
+            w.hp = Math.max(0, w.hp - 1);
+            w.flashTimer = 0.15;
+          }
+        } else {
+          w._playerCooldown = 0;
         }
       } else {
-        // Not in contact — let cooldown decay to 0 so re-contact feels responsive
-        w._playerCooldown = 0;
+        // Standard ring wall — player blocked from outside.
+        var pEdge = w.r + player.r;
+        if (pdist < pEdge) {
+          // Push player to wall edge along the wall→player vector
+          player.x = w.x + (pdx/pdist) * pEdge;
+          player.y = w.y + (pdy/pdist) * pEdge;
+          // Safety net: clamp to arena. Spawn-time rules should make this
+          // a no-op, but keep the clamp as a backstop in case of edge
+          // cases (multiple overlapping walls, etc.).
+          var _wb = getRumbleBounds();
+          player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
+          player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
+          // Tick wall hp on sustained contact
+          w._playerCooldown = (w._playerCooldown || 0) - dt;
+          if (w._playerCooldown <= 0) {
+            w._playerCooldown = 0.6;
+            w.hp = Math.max(0, w.hp - 1);
+            w.flashTimer = 0.15;
+          }
+        } else {
+          // Not in contact — let cooldown decay to 0 so re-contact feels responsive
+          w._playerCooldown = 0;
+        }
       }
     }
 
@@ -10474,9 +10535,6 @@ function _internalStart(config) {
   boulders = [];
   // v0.16.39 — reset reactive shrapnel
   shrapnelPieces = [];
-  // v0.16.45 — reset BS arc-wall trigger state (rising-edge detection
-  // for max armor crossing).
-  if (player) player._lastArmorAtMax = false;
   // Remove any leftover DOM overlays (exit card, victory screen) from a
   // previous battle that didn't tear down cleanly.
   var stale;

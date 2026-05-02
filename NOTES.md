@@ -6049,6 +6049,182 @@ v0.16.44 was a new system. The right v0.16.45 was a variant.**
 
 ---
 
+### v0.16.46 — Arc walls: cast-mode-switch, solid blocking, projectile interception
+
+> "arc walls should be the same as ring walls, cannot pass through
+> them, player or entity. arc walls stop projectiles, arc walls
+> continue being made instead of ring walls when BS armor full"
+>
+> "only make arc walls when self cast, still ring walls when drag
+> and drop. arc walls on self when armor full"
+
+Three significant refinements to the arc wall design:
+
+1. **Trigger model rewrite** — strip rising-edge auto-spawn from
+   v0.16.45 entirely. Arc walls only fire from SELF-CAST (tap)
+   gestures while BS is at max armor. Drag-cast always produces
+   ring walls regardless of armor state. Gesture distinction maps
+   directly to wall variant.
+2. **Solid arc walls** — arc segment is solid: blocks player and
+   entities from passing through (in cone direction). Open side
+   (outside cone) remains freely passable.
+3. **Projectile interception** — projectiles colliding with any
+   gray wall (ring or arc) are absorbed and damage the wall on
+   impact. Pre-existing gap: ring walls didn't block projectiles
+   either. Universal fix in this push.
+
+**Cast behavior matrix:**
+
+| BS armor state | Self-cast (tap) | Drag-cast |
+|---|---|---|
+| Below max | Ring wall (existing) | Ring wall (existing) |
+| **At max** | **Arc wall** (v0.16.46) | Ring wall (existing) |
+
+**Other classes** without `maxArmorArcWall` data: mode-switch
+never fires, self-cast at max behaves as standard pip flow
+(pips → armor + overflow ring around nearest entity).
+
+**Player collision for arc walls:**
+
+BS starts at the arc center. The arc segment blocks BS from
+escaping outward through the cone direction. Math: if BS's
+position is within arc cone AND `dist > w.r - player.r`, push
+back to inner edge. The OPEN side of the arc is freely passable
+in both directions (no wall there).
+
+**Entity collision for arc walls:**
+
+Same logic as v0.16.45 — entities approaching from outside the
+wall radius AND within the cone get pushed back to outer edge.
+Outside cone passes freely. Confirmed correct per redesign;
+no changes.
+
+**Projectile collision (NEW for both wall types):**
+
+Universal mechanic: any enemy projectile that collides with a
+gray wall (within `w.r ± p.r`) is absorbed. Damages wall on
+impact (HP -1, flash). For arc walls, additional cone check
+via `_pointInArc`. Pre-existing gap closed: ring walls didn't
+block projectiles either before this push.
+
+**Stripped from v0.16.45:**
+
+- `checkMaxArmorArcTrigger()` function (rising-edge detection)
+- Game-loop call to `checkMaxArmorArcTrigger()`
+- `_lastArmorAtMax` flag on player + cleanup reset
+- `spawnMaxArmorArcWall(arcCfg)` — replaced by `spawnArcWall(tier)`
+  called from cast site
+
+**Added in v0.16.46:**
+
+- `spawnArcWall(tier)` — called from `fireOverloadGray` when BS
+  self-casts at max armor. Reads tier from cast count for HP scaling.
+- Mode-switch in `fireOverloadGray`: at start of self-cast branch,
+  check `armor === armorMax` AND has `maxArmorArcWall` data → spawn
+  arc wall, return. Otherwise continue to standard pip flow.
+- Player collision branch in `updateGrayWalls` for `w.isArc`: push
+  back to inner edge if BS in cone moves past arc radius.
+- Projectile collision in `updateEnemyProjectiles`: universal gray
+  wall collision check (rings + arcs).
+
+**Forge cycle now reads (with cast mode-switch):**
+
+1. Plant ring walls via drag-cast (any armor state)
+2. Yellow → enemies confused, attack each other
+3. They eventually hit BS → pip absorbs → shrapnel fires
+4. Walls die → BS gains pips
+5. **At max armor: SELF-CAST gray now produces arc walls** instead
+   of pumping armor (full) + overflow ring (NEW)
+6. Arc faces nearest enemy, blocks projectiles + pushes entities
+7. Arc dies → +1 pip back to BS via wallDeathArmorRegen
+8. Cycle continues
+
+The cast distinction is legible: drag = ring wall (placed elsewhere,
+cages enemies), self-cast at max = arc wall (personal, around BS).
+Each gesture has a clear purpose at the right armor state.
+
+---
+
+**Files changed:** `characters.js`, `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, players-core.js, html, boardFx.
+
+---
+
+**Test focus:**
+
+1. Hard refresh.
+2. **BS not at max + self-cast:** standard pip flow (pips → armor,
+   overflow → ring around nearest). No arc wall.
+3. **BS not at max + drag-cast:** ring wall at drag location. No arc.
+4. **BS at max + self-cast:** ARC WALL appears centered on BS,
+   facing nearest enemy. Standard gray vocabulary, arc-shaped.
+5. **BS at max + drag-cast:** still ring wall at drag location.
+   Drag-cast NEVER produces arc walls. Critical to verify.
+6. **BS hits arc edge (in cone):** can't push through. Pushed
+   back to inner edge. Wall HP ticks down.
+7. **BS moves through open side of arc:** passes freely.
+8. **Entity in arc cone:** bumps wall, blocked, wall HP ticks.
+9. **Entity outside arc cone:** passes freely (open side).
+10. **Enemy projectile aimed at BS through arc cone:** absorbed,
+    wall HP ticks down.
+11. **Enemy projectile aimed at BS from open side:** passes through,
+    hits BS normally.
+12. **Enemy projectile through ring wall:** ALSO absorbed now (this
+    was a pre-existing gap, now fixed).
+13. **Arc death → +1 pip.** Same as ring walls.
+14. **Other classes self-cast at max armor:** standard behavior
+    (no arc — they have no `maxArmorArcWall` data). Critical.
+
+---
+
+**Risk surfaces:**
+
+- Universal projectile-vs-wall collision is NEW behavior. Players
+  who built strategies around projectiles passing through walls
+  may notice a mechanical change. Acceptable since walls
+  intuitively SHOULD block projectiles.
+- Player pushback for arc walls assumes BS is at center of arc.
+  If arc has been displaced somehow (e.g. arena edge clamp at
+  spawn), the math holds because `w.x, w.y` is the trigger
+  position, and player is presumed near it. If BS warps outside
+  the arc via Snapstep+BS multiclass, behavior becomes "from
+  outside the cone, BS is free" which is correct.
+- `spawnArcWall` reads `arcRadius = 50` as a fixed value. If
+  this needs class tuning later, surface as schema field.
+
+---
+
+**Standards audit (rule #17 — push #65 in S015 continuation,
+push #9 in S016 Blocksmith arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #1 (paired files): N/A (rumble.js + characters.js)
+- Rule #11 (data/runtime/UI): UNITY held. Mode-switch reads
+  schema field; arc walls live in same array as ring walls.
+- Rule #14 (UNITY): MAJOR win again. Cast dispatcher (single
+  function, fireOverloadGray) does the mode-switch — one entry
+  point covers both gestures and both armor states. Projectile
+  collision is universal, not arc-specific.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: gesture → variant mapping is one branch in cast logic.
+  - ELEGANCE: spawnArcWall consumed by cast site (proper
+    integration, not auto-fired).
+  - EFFICIENCY: stripped checkMaxArmorArcTrigger entirely. Net
+    delete vs v0.16.45.
+- Rule #19 (intuition): proposed two interpretations of "BS armor
+  maxes" trigger, asked for clarification. User's answer was
+  cleaner than either of my leans (gesture-conditional). Listening
+  to the user's intuition on cast UX paid off.
+- Rule #20 (grep-for-symptoms when unifying): held — when adding
+  projectile collision, recognized ring walls had the same gap
+  and applied universal fix.
+- Rule #28 (unify-at-choke-point): held — projectile collision
+  lives at one site (`updateEnemyProjectiles`), not duplicated
+  per wall type.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
