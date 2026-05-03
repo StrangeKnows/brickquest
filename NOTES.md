@@ -8309,6 +8309,147 @@ change at all.
 
 ---
 
+### v0.16.63 — Blue Retrieve + Party Mode rename
+
+**Feature push, breaking briefly from entity authority arc.**
+
+**1. Blue Retrieve (new mechanic):**
+
+Blue brick now has a third gesture variant. The full blue cast
+behavior matrix:
+- **Tap** (no drag): homing bolt → nearest entity (UNCHANGED)
+- **Drag onto player** (≤30px from player): RETRIEVE — teleport all
+  dropped loot to inventory with particle party (NEW)
+- **Drag-far** (>30px from player): AoE bolt at drop point (UNCHANGED)
+
+The retrieve gesture mirrors white heal's self-cast detection
+(threshold pattern). All existing blue behavior preserved; only
+the previously-undefined "drag onto self" gesture gets new logic.
+
+Cost: 1 blue brick (same as tap). No special overload tier scaling
+— T1 already retrieves EVERYTHING, no behavior left to extend.
+
+**FX flow per item:**
+- 6-particle burst at item's current position, color keyed to kind
+  (brick→source color, gold→yellow, cheese→cream)
+- Secondary lighter shade burst for sparkle pop (cyan-white)
+- Item flagged done; updateDroppedBricks cleans up next frame
+
+**FX flow at player (post-collection):**
+- 12-particle blue celebration burst
+- 8-particle lighter cyan layer
+- 4-particle white sparkle
+- Floating text: `+N ✦` (N = retrieved count)
+- Brick bar refreshes to show new bricks immediately
+
+**Empty arena fallback:** small puff at player + "— nothing to
+retrieve —" floater, so the cast doesn't feel silent.
+
+Function: `doBlueRetrieve()` in rumble.js, ~70 LOC. Pickup logic
+mirrors the contact branch in `updateDroppedBricks` — could refactor
+to a shared `_collectLoot(player, item)` helper if other features
+need pickup-without-magnet, parking lot.
+
+UNITY check: doBlueRetrieve handles all three loot kinds (brick,
+cheese, gold) in one site. Same effect as walking onto each item
+— this is a teleport, not a separate effect path.
+
+**2. Party Mode rename:**
+
+Picker card formerly labeled "COOP" with 🤝 icon now shows
+"PARTY MODE" with 🎉 icon. Description updated to mention
+"signature kits" since players already start with their canonical
+class kit (was correct since v0.16.56 via `useCanonicalKit`).
+
+Internal mode string `'coop'` UNCHANGED — only the visible label
+shifted. All multiplayer code paths still use `currentMode === 'coop'`,
+`isCoop`, etc. Avoids cascading rename across server, network, and
+session-tracking code.
+
+**Why mode string stayed:** rename would require updates in
+rumble_test.html (`isCoop`, `setMode('coop')`), server.js (zero
+references currently — server uses sessionId, not mode name), and
+any future code. Per memory rule #29 (bug-from-duplication), a
+purely cosmetic rename that touches multiple files invites drift.
+Keep one canonical internal name, change only the player-visible
+label.
+
+---
+
+**Files changed:** `rumble.js`, `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumbleEngine.js (no engine changes this push), server.js,
+characters.js, players-core.js, other html.
+
+---
+
+**Test focus:**
+
+1. **Blue tap** — homing bolt to nearest entity. Unchanged.
+2. **Blue drag-far** (>30px from player) — AoE bolt at drop point.
+   Unchanged.
+3. **Blue drag-onto-self** (≤30px from player) — RETRIEVE. With
+   loot in arena: particles burst at each, items vanish, brick
+   bar updates, floater shows count.
+4. **Blue retrieve with no loot** — small puff + "nothing to
+   retrieve" floater.
+5. **Mode picker** — PARTY MODE label visible with 🎉 icon.
+6. **Party mode flow** — click PARTY MODE → pick class → join
+   session → see ally → all unchanged from v0.16.59 architecture.
+7. **All other casts** — unchanged.
+
+If retrieve doesn't trigger when expected → distance threshold
+(30px) might be too tight. Easy tune.
+
+---
+
+**Risk surfaces:**
+
+- `doBlueRetrieve` directly mutates `player.bricks` and
+  `player.brickMax`. Mirrors the existing pickup branch logic, but
+  if pickup logic ever changes (different stat tracking, different
+  hp gain, etc.), the retrieve path would need parallel update.
+  Memory rule #29 (bug-from-duplication) flag — refactor to
+  shared `_collectLoot()` helper deferred to future polish.
+- The 30px threshold is in `scaleDist()` so it scales with display.
+  On mobile (smaller arena) this might feel either generous or
+  tight depending on viewport. Test on Android.
+- Cheese auto-apply branch in retrieve mirrors waves-mode behavior.
+  In live game (cheese inventory model), retrieved cheese goes to
+  inventory, not auto-eaten. Same as standard contact pickup.
+
+---
+
+**Standards audit (rule #17 — push #4 of S016 entity authority arc,
+feature interlude):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #11 (data/runtime/UI):
+  - Data: BRICK_COLORS table for color keying (existing)
+  - Runtime: `doBlueRetrieve` in rumble.js
+  - UI: card label change in rumble_test.html
+- Rule #14 (UNITY): retrieve logic is ONE function, called from
+  ONE dispatch site. Pickup effect mirrors standard contact
+  pickup at the level of behavior (same fields updated, same
+  battleStats hooks).
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: blue gesture matrix (tap/drag-self/drag-far) parallels
+    white's (tap-heal/drag-self/drag-far). Same gesture-language
+    across colors with self-cast utility role.
+  - ELEGANCE: ~70 LOC for retrieve, with built-in empty-arena
+    feedback. No conditional flags, no special-case cleanup.
+  - EFFICIENCY: O(N) over droppedBricks per cast. Typical N
+    ≤ 10. Trivial.
+- Rule #19 (intuition over menus): I led with full design (gesture,
+  cost, fx, empty case) instead of asking 6 sub-questions.
+  Picked the answer per UNITY/ELEGANCE/EFFICIENCY without
+  interrupting the build.
+- Rule #28 (unify-at-choke-point): blue dispatch in `onUp` has
+  one decision tree (tap → drag-onto-self → drag-far). Choke at
+  the dispatch level.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -2941,10 +2941,19 @@ function onBrickDown(e, color) {
         player.brickRecharge[color] = player.brickRecharge[color] || 0;
         renderBrickBar();
         if (isDrag) {
-          // Drag-drop: fire a bolt at the drop point regardless of target.
-          // Hits any entity within impact radius; harmless if dropped on empty
-          // rumble floor. Enables AoE positioning / area denial.
-          startBlueBoltAtPoint(canvasX, canvasY);
+          // v0.16.63 — Drag-onto-player check: if drop point is within
+          // ~30px of player, this is a RETRIEVE gesture (teleport all
+          // dropped loot to inventory). Otherwise drag-far behavior
+          // (bolt at drop point). Mirrors the self-cast pattern white
+          // heal uses.
+          var _dropDist = Math.hypot(canvasX - player.x, canvasY - player.y);
+          if (_dropDist <= scaleDist(30)) {
+            // Retrieve: teleport all dropped loot to inventory.
+            doBlueRetrieve();
+          } else {
+            // Drag-far: AoE bolt at drop point.
+            startBlueBoltAtPoint(canvasX, canvasY);
+          }
         } else {
           // Tap: home on nearest entity (legacy behavior).
           startBlueBolt(null);
@@ -8652,6 +8661,98 @@ function startBlueBoltAtPoint(tx, ty) {
     r: 7, dead: false, travelled: 0, tier: 1, glow: 0, delayTimer: 0,
     isCrit: _currentCrit,
   });
+}
+
+// ── BLUE RETRIEVE (v0.16.63) ──────────────────────────
+// Drop blue brick onto player → teleport ALL dropped loot to inventory
+// with celebratory particle burst at each pickup point and convergence
+// shimmer at the player. Fits blue's identity (precision, ranged
+// effect, fast). Cost is the same single blue brick that paid for the
+// gesture — overload tiers don't extend behavior (T1 already retrieves
+// EVERYTHING; nothing more to scale).
+//
+// Flow per item:
+//   1. Spawn a 6-particle burst at item's current position (color
+//      keyed to item kind: brick→source color, gold→yellow, cheese→cream)
+//   2. Apply pickup effect to player (same logic as standard contact pickup)
+//   3. Mark item done so updateDroppedBricks cleans it up next frame
+// After loop: spawn small "party" sparkle burst at player.
+//
+// UNITY: pickup logic mirrors updateDroppedBricks contact branch
+// (line ~4778). Could refactor into a shared helper in v0.16.63+ if
+// other features need item-collect-without-magnet behavior.
+function doBlueRetrieve() {
+  if (!player) return;
+  if (!droppedBricks || droppedBricks.length === 0) {
+    // Nothing to retrieve — give visual feedback so it doesn't feel
+    // like the cast did nothing. Small puff at player.
+    if (typeof spawnCritFlourish === 'function') {
+      spawnCritFlourish(player.x, player.y, '#4db8ff', 6);
+    }
+    showFloatingText(player.x, player.y - 40, '— nothing to retrieve —', '#4db8ff', player);
+    return;
+  }
+  var retrievedCount = 0;
+  for (var di = 0; di < droppedBricks.length; di++) {
+    var p = droppedBricks[di];
+    if (p.done) continue;
+    // Spawn a small particle burst at item's current position. Color
+    // keyed to item kind for legibility — player sees what they grabbed.
+    var burstColor;
+    if (p.kind === 'brick') {
+      burstColor = BRICK_COLORS[p.color] || '#FFFFFF';
+    } else if (p.kind === 'cheese') {
+      burstColor = '#FFD96A';
+    } else if (p.kind === 'gold') {
+      burstColor = '#F5D000';
+    } else {
+      burstColor = '#FFFFFF';
+    }
+    if (typeof spawnCritFlourish === 'function') {
+      spawnCritFlourish(p.x, p.y, burstColor, 6);
+      // Secondary lighter shade for sparkle-pop quality
+      spawnCritFlourish(p.x, p.y, '#a0dfff', 3);
+    }
+    // Apply pickup effect — mirrors updateDroppedBricks contact branch.
+    // Cheese, gold, brick all handled here so blue retrieve is a true
+    // teleport-to-inventory regardless of loot type.
+    if (p.kind === 'cheese') {
+      if (cfg && cfg.cheeseAutoApply) {
+        player.hpMax += 1;
+        player.hp = Math.min(player.hpMax, player.hp + 1);
+        if (_battleStats) {
+          if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+          _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+        }
+      } else {
+        player.cheese = (player.cheese || 0) + 1;
+        if (_battleStats) _battleStats.cheeseEaten = (_battleStats.cheeseEaten || 0) + 1;
+        if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+        _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+      }
+    } else if (p.kind === 'gold') {
+      var amt = p.amount || 1;
+      player.gold = (player.gold || 0) + amt;
+      if (_battleStats) _battleStats.goldGained = (_battleStats.goldGained || 0) + amt;
+    } else {
+      // Brick — same as standard pickup: grow charges AND ceiling.
+      player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
+      player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
+      if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
+    }
+    p.done = true;
+    retrievedCount++;
+  }
+  // Celebratory sparkle party at player — small but readable
+  if (retrievedCount > 0 && typeof spawnCritFlourish === 'function') {
+    spawnCritFlourish(player.x, player.y, '#4db8ff', 12);
+    spawnCritFlourish(player.x, player.y, '#a0dfff', 8);
+    spawnCritFlourish(player.x, player.y, '#FFFFFF', 4);
+  }
+  // Refresh brick bar so retrieved bricks immediately show in HUD
+  if (typeof renderBrickBar === 'function') renderBrickBar();
+  // Single floater summarizing the grab
+  showFloatingText(player.x, player.y - 50, '+' + retrievedCount + ' ✦', '#4db8ff', player);
 }
 
 function updateBlueBolts(dt, bounds) {
