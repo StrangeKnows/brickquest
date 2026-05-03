@@ -2620,6 +2620,26 @@ var _mpPlayerId = null;          // assigned at join (random per-tab)
 var _mpPushInterval = null;      // setInterval handle for state push
 var _mpAllyState = [];           // last-received ally array (excludes self)
 
+// ── Auto-reconnect state (post-v0.16.69) ──
+// iOS 26 diagnostic showed close code 1006 (abnormal) after the
+// session was alive and exchanging messages. Likely cause: iOS Safari
+// terminates WebSockets on tab background, screen lock, network
+// transition, or notification-shade pulldown. iOS 16 was more lenient.
+//
+// Fix: detect abnormal close, reconnect with exponential backoff.
+// State preserved so reconnect can re-issue the join with the
+// original class/kit. Player keeps the same _mpPlayerId across
+// reconnects so server treats them as continuing rather than
+// joining as a new player.
+var _mpReconnect = {
+  intent: 'none',          // 'none' (not connected) | 'connect' (try to stay connected) | 'disconnect' (user left)
+  cls: null,               // class to re-join with (saved from initial mpConnect)
+  meta: null,              // SPEC_CLASSES entry (m) — saved from initial mpConnect
+  attempts: 0,             // consecutive reconnect attempts (capped at 6)
+  timer: null,             // setTimeout handle for next reconnect
+  lastNormalCloseTs: 0,    // timestamp of last clean close (to suppress immediate reconnect after intentional disconnect)
+};
+
 function _mpGenPlayerId() {
   return 'p_' + Math.random().toString(36).slice(2, 10);
 }
@@ -3039,11 +3059,28 @@ function mpConnect(cls, m, onReady) {
   }
   var host = location.hostname;
   var port = location.port || 8080;
-  _mpPlayerId = _mpGenPlayerId();
+  // Preserve _mpPlayerId across auto-reconnects so server treats this
+  // as a continuing player rather than a fresh join. Only generate a
+  // new id on first connect (when intent is still 'none' meaning we
+  // haven't entered the "stay connected" loop yet).
+  if (_mpReconnect.intent !== 'connect' || !_mpPlayerId) {
+    _mpPlayerId = _mpGenPlayerId();
+  }
+  // Save reconnect state. Even on first connect, we set intent='connect'
+  // so onclose knows to attempt reconnect on abnormal close codes.
+  _mpReconnect.intent = 'connect';
+  _mpReconnect.cls = cls;
+  _mpReconnect.meta = m;
+  // Reset attempt counter on any USER-initiated mpConnect (vs auto-reconnect)
+  // — only auto-reconnect bumps attempts.
   _mpWS = new WebSocket('ws://' + host + ':' + port + '?role=rumble_session');
   // v0.16.69 — Wrap with diagnostic instrumentation
   _wsDiagInstrument(_mpWS, 'session');
   _mpWS.onopen = function() {
+    // Successful connect — clear any pending reconnect and zero the
+    // attempt counter so future drops start backoff fresh.
+    if (_mpReconnect.timer) { clearTimeout(_mpReconnect.timer); _mpReconnect.timer = null; }
+    _mpReconnect.attempts = 0;
     // Send the join. Server records us in the session and starts
     // broadcasting state to us at 20 Hz.
     _mpWS.send(JSON.stringify({
@@ -3095,17 +3132,67 @@ function mpConnect(cls, m, onReady) {
       console.warn('[MP] Server error:', msg.msg);
     }
   };
-  _mpWS.onclose = function() {
-    console.log('[MP] Connection closed');
+  _mpWS.onclose = function(evt) {
+    var code = (evt && evt.code) || 0;
+    console.log('[MP] Connection closed, code=' + code);
     if (_mpPushInterval) { clearInterval(_mpPushInterval); _mpPushInterval = null; }
     _mpAllyState = [];
     if (typeof Rumble !== 'undefined' && Rumble.setAllyState) {
       Rumble.setAllyState([]);
     }
+    // Auto-reconnect logic. Only reconnect if:
+    //   1. User intent is 'connect' (they haven't explicitly left)
+    //   2. Close code is abnormal (1006) — clean closes (1000, 1001)
+    //      and going-away (1001) are user-initiated and should NOT
+    //      trigger reconnect
+    //   3. We have the cls/m saved (sanity check)
+    //
+    // iOS 26 issue: close code 1006 fires when iOS Safari terminates
+    // the WebSocket on tab background, screen lock, network
+    // transition, or notification-shade pulldown. Reconnect with
+    // exponential backoff handles this transparently.
+    var isAbnormal = (code === 0 || code === 1006 || code === 1011 || code === 1012);
+    var shouldReconnect = (
+      _mpReconnect.intent === 'connect' &&
+      isAbnormal &&
+      _mpReconnect.cls && _mpReconnect.meta
+    );
+    if (shouldReconnect) {
+      _mpScheduleReconnect();
+    }
   };
   _mpWS.onerror = function(e) {
     console.warn('[MP] Socket error', e);
   };
+}
+
+// Auto-reconnect with exponential backoff. Schedules the next
+// reconnect attempt; on the call, opens a fresh WebSocket via
+// mpConnect using the saved cls/m. Caps at 6 attempts before
+// giving up — prevents thrashing if the server is genuinely down.
+function _mpScheduleReconnect() {
+  // Already a pending reconnect? Don't double-schedule.
+  if (_mpReconnect.timer) return;
+  _mpReconnect.attempts = (_mpReconnect.attempts || 0) + 1;
+  if (_mpReconnect.attempts > 6) {
+    console.warn('[MP] Reconnect limit reached (6 attempts) — giving up.');
+    _mpReconnect.intent = 'none';
+    return;
+  }
+  // Exponential backoff: 1s, 2s, 4s, 8s, 8s, 8s (capped at 8s).
+  var delayMs = Math.min(8000, 1000 * Math.pow(2, _mpReconnect.attempts - 1));
+  console.log('[MP] Scheduling reconnect attempt ' + _mpReconnect.attempts + ' in ' + delayMs + 'ms');
+  _mpReconnect.timer = setTimeout(function() {
+    _mpReconnect.timer = null;
+    // User hasn't disconnected during the backoff?
+    if (_mpReconnect.intent !== 'connect') return;
+    // Re-attempt with saved cls/meta. mpConnect's onopen handler
+    // resets attempts to 0 on success.
+    console.log('[MP] Attempting reconnect (attempt ' + _mpReconnect.attempts + ')');
+    mpConnect(_mpReconnect.cls, _mpReconnect.meta, function() {
+      console.log('[MP] Reconnect succeeded');
+    });
+  }, delayMs);
 }
 
 // Push local player state to server every ~50ms (20 Hz). Reads from
@@ -3140,13 +3227,20 @@ function mpStartPushLoop() {
 }
 
 function mpDisconnect() {
+  // Mark intent so onclose doesn't trigger an auto-reconnect after we
+  // close the socket below. Clear any pending reconnect timer too.
+  _mpReconnect.intent = 'disconnect';
+  _mpReconnect.attempts = 0;
+  _mpReconnect.cls = null;
+  _mpReconnect.meta = null;
+  if (_mpReconnect.timer) { clearTimeout(_mpReconnect.timer); _mpReconnect.timer = null; }
   if (_mpPushInterval) { clearInterval(_mpPushInterval); _mpPushInterval = null; }
   if (_mpWS) {
     try {
       if (_mpWS.readyState === 1) {
         _mpWS.send(JSON.stringify({ type: 'rumble_session_leave' }));
       }
-      _mpWS.close();
+      _mpWS.close(1000, 'user disconnect');
     } catch (e) {}
     _mpWS = null;
   }

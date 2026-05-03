@@ -9648,6 +9648,197 @@ WS lifecycle quirk.
 
 ---
 
+### iOS 26 auto-reconnect (post-v0.16.69)
+
+> Diagnostic from v0.16.69 — iOS 26 (iPad iPadOS 26.3.1):
+> ```
+> WS: closed · ready: 3 (closed)
+> ↑sent: 12 (rumble_player_state)
+> ↓recv: 59 (rumble_session_state)
+> last evt: 2.5s ago
+> err: connection error
+> close code: 1006
+> ```
+
+**Diagnostic VINDICATED.** Connection worked — 71 messages
+exchanged successfully over ~29 seconds. Then died with close
+code **1006** (abnormal closure, no close frame). This is a clean
+signal: not a permission issue, not a protocol mismatch, not a
+server reject. The connection was alive and exchanging real-time
+data, then dropped without a clean close handshake.
+
+**Cause hypothesis:** iOS 26 Safari is more aggressive than iOS 16
+about closing WebSockets on tab background, screen lock, network
+transitions, or notification-shade pulldown. The "iOS not seeing
+others / not being seen" symptom is the after-effect of
+post-disconnect: connection drops, no auto-reconnect, players
+appear absent to each other.
+
+**Fix: auto-reconnect with exponential backoff.**
+
+WebSocket drops are a real-world condition (network blips, OS
+backgrounding, route changes) — production multiplayer games have
+to handle them transparently. Implementation:
+
+**State (`_mpReconnect`):**
+- `intent`: `'none'` | `'connect'` | `'disconnect'` — distinguishes
+  user-initiated leave from drop
+- `cls`, `meta`: saved class + SPEC_CLASSES entry, used to re-issue
+  the join after reconnect
+- `attempts`: consecutive reconnect attempts (capped at 6)
+- `timer`: setTimeout handle, cleared on success or explicit
+  disconnect
+
+**mpConnect changes:**
+- Sets `_mpReconnect.intent = 'connect'` on every call
+- Saves cls/m to reconnect state
+- Preserves `_mpPlayerId` across auto-reconnects so server
+  treats the same player as continuing rather than joining
+  fresh. Only generates new playerId on TRULY fresh connect
+  (intent !== 'connect').
+- onopen handler clears the reconnect timer + zeroes attempts
+
+**onclose changes:**
+- Reads close `code` from the event
+- Distinguishes abnormal codes (`0`, `1006`, `1011`, `1012`) from
+  clean (`1000`, `1001`)
+- Schedules reconnect via `_mpScheduleReconnect()` if intent ===
+  'connect' AND close was abnormal AND we have saved cls/meta
+
+**`_mpScheduleReconnect()`:**
+- Bumps attempt counter
+- Gives up after 6 attempts (sets intent='none', clears state)
+- Backoff: 1s → 2s → 4s → 8s → 8s → 8s (capped at 8s)
+- Re-checks intent inside the timer callback (user might have
+  disconnected during backoff)
+- Calls `mpConnect(saved_cls, saved_meta)` — same flow as fresh
+  connect
+
+**mpDisconnect enhanced:**
+- Sets `intent = 'disconnect'` so onclose suppresses reconnect
+- Clears any pending reconnect timer
+- Clears saved cls/meta
+- Closes socket with code 1000 (clean) so server can clean up
+- Existing rumble_session_leave message still sent
+
+---
+
+**Per memory rule #15 (handoff hygiene):** scanned FIRST and
+found that `mpDisconnect()` already existed. Almost shipped a
+duplicate. Merged my reconnect-state-clearing additions into the
+existing function instead of creating a parallel implementation.
+
+**Per memory rule #29 (bug-from-duplication):** rule paid off
+TWICE on this push — first when I caught the duplicate
+mp-debug-overlay vs. existing _wsDiag (last push), now catching
+duplicate mpDisconnect.
+
+**Per memory rule #28 (unify-at-choke-point):** reconnect
+decision is at ONE function (`_mpScheduleReconnect`). All paths
+that reach reconnect (network drop, iOS background, server
+restart) flow through the same backoff + re-issue logic.
+
+**Per memory rule #19 (intuition over menus):** committed to
+exponential backoff (1s/2s/4s/8s) and 6-attempt cap without
+asking — these are battle-tested defaults from production
+WebSocket clients.
+
+---
+
+**Files changed:** `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumble.js, rumbleEngine.js, server.js, characters.js,
+players-core.js.
+
+---
+
+**Test focus:**
+
+1. **Normal play unchanged:**
+   - PARTY MODE → HOST → pick class → enter arena
+   - Run for 30+ seconds, verify allies still visible, no
+     console reconnect messages
+2. **iOS 26 auto-reconnect:**
+   - PARTY MODE → JOIN → enter arena on iOS 26 device
+   - Wait for the typical drop (close code 1006 expected after
+     ~30s based on previous diag)
+   - WS overlay should show:
+     - `state: closed` momentarily
+     - `state: connecting` 1-8s later (depending on attempt)
+     - `state: open` once reconnect succeeds
+     - `↑sent` and `↓recv` continue incrementing
+   - Console: `[MP] Connection closed, code=1006`,
+     `[MP] Scheduling reconnect attempt 1 in 1000ms`,
+     `[MP] Attempting reconnect (attempt 1)`,
+     `[MP] Reconnect succeeded`
+   - Allies should reappear after reconnect. Brief visual gap is
+     expected — that's the cost of the disconnect.
+3. **Explicit disconnect doesn't reconnect:**
+   - Refresh the page mid-session (location.reload triggers
+     beforeunload → mpDisconnect with intent='disconnect')
+   - No reconnect attempts after the close
+4. **Server down → eventual giveup:**
+   - Stop the server, wait
+   - Should see 6 reconnect attempts logged (1, 2, 4, 8, 8, 8s)
+   - Then `[MP] Reconnect limit reached (6 attempts) — giving up`
+   - Restart server, manual page reload to reconnect
+
+---
+
+**Risk surfaces:**
+
+- **Lobby socket drops** (`_partyOpenLobbySocket`) are NOT
+  auto-reconnected — they're one-shot for HOST/JOIN/BROWSE
+  handshakes. If browse refresh sees a drop, the next 3s tick
+  opens a fresh socket anyway. Acceptable.
+- **Reconnect during a stale game state** could be weird. If
+  player died and the death event was the message that didn't
+  arrive, reconnect re-joins with the saved cls/m as if alive.
+  Server will broadcast the authoritative state and client will
+  reconcile. Worth watching for desync.
+- **rumble_session_leave** is sent on intentional disconnect
+  but NOT on abnormal close. Server might keep the slot occupied
+  for a few seconds until its own cleanup logic fires. This is
+  fine — reconnect uses the same playerId so server replaces
+  the entry rather than creating a new one.
+- **6-attempt cap** is a balance: long enough to ride out brief
+  drops (sleep/wake, brief network blip) but short enough to
+  avoid eating battery on a permanently-down server. Could be
+  longer; 6 felt right.
+- The user-initiated mpDisconnect during a PENDING reconnect
+  cleanly cancels the timer.
+
+---
+
+**Standards audit (rule #17 — push #12 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch — save.sh canonical
+- Rule #15 (handoff hygiene): scanned existing mpDisconnect
+  before adding new code. Merged into existing function instead
+  of duplicating.
+- Rule #14 (UNITY): one reconnect helper, one mpDisconnect
+  function, one intent state field.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: reconnect logic flows through the same mpConnect
+    that fresh-connect uses. Same code path, just re-entered.
+  - ELEGANCE: ~80 LOC adding state, scheduler, intent-aware
+    onclose. No parallel "session manager" class needed.
+  - EFFICIENCY: zero overhead during normal operation — the
+    timer is null, intent check is O(1).
+- Rule #19 (intuition over menus): exponential backoff (1/2/4/8s)
+  and 6-attempt cap chosen without sub-questions.
+- Rule #28 (unify-at-choke-point): close handling is the choke;
+  all reconnect decisions flow through onclose → schedule.
+- Rule #29 (bug-from-duplication): caught duplicate mpDisconnect
+  before shipping. Two near-misses in two pushes — rule is doing
+  real work.
+- Rule #6 (diagnostic-first): VINDICATED. Without v0.16.69's
+  diagnostic data showing close code 1006, I'd have guessed at
+  causes (CORS, permissions, etc.). The data made the fix
+  targeted.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
