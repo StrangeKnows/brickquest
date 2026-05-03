@@ -2917,31 +2917,6 @@ function onBrickDown(e, color) {
       canvasY = player ? player.y : _ab.y + _ab.h/2;
     }
 
-    // ── v0.16.67 BLUE RETRIEVE DIAGNOSTIC ────────────────────
-    // User reports retrieve still not working. Log every blue cast
-    // with full context so we can identify which dispatch path the
-    // gesture is hitting. Held >= 0.5s goes through OVERLOAD path
-    // (fireOverloadBlue), held < 0.5s goes through short-press
-    // dispatch (where my retrieve check lives). We suspect long-
-    // press is swallowing the gesture.
-    if (color === 'blue' && player) {
-      var _diagDropDist = Math.hypot(canvasX - player.x, canvasY - player.y);
-      var _diagThreshold = scaleDist(80);
-      var _diagPath = (held >= OVERLOAD_TIER && Math.floor(held / OVERLOAD_TIER) >= 1)
-        ? 'OVERLOAD'
-        : (isDrag
-          ? (_diagDropDist <= _diagThreshold ? 'short-press DRAG → RETRIEVE' : 'short-press DRAG → AOE bolt')
-          : 'short-press TAP → homing bolt');
-      console.log('[BQ-BLUE]',
-        'held=' + held.toFixed(2) + 's',
-        'isDrag=' + isDrag,
-        'dropDist=' + _diagDropDist.toFixed(0) + 'px',
-        'threshold=' + _diagThreshold.toFixed(0) + 'px',
-        'outOfRumble=' + _outOfRumble,
-        'droppedBricks=' + (typeof droppedBricks !== 'undefined' ? droppedBricks.length : 'undef'),
-        '→ ' + _diagPath);
-    }
-
     blueDragPos=null; greenDragPos=null; purpleDragPos=null; blackDragPos=null;
     yellowDragPos=null; orangeDragPos=null; redDragPos=null; grayDragPos=null;
     whiteDragPos=null;
@@ -2966,26 +2941,29 @@ function onBrickDown(e, color) {
         player.brickRecharge[color] = player.brickRecharge[color] || 0;
         renderBrickBar();
         if (isDrag) {
-          // v0.16.63 — Drag-onto-player check: if drop point is near
-          // the player, this is a RETRIEVE gesture (teleport all
-          // dropped loot to inventory). Otherwise drag-far behavior
-          // (bolt at drop point). Mirrors the self-cast pattern white
-          // heal uses.
-          // v0.16.65 — Threshold loosened from 30 to 80 (scale-aware).
-          // 30px was tight against player radius (22) — only an 8px
-          // halo around player edge would trigger retrieve. 80px gives
-          // a generous "near me" zone that's discoverable.
-          var _dropDist = Math.hypot(canvasX - player.x, canvasY - player.y);
-          if (_dropDist <= scaleDist(80)) {
-            // Retrieve: teleport all dropped loot to inventory.
+          // Drag-far: AoE bolt at drop point.
+          startBlueBoltAtPoint(canvasX, canvasY);
+        } else {
+          // v0.16.68 — Context-aware tap. Blue is smart about what
+          // the player needs:
+          //   - Loot on ground → RETRIEVE all dropped items (priority)
+          //   - No loot → homing bolt to nearest entity (legacy)
+          // Tap is unambiguous and discoverable. Drag-onto-self
+          // gesture (v0.16.63-65) was destroyed by the _outOfRumble
+          // branch above, which slammed isDrag=false and canvasX/Y
+          // back to player position whenever release was outside
+          // rumble bounds (which on mobile is most of the time given
+          // brick bar height + HUD margins). Diagnostic v0.16.67
+          // confirmed all retrieve attempts hit isDrag=false,
+          // outOfRumble=true. Tap-based trigger eliminates the
+          // bounds-fragility entirely.
+          if (typeof droppedBricks !== 'undefined' && droppedBricks.length > 0) {
+            // Loot exists — retrieve takes priority over bolt.
             doBlueRetrieve();
           } else {
-            // Drag-far: AoE bolt at drop point.
-            startBlueBoltAtPoint(canvasX, canvasY);
+            // Tap: home on nearest entity (legacy behavior).
+            startBlueBolt(null);
           }
-        } else {
-          // Tap: home on nearest entity (legacy behavior).
-          startBlueBolt(null);
         }
       } else if (dragFns[color]) {
         player.bricks[color]--;
@@ -4849,6 +4827,65 @@ function spawnLootFromEntity(entity) {
   });
 }
 
+// ── LOOT COLLECTION (v0.16.69) ────────────────────────
+// Single source of truth for "this dropped item gets collected by
+// the player." Used by:
+//   - updateDroppedBricks contact pickup (player walks onto item)
+//   - doBlueRetrieve (tap blue → teleport all loot)
+//   - blue bolt travel + AoE sweep (cast contacts items)
+// Marks p.done = true so updateDroppedBricks cleans it up next frame.
+//
+// opts.showFloater (default true): show '+1 X' style pickup floater.
+//   Set false for the bulk-retrieve path which shows ONE summary
+//   floater for the whole batch instead of per-item spam.
+// opts.cheeseFlavor (default true): show occasional flavor text on
+//   cheese pickups (every 3rd). Disabled on bulk-retrieve to avoid
+//   stacking text.
+// Returns true if collected, false if already done or invalid.
+function _collectLootItem(p, opts) {
+  if (!p || p.done || !player) return false;
+  opts = opts || {};
+  var showFloater = opts.showFloater !== false;  // default true
+  var cheeseFlavor = opts.cheeseFlavor !== false; // default true
+  if (p.kind === 'cheese') {
+    // Cheese: inventory model in live game; auto-apply in waves test mode.
+    if (cfg && cfg.cheeseAutoApply) {
+      player.hpMax += 1;
+      player.hp = Math.min(player.hpMax, player.hp + 1);
+      if (_battleStats) {
+        if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+        _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+      }
+      if (showFloater) showFloatingText(player.x, player.y, '🧀 +1 HP MAX', '#FFD96A', player);
+    } else {
+      player.cheese = (player.cheese || 0) + 1;
+      if (_battleStats) _battleStats.cheeseEaten = (_battleStats.cheeseEaten || 0) + 1;
+      if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+      _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+      if (showFloater) showFloatingText(player.x, player.y, '+1 🧀', '#FFD96A', player);
+      // Occasional flavor line — every 3rd cheese, when not in bulk-retrieve.
+      if (cheeseFlavor && player.cheese % 3 === 1) {
+        showFloatingText(player.x, player.y - (player.r + 48), _pickCheeseEventFlavor(), '#FFD96A');
+      }
+    }
+  } else if (p.kind === 'gold') {
+    var amt = p.amount || 1;
+    player.gold = (player.gold || 0) + amt;
+    if (_battleStats) _battleStats.goldGained = (_battleStats.goldGained || 0) + amt;
+    if (showFloater) showFloatingText(player.x, player.y - 40, '+' + amt + ' 🪙', '#F5D000', player);
+  } else {
+    // Brick — grow charges + ceiling (S013.6: looted bricks persist post-rumble)
+    player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
+    player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
+    if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
+    if (showFloater) showFloatingText(player.x, player.y - 40,
+      '+1 ' + p.color.charAt(0).toUpperCase(), BRICK_COLORS[p.color] || '#fff', player);
+  }
+  p.done = true;
+  return true;
+}
+
+
 function updateDroppedBricks(dt) {
   if (!player) return;
   droppedBricks.forEach(function(p) {
@@ -4867,57 +4904,9 @@ function updateDroppedBricks(dt) {
       var dist = Math.hypot(ddx, ddy);
       var contactR = (p.pickupR || p.r) + player.r;
       if (dist < contactR) {
-        // Collect by kind. Each pickup type has its own effect.
-        if (p.kind === 'cheese') {
-          // v4: Cheese loot goes into player's cheese inventory (+1 per pickup).
-          // Previously cheese gave permanent +1 max HP + +1 HP — replaced so cheese
-          // is a tradeable consumable, eaten via the out-of-battle menu for +1 Max HP.
-          //
-          // EXCEPTION: cfg.cheeseAutoApply (waves mode test tool) restores the
-          // old behavior — pickups apply immediately for visible feedback during
-          // stress testing. Live game keeps the inventory model.
-          if (cfg && cfg.cheeseAutoApply) {
-            player.hpMax += 1;
-            player.hp = Math.min(player.hpMax, player.hp + 1);
-            if (_battleStats) {
-              if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
-              _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
-            }
-            showFloatingText(player.x, player.y, '🧀 +1 HP MAX', '#FFD96A', player);
-          } else {
-            player.cheese = (player.cheese || 0) + 1;
-            if (_battleStats) _battleStats.cheeseEaten++;
-            if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
-            _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
-            showFloatingText(player.x, player.y, '+1 🧀', '#FFD96A', player);
-            // S013.3: occasional flavor line for cheese pickups — every 3rd to avoid spam
-            if (player.cheese % 3 === 1) {
-              // Spawn ABOVE the player (not parented) so it floats independently
-              // and doesn't stack on top of the pickup number.
-              showFloatingText(player.x, player.y - (player.r + 48), _pickCheeseEventFlavor(), '#FFD96A');
-            }
-          }
-        } else if (p.kind === 'gold') {
-          // Coins accumulate on player.gold; battleTick surfaces to server.
-          var amt = p.amount || 1;
-          player.gold = (player.gold || 0) + amt;
-          if (_battleStats) _battleStats.goldGained += amt;
-          showFloatingText(player.x, player.y - 40, '+' + amt + ' 🪙', '#F5D000', player);
-        } else {
-          // Brick — looted mid-rumble grows both inventory ceiling AND active
-          // charges. S013.6: previously only spec mode grew the ceiling, which
-          // meant non-spec loot vanished after the battle (ceiling unchanged →
-          // server never saw the pickup). Now looted bricks persist AND are
-          // immediately usable.
-          //   bricks[c]   += 1  — charges (immediately usable)
-          //   brickMax[c] += 1  — inventory ceiling (persists post-rumble)
-          player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
-          player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
-          if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
-          showFloatingText(player.x, player.y - 40, '+1 ' + p.color.charAt(0).toUpperCase(),
-            BRICK_COLORS[p.color] || '#fff', player);
-        }
-        p.done = true;
+        // Collect via shared helper. Contact pickup gets the full
+        // floater + cheese flavor experience.
+        _collectLootItem(p);
         return;
       }
       if (dist < scaleDist(LOOT_MAGNET_RANGE)) {
@@ -8755,6 +8744,69 @@ function drawBlueFieldFlashes() {
   });
 }
 
+// ── BLUE CAST ITEM SWEEP (v0.16.69) ───────────────────
+// Any blue cast (bolt travel, AoE detonation) that overlaps a
+// dropped item collects it. Generalizes the retrieve mechanic:
+// blue is the "loot color" — every blue cast does double duty as
+// combat + sweep.
+//
+// Called per-bolt per-tick during travel (radius = bolt.r * 2) and
+// once per AoE impact (radius = impactR). Returns count collected.
+//
+// FX: reverse-rain stream from item to player, same as doBlueRetrieve.
+// Each collected item streams its color toward the player.
+function _sweepBlueItems(centerX, centerY, radius) {
+  if (!droppedBricks || droppedBricks.length === 0) return 0;
+  if (!player) return 0;
+  var collected = 0;
+  var scale = (typeof getDisplayScale === 'function') ? getDisplayScale() : 1;
+  for (var i = 0; i < droppedBricks.length; i++) {
+    var p = droppedBricks[i];
+    if (p.done) continue;
+    // Item still popping out from kill — skip until idle so kill
+    // animation reads cleanly. Also skip very-fresh items (age < 0.2)
+    // so the explosion doesn't instantly vacuum loot.
+    if (p.state === 'popping' || p.age < 0.2) continue;
+    var pdx = p.x - centerX, pdy = p.y - centerY;
+    var pdist = Math.sqrt(pdx*pdx + pdy*pdy);
+    if (pdist > radius + (p.pickupR || p.r || 8)) continue;
+    // Reverse-rain stream toward player
+    var dx = player.x - p.x, dy = player.y - p.y;
+    var dist = Math.hypot(dx, dy) || 1;
+    var dirX = dx / dist, dirY = dy / dist;
+    var perpX = -dirY, perpY = dirX;
+    var streamColor;
+    if (p.kind === 'brick')      streamColor = BRICK_COLORS[p.color] || '#FFFFFF';
+    else if (p.kind === 'cheese') streamColor = '#FFD96A';
+    else if (p.kind === 'gold')   streamColor = '#F5D000';
+    else                          streamColor = '#FFFFFF';
+    var streamCount = 6;  // smaller per-item burst since multiple items may sweep at once
+    for (var si = 0; si < streamCount; si++) {
+      var sp = (180 + Math.random() * 200) * scale;
+      var spread = (Math.random() - 0.5) * 16 * scale;
+      var perpV = (Math.random() - 0.5) * sp * 0.2;
+      purpleParticles.push({
+        x: p.x + perpX * spread * 0.3,
+        y: p.y + perpY * spread * 0.3,
+        vx: dirX * sp + perpX * perpV,
+        vy: dirY * sp + perpY * perpV,
+        r: (1.5 + Math.random() * 2) * scale,
+        alpha: 0.95,
+        color: streamColor,
+      });
+    }
+    // Apply pickup. Bolt-sweep mode shows per-item floaters (one
+    // bolt typically collects 1-3 items so spam isn't an issue).
+    _collectLootItem(p, { showFloater: true, cheeseFlavor: false });
+    collected++;
+  }
+  if (collected > 0 && typeof renderBrickBar === 'function') {
+    renderBrickBar();
+  }
+  return collected;
+}
+
+
 function startBlueBolt(lockedTarget) {
   var target = lockedTarget || (entities.length ? entities.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null);
   if (!target || !player) return;
@@ -8808,10 +8860,6 @@ function startBlueBoltAtPoint(tx, ty) {
 // need item-collect-without-magnet behavior.
 function doBlueRetrieve() {
   if (!player) return;
-  // ── v0.16.67 DIAGNOSTIC ────────
-  console.log('[BQ-BLUE-RETRIEVE] called, droppedBricks=' +
-    (droppedBricks ? droppedBricks.length : 'undef') +
-    ', player=(' + Math.round(player.x) + ',' + Math.round(player.y) + ')');
   if (!droppedBricks || droppedBricks.length === 0) {
     // Nothing to retrieve — give visual feedback so it doesn't feel
     // like the cast did nothing. Small puff at player.
@@ -8873,32 +8921,11 @@ function doBlueRetrieve() {
     if (typeof spawnCritFlourish === 'function') {
       spawnCritFlourish(p.x, p.y, streamColor, 3);
     }
-    // Apply pickup effect — mirrors updateDroppedBricks contact branch.
-    if (p.kind === 'cheese') {
-      if (cfg && cfg.cheeseAutoApply) {
-        player.hpMax += 1;
-        player.hp = Math.min(player.hpMax, player.hp + 1);
-        if (_battleStats) {
-          if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
-          _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
-        }
-      } else {
-        player.cheese = (player.cheese || 0) + 1;
-        if (_battleStats) _battleStats.cheeseEaten = (_battleStats.cheeseEaten || 0) + 1;
-        if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
-        _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
-      }
-    } else if (p.kind === 'gold') {
-      var amt = p.amount || 1;
-      player.gold = (player.gold || 0) + amt;
-      if (_battleStats) _battleStats.goldGained = (_battleStats.goldGained || 0) + amt;
-    } else {
-      // Brick — same as standard pickup: grow charges AND ceiling.
-      player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
-      player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
-      if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
-    }
-    p.done = true;
+    // Apply pickup effect via shared helper. Bulk retrieve suppresses
+    // per-item floaters (single summary floater shown after loop)
+    // and cheese flavor lines (one big batch shouldn't spawn multiple
+    // flavor texts).
+    _collectLootItem(p, { showFloater: false, cheeseFlavor: false });
     retrievedCount++;
   }
   // Convergence flash at player — small bright pulse where streams arrive
@@ -8930,6 +8957,12 @@ function updateBlueBolts(dt, bounds) {
     b.x += (dx/dist) * step;
     b.y += (dy/dist) * step;
     b.travelled = (b.travelled||0) + step;
+    // v0.16.69 — Blue is the loot color. As bolt travels, sweep
+    // items in its path. Single-item radius (b.r * 1.5) so the bolt
+    // looks like it's vacuuming loot it physically passes through.
+    // Bolts normally can't reach items behind/beside them — only
+    // those they actively cross.
+    _sweepBlueItems(b.x, b.y, b.r * 1.5);
     // Spawn healing-style trail particles
     var tier = b.tier || 1;
     var trailCount = Math.max(1, Math.round(Math.ceil(tier * 0.25) * vScale(tier)));
@@ -8972,6 +9005,10 @@ function updateBlueBolts(dt, bounds) {
           }
         }
       });
+      // v0.16.69 — Sweep items in AoE radius. Same blast that damages
+      // entities also collects loot in its area. Blue's identity:
+      // every cast does double duty as combat + sweep.
+      _sweepBlueItems(ix, iy, impactR);
       // BLUE LANDING FLASH (every cast, not just crits): snappy shockwave
       // sized to the actual blast radius + lingering glow that fades over
       // ~0.4s. Players see exactly where the AoE landed and how big it was.
@@ -9029,6 +9066,12 @@ function updateBlueBolts(dt, bounds) {
             showDamageNumber(other.x, other.y - 30, burstRes.applied, '#6fb8ff', burstRes.tier, other.x, other.y, undefined, burstRes.witherBoost, other, 'blue');
           }
         });
+        // v0.16.69 — Overload burst also sweeps items in its radius.
+        _sweepBlueItems(b.target.x, b.target.y, b.burstRadius);
+      } else {
+        // Tap-blue homing bolt: smaller sweep at impact point so even
+        // single-target bolts collect items they hit at landing.
+        _sweepBlueItems(b.target.x, b.target.y, b.r * 2);
       }
       // Impact burst scaled by tier
       var tier = b.tier || 1;

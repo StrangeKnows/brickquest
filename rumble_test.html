@@ -2674,12 +2674,142 @@ function _setPartyStatus(msg, kind) {
   el.className = 'party-status' + (kind ? ' ' + kind : '');
 }
 
+// ─── WS DIAGNOSTIC (v0.16.69) ─────────────────────────────────
+// Investigation: iOS reportedly fails to connect or exchange
+// messages with the server. macOS↔Android works. Per memory rule
+// #6 (diagnostic-first), gather data before attempting fix.
+//
+// Logs to console.log (visible if user attaches a debugger) AND
+// renders an on-screen overlay (visible without a debugger,
+// critical for iOS testing where attaching a debugger requires
+// connecting to a Mac running Safari with web-inspector enabled).
+//
+// Always-on for v0.16.69. Future polish push can add a URL param
+// (?nowsdiag=1) to suppress.
+
+var _wsDiag = {
+  sentCount: 0,
+  recvCount: 0,
+  lastSentType: '',
+  lastRecvType: '',
+  lastEventTs: 0,
+  state: 'idle',  // idle | connecting | open | closed | error
+  lastError: '',
+  lastCloseCode: 0,
+};
+
+function _wsDiagOverlay() {
+  var el = document.getElementById('ws-diag');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'ws-diag';
+    // Top-left positioning: iOS Safari's bottom toolbar can obscure
+    // bottom-fixed elements, especially in landscape. Top-left is
+    // always visible.
+    el.style.cssText = [
+      'position:fixed', 'top:6px', 'left:6px',
+      'background:rgba(20,15,40,0.92)', 'border:1px solid #6644aa',
+      'border-radius:5px', 'color:#e8e0ff', 'font-family:ui-monospace,monospace',
+      'font-size:11px', 'padding:6px 8px', 'z-index:99999',
+      'pointer-events:none', 'max-width:280px', 'line-height:1.4',
+      'letter-spacing:.02em',
+      'box-shadow:0 2px 12px rgba(0,0,0,0.5)',
+    ].join(';');
+    document.body.appendChild(el);
+  }
+  var stateColor = ({
+    'idle': '#888',
+    'connecting': '#FFD700',
+    'open': '#7AE070',
+    'closed': '#ff7755',
+    'error': '#ff5555',
+  })[_wsDiag.state] || '#888';
+  var since = _wsDiag.lastEventTs ? ((performance.now() - _wsDiag.lastEventTs)/1000).toFixed(1) + 's' : '—';
+  // readyState lookup (covers both lobby and session sockets if either exists)
+  var readyState = '?';
+  if (typeof _mpWS !== 'undefined' && _mpWS && typeof _mpWS.readyState === 'number') {
+    readyState = _mpWS.readyState + ' (' +
+      (['connecting','open','closing','closed'][_mpWS.readyState] || '?') + ')';
+  }
+  // Short UA stamp — first 60 chars, helps identify iOS version in screenshots
+  var uaShort = (navigator.userAgent || '').replace('Mozilla/5.0 ', '').slice(0, 56);
+  el.innerHTML =
+    '<div>WS: <span style="color:' + stateColor + ';font-weight:600;">' + _wsDiag.state + '</span> · ready: ' + readyState + '</div>' +
+    '<div>↑sent: ' + _wsDiag.sentCount + ' (' + (_wsDiag.lastSentType || '—') + ')</div>' +
+    '<div>↓recv: ' + _wsDiag.recvCount + ' (' + (_wsDiag.lastRecvType || '—') + ')</div>' +
+    '<div>last evt: ' + since + ' ago</div>' +
+    (_wsDiag.lastError ? '<div style="color:#ff7755;">err: ' + _wsDiag.lastError + '</div>' : '') +
+    (_wsDiag.lastCloseCode ? '<div style="color:#ff7755;">close code: ' + _wsDiag.lastCloseCode + '</div>' : '') +
+    '<div style="color:#7060a0;font-size:9px;margin-top:3px;">' + uaShort + '</div>';
+}
+
+// Refresh overlay every 500ms while page is alive
+setInterval(_wsDiagOverlay, 500);
+
+// Wrap a websocket so all events get logged + counted. Uses
+// addEventListener (not onopen/onmessage setters) so user code
+// can still set those without conflict.
+function _wsDiagInstrument(ws, label) {
+  _wsDiag.state = 'connecting';
+  _wsDiag.lastEventTs = performance.now();
+  console.log('[WS-DIAG]', label, 'creating ws to', ws.url);
+  // Wrap send() to count outgoing
+  var origSend = ws.send.bind(ws);
+  ws.send = function(data) {
+    _wsDiag.sentCount++;
+    _wsDiag.lastEventTs = performance.now();
+    var typeStr = '?';
+    try {
+      var parsed = JSON.parse(data);
+      typeStr = parsed.type || '?';
+      _wsDiag.lastSentType = typeStr;
+    } catch (e) {}
+    console.log('[WS-DIAG]', label, '→ send:', typeStr, '(' + (data.length || 0) + ' bytes)');
+    return origSend(data);
+  };
+  // Listen for lifecycle events alongside user's handlers
+  ws.addEventListener('open', function() {
+    _wsDiag.state = 'open';
+    _wsDiag.lastEventTs = performance.now();
+    console.log('[WS-DIAG]', label, '✓ open (readyState=' + ws.readyState + ')');
+  });
+  ws.addEventListener('message', function(evt) {
+    _wsDiag.recvCount++;
+    _wsDiag.lastEventTs = performance.now();
+    var typeStr = '?';
+    try {
+      var parsed = JSON.parse(evt.data);
+      typeStr = parsed.type || '?';
+      _wsDiag.lastRecvType = typeStr;
+    } catch (e) {}
+    // Suppress noisy session_state logs (broadcasts every 50ms)
+    if (typeStr !== 'rumble_session_state' && typeStr !== 'state') {
+      console.log('[WS-DIAG]', label, '← recv:', typeStr, '(' + (evt.data.length || 0) + ' bytes)');
+    }
+  });
+  ws.addEventListener('error', function(evt) {
+    _wsDiag.state = 'error';
+    _wsDiag.lastEventTs = performance.now();
+    _wsDiag.lastError = (evt && evt.message) || 'connection error';
+    console.error('[WS-DIAG]', label, '✗ error:', _wsDiag.lastError, evt);
+  });
+  ws.addEventListener('close', function(evt) {
+    _wsDiag.state = 'closed';
+    _wsDiag.lastEventTs = performance.now();
+    _wsDiag.lastCloseCode = (evt && evt.code) || 0;
+    console.log('[WS-DIAG]', label, '✕ close:', _wsDiag.lastCloseCode, '(' + (evt && evt.reason || '') + ')');
+  });
+  return ws;
+}
+
 // Open a one-shot websocket for the lobby handshake. Resolves with
 // the open socket so caller can send their message and handle reply.
 function _partyOpenLobbySocket(onMessage, onError) {
   var host = location.hostname;
   var port = location.port || 8080;
   var ws = new WebSocket('ws://' + host + ':' + port + '?role=rumble_lobby');
+  // v0.16.69 — Wrap with diagnostic instrumentation
+  _wsDiagInstrument(ws, 'lobby');
   ws.onmessage = function(evt) {
     var msg; try { msg = JSON.parse(evt.data); } catch (e) { return; }
     onMessage(msg, ws);
@@ -2911,6 +3041,8 @@ function mpConnect(cls, m, onReady) {
   var port = location.port || 8080;
   _mpPlayerId = _mpGenPlayerId();
   _mpWS = new WebSocket('ws://' + host + ':' + port + '?role=rumble_session');
+  // v0.16.69 — Wrap with diagnostic instrumentation
+  _wsDiagInstrument(_mpWS, 'session');
   _mpWS.onopen = function() {
     // Send the join. Server records us in the session and starts
     // broadcasting state to us at 20 Hz.

@@ -9343,6 +9343,311 @@ isn't firing. Console log on server side would show.
 
 ---
 
+### v0.16.69 — iOS WebSocket diagnostic (NOT a fix)
+
+> "iOS issues connecting to android mac and ios. ios is not seeing
+> others or being seen"
+
+**Per memory rule #6 (diagnostic-first):** iOS works for some
+(macOS↔Android per earlier reports) but fails for iOS. Cause is
+uncertain — could be local network permission, WS lifecycle quirk,
+backgrounding behavior, or other iOS Safari weirdness. Ship
+diagnostic, gather data on actual iOS device, then fix.
+
+**Hypotheses being tested:**
+
+1. **Local network permission (iOS 14+)** — Safari may silently
+   fail WS connections to local IPs without user permission grant.
+   Symptom: WS never opens.
+2. **WS lifecycle quirk** — connection might open then immediately
+   close due to extension/header negotiation difference.
+3. **Background suspension** — iOS aggressively suspends background
+   tabs; WS dies on app switch. Symptom: works initially, drops.
+4. **Sleep/wake** — screen sleep closes WS. Works briefly, dies.
+5. **CORS/origin** — less likely since server doesn't check, but
+   possible.
+
+The diagnostic surfaces all five scenarios.
+
+---
+
+**Server-side diagnostic:**
+
+Every WebSocket connection logs:
+- `role` (rumble_lobby, rumble_session, dm, etc.)
+- `ip` (client IP — confirms iOS reaching server at all)
+- `ua` (compact platform tag: iOS, Android, macOS, Windows, Linux)
+- truncated user-agent string (full platform fingerprint)
+
+Plus close events log code + reason. Plus error events log message.
+
+Console output looks like:
+```
+[WS-CONNECT] role=rumble_lobby ip=192.168.86.42 ua=iOS (Mozilla/5.0 (iPhone; CPU iPhone OS 17_2...))
+[WS-CLOSE]   role=rumble_lobby ip=192.168.86.42 ua=iOS code=1006 reason=
+```
+
+Code 1006 specifically would indicate "abnormal closure" — common
+when iOS local-network permission isn't granted.
+
+---
+
+**Client-side diagnostic:**
+
+1. **`_wsDiag` state object:** tracks
+   - sent/recv message counts
+   - last sent/received message type
+   - WS state (idle/connecting/open/closed/error)
+   - last error message + last close code
+   - timestamp of last event
+
+2. **`_wsDiagInstrument(ws, label)` helper:** wraps any WebSocket
+   to log every send + receive + lifecycle event. Uses
+   `addEventListener` (NOT `onopen`/`onmessage` setters) so it
+   coexists with user-defined handlers. Both lobby socket and
+   gameplay socket are instrumented.
+
+3. **On-screen overlay:** floating panel at bottom-left,
+   semi-transparent purple. Shows live state:
+   ```
+   WS: open
+   sent: 3 (rumble_session_create)
+   recv: 5 (rumble_session_state)
+   last: 0.3s
+   ```
+   Refreshes every 500ms. CRITICAL for iOS testing — connecting
+   an iOS device to Safari Web Inspector requires a Mac with
+   develop menu enabled, which most users won't do. Overlay
+   gives the data without a debugger.
+
+4. **Console logs (`[WS-DIAG]` tag):** every event with timestamp,
+   label, type, and byte count. Suppresses noisy `rumble_session_state`
+   broadcasts (every 50ms) so the log stays scannable. Visible
+   if a debugger IS attached.
+
+---
+
+**What we're looking for in iOS test:**
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| WS state stays "connecting", never opens | Local network permission | iOS 14+ needs permission grant or `NSLocalNetworkUsageDescription` |
+| WS opens, closes immediately (code 1006) | Mixed content / handshake | Check if page is https/ws mismatch |
+| WS opens, no recv | Server not broadcasting | Server log will show send attempts |
+| WS opens, sends work, recv = 0 | Browser-side filter | Inspect message format |
+| WS works, dies after backgrounding | Background suspension | Need wake lock or auto-reconnect |
+| WS works, only fails for OTHER clients | Cross-platform message routing | Check session membership server-side |
+
+---
+
+**Files changed:** `server.js`, `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumble.js, rumbleEngine.js, characters.js,
+players-core.js.
+
+---
+
+**Test focus (this is the fact-finding mission):**
+
+1. **Restart the server.** Watch the terminal output.
+2. **Open rumble_test.html on each device** that you've tested:
+   - macOS browser
+   - Android browser
+   - **iOS browser (the broken one)**
+3. **For each, observe the on-screen `WS: ...` overlay** at bottom-
+   left of screen. State transitions: idle → connecting → open
+   (success) OR idle → connecting → error (failure).
+4. **Try the lobby flows on iOS:**
+   - PARTY MODE → HOST → does the code appear?
+   - PARTY MODE → BROWSE → does the list load?
+5. **Capture the server console output.** Save it. Specifically:
+   - `[WS-CONNECT]` lines: who connected, what UA, what IP
+   - `[WS-CLOSE]` lines: any unexpected disconnects? what code?
+6. **Capture the client overlay snapshots** (screenshot if possible)
+   for each device showing what the overlay reads.
+
+**Specifically for iOS:** what does the overlay show at the
+moment iOS attempts a HOST or JOIN? Is the WS in "connecting",
+"open", "closed", or "error"?
+
+**Share back:** server console output + iOS overlay snapshot.
+With that data, the fix will be obvious.
+
+---
+
+**Standards audit (rule #17 — push #11 of S016 entity authority arc,
+diagnostic push):**
+
+- Rule #25 (version bump): patch — save.sh canonical
+- Rule #6 (diagnostic-first): VINDICATED again. Speculating the
+  iOS fix without data would have shipped wrong fixes. The diag
+  exposes which of 5+ hypotheses is the actual cause.
+- Rule #11 (data/runtime/UI):
+  - Data: `_wsDiag` state object
+  - Runtime: instrument wrapper, overlay refresh interval
+  - UI: floating overlay div
+- Rule #18 (ELEGANCE): ~80 LOC client + ~30 LOC server. Single
+  instrument helper covers both lobby + gameplay sockets.
+  Single overlay covers all WS state.
+- Rule #19 (intuition over menus): committed to comprehensive
+  diag (counts + types + lifecycle + on-screen overlay) rather
+  than asking "should I add overlay too?" The overlay is the
+  whole point of an iOS-debug push.
+- Rule #28 (unify-at-choke-point): `_wsDiagInstrument` is THE
+  WebSocket instrumentation. Both sockets use it. Adding more
+  WS endpoints in the future = wrap them with same call.
+- Rule #29 (bug-from-duplication): single `_wsDiag` state, single
+  overlay renderer, single instrument helper. No drift.
+
+---
+
+### Blue cast sweep + iOS diag visibility (post-v0.16.69)
+
+> "blue landed on two green bricks, wm ovld, did not pick up, fw
+> blue pass through item and not sent to inv. treat any interaction
+> with any player fired blue damage area or travel path as player
+> collision with that item"
+
+> "ios version 26.3.1(a) is not working to see other players in
+> same party and other players do not see player from ios 26;
+> ios 16.4.1 is working"
+
+**Per memory rule #15 (handoff hygiene):** scanned the file FIRST
+before adding new code. Discovered `_wsDiag` system already
+shipped (existing v0.16.69 push — iOS diagnostic). Removed my
+parallel `mp-debug-overlay` additions. The existing diagnostic is
+canonical. Memory rule #29 averted: would have shipped two
+parallel WS-state tracking systems otherwise.
+
+---
+
+**1. Blue is the loot color (cast sweep mechanic):**
+
+Generalizes retrieve from "tap to gather" to "any blue cast
+contacts loot → loot collected." Three pickup pathways now share
+ONE collection helper:
+
+- `updateDroppedBricks` contact pickup (player walks onto item)
+- `doBlueRetrieve` (tap blue → teleport all loot)
+- `_sweepBlueItems` (cast contacts items)
+
+**New helper: `_collectLootItem(p, opts)`** — single source of
+truth for "this dropped item gets collected by the player."
+Handles cheese (live vs. waves auto-apply), gold, brick (charges
++ ceiling). `opts.showFloater` and `opts.cheeseFlavor` toggle
+per-item floater behavior (suppressed in bulk-retrieve to avoid
+text spam).
+
+**New helper: `_sweepBlueItems(centerX, centerY, radius)`** —
+checks all dropped items within radius, collects via
+`_collectLootItem`, spawns reverse-rain particle stream toward
+player for each. Skips popping/very-fresh items (kill animation
+should complete before vacuum).
+
+**Wired into:**
+- Bolt travel (per-tick): `_sweepBlueItems(b.x, b.y, b.r * 1.5)`
+  inside the bolt-update step. Bolt physically vacuums items it
+  crosses.
+- Fixed-point AoE impact: `_sweepBlueItems(ix, iy, impactR)` after
+  damage application.
+- Homing-bolt overload burst: `_sweepBlueItems(target.x, target.y, b.burstRadius)`
+  alongside burst damage.
+- Tap-blue homing impact (no burst): `_sweepBlueItems(target.x, target.y, b.r * 2)`
+  smaller sweep at landing point.
+
+**Per memory rule #28 (unify-at-choke-point):** all five pickup
+paths converge through `_collectLootItem`. Adding a future pickup
+path = call the helper, never duplicate the cheese/gold/brick
+branches.
+
+**Per memory rule #29 (bug-from-duplication):** v0.16.65 had three
+copies of the cheese/gold/brick logic (contact, retrieve, would-
+have-had bolt-sweep). One source of truth now. If pickup rules
+change (e.g., capacity caps, animation, sound), one place to
+update.
+
+---
+
+**2. Diagnostic overlay visibility improvements:**
+
+The existing `_wsDiag` overlay was at `bottom:6px left:6px`. iOS
+Safari's bottom toolbar can obscure bottom-fixed elements,
+especially in landscape. Moved to `top:6px left:6px` — always
+visible regardless of toolbar state.
+
+Other improvements:
+- Larger font (9.5px → 11px) for legibility on phone screens
+- Added `readyState` field — shows `0/1/2/3 (connecting/open/closing/closed)`
+  inline with state. Catches the case where state transitions
+  silently (e.g., open → closing without close-event).
+- Stamped abbreviated user agent at bottom of overlay (60 chars).
+  iOS version visible in screenshots for direct comparison.
+- Slightly more contrast: border `#4a3475` → `#6644aa`, background
+  alpha 0.85 → 0.92, added soft shadow.
+
+These are visibility tweaks, not architectural changes. The
+underlying `_wsDiag` instrumentation (counts, types, errors) is
+unchanged — already comprehensive from the previous push.
+
+**Files changed:** `rumble.js`, `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: `server.js` (browse-games server changes already on
+origin from previous push), rumbleEngine.js, characters.js,
+players-core.js.
+
+---
+
+**Test focus:**
+
+1. **Blue tap with loot on ground:** retrieve all → reverse-rain
+   to player (from previous push, regression check)
+2. **Blue tap with no loot:** homing bolt at nearest entity (legacy)
+3. **Blue drag-far at loot cluster:** AoE bolt detonates → items
+   in radius sweep to player as bolt does damage
+4. **Blue drag-far past loot, hits enemy beyond:** items along
+   the bolt's flight path sweep too
+5. **Blue overload near loot:** multi-bolt spray sweeps all items
+   in the burst radii
+6. **iOS 26 with new overlay positioning:** load rumble_test.html
+   on iOS 26 device. WS overlay should now be visible top-left.
+   Try HOST/JOIN. Screenshot + compare to iOS 16. Share what each
+   shows for `WS:` (state), `↑sent`, `↓recv`, error fields, and
+   the UA stamp at the bottom.
+
+If iOS 26 shows `state: connecting` and never advances → local
+network permission likely. If it shows `open` but `↓recv: 0` →
+upstream broadcast not reaching iOS. If it shows `closed` early →
+WS lifecycle quirk.
+
+---
+
+**Standards audit (rule #17 — push #11 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch — save.sh canonical
+- Rule #15 (handoff hygiene): scanned FIRST, found existing
+  diagnostic, removed my parallel addition before shipping.
+  Wasted ~80 LOC of work — but caught it before the bug.
+- Rule #14 (UNITY): one pickup helper, one sweep helper, one
+  diagnostic system. Three pickup paths converge.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: blue identity reinforced — every cast sweeps loot.
+  - ELEGANCE: helper per concern (collect, sweep). Clean
+    separation between "apply pickup effect" and "decide what to
+    pick up."
+  - EFFICIENCY: O(items × bolts) per tick. With typical
+    items ≤ 10, bolts ≤ 5, cost is negligible.
+- Rule #28 (unify-at-choke-point): collection logic at ONE
+  function. Sweep geometry at ONE function.
+- Rule #29 (bug-from-duplication): three previous pickup
+  implementations consolidated. Caught duplicate diagnostic
+  before shipping it.
+- Rule #6 (diagnostic-first): VINDICATED — diagnostic from prior
+  push is what we'll use to root-cause iOS 26 issue. The
+  visibility improvements ensure the diagnostic actually serves
+  its purpose on the device that needs it.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
