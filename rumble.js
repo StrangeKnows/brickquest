@@ -13234,6 +13234,27 @@ window.Rumble = {
     if (typeof updateHUD === 'function') updateHUD();
     return n;
   },
+  // v0.16.71 — Clear all transient arena state (entities, projectiles,
+  // walls, dropped loot, traps, status FX) without resetting the
+  // player. Used by coop wave-jump: when a joiner connects to a
+  // session already in progress, we wipe the wave-1 entities that
+  // spawned during start, then spawn the target wave fresh.
+  //
+  // Player position, HP, bricks, and gold are preserved. Enemy
+  // projectiles and active visual effects are cleared so the
+  // jumped-into wave reads clean.
+  clearArena: function() {
+    if (typeof entities !== 'undefined') entities = [];
+    if (typeof enemyProjectiles !== 'undefined') enemyProjectiles = [];
+    if (typeof droppedBricks !== 'undefined') droppedBricks = [];
+    if (typeof grayWalls !== 'undefined') grayWalls = [];
+    if (typeof traps !== 'undefined') traps = [];
+    // Bolts in flight (blue, etc.) — clear so they don't impact
+    // newly-spawned entities the moment we jump.
+    if (typeof blueBolts !== 'undefined') blueBolts = [];
+    // Crit shockwaves and floating text are cosmetic; let them
+    // self-expire rather than abruptly wiping mid-render.
+  },
 };
 
 })(); // end IIFE

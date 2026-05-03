@@ -9839,6 +9839,219 @@ players-core.js.
 
 ---
 
+### Wave alignment — Path B "synced parallel play"
+
+> "players need to join the wave that other players are currently
+> active with"
+
+The original feedback item from when iOS, BS arc, and class
+collision were also flagged. Deferred through v0.16.66-70 because
+each push had higher-immediacy items. Now it's the next call.
+
+**Path B chosen** (over Path A "shared entities") because Path B
+delivers the immediate user-visible improvement (joiners stop
+spawning at wave 1) without requiring the entity authority
+migration. Path A is the right end-state but it's a multi-push
+arc; this push unlocks usable coop now.
+
+**The model: synced parallel play.** Both players fight the same
+wave NUMBER. Each client spawns its own entity instances locally
+(no shared HP). Players see each other moving as ally markers.
+When one clears their wave, server tracks the new wave so future
+joiners spawn there.
+
+**What's NOT in this push:**
+- Shared entity HP (each client's monsters are local)
+- Force-advancing existing players when a teammate races ahead
+  (intentional — laggard shouldn't get yanked from their
+  unfinished battle)
+- Wave-clear synchronization (each client clears independently)
+
+These are Path A territory.
+
+---
+
+**Server changes (`server.js`):**
+
+1. **`sess.wave`** added to session struct, defaulting to 1. The
+   only authoritative wave value in the system. Represents
+   "where new joiners should start."
+
+2. **`rumble_session_state`** broadcast includes `wave` field.
+   Clients see the canonical value on every tick.
+
+3. **`rumble_session_joined`** ack includes `wave`. Brand-new
+   joiners know their target wave immediately, without waiting
+   for the next session_state tick.
+
+4. **`rumble_wave_advance`** new message type. Client → server,
+   payload `{ newWave }`. Server takes max(currentWave, newWave)
+   and rebroadcasts. Idempotent (multiple players advancing
+   simultaneously all converge to the highest). Monotonic
+   (laggards can't drag the session backwards — verified in
+   smoke test).
+
+5. **`rumble_session_check`** and **`rumble_session_list`**
+   responses include `wave`. Browse UI can show "wave N" per
+   session card so joiners know what they're entering.
+
+---
+
+**Client changes (`rumble_test.html`):**
+
+1. **`session_joined` handler** — if `msg.wave > 1`, defer 100ms
+   (let `Rumble.start` finish wave 1 spawn first), then call
+   `jumpToWave(msg.wave)`.
+
+2. **`continueToNextWave`** — at end, if `currentMode === 'coop'`,
+   send `rumble_wave_advance` with the new wave.
+
+3. **`jumpToWave(targetWave)`** new helper. Clears existing
+   entities/projectiles/walls/loot/traps via `Rumble.clearArena()`,
+   sets `_waveState.currentWave = targetWave`, calls `spawnWave`.
+   Idempotent (no-op if already at/past target).
+
+4. **Browse UI** — session cards show "wave N" inline when wave > 1
+   (hidden for wave 1 = default, not informative).
+
+---
+
+**Engine change (`rumble.js`):**
+
+1. **`Rumble.clearArena()`** new public API. Clears `entities`,
+   `enemyProjectiles`, `droppedBricks`, `grayWalls`, `traps`,
+   `blueBolts`. Player state preserved. Used by `jumpToWave` to
+   wipe the wave-1 spawn before installing the target wave.
+   Cosmetic FX (crit shockwaves, floating text) self-expire.
+
+---
+
+**Per memory rule #14 (UNITY):**
+- ONE authoritative wave field on the server (`sess.wave`).
+- ONE message to advance it (`rumble_wave_advance`).
+- ONE place clients learn about it (the existing
+  session_joined/session_state messages — no new pull request
+  needed).
+- ONE jump helper on the client (`jumpToWave`).
+
+**Per memory rule #28 (unify-at-choke-point):** wave-update
+decision is in ONE function (`rumble_wave_advance` handler).
+All advance paths flow through max-comparison. All read paths
+flow through session_joined/session_state.
+
+**Per memory rule #19 (intuition over menus):** committed to
+Path B without sub-questions about whether to attempt full
+Path A. Path B is the right size for one push.
+
+**Per memory rule #29 (bug-from-duplication):** `clearArena` lives
+in ONE place on the engine API. If we needed it from another
+spot (e.g., game-over reset), we'd call the same function rather
+than re-implement.
+
+---
+
+**Files changed:** `server.js`, `rumble.js`, `rumble_test.html`,
+`NOTES.md`.
+
+UNTOUCHED: rumbleEngine.js, characters.js, players-core.js, other html.
+
+---
+
+**Test focus:**
+
+1. **Solo coop (no joiners) — regression:**
+   - PARTY MODE → HOST → pick class → enter arena
+   - Run normally, advance through waves
+   - No console errors. Server's `sess.wave` should advance with
+     each clear (verify with server log if curious).
+2. **Joiner enters at wave 1 — happy path:**
+   - Device 1: HOST, pick class, do NOT advance past wave 1
+   - Device 2: JOIN code, pick class
+   - Both spawn at wave 1, see each other as allies
+3. **Joiner enters mid-session at wave N — THE NEW BEHAVIOR:**
+   - Device 1: HOST, pick class, clear wave 1 → CONTINUE (now wave 2)
+   - Continue to wave 3, wave 4 (each CONTINUE sends advance)
+   - Device 2: JOIN code → spawns at wave 1 briefly, jumps to wave 4
+   - Both fighting wave 4 (separate entity instances per client)
+4. **Wave alignment via BROWSE list:**
+   - Device 1: HOST, advance to wave 3
+   - Device 2: PARTY MODE → BROWSE → card shows "1 player · wave 3"
+5. **Laggard doesn't get force-advanced:**
+   - Two players in wave 2. Player A clears, advances to wave 3.
+   - Player B is still mid-wave-2. Server reports wave=3 in next
+     session_state. Player B should NOT jump — they keep fighting
+     their wave 2.
+   - jumpToWave is gated by `targetWave > _waveState.currentWave`
+     AND only called from `session_joined`, not from session_state
+     ticks. Laggards stay where they are.
+6. **Race: both advance same time:**
+   - Both clear wave 5 simultaneously, both send wave_advance(6).
+   - Server takes max → 6. Both rebroadcast as wave=6. Idempotent.
+
+---
+
+**Risk surfaces:**
+
+- **Wave-1 spawn → clear cycle on join:** The 100ms delay before
+  jumpToWave means wave 1 entities exist for ~100ms before being
+  wiped. Brief visual artifact. Could be fixed by deferring the
+  initial spawn in coop mode until session_joined arrives, but
+  that adds complexity for a small visual win. Acceptable.
+
+- **`clearArena` doesn't clear all visual FX.** Crit shockwaves,
+  floating text, and particle effects continue to play out their
+  natural lifespan after the wipe. Reads as "the wave 1 spawn
+  echo fades while wave N spawns in." Could be janky on slow
+  devices but should be visually fine.
+
+- **Wave advance via reconnect:** If iOS player drops mid-wave-3
+  and auto-reconnects, they re-issue rumble_session_join with
+  same playerId. Server returns wave=3 (or higher). jumpToWave
+  is idempotent — no-op if already at 3, jumps if behind.
+  Auto-reconnect now naturally handles wave catch-up.
+
+- **Server's session_joined ack** includes wave but is sent
+  BEFORE _broadcastRumbleSession. So the joining client gets
+  joined first (with wave), then the broadcast. Order is correct
+  for a clean catch-up.
+
+- **No wave regression possible.** Server enforces monotonic max.
+  Bad-actor client sending newWave=0 is silently ignored (the
+  `> sess.wave` check rejects it).
+
+---
+
+**Standards audit (rule #17 — push #13 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch — save.sh canonical
+- Rule #14 (UNITY): one wave field, one advance message, one
+  jump helper, one clearArena.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: existing message channels (session_joined,
+    session_state, session_check, session_list) all carry wave
+    in the same shape.
+  - ELEGANCE: ~20 LOC server, ~40 LOC client, ~15 LOC engine.
+    No new schema, no new socket pattern.
+  - EFFICIENCY: `wave` in broadcast adds 8 bytes/tick. Negligible.
+- Rule #19 (intuition over menus): chose Path B without sub-asking.
+  Was right call — push is contained, validates clean.
+- Rule #28 (unify-at-choke-point): wave update is at the
+  rumble_wave_advance handler. Wave reads are at the joined/
+  state ack handlers.
+- Rule #29 (bug-from-duplication): `clearArena` consolidated.
+  jumpToWave reused by session_joined; could be reused later
+  by other scenarios (testing/debug).
+- Rule #15 (handoff hygiene): scanned `_waveState`,
+  `continueToNextWave`, `spawnWave`, server session struct,
+  before adding code. Found right insertion points first try.
+- Rule #11 (data/runtime/UI):
+  - Data: `sess.wave` server-side is data. ✓
+  - Runtime: jumpToWave + advance broadcast is runtime. ✓
+  - UI: browse-card wave label is UI. ✓
+  No misplaced concerns.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

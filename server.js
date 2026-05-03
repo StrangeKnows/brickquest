@@ -667,7 +667,12 @@ function _ensureRumbleSession(sessionId) {
     rumbleSessions[sessionId] = {
       id: sessionId,
       players: {},                  // playerId → { cls, x, y, hp, hpMax, armor, bricks, alive, lastInputTs }
-      // v0.16.57+ adds: entities, walls, projectiles, traps, wave, status
+      // v0.16.71 — wave: highest wave reached by any player in the session.
+      // New joiners start at this wave (skip-ahead). Existing players are
+      // NOT forced to advance — their currentWave is locally driven by
+      // their own clears. Server's wave is "where new players should start."
+      wave: 1,
+      // v0.16.57+ adds: entities, walls, projectiles, traps, status
       startedAt: Date.now(),
       createdAt: Date.now(),        // v0.16.64 — for empty-session TTL cleanup
     };
@@ -682,6 +687,7 @@ function _broadcastRumbleSession(sessionId) {
     type: 'rumble_session_state',
     sessionId: sessionId,
     players: sess.players,
+    wave: sess.wave || 1,           // v0.16.71 — current session wave
     serverTs: Date.now(),
   });
   // Only send to clients registered for this session
@@ -877,6 +883,40 @@ wss.on('connection', (ws, req) => {
   const params = new URL(req.url, 'http://x').searchParams;
   const role = params.get('role') || 'dm';
   clients.set(ws, { role });
+  // v0.16.69 — WS connection diagnostic. Logs IP and user-agent on
+  // every connect so we can see which clients are reaching the
+  // server. Critical for diagnosing platform-specific issues
+  // (e.g., iOS not connecting). User-agent string identifies the
+  // platform without needing a remote debugger.
+  const remoteIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').toString();
+  const ua = (req.headers['user-agent'] || 'unknown').toString();
+  // Compact UA classifier — reads at a glance which platform connected
+  let uaTag = 'other';
+  if (/iPhone|iPad|iPod/i.test(ua)) uaTag = 'iOS';
+  else if (/Android/i.test(ua)) uaTag = 'Android';
+  else if (/Macintosh/i.test(ua)) uaTag = 'macOS';
+  else if (/Windows/i.test(ua)) uaTag = 'Windows';
+  else if (/Linux/i.test(ua)) uaTag = 'Linux';
+  console.log('[WS-CONNECT]',
+    'role=' + role,
+    'ip=' + remoteIp,
+    'ua=' + uaTag,
+    '(' + ua.substring(0, 80) + (ua.length > 80 ? '...' : '') + ')');
+  ws.on('close', (code, reason) => {
+    console.log('[WS-CLOSE]',
+      'role=' + role,
+      'ip=' + remoteIp,
+      'ua=' + uaTag,
+      'code=' + code,
+      'reason=' + (reason ? reason.toString() : ''));
+  });
+  ws.on('error', (err) => {
+    console.log('[WS-ERROR]',
+      'role=' + role,
+      'ip=' + remoteIp,
+      'ua=' + uaTag,
+      'msg=' + (err && err.message));
+  });
   if (G.players[role]) { G.players[role].connected = true; log(G.players[role].name+' connected','connect'); }
   ws.send(JSON.stringify({ type:'state', state:G }));
   broadcastState();
@@ -955,6 +995,7 @@ wss.on('connection', (ws, req) => {
         type: 'rumble_session_joined',
         sessionId, playerId,
         playerCount: Object.keys(sess.players).length,
+        wave: sess.wave || 1,         // v0.16.71 — joiner spawns at this wave
       }));
       _broadcastRumbleSession(sessionId);
       return;
@@ -986,6 +1027,7 @@ wss.on('connection', (ws, req) => {
         exists: !!sess,
         playerCount: sess ? Object.keys(sess.players).length : 0,
         takenClasses: takenClasses,
+        wave: sess ? (sess.wave || 1) : 1,   // v0.16.71 — joiner sees current wave
       }));
       return;
     }
@@ -993,7 +1035,7 @@ wss.on('connection', (ws, req) => {
     // List all active rumble sessions — for the browse-games UI.
     // Returns { type: 'rumble_session_list', sessions: [...] }
     // each session entry: { sessionId, playerCount, takenClasses,
-    //                       createdAt }
+    //                       createdAt, wave }
     // Newest first (sorted by createdAt descending). Empty sessions
     // (HOST created but never joined) are still listed — they're
     // valid join targets until TTL cleans them up.
@@ -1012,6 +1054,7 @@ wss.on('connection', (ws, req) => {
           playerCount: Object.keys(sess.players).length,
           takenClasses: takenClasses,
           createdAt: sess.createdAt || sess.startedAt,
+          wave: sess.wave || 1,           // v0.16.71 — current wave for browse UI
         };
       });
       // Sort newest first so the most recently created session appears
@@ -1027,6 +1070,34 @@ wss.on('connection', (ws, req) => {
     if (type === 'rumble_session_leave') {
       _removePlayerFromRumbleSession(ws, 'explicit');
       ws.send(JSON.stringify({ type: 'rumble_session_left' }));
+      return;
+    }
+
+    // v0.16.71 — Wave advance. Client cleared a wave and is moving
+    // to the next; tell the server so new joiners spawn at the right
+    // wave. Server takes max(currentWave, newWave) — laggard clients
+    // can't drag the session backwards. Idempotent (multiple clients
+    // advancing simultaneously all converge to the highest).
+    //
+    // Existing players are NOT force-advanced when another player
+    // pushes ahead — their currentWave is locally driven. Server's
+    // wave is "where new joiners should start," not "everyone is here."
+    //
+    // Payload: { newWave }
+    if (type === 'rumble_wave_advance') {
+      const reg = rumbleClientSession.get(ws);
+      if (!reg) return;  // not in a session, ignore
+      const sess = rumbleSessions[reg.sessionId];
+      if (!sess) return;
+      const newWave = (P && typeof P.newWave === 'number') ? P.newWave : 0;
+      if (newWave > (sess.wave || 1)) {
+        sess.wave = newWave;
+        // Broadcast so any spectators / dashboards see the update.
+        // Live players don't fast-forward (Path B); they read this
+        // value only when joining. But broadcasting keeps everyone
+        // informed for UI purposes.
+        _broadcastRumbleSession(reg.sessionId);
+      }
       return;
     }
 

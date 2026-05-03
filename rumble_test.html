@@ -2114,6 +2114,43 @@ function continueToNextWave() {
   spawnWave(_waveState.currentWave);
   // Resume sim after the new wave is spawned and ready
   if (Rumble.setExternalPause) Rumble.setExternalPause(false);
+  // v0.16.71 — In coop mode, tell the server we advanced. Server takes
+  // max(serverWave, ourWave) and rebroadcasts. Future joiners will
+  // start at this wave. Existing players are not force-advanced; this
+  // is "where new joiners spawn," not "everyone is here."
+  if (currentMode === 'coop' && _mpWS && _mpWS.readyState === 1) {
+    try {
+      _mpWS.send(JSON.stringify({
+        type: 'rumble_wave_advance',
+        payload: { newWave: _waveState.currentWave },
+      }));
+    } catch (e) { /* socket may have just closed; reconnect will recover */ }
+  }
+}
+
+// v0.16.71 — Jump local wave state to a target wave. Called by the
+// coop joiner when the server reports a session is already at wave N
+// and the joiner should spawn there instead of wave 1. Clears any
+// existing entities (the wave 1 spawn that ran during startTestRumble),
+// sets state, and spawns the target wave.
+//
+// Safe to call multiple times (idempotent on currentWave already
+// matching the target).
+function jumpToWave(targetWave) {
+  if (!_waveState.active) return;
+  if (targetWave <= _waveState.currentWave) return;  // already at or past
+  console.log('[MP] Jumping from wave ' + _waveState.currentWave + ' → ' + targetWave);
+  // Clear existing entities/projectiles/walls/loot. Engine has a
+  // helper for this; if not exposed, we fall back to spawning fresh
+  // wave on top (engine will dedupe naturally as cleared entities
+  // die during the next clear).
+  if (Rumble.clearArena) {
+    Rumble.clearArena();
+  }
+  _waveState.currentWave = targetWave;
+  _waveState.highestReached = Math.max(_waveState.highestReached, targetWave);
+  captureWaveSnapshot();
+  spawnWave(targetWave);
 }
 
 // ── RUN-SUMMARY SCREEN ──────────────────────────────────────────────
@@ -2981,12 +3018,16 @@ function _renderPartyBrowseList(sessions) {
       }).join('');
     }
     var countLabel = sess.playerCount === 1 ? '1 player' : sess.playerCount + ' players';
+    // v0.16.71 — Show wave alongside player count so joiner knows
+    // they'd be entering wave N. Hidden if wave is 1 (default state,
+    // not informative).
+    var waveLabel = (sess.wave && sess.wave > 1) ? ' · wave ' + sess.wave : '';
     // Card uses onclick to call partyJoinByCode with the code already
     // populated. Reuses the join-by-code flow.
     html += '<div class="party-browse-card" onclick="partyJoinByCodeFromBrowse(\'' + sess.sessionId + '\')">'
       +     '<div class="party-browse-code">' + sess.sessionId + '</div>'
       +     '<div class="party-browse-meta">'
-      +       '<div class="party-browse-count">' + countLabel + '</div>'
+      +       '<div class="party-browse-count">' + countLabel + waveLabel + '</div>'
       +       '<div class="party-browse-classes">' + classHtml + '</div>'
       +     '</div>'
       +     '<div class="party-browse-arrow">▸</div>'
@@ -3127,7 +3168,16 @@ function mpConnect(cls, m, onReady) {
         Rumble.setAllyState(allies);
       }
     } else if (msg.type === 'rumble_session_joined') {
-      console.log('[MP] Joined session', msg.sessionId, '— playerCount', msg.playerCount);
+      console.log('[MP] Joined session', msg.sessionId, '— playerCount', msg.playerCount, '— wave', msg.wave);
+      // v0.16.71 — If server reports session is past wave 1, jump to
+      // catch up. New joiners shouldn't start at wave 1 while host is
+      // on wave 5. Existing players (advancing locally) get this same
+      // event but jumpToWave is idempotent — no-op if already at/past.
+      if (typeof msg.wave === 'number' && msg.wave > 1) {
+        // Defer slightly to ensure Rumble.start has fully initialized
+        // and the wave 1 spawn is done before we clear it.
+        setTimeout(function() { jumpToWave(msg.wave); }, 100);
+      }
     } else if (msg.type === 'rumble_error') {
       console.warn('[MP] Server error:', msg.msg);
     }
