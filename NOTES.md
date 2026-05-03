@@ -8450,6 +8450,160 @@ feature interlude):**
 
 ---
 
+### v0.16.64 — Party Mode HOST/JOIN with game codes
+
+> "white overload is great, need a way to join existing games in
+> party mode"
+
+**The problem:** prior to this push, every Party Mode player auto-
+joined the hardcoded session 'sandbox'. No way to start a game
+with specific friends. No way for two pairs of friends to play
+parallel games on the same server. Just one global lobby.
+
+**The fix: Jackbox-style game code system.**
+
+**Server architecture:**
+
+- **Code charset:** 24 letters (A-Z minus I,O for legibility) ×
+  4 positions = 331,776 unique codes. Plenty for hundreds of
+  concurrent sessions; collision retry is fast.
+- **Code generation:** server-side at HOST. Random 4-letter,
+  collision-checked against existing sessions, retry up to 32x
+  before suffix-fallback (would never trigger in practice).
+- **Code normalization:** player input trimmed + uppercased on
+  arrival. Players type "blue" → server treats as "BLUE".
+- **TTL for empty sessions:** 60s. Player clicks HOST, gets a
+  code, walks away → server reaps the phantom session after a
+  minute. Also ensures abandoned codes recycle.
+
+**Three new server messages:**
+
+1. `rumble_session_create` (in) → server generates code, creates
+   session, replies `rumble_session_created { sessionId }`. No
+   player joins yet — separation of concerns.
+2. `rumble_session_check` (in) → server replies
+   `rumble_session_check { sessionId, exists, playerCount }`.
+   Lightweight pre-join validation (can't join a typo'd code).
+3. `rumble_session_join` (existing, modified) — now normalizes
+   sessionId via uppercase/trim. Backward-compat: any non-existent
+   sessionId still creates lazily (preserves direct-URL/scripted
+   tests).
+
+**Client architecture:**
+
+- **Picker UI:** new "PARTY MODE" panel between mode picker and
+  class grid. Shown only when `currentMode === 'coop'`. Default
+  state: HOST + JOIN buttons side by side. JOIN reveals 4-letter
+  input. Once code is chosen, code displays prominently in gold
+  monospace ("YOUR CODE: BLUE") so HOST can read it to friends.
+- **Class grid:** disabled (40% opacity, no pointer events) until
+  session is confirmed via HOST or JOIN. Forces the order:
+  pick session → pick class → start. Defensive check in
+  startTestRumble too.
+- **Lobby socket:** one-shot WebSocket for HOST/JOIN handshake.
+  Opens, performs request, closes. Gameplay socket opens fresh
+  in mpConnect when class is picked. Keeps lifecycles clean.
+- **Input UX:** code input auto-uppercases via oninput, accepts
+  Enter key to submit, has visual feedback for invalid codes
+  ("No game with code 'XXXX' — check spelling").
+
+**Per-state CSS:** new `.party-panel`, `.party-btn`, `.party-code-display`
+classes. Purple/violet color scheme distinguishes from gold mode
+cards. Code value rendered in gold monospace at 36px with subtle
+glow shadow.
+
+**Why mode string stayed `'coop'` despite "Party Mode" UI label:**
+deliberate choice from v0.16.63 (memory rule #29 — bug-from-
+duplication). All multiplayer code paths still use `currentMode === 'coop'`,
+`isCoop`, etc. Pure cosmetic rename at the player layer; internal
+canonical name unchanged.
+
+---
+
+**Files changed:** `server.js`, `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumble.js, rumbleEngine.js, characters.js,
+players-core.js, other html.
+
+---
+
+**Test focus:**
+
+1. **HOST flow:**
+   - Mode picker → click PARTY MODE
+   - Party panel appears, default state shows HOST + JOIN buttons
+   - Click HOST → "Creating game..." → code appears in gold
+   - Code is 4 uppercase letters, no I or O
+   - Status: "Game created! Pick a class to start."
+   - Class grid becomes interactive
+   - Pick class → enters arena, joins the new session
+2. **JOIN flow:**
+   - Open second device/tab
+   - Mode picker → PARTY MODE → JOIN
+   - Type the 4-letter code from device 1
+   - Click JOIN (or press Enter)
+   - Status: "Joined! ... (1 player waiting)"
+   - Pick class → enters arena, sees device 1's player
+3. **JOIN with wrong code:** status shows "No game with code XXXX"
+4. **JOIN with code < 4 letters:** "Code must be 4 letters" error
+5. **HOST waits 60+ seconds without joining:** server cleans up;
+   if the host then tries to start, the session no longer exists
+   on server — would create new on first play (lazy create still
+   works as fallback). Acceptable corner case.
+6. **Solo modes** (sandbox/spec/waves): party panel HIDDEN. No
+   regression.
+7. **Production rumble** (board game): unchanged.
+
+---
+
+**Risk surfaces:**
+
+- Lobby socket lifecycle: opens, sends, closes. If onmessage
+  takes too long, might not close cleanly. Try/catch on close
+  guards against errors.
+- 60s empty TTL: tight enough to clean up, generous enough that
+  player typing on phone doesn't get bumped. If feedback says
+  too short/long, easy tune at top of server.js.
+- Code collisions are POSSIBLE but unlikely (24^4 = 331k space).
+  Generator retries 32x; in practice n=1 is enough.
+- Two sockets per coop session (lobby + gameplay): negligible
+  resource cost. Lobby closes within ~100ms of handshake.
+- `_normalizeRumbleCode` is permissive (any case, any whitespace
+  trim). If user types "ABC D" it becomes "ABCD" — could be wrong
+  if they meant "ABC D" as separate code. Rare edge; ignore.
+
+---
+
+**Standards audit (rule #17 — push #5 of S016 entity authority arc,
+feature continuation):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #11 (data/runtime/UI):
+  - Data: code charset constants in server.js
+  - Runtime: code generation, validation, lookup in server.js
+  - UI: party-panel HTML + CSS + JS in rumble_test.html
+- Rule #14 (UNITY): single canonical sessionId throughout (server
+  + client both treat code as the session key). No parallel
+  "code → id" mapping; the code IS the id.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: one code system, one normalization rule, one
+    create-then-join two-step flow.
+  - ELEGANCE: ~80 LOC server (3 handlers + helpers) + ~110 LOC
+    client (UI+flow). Modular; each piece has one job.
+  - EFFICIENCY: code charset is 24, length 4. 331k codes,
+    O(1) lookup. Lobby socket is one-shot; no persistent overhead.
+- Rule #19 (intuition over menus): committed to the design
+  (Jackbox-style game codes, HOST/JOIN buttons, 4-letter input)
+  rather than asking "should I do option A or B" mid-build.
+- Rule #28 (unify-at-choke-point): _normalizeRumbleCode is THE
+  code parser. Used by both join and check. No duplicate
+  normalization logic.
+- Rule #29 (bug-from-duplication): code IS the session id (no
+  separate mapping table). Eliminates "did I update the code-to-
+  id map?" risk.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

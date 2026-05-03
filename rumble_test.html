@@ -125,6 +125,108 @@
     font-style:italic;
   }
 
+  /* ── PARTY MODE PANEL (v0.16.64) ────────────────────────── */
+  .party-panel {
+    width:100%; max-width:560px;
+    margin:0 auto 16px auto;
+    padding:12px 14px;
+    background:linear-gradient(180deg, #1a1230, #0d0820);
+    border:1px solid #3a2a55;
+    border-radius:10px;
+  }
+  .party-row {
+    display:flex; gap:10px; align-items:center;
+    margin-top:8px;
+  }
+  .party-btn {
+    flex:1;
+    padding:14px 10px;
+    background:linear-gradient(180deg, #221634, #15102a);
+    border:1px solid #4a3475;
+    border-radius:8px;
+    color:#e8e0ff;
+    cursor:pointer;
+    text-align:center;
+    transition:transform .12s ease, border-color .15s ease, box-shadow .15s ease;
+    font-family:ui-sans-serif, system-ui, sans-serif;
+  }
+  .party-btn:hover {
+    transform:translateY(-1px);
+    border-color:#7755bb;
+    box-shadow:0 0 12px rgba(120,80,200,.3);
+  }
+  .party-btn-icon { font-size:24px; }
+  .party-btn-label {
+    font-size:14px; font-weight:600; letter-spacing:.05em;
+    margin-top:6px;
+  }
+  .party-btn-sub {
+    font-size:9.5px; color:#a090c0;
+    margin-top:4px; font-style:italic;
+  }
+  .party-btn-go, .party-btn-cancel {
+    padding:14px 18px;
+    background:#5544aa; border:1px solid #7755cc;
+    border-radius:8px; color:#fff;
+    cursor:pointer; font-weight:600;
+    font-size:14px;
+    font-family:ui-sans-serif, system-ui, sans-serif;
+  }
+  .party-btn-cancel {
+    background:#332244; border-color:#554466;
+    padding:14px 12px;
+  }
+  .party-btn-go:hover { background:#6655bb; }
+  .party-btn-cancel:hover { background:#443355; }
+  #party-code-input {
+    flex:1;
+    padding:14px 12px;
+    background:#0d0820; border:1px solid #4a3475;
+    border-radius:8px;
+    color:#FFD700; font-size:24px; font-weight:700;
+    text-align:center; letter-spacing:.4em;
+    font-family:ui-monospace, monospace;
+    text-transform:uppercase;
+  }
+  #party-code-input:focus {
+    outline:none;
+    border-color:#7755cc;
+    box-shadow:0 0 12px rgba(120,80,200,.4);
+  }
+  .party-status {
+    margin-top:8px; min-height:14px;
+    font-size:11px; color:#a090c0;
+    text-align:center;
+    font-style:italic;
+  }
+  .party-status.error { color:#ff7755; }
+  .party-status.success { color:#7AE070; }
+  .party-code-display {
+    margin-top:10px;
+    padding:14px;
+    background:linear-gradient(180deg, #2a1a44, #15102a);
+    border:1px solid #6644aa;
+    border-radius:8px;
+    text-align:center;
+  }
+  .party-code-label {
+    font-size:10px; color:#9080b0;
+    letter-spacing:.15em;
+    font-weight:600;
+  }
+  .party-code-value {
+    font-size:36px; font-weight:700;
+    color:#FFD700;
+    font-family:ui-monospace, monospace;
+    letter-spacing:.3em;
+    margin:6px 0 4px;
+    text-shadow:0 0 16px rgba(255,215,0,.4);
+  }
+  .party-code-hint {
+    font-size:11px; color:#a090c0;
+    font-style:italic;
+  }
+
   /* ── CLASS CARDS ───────────────────────────────────────── */
   .class-grid {
     display:grid;
@@ -861,6 +963,41 @@
     </div>
   </div>
 
+  <!-- v0.16.64 — Party Mode panel: HOST/JOIN code flow. Shown only
+       when mode === 'coop'. Default state shows HOST and JOIN
+       buttons. JOIN reveals a 4-letter input. Once a code is set
+       (via HOST or successful JOIN), display the code prominently
+       and proceed to class selection.  -->
+  <div class="party-panel" id="party-panel" style="display:none;">
+    <div class="section-head">PARTY MODE</div>
+    <div id="party-default" class="party-row">
+      <button class="party-btn party-host" onclick="partyHost()">
+        <div class="party-btn-icon">🎲</div>
+        <div class="party-btn-label">HOST GAME</div>
+        <div class="party-btn-sub">Get a code, share with friends</div>
+      </button>
+      <button class="party-btn party-join" onclick="partyShowJoin()">
+        <div class="party-btn-icon">🔑</div>
+        <div class="party-btn-label">JOIN GAME</div>
+        <div class="party-btn-sub">Enter a code from a friend</div>
+      </button>
+    </div>
+    <div id="party-join-form" class="party-row" style="display:none;">
+      <input type="text" id="party-code-input" maxlength="4" placeholder="CODE"
+             autocomplete="off" autocapitalize="characters" spellcheck="false"
+             oninput="this.value=this.value.toUpperCase().replace(/[^A-Z]/g,'')"
+             onkeydown="if(event.key==='Enter')partyJoinByCode()" />
+      <button class="party-btn-go" onclick="partyJoinByCode()">JOIN</button>
+      <button class="party-btn-cancel" onclick="partyCancelJoin()">×</button>
+    </div>
+    <div id="party-status" class="party-status"></div>
+    <div id="party-code-display" class="party-code-display" style="display:none;">
+      <div class="party-code-label">YOUR CODE</div>
+      <div class="party-code-value" id="party-code-value">XXXX</div>
+      <div class="party-code-hint">Share this with your friends!</div>
+    </div>
+  </div>
+
   <div class="section-head">CHOOSE CLASS</div>
   <div class="class-grid" id="class-grid"></div>
 
@@ -989,6 +1126,14 @@ function setMode(m) {
   document.getElementById('mode-waves').classList.toggle('active', m === 'waves');
   var coopCard = document.getElementById('mode-coop');
   if (coopCard) coopCard.classList.toggle('active', m === 'coop');
+  // v0.16.64 — Party Mode panel visibility tracks coop selection.
+  // When entering coop, reset the panel state (show HOST/JOIN buttons,
+  // clear any prior code). When leaving coop, hide the panel.
+  var partyPanel = document.getElementById('party-panel');
+  if (partyPanel) {
+    partyPanel.style.display = (m === 'coop') ? 'block' : 'none';
+    if (m === 'coop') partyResetUI();
+  }
   renderClassGrid();
 }
 
@@ -2309,13 +2454,156 @@ Rumble.init({
 // ═══════════════════════════════════════════════════════════════════
 
 var _mpWS = null;
-var _mpSessionId = 'sandbox';   // single hardcoded session for v0.16.56
+var _mpSessionId = null;         // v0.16.64 — set by partyHost/partyJoinByCode
+var _mpSessionConfirmed = false; // true once server confirmed session via HOST or JOIN check
 var _mpPlayerId = null;          // assigned at join (random per-tab)
 var _mpPushInterval = null;      // setInterval handle for state push
 var _mpAllyState = [];           // last-received ally array (excludes self)
 
 function _mpGenPlayerId() {
   return 'p_' + Math.random().toString(36).slice(2, 10);
+}
+
+// ─── Party Mode lobby (v0.16.64) ───────────────────────────────────
+// HOST / JOIN flow uses a one-shot lobby websocket — opens, performs
+// handshake, closes. Gameplay socket opens fresh in mpConnect when
+// player picks class. Keeps session-discovery concerns separate from
+// gameplay state push.
+
+function partyResetUI() {
+  // Show default state (HOST + JOIN buttons), clear any code/status.
+  var partyDefault = document.getElementById('party-default');
+  var partyJoinForm = document.getElementById('party-join-form');
+  var partyStatus = document.getElementById('party-status');
+  var partyCodeDisplay = document.getElementById('party-code-display');
+  var partyCodeInput = document.getElementById('party-code-input');
+  if (partyDefault) partyDefault.style.display = 'flex';
+  if (partyJoinForm) partyJoinForm.style.display = 'none';
+  if (partyStatus) { partyStatus.textContent = ''; partyStatus.className = 'party-status'; }
+  if (partyCodeDisplay) partyCodeDisplay.style.display = 'none';
+  if (partyCodeInput) partyCodeInput.value = '';
+  _mpSessionId = null;
+  _mpSessionConfirmed = false;
+  // Disable class grid until session is set
+  _refreshClassGridForParty();
+}
+
+function _refreshClassGridForParty() {
+  // Class grid clickability depends on session state in coop mode.
+  // Other modes: grid always clickable.
+  var grid = document.getElementById('class-grid');
+  if (!grid) return;
+  if (currentMode === 'coop' && !_mpSessionConfirmed) {
+    grid.style.opacity = '0.4';
+    grid.style.pointerEvents = 'none';
+  } else {
+    grid.style.opacity = '';
+    grid.style.pointerEvents = '';
+  }
+}
+
+function _setPartyStatus(msg, kind) {
+  var el = document.getElementById('party-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'party-status' + (kind ? ' ' + kind : '');
+}
+
+// Open a one-shot websocket for the lobby handshake. Resolves with
+// the open socket so caller can send their message and handle reply.
+function _partyOpenLobbySocket(onMessage, onError) {
+  var host = location.hostname;
+  var port = location.port || 8080;
+  var ws = new WebSocket('ws://' + host + ':' + port + '?role=rumble_lobby');
+  ws.onmessage = function(evt) {
+    var msg; try { msg = JSON.parse(evt.data); } catch (e) { return; }
+    onMessage(msg, ws);
+  };
+  ws.onerror = function() {
+    if (onError) onError();
+  };
+  return ws;
+}
+
+function partyHost() {
+  _setPartyStatus('Creating game...', '');
+  var ws = _partyOpenLobbySocket(function(msg, sock) {
+    if (msg.type === 'rumble_session_created') {
+      _mpSessionId = msg.sessionId;
+      _mpSessionConfirmed = true;
+      // Show code prominently
+      var partyDefault = document.getElementById('party-default');
+      var partyCodeDisplay = document.getElementById('party-code-display');
+      var partyCodeValue = document.getElementById('party-code-value');
+      if (partyDefault) partyDefault.style.display = 'none';
+      if (partyCodeDisplay) partyCodeDisplay.style.display = 'block';
+      if (partyCodeValue) partyCodeValue.textContent = msg.sessionId;
+      _setPartyStatus('Game created! Pick a class to start.', 'success');
+      _refreshClassGridForParty();
+      // Done with lobby socket; gameplay socket opens at startTestRumble
+      try { sock.close(); } catch (e) {}
+    }
+  }, function() {
+    _setPartyStatus('Connection failed. Server unreachable.', 'error');
+  });
+  ws.onopen = function() {
+    ws.send(JSON.stringify({ type: 'rumble_session_create', payload: {} }));
+  };
+}
+
+function partyShowJoin() {
+  var partyDefault = document.getElementById('party-default');
+  var partyJoinForm = document.getElementById('party-join-form');
+  if (partyDefault) partyDefault.style.display = 'none';
+  if (partyJoinForm) partyJoinForm.style.display = 'flex';
+  _setPartyStatus('Enter the 4-letter code', '');
+  // Focus the input so player can type immediately
+  var input = document.getElementById('party-code-input');
+  if (input) { input.value = ''; input.focus(); }
+}
+
+function partyCancelJoin() {
+  var partyDefault = document.getElementById('party-default');
+  var partyJoinForm = document.getElementById('party-join-form');
+  if (partyDefault) partyDefault.style.display = 'flex';
+  if (partyJoinForm) partyJoinForm.style.display = 'none';
+  _setPartyStatus('', '');
+}
+
+function partyJoinByCode() {
+  var input = document.getElementById('party-code-input');
+  if (!input) return;
+  var code = (input.value || '').trim().toUpperCase();
+  if (code.length !== 4) {
+    _setPartyStatus('Code must be 4 letters', 'error');
+    return;
+  }
+  _setPartyStatus('Checking...', '');
+  var ws = _partyOpenLobbySocket(function(msg, sock) {
+    if (msg.type === 'rumble_session_check') {
+      if (msg.exists) {
+        _mpSessionId = msg.sessionId;
+        _mpSessionConfirmed = true;
+        // Show code prominently (so joiner also sees what they joined)
+        var partyJoinForm = document.getElementById('party-join-form');
+        var partyCodeDisplay = document.getElementById('party-code-display');
+        var partyCodeValue = document.getElementById('party-code-value');
+        if (partyJoinForm) partyJoinForm.style.display = 'none';
+        if (partyCodeDisplay) partyCodeDisplay.style.display = 'block';
+        if (partyCodeValue) partyCodeValue.textContent = msg.sessionId;
+        _setPartyStatus('Joined! Pick a class to start. (' + msg.playerCount + ' player' + (msg.playerCount === 1 ? '' : 's') + ' waiting)', 'success');
+        _refreshClassGridForParty();
+      } else {
+        _setPartyStatus('No game with code "' + code + '" — check spelling', 'error');
+      }
+      try { sock.close(); } catch (e) {}
+    }
+  }, function() {
+    _setPartyStatus('Connection failed. Server unreachable.', 'error');
+  });
+  ws.onopen = function() {
+    ws.send(JSON.stringify({ type: 'rumble_session_check', payload: { sessionId: code } }));
+  };
 }
 
 function mpConnect(cls, m, onReady) {
@@ -2450,6 +2738,13 @@ window.addEventListener('beforeunload', function() { mpDisconnect(); });
 // ═══════════════════════════════════════════════════════════════════
 
 function startTestRumble(cls) {
+  // v0.16.64 — In coop mode, require session to be set (HOST/JOIN
+  // completed) before starting. Class grid is normally disabled
+  // until session is set, but defensive check here too.
+  if (currentMode === 'coop' && !_mpSessionConfirmed) {
+    _setPartyStatus('Pick HOST or JOIN first', 'error');
+    return;
+  }
   document.getElementById('overlay').style.display = 'none';
   document.body.classList.remove('picker-active');
   tryFullscreen();

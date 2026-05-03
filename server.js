@@ -608,17 +608,59 @@ const httpServer = http.createServer((req, res) => {
 const RUMBLE_TICK_HZ = 20;
 const RUMBLE_TICK_MS = 1000 / RUMBLE_TICK_HZ;
 const RUMBLE_PLAYER_TIMEOUT_MS = 5000;  // drop player if no state update in 5s
+const RUMBLE_EMPTY_SESSION_TTL_MS = 60000;  // drop session if empty for >60s (HOST never joined)
 
 // Map from sessionId → session state. Multiple sessions allowed for
-// future matchmaking; v0.16.56 expects a single 'sandbox' session.
-// NOT stored on G — sessions are ephemeral, never serialized to save
-// file, never sent in broadcastState messages. Lives at module scope.
+// future matchmaking. NOT stored on G — sessions are ephemeral,
+// never serialized to save file, never sent in broadcastState
+// messages. Lives at module scope.
+//
+// v0.16.64 — sessionId is now a 4-letter code generated at create
+// time (e.g. 'BLUE', 'STAR'). Players HOST to create a fresh
+// session+code, or JOIN with an existing code to enter another
+// player's session. The legacy 'sandbox' sessionId still works
+// (any code works — server just creates the session lazily on
+// first join), preserving backward compatibility for direct
+// session URLs / scripted tests.
 let rumbleSessions = {};
 
 // Reverse lookup: ws → { sessionId, playerId } so we can clean up on
 // disconnect without scanning all sessions. Set on rumble_session_join,
 // cleared on close/leave.
 const rumbleClientSession = new Map();
+
+// Session code charset — letters only, ambiguous chars (I/O) removed
+// for legibility (player typing on small phone screens). 24 letters
+// × 4 positions = 331,776 possible codes. Plenty even with hundreds
+// of concurrent sessions; collision retry is fast.
+const RUMBLE_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const RUMBLE_CODE_LENGTH = 4;
+
+function _generateRumbleCode() {
+  // Generate a code that doesn't collide with an active session.
+  // Up to 32 attempts before giving up (would mean 99%+ of code space
+  // is in use — unrealistic but bounded).
+  for (let attempt = 0; attempt < 32; attempt++) {
+    let code = '';
+    for (let i = 0; i < RUMBLE_CODE_LENGTH; i++) {
+      code += RUMBLE_CODE_CHARS[Math.floor(Math.random() * RUMBLE_CODE_CHARS.length)];
+    }
+    if (!rumbleSessions[code]) return code;
+  }
+  // Fallback: include a digit suffix to break collision. Should
+  // never trigger in practice.
+  return RUMBLE_CODE_CHARS[0] + RUMBLE_CODE_CHARS[1] +
+         Math.floor(Math.random() * 10).toString() +
+         Math.floor(Math.random() * 10).toString();
+}
+
+function _normalizeRumbleCode(s) {
+  // Player input: trim whitespace, uppercase. We don't strip
+  // ambiguous chars on input (let the lookup fail and surface
+  // a clear error) so player can't accidentally find a session
+  // they didn't type correctly.
+  return (s || '').toString().trim().toUpperCase();
+}
 
 function _ensureRumbleSession(sessionId) {
   if (!rumbleSessions[sessionId]) {
@@ -627,6 +669,7 @@ function _ensureRumbleSession(sessionId) {
       players: {},                  // playerId → { cls, x, y, hp, hpMax, armor, bricks, alive, lastInputTs }
       // v0.16.57+ adds: entities, walls, projectiles, traps, wave, status
       startedAt: Date.now(),
+      createdAt: Date.now(),        // v0.16.64 — for empty-session TTL cleanup
     };
   }
   return rumbleSessions[sessionId];
@@ -691,7 +734,11 @@ setInterval(() => {
       }
     });
     _broadcastRumbleSession(sessionIds[i]);
-    if (dirty && Object.keys(sess.players).length === 0) {
+    // Cleanup conditions for the session itself:
+    //   - All players dropped this tick AND session is empty → cleanup
+    //   - Session was empty for too long (HOST never joined) → cleanup
+    const isEmpty = Object.keys(sess.players).length === 0;
+    if (isEmpty && (dirty || (now - (sess.createdAt || sess.startedAt)) > RUMBLE_EMPTY_SESSION_TTL_MS)) {
       delete rumbleSessions[sessionIds[i]];
     }
   }
@@ -847,6 +894,22 @@ wss.on('connection', (ws, req) => {
     // independent from G.rumbleBattle.
     // ═══════════════════════════════════════════════════════════════
 
+    if (type === 'rumble_session_create') {
+      // v0.16.64 — Player clicked HOST. Server generates a fresh
+      // 4-letter code and creates the session. Player still has
+      // to send rumble_session_join with the new code to actually
+      // join (two-step keeps create/join concerns separated).
+      // Payload: {} (no fields needed — server generates code)
+      // Returns: { type: 'rumble_session_created', sessionId: 'XXXX' }
+      const code = _generateRumbleCode();
+      _ensureRumbleSession(code);  // pre-create so join can find it
+      ws.send(JSON.stringify({
+        type: 'rumble_session_created',
+        sessionId: code,
+      }));
+      return;
+    }
+
     if (type === 'rumble_session_join') {
       // Payload: { sessionId, playerId, cls, hp, hpMax, armor, bricks, nx, ny }
       // Client picked a class on rumble_test.html and is entering the
@@ -854,11 +917,21 @@ wss.on('connection', (ws, req) => {
       // updated session to all connected clients in that session.
       // v0.16.58: position uses nx/ny (0-1 normalized). Each client
       // has different canvas size, so raw x/y don't translate.
-      const { sessionId, playerId, cls, hp, hpMax, armor, bricks, nx, ny } = P || {};
+      // v0.16.64: sessionId may be a player-typed code; server
+      // normalizes (uppercase, trim) and validates.
+      const { playerId, cls, hp, hpMax, armor, bricks, nx, ny } = P || {};
+      const sessionId = _normalizeRumbleCode((P || {}).sessionId);
       if (!sessionId || !playerId) {
         ws.send(JSON.stringify({ type:'rumble_error', msg:'sessionId + playerId required' }));
         return;
       }
+      // v0.16.64 — JOIN flow validates the code points to a session
+      // that already exists (created via HOST). The legacy 'sandbox'
+      // and any direct sessionId still work via lazy create — that's
+      // backward compatibility for scripted tests and direct URLs.
+      // Frontend's "JOIN by code" path will reject unknown codes
+      // BEFORE sending the join message, so this lazy-create only
+      // fires for direct/scripted entry.
       // If this socket was already in a session, leave it first.
       if (rumbleClientSession.has(ws)) {
         _removePlayerFromRumbleSession(ws, 'rejoin');
@@ -884,6 +957,23 @@ wss.on('connection', (ws, req) => {
         playerCount: Object.keys(sess.players).length,
       }));
       _broadcastRumbleSession(sessionId);
+      return;
+    }
+
+    // v0.16.64 — Code validation lookup (no join, just check).
+    // Frontend uses this to verify a code BEFORE asking the player
+    // for their class pick. Lighter than the full join handshake.
+    // Payload: { sessionId }
+    // Returns: { type: 'rumble_session_check', sessionId, exists, playerCount }
+    if (type === 'rumble_session_check') {
+      const sessionId = _normalizeRumbleCode((P || {}).sessionId);
+      const sess = sessionId ? rumbleSessions[sessionId] : null;
+      ws.send(JSON.stringify({
+        type: 'rumble_session_check',
+        sessionId: sessionId,
+        exists: !!sess,
+        playerCount: sess ? Object.keys(sess.players).length : 0,
+      }));
       return;
     }
 
