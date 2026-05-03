@@ -9093,6 +9093,133 @@ diagnostic push):**
 
 ---
 
+### v0.16.68 — Blue retrieve: context-aware tap (real fix)
+
+> Diagnostic data from v0.16.67 (released as v0.16.66 due to
+> version-stamp drift):
+> ```
+> [BQ-BLUE] held=0.07s isDrag=false dropDist=0px outOfRumble=true
+>   droppedBricks=3 → short-press TAP → homing bolt
+> ```
+> Every retrieve attempt: isDrag=false, outOfRumble=true,
+> dropDist=0px. The drag-onto-self gesture was being annihilated
+> by the `_outOfRumble` branch at line 2910-2918, which forces
+> `isDrag = false` and slams `canvasX/Y` to player position
+> whenever release lands outside the rumble bounds — which on
+> mobile is essentially always (brick bar height + HUD margins
+> consume most of the visual canvas).
+
+**The real fix: change the trigger.**
+
+Drag-onto-self was a fragile gesture that:
+1. Required `isDrag=true` (drag distance ≥20px)
+2. Required `outOfRumble=false` (release inside playable area)
+3. Required `dropDist ≤ 80px` (near player)
+
+All three conditions had to hold. On mobile, `outOfRumble`
+killed it before the user even released their finger.
+
+**v0.16.68 trigger: TAP blue when loot is on ground.**
+
+```
+if (droppedBricks.length > 0) {
+  doBlueRetrieve();    // priority
+} else {
+  startBlueBolt(null); // legacy homing bolt
+}
+```
+
+Blue tap becomes context-aware. The cast adapts to the
+situation:
+- **Combat** (no loot) → tap fires homing bolt (legacy)
+- **Post-combat / loot drop** (loot exists) → tap retrieves
+- **Drag-far** → AoE bolt at drop point (unchanged)
+- **Hold + release** → overload at drop or player (unchanged)
+
+This is unambiguous, discoverable, and bounds-fragility-proof.
+No gesture training. Player taps blue when they see loot, and
+it just works.
+
+**Trade-off:** can't fire a homing bolt while loot is on the
+ground. Acceptable because:
+- Combat usually clears before loot piles up
+- Drag-bolt is right there if you need to attack a specific spot
+- Retrieve is the BETTER move post-fight — nobody's tapping
+  blue at homing-bolt-an-empty-arena anyway
+
+**Per memory rule #19 (intuition over menus):** committed to the
+trigger change rather than asking "should I keep drag or use
+tap?" Diagnostic data confirmed drag was structurally broken on
+mobile. Switching to a robust trigger is the right call.
+
+**Per memory rule #28 (unify-at-choke-point):** dispatch is one
+decision tree (drag → AoE bolt; tap → retrieve OR bolt based on
+context). Single choke for blue cast.
+
+**Per memory rule #6 (diagnostic-first):** VINDICATED. v0.16.65
+attempted to fix retrieve by loosening the threshold to 80px —
+which would NEVER have worked because the threshold check never
+ran. The diagnostic exposed the upstream `_outOfRumble`
+mutilation. Without diagnostic, I'd have made another speculative
+fix and shipped another broken version.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: rumbleEngine.js, server.js, html files, characters.js.
+
+---
+
+**Test focus:**
+
+1. **Diagnostic logs removed** — console should be clean of
+   `[BQ-BLUE]` spam.
+2. **Tap blue with loot on ground:**
+   - Kill an entity, loot drops
+   - Tap blue brick (don't drag, don't hold)
+   - Items teleport with reverse-rain particle streams
+   - Brick bar updates with retrieved bricks
+3. **Tap blue with no loot:**
+   - Empty arena, tap blue → homing bolt fires at nearest entity
+4. **Drag blue far:**
+   - Drag onto enemy → AoE bolt at drop point
+5. **Hold blue (overload):**
+   - Hold ≥0.5s → overload at drop point or player
+
+If retrieve doesn't fire when loot is dropped — `droppedBricks`
+might not be the right collection name in some context, or the
+items haven't fully spawned (popping → idle transition) before
+the tap. Add diagnostic if needed (don't ship without verifying
+this time).
+
+---
+
+**Standards audit (rule #17 — push #9 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch (label drift acknowledged —
+  save.sh is canonical going forward)
+- Rule #6 (diagnostic-first): VINDICATED. Diagnostic in v0.16.66
+  revealed the real bug location; v0.16.65 speculative fix would
+  have stayed broken indefinitely without it.
+- Rule #14 (UNITY): one dispatch tree for blue. Tap path now
+  branches on loot context, not on gesture geometry.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: tap = "smart cast" with one decision (loot present?)
+  - ELEGANCE: 4-line if/else replaces the broken 11-line
+    distance-check branch. Removed bug surface.
+  - EFFICIENCY: zero overhead — single array length check.
+- Rule #19 (intuition over menus): didn't ask "should we keep
+  drag-onto-self or switch to tap?" Diagnostic data made the
+  answer obvious.
+- Rule #28 (unify-at-choke-point): dispatch is the choke; tap
+  branch makes context decision in one place.
+- Rule #29 (bug-from-duplication): trigger is now in ONE place
+  (the tap branch). Drag-onto-self check (which would have been
+  parallel to tap-if-loot) is gone. No drift surface.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

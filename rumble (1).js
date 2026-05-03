@@ -1,0 +1,13170 @@
+// ═══════════════════════════════════════════════════════════════════════
+// rumble.js — BrickQuest real-time combat module
+// ═══════════════════════════════════════════════════════════════════════
+// Public API (exposed as window.Rumble):
+//
+//   Lifecycle:
+//     init(options)         options: { onEvent: fn(type,data) }
+//                           Hooks up canvas, input listeners, emits 'ready'.
+//     teardown()            Cleans up everything. Safe to call multiple times.
+//
+//   Control:
+//     start(config)         config: { cls, hp, hpMax, armor, bricks }
+//                           Begins a battle; emits 'start', then 'tick'/'victory'/'defeat'/etc.
+//     setPauseState(paused) true = pause, false = resume
+//     forceEnd(reason)      reason: 'quit' | 'timeout' | 'dm-reset' | custom
+//
+//   Queries:
+//     isActive()            boolean; is a battle currently running?
+//     getState()            snapshot: { playerHp, playerArmor, playerBricks,
+//                                       enemyHp, enemyHpMax, elapsed, status }
+//     getConfig()           returns a copy of the last config passed to start()
+//     getDebugInfo()        verbose internal state (particle counts, etc.)
+//
+//   DM tools:
+//     injectBricks(delta)   delta: { red: 2, gray: -1, ... } — adjusts player bricks
+//     setPlayerHP(n)        clamp to [0, hpMax]
+//     setEnemyHP(n)         clamp to [0, enemy.hpMax] — targets first living entity
+//
+// Events emitted via options.onEvent(type, data):
+//   'ready'    — module initialized
+//   'start'    — battle began             data: { cls }
+//   'tick'     — periodic state snapshot  data: getState()
+//   'pause'    'resume'
+//   'playerHit'  data: { amount }
+//   'enemyHit'   data: { amount }
+//   'playerDown' 'enemyKilled'
+//   'victory' 'defeat' 'timeout' 'quit'   data: { reason? }
+//   'end'      — always fires after 'victory'/'defeat'/'timeout'/'quit'. data: { reason }
+//
+// DOM requirements on the host page:
+//   Required:
+//     <canvas id="rumble-canvas"></canvas>
+//     <div id="rumble-brick-bar-left"></div>
+//     <div id="rumble-brick-bar-right"></div>
+//   Optional (only rendered if present):
+//     <div id="rumble-hud">…<span id="rumble-timer-display"></span>…</div>
+//     <div id="rumble-debug"></div>
+//
+// Legacy: if #rumble-brick-bar exists (single container), all 9 bricks render there.
+//
+// CSS:
+//   <link rel="stylesheet" href="rumble.css">
+// ═══════════════════════════════════════════════════════════════════════
+
+(function() {
+'use strict';
+
+// ═══════════════════════════════════════════════════
+// CONSTANTS & CONFIG
+// ═══════════════════════════════════════════════════
+const RUMBLE_DURATION = 30; // seconds (30 for real game, 5 placeholder)
+
+// Combat & Economy v1 spec. See NOTES.md for full design doc.
+const BRICK_ECONOMY = {
+  refreshRates: { signature: 3.0, secondary: 5.0, baseline: 10.0 },
+};
+
+// Class-color affinity tier. Returns 'signature' | 'secondary' | 'baseline'.
+// Canonical data lives in characters.js (CLASS_AFFINITY table).
+function brickTier(cls, color) {
+  return window.brickTier ? window.brickTier(cls, color) : 'baseline';
+}
+
+// ── COMBAT FORMULA WRAPPERS ─────────────────────────────────────────────
+// These functions are THIN WRAPPERS over characters.js (the canonical
+// source). They preserve the 1-argument call signatures used throughout
+// rumble (affinityMult('white'), tapScaleMult('white'), etc.) by reading
+// player.cls and player.brickMax internally. The actual formulas live
+// in characters.js; if values need tuning, edit there, not here.
+function affinityMult(color) {
+  if (!player) return 1.0;
+  return window.affinityMult(player.cls, color);
+}
+
+function tapScaleMult(color) {
+  if (!player || !player.brickMax) return 1.0;
+  var owned = player.brickMax[color] || 0;
+  return window.tapScaleMult(player.cls, color, owned);
+}
+
+// ── EFFECTIVE-AT FOR PLAYER ─────────────────────────────────────────────
+// Convenience wrapper that closes over the active player. Single call
+// site shape `_fx('red', count)` returns the unified-pipeline output
+// (damage, radius, duration, charges, etc.) for the player's class +
+// inventory. Every overload fire site and preview drawer goes through
+// this — preview = payload guaranteed because they read the same call.
+//
+// Returns `null` if there's no active player (e.g. drawing a leftover
+// reticle during teardown). Callers should null-check.
+function _fx(color, tier) {
+  if (!player) return null;
+  var owned = (player.brickMax && player.brickMax[color]) || 0;
+  return window.effectiveAt(color, tier, player.cls, owned);
+}
+
+// Crit chance: base 10% + 8% per extra brick in overload, +/- affinity bonus.
+// Tap is treated as count=1 (just the base + affinity).
+//   signature: +5%, secondary: 0%, baseline: -3%
+// Clamped 0-0.99 so there's always a chance to miss (never guaranteed).
+function critChance(color, count) {
+  if (!player) return 0;
+  var n = count || 1;
+  var base = 0.10 + 0.08 * Math.max(0, n - 1);
+  var tier = brickTier(player.cls, color);
+  var bonus = tier === 'signature' ? 0.05 : tier === 'baseline' ? -0.03 : 0;
+  return Math.max(0, Math.min(0.99, base + bonus));
+}
+
+// Roll a crit for a given color+count. Returns true if crit fires.
+// Called at the moment a cast is dispatched. Threshold EFFECTS are applied
+// downstream based on this boolean (see threshold handlers per color).
+// Crit stats debug — tracks recent rolls for player visibility.
+// Toggle CRIT_DEBUG to true to log to console and overlay the panel.
+var CRIT_DEBUG = true;
+// Toggle FLOATER_DEBUG to true in browser console (or here) to log every
+// damage/floater spawn with: text, tier, parent type, side, spawn coords,
+// parent radius. Useful for diagnosing placement issues (collisions,
+// clipping, wrong side).
+var FLOATER_DEBUG = false;
+var _critStats = { total: 0, crits: 0, perColor: {} };
+
+// Per-battle stats — populated during combat, consumed by victory screen.
+// Reset at _internalStart, read at _internalEnd.
+var _battleStats = {
+  startedAt: 0,
+  endedAt: 0,
+  damageDealt: 0,
+  damageTaken: 0,
+  armorAbsorbed: 0,
+  bricksUsed: {},       // { red: 3, orange: 1, ... } — spent
+  bricksGained: {},     // { red: 1, cheese: 1, ... } — looted (kind: 'cheese', 'gold' included)
+  goldGained: 0,
+  cheeseEaten: 0,
+  enemiesKilled: [],    // array of entity types slain
+  critsLanded: 0,
+  overloadsFired: 0,
+  hpLow: 9999,          // lowest hp reached during battle (for 'flawless' tier)
+  // Active-combat tracking — accumulated time during which the player has
+  // dealt damage in the last ACTIVE_COMBAT_WINDOW_MS. Used for "active DPS"
+  // (damage rate during engagement, not corrupted by idle gaps).
+  activeCombatMs: 0,
+  _lastDamageAt: 0,
+  // Damage source/target attribution for run-summary tuning analysis
+  damageByColor: {},    // { red: 247, purple: 102, ... }
+  damageByTarget: {},   // { goblin: 96, stone_troll: 240, ... }
+  // Heal source attribution. Mirrors damageByColor — used by audit panel
+  // to compute expected-vs-actual ratios for healing colors (white).
+  healedByColor: {},    // { white: 28, ... }
+};
+
+function _addBrickStat(bucket, color, amount) {
+  if (!bucket || !color) return;
+  bucket[color] = (bucket[color] || 0) + (amount || 1);
+}
+
+function rollCrit(color, count) {
+  var chance = critChance(color, count);
+  var roll = Math.random();
+  var hit = roll < chance;
+  if (hit && _battleStats) _battleStats.critsLanded++;
+  if (CRIT_DEBUG) {
+    _critStats.total++;
+    if (hit) _critStats.crits++;
+    if (!_critStats.perColor[color]) _critStats.perColor[color] = { total: 0, crits: 0 };
+    _critStats.perColor[color].total++;
+    if (hit) _critStats.perColor[color].crits++;
+    if (typeof console !== 'undefined') {
+      console.log('[CRIT] ' + color + ' count=' + count + ' chance=' + (chance*100).toFixed(0) + '% roll=' + (roll*100).toFixed(0) + '% → ' + (hit ? 'HIT' : 'miss') + ' (cumulative ' + _critStats.crits + '/' + _critStats.total + ' = ' + Math.round(_critStats.crits/_critStats.total*100) + '%)');
+    }
+  }
+  return hit;
+}
+
+// Display scale: 0.60 (phones) to 1.00 (desktops). Smooth-interpolated.
+// Reference = smaller of viewport W/H so tall portrait phones still scale down.
+// Used to shrink player radius, entity radius, and aggro ranges on small screens.
+function getDisplayScale() {
+  var ref = Math.min(W || window.innerWidth || 800, H || window.innerHeight || 600);
+  if (ref <= 400)  return 0.60;
+  if (ref >= 1100) return 1.00;
+  if (ref <= 700)  return 0.60 + (ref - 400) / 300 * 0.20; // 0.60 -> 0.80 over 400-700
+  return 0.80 + (ref - 700) / 400 * 0.20;                   // 0.80 -> 1.00 over 700-1100
+}
+
+// Scale a pixel distance by the current display scale. Used for targeting
+// thresholds, effect radii, burst sizes. Called per-frame but cheap.
+function scaleDist(px) {
+  return px * getDisplayScale();
+}
+
+// Clamp an effect radius to the arena half-min. All overload AoEs run
+// through this. Targeting reticles and payload share the same call so
+// previews never lie about the fire's reach.
+//   halfMin = min(arena width, arena height) / 2
+// (Conservative reference: largest circle that fits regardless of where
+// the cast is centered.)
+//
+// Fusion will eventually produce effects that escape the arena. When
+// that lands, fusion casts skip this clamp; until then, all overload
+// effects respect the bounds.
+function clampRadiusToArena(r) {
+  if (typeof getRumbleBounds !== 'function') return r;
+  var b = getRumbleBounds();
+  if (!b) return r;
+  return Math.min(r, Math.min(b.w, b.h) / 2);
+}
+
+const BRICK_COLORS = {
+  red:'#E24B4A', blue:'#006DB7', green:'#1D9E75', white:'#EFEFEF',
+  gray:'#AAAAAA', purple:'#7B2FBE', yellow:'#F5D000', orange:'#F57C00',
+  black:'#6a5870'  // dark slate-purple — readable against #0a0a0f, retains "darkest brick" identity, purple cast hints at curse role
+};
+
+// ═══════════════════════════════════════════════════
+// CRIT VISUAL POLISH
+// Universal signature: screen flash + banner + haptic. Each color also has
+// a set of rotating flavor text lines so the same banner doesn't repeat.
+// Per-color visual flourishes (unique per-crit particle effects) live in
+// the individual handler functions where the effect is applied.
+// ═══════════════════════════════════════════════════
+
+// Rotating flavor text per color — 6 lines each, thematically linked to
+// color properties and damage family. Picked randomly at crit time.
+//   Physical family (red / gray / orange) — force, mass, impact, shrapnel.
+//   Ethereal family (blue / purple / white) — precision, magic, light.
+//   Malady family   (yellow / green / black) — mind, rot, decay.
+var CRIT_FLAVOR = {
+  // Physical
+  red:    ['CRUSHING BLOW!',  'SHATTERING IMPACT!', 'BONE-BREAKER!',    'DEVASTATION!',     'RAMMING FORCE!',   'PULVERIZED!'],
+  orange: ['SHRAPNEL!',       'THORN STORM!',       'EXPLOSIVE TRAP!',  'SCATTERED DEATH!', 'SHREDDING BURST!', 'SPLINTERED!'],
+  gray:   ['REINFORCE!',      'BULWARK!',           'UNBREAKABLE!',     'IRON RESOLVE!',    'STONEWALL!',       'FORTRESS!'],
+  // Ethereal
+  blue:   ['MARKED!',         'WEAKNESS FOUND!',    'PRECISION STRIKE!','TARGET EXPOSED!',  'LANCE OF TRUTH!',  'PIERCED!'],
+  purple: ['SILENCE!',        'MAGIC SEVERED!',     'VOICELESS!',       'NULLIFIED!',       'ARCANE RUPTURE!',  'UNMADE!'],
+  white:  ['BLESSING!',       'SANCTIFIED!',        'THE LIGHT PURGES!','GRACE ABOUNDS!',   'HALLOWED!',        'RADIANT!'],
+  // Malady
+  yellow: ['DAZE!',           'MIND UNSPOOLED!',    'REELING!',         'COMPLETELY LOST!', 'SENSES SHATTERED!','BEFOGGED!'],
+  green:  ['NECROSIS!',       'ROTTING WOUND!',     'VIRULENT!',        'DECAY SETS IN!',   'PUTREFIED!',       'CORRUPTED!'],
+  black:  ['DEEP WITHER!',    'CURSED!',            'DECAY UNLEASHED!', 'THE ROT SPREADS!', 'VOID-TOUCHED!',    'UNMAKING!'],
+};
+
+function pickCritFlavor(color) {
+  var lines = CRIT_FLAVOR[color] || ['CRIT!'];
+  return lines[Math.floor(Math.random() * lines.length)];
+}
+
+// Screen flash overlay. Fades quickly (150-200ms) so it flashes and clears.
+// Stored as state and drawn each frame during its lifetime.
+var critFlash = null; // { color, alpha, timer, duration }
+
+function triggerCritFlash(color) {
+  var hex = BRICK_COLORS[color] || '#FFD700';
+  critFlash = { color: hex, alpha: 0.35, timer: 0.18, duration: 0.18 };
+}
+
+function updateCritFlash(dt) {
+  if (!critFlash) return;
+  critFlash.timer -= dt;
+  if (critFlash.timer <= 0) { critFlash = null; return; }
+  critFlash.alpha = 0.35 * (critFlash.timer / critFlash.duration);
+}
+
+function drawCritFlash() {
+  if (!critFlash || !ctx) return;
+  ctx.save();
+  ctx.globalAlpha = critFlash.alpha;
+  ctx.fillStyle = critFlash.color;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
+// Big banner — used for crit name. Different from showFloatingText: larger
+// font, stronger glow, longer lifetime, slight vertical rise.
+var critBanners = []; // { x, y, text, color, alpha, timer, duration, rise }
+
+function spawnCritBanner(x, y, text, color) {
+  critBanners.push({
+    x: x, y: y,
+    text: text,
+    color: color || '#FFD700',
+    alpha: 1.0,
+    timer: 1.4,
+    duration: 1.4,
+    rise: 0,
+  });
+}
+
+function updateCritBanners(dt) {
+  critBanners = critBanners.filter(function(b) { return b.timer > 0; });
+  critBanners.forEach(function(b) {
+    b.timer -= dt;
+    b.rise += 30 * dt; // gentle upward drift
+    b.alpha = Math.max(0, Math.min(1, b.timer / (b.duration * 0.6)));
+  });
+}
+
+function drawCritBanners() {
+  if (!ctx || !critBanners.length) return;
+  var fontPx = Math.max(14, Math.round(26 * getDisplayScale()));
+  critBanners.forEach(function(b) {
+    ctx.save();
+    ctx.globalAlpha = b.alpha;
+    ctx.font = 'bold ' + fontPx + 'px "Cinzel", serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = b.color;
+    ctx.shadowColor = b.color;
+    ctx.shadowBlur = 20 * getDisplayScale();
+    ctx.lineWidth = Math.max(2, 3 * getDisplayScale());
+    ctx.strokeStyle = '#000';
+    ctx.strokeText(b.text, b.x, b.y - b.rise);
+    ctx.fillText(b.text, b.x, b.y - b.rise);
+    ctx.restore();
+  });
+}
+
+// Haptic ping on mobile — short vibration when a crit fires. No-op on
+// platforms without the vibrate API (desktop, unsupported browsers).
+function hapticCrit() {
+  try {
+    if (navigator && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(30);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// Unified crit-signature trigger. Call this when a crit fires to get all
+// three of: screen flash, banner text, haptic. Per-color particle flair
+// is layered inside the individual handlers.
+function triggerCritSignature(color, x, y) {
+  triggerCritFlash(color);
+  spawnCritBanner(x, y, pickCritFlavor(color), BRICK_COLORS[color] || '#FFD700');
+  hapticCrit();
+}
+
+// Crit shockwave rings — expanding color-tinted rings used as per-color
+// flourish by multiple colors (red, gray, black, etc). Configurable start
+// radius, max radius, color, ring thickness.
+var critShockwaves = [];
+
+// Screen shake state. Small impulse applied during canvas render via
+// ctx.translate of (shakeX, shakeY) before drawing. Decays linearly over
+// duration. Used for BK Model 2 crits (S015 v0.15.13 visual payoff).
+// Magnitude is in canvas pixels; 4-6 px reads as a meaningful jolt
+// without disorienting. Duration ≤ 200ms keeps it punchy not
+// disorienting.
+var screenShake = { mag: 0, durTotal: 0, dur: 0, x: 0, y: 0 };
+
+function triggerScreenShake(magnitude, durationMs) {
+  // If a shake is in flight, take the louder of (current remaining, new).
+  // Avoids overlapping shakes stacking into chaos but also doesn't squash
+  // a meaningful new impact under a tail of an old one.
+  var newMag = magnitude || 4;
+  var newDur = (durationMs || 180) / 1000;
+  if (screenShake.dur > 0 && screenShake.mag > newMag) return;
+  screenShake.mag = newMag;
+  screenShake.durTotal = newDur;
+  screenShake.dur = newDur;
+}
+
+function updateScreenShake(dt) {
+  if (screenShake.dur <= 0) return;
+  screenShake.dur -= dt;
+  if (screenShake.dur <= 0) {
+    screenShake.dur = 0;
+    screenShake.x = 0;
+    screenShake.y = 0;
+    return;
+  }
+  // Decaying random offset
+  var fade = screenShake.dur / screenShake.durTotal;
+  var m = screenShake.mag * fade;
+  screenShake.x = (Math.random() * 2 - 1) * m;
+  screenShake.y = (Math.random() * 2 - 1) * m;
+}
+
+function spawnCritShockwave(x, y, color, opts) {
+  var o = opts || {};
+  critShockwaves.push({
+    x: x, y: y,
+    r: o.r0 || 8,
+    maxR: o.maxR || scaleDist(160),
+    color: color || '#FFD700',
+    thickness: o.thickness || 3,
+    alpha: 1.0,
+    growth: o.growth || 260,  // px/s
+    fadeRate: o.fadeRate || 2.2,
+  });
+}
+
+function updateCritShockwaves(dt) {
+  critShockwaves = critShockwaves.filter(function(s) { return s.alpha > 0.02 && s.r < s.maxR; });
+  critShockwaves.forEach(function(s) {
+    s.r += s.growth * dt;
+    s.alpha -= s.fadeRate * dt;
+  });
+}
+
+function drawCritShockwaves() {
+  if (!ctx) return;
+  var scale = getDisplayScale();
+  critShockwaves.forEach(function(s) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, s.alpha);
+    ctx.strokeStyle = s.color;
+    ctx.shadowColor = s.color;
+    ctx.shadowBlur = 16 * scale;
+    ctx.lineWidth = Math.max(1.2, s.thickness * scale);
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
+  });
+}
+
+// Generic per-color flourish burst. Spawns `n` color-tinted particles
+// radially from a point. Used for quick visual punctuation on crits.
+// Count scales down on small screens so dense bursts stay readable.
+function spawnCritFlourish(x, y, color, n) {
+  var scale = getDisplayScale();
+  var count = Math.max(4, Math.round((n || 18) * scale));
+  for (var i = 0; i < count; i++) {
+    var a = Math.random() * Math.PI * 2;
+    var speed = (40 + Math.random() * 180) * scale;
+    purpleParticles.push({
+      x: x, y: y,
+      vx: Math.cos(a) * speed,
+      vy: Math.sin(a) * speed,
+      r: (2 + Math.random() * 3) * scale,
+      alpha: 0.95,
+      color: color,
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════
+var canvas, ctx, W, H;
+var running = false;
+var rafId = null;
+// v4: While the revive minigame overlay is active, gameplay systems (movement,
+// enemy AI, damage, timer, loot) are frozen. `running` stays true (so _internalEnd
+// isn't triggered prematurely) but _revivePaused gates every per-tick side-effect.
+var _revivePaused = false;
+// S013.1: post-victory brick-refill boost. Set true when victory screen is shown,
+// cleared at rumble end. While true, brick regen rate is multiplied so empty pips
+// fill visibly during the victory card display.
+var _victoryRefillActive = false;
+var lastTs = 0;
+var cfg = null; // last start(config) object
+
+var player = null;
+var entities = [];
+var deadEntities = [];
+var pendingVictory = 0; // countdown to victory screen
+var rumble = {};
+var timerLeft = RUMBLE_DURATION;
+var timerInterval = null;
+
+// ── Multiplayer allies (v0.16.56, interp v0.16.59) ────────
+// Two-layer ally state for smooth render:
+//   _mpAllyTargets — keyed by ally.id, stores last-received server
+//     snapshot (targetNX/NY, hp, alive, etc.) PLUS the smoothed
+//     render coords (currentNX/NY). On each setAllyState call,
+//     targets update; renderer lerps current toward target each
+//     frame so motion looks smooth instead of step-stepping at
+//     the 20Hz server tick rate.
+//   Snapshot-arrival timestamp is stored so renderer can do
+//     time-based interpolation rather than per-frame fixed lerp
+//     (handles variable framerate cleanly).
+//
+// Entries persist across snapshots (so currentNX/NY stay continuous
+// for the same ally). Allies absent from a snapshot are pruned
+// after a short grace period (handles momentary network blips
+// without flickering allies in/out).
+var _mpAllyTargets = {};       // id → { cls, targetNX, targetNY, currentNX, currentNY, hp, hpMax, alive, spectating, lastSnapshotMs, lastSeenMs }
+var _mpAllyOrder = [];         // render order (insertion order, stable across frames)
+var _MP_ALLY_GRACE_MS = 1500;  // prune ally if no snapshot for this long
+var _lastDrawAlliesMs = 0;     // perf.now of last drawAllies call (for time-based interp)
+
+// ── Canonical engine handle (v0.16.60) ────────────────────
+// Created in _internalStart via window.RumbleEngine.createRumbleEngine.
+// v0.16.60 ships skeleton only — engine doesn't run logic yet, but
+// exists alongside rumble.js's existing state. v0.16.61+ migrates
+// damage/cast/tick logic INTO the engine; rumble.js progressively
+// becomes view+input layer. v0.16.63 cuts coop over to server-side
+// engine; solo continues running engine in-process.
+var _engine = null;
+
+// Touch/drag state
+var dragActive = false;
+var dragTarget = null;
+
+// Dash state
+var dashCooldown = 0;
+var dashActive = false;
+var dashTarget = null;
+var dashEntity = null;
+var dashSpeed = 0;
+var DASH_DURATION = 0.75; // distance = dashSpeed * 0.75 px
+var dashTimer = 0;
+
+// Double-tap detection
+var lastTapTime = 0;
+var lastTapPos = null;
+var DOUBLE_TAP_MS = 300;
+var DOUBLE_TAP_DIST = 60; // max px between taps to count as double-tap
+
+// ═══════════════════════════════════════════════════
+// PLAYER OBJECT
+// ═══════════════════════════════════════════════════
+function makePlayer(cls) {
+  var meta = window.CHARACTERS ? window.CHARACTERS[cls] : null;
+  if (!meta) { console.warn('[BQ-RUMBLE] makePlayer: unknown class', cls); meta = {}; }
+  var COLORS = ['red','white','yellow','blue','orange','gray','green','purple','black'];
+  var brickMax = {}; var brickRecharge = {}; var bricks = {};
+  COLORS.forEach(function(c) {
+    brickMax[c] = 1 + Math.floor(Math.random() * 10); // 1-10
+    bricks[c] = brickMax[c];
+    brickRecharge[c] = 0;
+  });
+  return {
+    cls: cls,
+    color: meta.color,
+    icon: meta.icon,
+    x: W / 2,
+    y: H / 2,
+    r: Math.round(22 * getDisplayScale()),
+    hp: meta.hp,
+    hpMax: meta.hp,
+    speed: meta.speed,
+    bricks: bricks,                // current charges
+    brickMax: brickMax,            // max charges
+    brickRecharge: brickRecharge,  // seconds until next recharge
+    overloadCount: 0,              // total overloads this battle (any color)
+    reviveCount: 0,                // S013.3: heart-revives this run (drives loot penalty)
+    armor: 0,                      // shield pips
+    gold: 0,                       // coins picked up in rumble; surfaces to server
+    cheese: 0,                     // cheese picked up in rumble; surfaces to server
+    // PHASE B — status effect slots.
+    // Each slot tracks timer (>0 = active). Applied via applyStatus(),
+    // ticked in updateStatusEffects() once per frame.
+    status: {
+      poison:  { stacks: 0, timer: 0, tickTimer: 0, dmgPerTick: 1 },
+      slow:    { factor: 0, timer: 0 },   // factor 0.4 → speed × 0.6
+      daze:    { timer: 0 },              // brick refresh 50% slower
+      confuse: { timer: 0 },              // movement inverted
+      weaken:  { timer: 0 },              // incoming dmg × 1.5
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════
+// PHASE B — PLAYER STATUS EFFECTS
+// ═══════════════════════════════════════════════════
+// Five debuffs the player can suffer: poison, slow, daze, confuse, weaken.
+// Applied by entity arsenal effects (Phase C), cleansed by white crit or
+// battle end / respawn. Visual state shows above the HP bar via the HUD
+// and as outline pulses on the player sprite.
+
+function applyStatus(kind, opts) {
+  if (!player || !player.status) return;
+  opts = opts || {};
+  var s = player.status[kind];
+  if (!s) return;
+  switch (kind) {
+    case 'poison':
+      // Stacking: each application adds a stack up to 5; timer refreshes
+      // to the longest incoming duration.
+      s.stacks = Math.min(5, (s.stacks || 0) + (opts.stacks || 1));
+      s.timer  = Math.max(s.timer || 0, opts.duration || 6);
+      s.dmgPerTick = opts.dmgPerTick || s.dmgPerTick || 1;
+      break;
+    case 'slow':
+      // Slow factor = how much speed is REMOVED. factor 0.4 = speed × 0.6.
+      // Longer / stronger slow overrides weaker.
+      if ((opts.factor || 0) > (s.factor || 0)) s.factor = opts.factor;
+      s.timer = Math.max(s.timer || 0, opts.duration || 1);
+      break;
+    case 'daze':
+    case 'confuse':
+    case 'weaken':
+      s.timer = Math.max(s.timer || 0, opts.duration || 2);
+      break;
+  }
+}
+
+function clearStatuses() {
+  if (!player || !player.status) return;
+  var s = player.status;
+  s.poison.stacks = 0;  s.poison.timer = 0;  s.poison.tickTimer = 0;
+  s.slow.factor   = 0;  s.slow.timer   = 0;
+  s.daze.timer    = 0;
+  s.confuse.timer = 0;
+  s.weaken.timer  = 0;
+}
+
+function hasStatus(kind) {
+  if (!player || !player.status) return false;
+  var s = player.status[kind];
+  if (!s) return false;
+  if (kind === 'poison') return (s.timer > 0 && s.stacks > 0);
+  if (kind === 'slow')   return (s.timer > 0 && s.factor > 0);
+  return s.timer > 0;
+}
+
+// Per-frame tick — runs once in update(). Handles decay timers and the
+// per-tick poison damage application. Does not apply gameplay effects
+// (those live at each read site: movement uses slow factor, incoming
+// damage multiplies by weaken, brick refresh divides by daze, etc).
+function updateStatusEffects(dt) {
+  if (!player || !player.status) return;
+  var s = player.status;
+
+  // Poison: stack-based DoT, ticks once per second.
+  if (s.poison.timer > 0 && s.poison.stacks > 0) {
+    s.poison.timer     = Math.max(0, s.poison.timer - dt);
+    s.poison.tickTimer = (s.poison.tickTimer || 0) + dt;
+    while (s.poison.tickTimer >= 1.0 && s.poison.timer > 0) {
+      s.poison.tickTimer -= 1.0;
+      var dmg = (s.poison.dmgPerTick || 1) * s.poison.stacks;
+      // Bypass armor for DoT (armor is for physical absorption).
+      // Routes through applyDamageToPlayer — non-killing ticks instant-apply,
+      // a killing tick triggers bleed (with overflow-scaled duration).
+      if (_battleStats) {
+        _battleStats.damageTaken += dmg;
+        if ((player.hp - dmg) < _battleStats.hpLow) _battleStats.hpLow = Math.max(0, player.hp - dmg);
+        if (dmg > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmg;
+      }
+      showFloatingText(player.x, player.y - 40, '☠ ' + dmg, '#1D9E75', player);
+      applyDamageToPlayer(dmg);
+      // Stop ticking once dying or dead — bleed will resolve to death on its
+      // own timer, and we don't want repeated ticks compounding during bleed.
+      if (player.hp <= 0 || player.bleedOut) {
+        break;
+      }
+    }
+    if (s.poison.timer <= 0) { s.poison.stacks = 0; s.poison.tickTimer = 0; }
+  }
+
+  // Non-damage timers just decrement
+  if (s.slow.timer > 0) {
+    s.slow.timer = Math.max(0, s.slow.timer - dt);
+    if (s.slow.timer === 0) s.slow.factor = 0;
+  }
+  if (s.daze.timer    > 0) s.daze.timer    = Math.max(0, s.daze.timer    - dt);
+  if (s.confuse.timer > 0) s.confuse.timer = Math.max(0, s.confuse.timer - dt);
+  if (s.weaken.timer  > 0) s.weaken.timer  = Math.max(0, s.weaken.timer  - dt);
+}
+
+// Read helpers — each gameplay site that needs to apply a status effect
+// calls these. Keeps effect application centralized and easy to tune.
+
+function playerSpeedMult() {
+  // Called by player movement code. slow factor 0..0.7 subtracts from 1.
+  if (!player || !player.status) return 1;
+  var f = player.status.slow.factor || 0;
+  if (player.status.slow.timer <= 0) f = 0;
+  return Math.max(0.3, 1 - f);
+}
+
+function playerRefreshMult() {
+  // Called by brick refresh tick.
+  // Base: 1.0
+  // × FW refresh boost (e.g. 2.0 for first 10s of next rumble after FW blue success)
+  // × 0.5 if dazed
+  if (!player) return 1;
+  var m = 1;
+  if (player.refreshBoost) {
+    if (performance.now() < player.refreshBoost.endsAt) {
+      m *= player.refreshBoost.multiplier;
+    } else {
+      // Expired — clear so we skip the check on subsequent ticks
+      player.refreshBoost = null;
+    }
+  }
+  if (player.status && hasStatus('daze')) m *= 0.5;
+  return m;
+}
+
+function playerDamageTakenMult() {
+  // Called by damage application. weaken amplifies by 1.5×.
+  if (!player || !player.status) return 1;
+  return hasStatus('weaken') ? 1.5 : 1;
+}
+
+function playerInputInvert() {
+  // Called by movement input. confuse flips direction.
+  return hasStatus('confuse');
+}
+
+// ═══════════════════════════════════════════════════
+// ARENA BOUNDS
+// ═══════════════════════════════════════════════════
+function getRumbleBounds() {
+  var pad = 12;
+  // Reservation for brick bar + comfortable thumb gutter.
+  // Layout: page edge → 12px → 48px button → 24px gutter → arena.
+  // The previous 54px reservation crammed thumbs against the arena edge;
+  // mistapped player drags were common when reaching for chips.
+  var panelWidth = 84;
+  var topHUD = 50;
+  return {
+    x: panelWidth + pad,
+    y: topHUD,
+    w: W - (panelWidth + pad) * 2,
+    h: H - topHUD - pad
+  };
+}
+
+// ═══════════════════════════════════════════════════
+// INPUT
+// ═══════════════════════════════════════════════════
+function getEventPos(e) {
+  var rect = canvas.getBoundingClientRect();
+  // Use changedTouches when available — it's the touch that triggered THIS event.
+  // Using touches[0] breaks multitouch: if a first finger is already down elsewhere
+  // (e.g. holding a brick bar button), touches[0] returns that finger's position
+  // instead of the new finger that landed on the canvas. changedTouches[0] always
+  // refers to the touch the event is actually about.
+  var touch = (e.changedTouches && e.changedTouches[0])
+              || (e.touches && e.touches[0])
+              || e;
+  return {
+    x: (touch.clientX - rect.left) * (canvas.width / rect.width),
+    y: (touch.clientY - rect.top)  * (canvas.height / rect.height)
+  };
+}
+
+function onPointerDown(e) {
+  if (!running) return;
+  e.preventDefault();
+  var pos = getEventPos(e);
+
+  // Ignore if touch is outside the playable rumble area bounds — don't let clicks
+  // on brick bar or other UI above the canvas move the player if they bubble.
+  var bounds = getRumbleBounds();
+  if (pos.x < bounds.x || pos.x > bounds.x + bounds.w ||
+      pos.y < bounds.y || pos.y > bounds.y + bounds.h) {
+    return;
+  }
+
+  // Double-tap detection
+  var now = performance.now();
+  var dt = now - lastTapTime;
+  var nearLast = lastTapPos && Math.hypot(pos.x - lastTapPos.x, pos.y - lastTapPos.y) < DOUBLE_TAP_DIST;
+  if (dt < DOUBLE_TAP_MS && nearLast && dashCooldown <= 0 && player) {
+    // Trigger dash
+    var dx = pos.x - player.x;
+    var dy = pos.y - player.y;
+    var dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist > 10) {
+      dashActive = true;
+      dashTarget = { x: pos.x, y: pos.y };
+      dashSpeed = player.speed * 3;
+      dashTimer = DASH_DURATION;
+      dashCooldown = 5;
+      // If released near a entity, track toward them
+      var rect2 = canvas.getBoundingClientRect();
+      var cx2 = (pos.x - rect2.left) * (canvas.width / rect2.width);
+      var cy2 = (pos.y - rect2.top) * (canvas.height / rect2.height);
+      dashEntity = entities.find(function(g){ return Math.hypot(cx2-g.x,cy2-g.y)<g.r+50; }) || null;
+      showFloatingText(player.x, player.y - 50, 'EVADE!', player.color, player);
+    }
+    lastTapTime = 0; // reset so triple-tap doesn't re-trigger
+    lastTapPos = null;
+  } else {
+    lastTapTime = now;
+    lastTapPos = { x: pos.x, y: pos.y };
+  }
+
+  dragActive = true;
+  dragTarget = { x: pos.x, y: pos.y };
+}
+
+function onPointerMove(e) {
+  if (!running || !dragActive) return;
+  e.preventDefault();
+  var pos = getEventPos(e);
+  // Clamp to arena bounds so finger drift onto brick bars / page edges
+  // doesn't direct the player off the play surface. Player would stop at
+  // the wall anyway, but the clamped target makes positioning feel right
+  // (player parks near the visible finger, not crammed in the corner).
+  if (player) {
+    var b = getRumbleBounds();
+    var pr = player.r || 12;
+    pos.x = Math.max(b.x + pr, Math.min(b.x + b.w - pr, pos.x));
+    pos.y = Math.max(b.y + pr, Math.min(b.y + b.h - pr, pos.y));
+  }
+  dragTarget = { x:pos.x, y:pos.y };
+}
+
+function onPointerUp(e) {
+  dragActive = false;
+  // dragTarget persists — player keeps moving toward last position
+}
+
+// ═══════════════════════════════════════════════════
+// UPDATE
+// ═══════════════════════════════════════════════════
+function update(dt) {
+  if (!player) return;
+  var bounds = getRumbleBounds();
+
+  // Death save controller — runs unconditionally. Drives the freeze
+  // flag while the BK gray pip-drain cinema is active, then releases
+  // it. See tryDeathSave / updateDeathSave for the sequence logic.
+  updateDeathSave(dt);
+
+  // Global freeze — when death save cinema is playing, halt entity
+  // movement and most engine systems so the player can experience
+  // the rescue beat without dying to the next swing. Particles + crit
+  // visuals continue to update so the cinema still reads visually.
+  if (_globalFreeze) {
+    updatePurpleParticles(dt);
+    updateCritFlash(dt);
+    updateCritBanners(dt);
+    updateCritShockwaves(dt);
+    return;
+  }
+
+  // Active-combat accumulator. Counts this frame as "engaged" if the player
+  // has dealt damage in the last ACTIVE_COMBAT_WINDOW_MS. Used for time-on-
+  // target DPS calculation; excludes idle/travel/dodge gaps.
+  if (_battleStats && _battleStats._lastDamageAt > 0) {
+    var sinceDmg = performance.now() - _battleStats._lastDamageAt;
+    if (sinceDmg < 1500) {
+      _battleStats.activeCombatMs += dt * 1000;
+    }
+  }
+
+  // Dash cooldown tick
+  if (dashCooldown > 0) dashCooldown = Math.max(0, dashCooldown - dt);
+
+  // Dash movement — overrides normal movement
+  if (dashActive) {
+    dashTimer -= dt;
+    // If tracking a entity, update target to follow them
+    if (dashEntity && dashEntity.hp > 0) {
+      dashTarget = { x: dashEntity.x, y: dashEntity.y };
+    }
+    var ddx = dashTarget ? dashTarget.x - player.x : 0;
+    var ddy = dashTarget ? dashTarget.y - player.y : 0;
+    var ddist = Math.sqrt(ddx*ddx + ddy*ddy);
+    if (ddist > 4 && dashTimer > 0) {
+      var step = Math.min(dashSpeed * dt, ddist);
+      player.x += (ddx/ddist) * step;
+      player.y += (ddy/ddist) * step;
+    } else {
+      if (dashTarget && ddist <= 4) { player.x = dashTarget.x; player.y = dashTarget.y; }
+      dashActive = false;
+      dashTarget = null;
+      dashEntity = null;
+      dragTarget = null; // clear drag target so normal movement doesn't continue
+    }
+  } else if (dragTarget) {
+    var dx = dragTarget.x - player.x;
+    var dy = dragTarget.y - player.y;
+    // Confuse flips the direction of movement input.
+    if (playerInputInvert()) { dx = -dx; dy = -dy; }
+    var dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist > 8) {
+      // Slow status reduces effective speed via playerSpeedMult().
+      var step = Math.min(player.speed * playerSpeedMult() * dt, dist);
+      player.x += (dx / dist) * step;
+      player.y += (dy / dist) * step;
+    } else if (!dragActive) {
+      dragTarget = null;
+    }
+  }
+
+  // Clamp player
+  player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
+  player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
+
+  // Push player and entity apart if overlapping
+  // Push entities away from player — player is not moved by collision
+  // v0.16.53 — Pierce dash redirect: keep resolver running (visual
+  // separation matters — without it, player visually clips into
+  // entities, reads as "caught" / "shaking"), but during pierce dash
+  // push the entity PERPENDICULAR to dash direction instead of along
+  // the player→entity vector. This preserves visual cleanliness while
+  // matching pierce identity (entities spin out sideways, not forward).
+  //
+  // Other dash models (BK aoe-blast, recoil) keep the original
+  // player→entity push — their identity IS physical impact.
+  //
+  // (v0.16.52 attempted a full resolver bypass for pierce — it removed
+  // the forward-displacement bug but introduced caught/shaking
+  // symptoms because visual separation was lost. v0.16.53 restores
+  // the resolver and just redirects its push direction.)
+  var _isPierceDashActive = false;
+  var _pierceDashDirX = 0, _pierceDashDirY = 0;
+  if (brickAction && brickAction.type === 'red' && brickAction.phase === 'charge'
+      && typeof getRedDashProfile === 'function') {
+    var _ddProf = getRedDashProfile(player.cls);
+    if (_ddProf && _ddProf.dashModel === 'pierce') {
+      _isPierceDashActive = true;
+      _pierceDashDirX = brickAction.dirX;
+      _pierceDashDirY = brickAction.dirY;
+    }
+  }
+  entities.forEach(function(entity) {
+    var odx = player.x - entity.x, ody = player.y - entity.y;
+    var odist = Math.sqrt(odx*odx+ody*ody);
+    var minDist = player.r + entity.r;
+    if (odist < minDist && odist > 0) {
+      var push = minDist - odist;
+      var nx, ny;
+      if (_isPierceDashActive) {
+        // Perpendicular push: pick side based on cross product
+        // (entity_offset × dashDir) to match the bounce knockback side.
+        var _ofx = entity.x - player.x, _ofy = entity.y - player.y;
+        var _cross = _ofx * _pierceDashDirY - _ofy * _pierceDashDirX;
+        if (_cross < 0) {
+          nx = -_pierceDashDirY; ny = _pierceDashDirX;   // entity left → push left
+        } else {
+          nx = _pierceDashDirY;  ny = -_pierceDashDirX;  // entity right or on line → push right
+        }
+        // Note: nx,ny here is "push direction for entity" (different
+        // sign convention than the original resolver, which used
+        // odx/odist as "away-from-player" then `entity -= nx*push`).
+        // We add directly since perpendicular IS the away direction
+        // when entity is exactly on the dash line.
+        entity.x += nx * push;
+        entity.y += ny * push;
+        entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
+        entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
+      } else {
+        // Standard push (away from player along player→entity vector)
+        nx = odx/odist; ny = ody/odist;
+        entity.x -= nx*push;
+        entity.y -= ny*push;
+        entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
+        entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
+      }
+    }
+  });
+
+  // Entity
+  deadEntities.forEach(function(g) { g.deathTimer -= dt; });
+  deadEntities = deadEntities.filter(function(g) { return g.deathTimer > 0; });
+  entities.forEach(function(g) { updateEntityConfusion(g, dt); updateEntity(g, dt, bounds); });
+  entities.forEach(function(g) {
+    if (g.hp > 0 || g.dead) return;
+    // PHASE E — bone_rise: small-hit kill queues a revive instead of death.
+    // Snap HP back up, restore to chase state, mark _boneRisen so the
+    // second death proceeds normally. A brief collapse/rise visual is
+    // cheaply simulated with an iframes-like invulnerable window and
+    // a pulse flash.
+    if (g._boneRiseQueued && !g._boneRisen) {
+      g._boneRisen = true;
+      g._boneRiseQueued = false;
+      g.hp = Math.max(1, Math.round(g.hpMax * 0.40));
+      g._phaseFadeTimer = 1.5;  // reuse invuln window — player can't attack during rise
+      g.aggroed = true;
+      g.state = 'chase';
+      showFloatingText(g.x, g.y - (g.r + 14), 'BONE RISE', '#dcdcdc', g);
+      return;
+    }
+    g.dead = true;
+    g.deathTimer = 2.5;
+    deadEntities.push(g);
+    // PHASE E — mitosis_split: on death, spawn smaller clones that inherit
+    // the signature (up to max recursion depth). Runs AFTER the death
+    // decision so clones spawn at the moment of visible death.
+    // Two places this can trigger: primary signature === 'mitosis_split'
+    // (rot_grub) OR deathSignature === 'mitosis_split' (blight_worm).
+    if (g.signature === 'mitosis_split' || g.deathSignature === 'mitosis_split') {
+      _spawnSplitClones(g);
+    }
+  });
+  entities = entities.filter(function(g) { return !g.dead; });
+  // Brick actions
+  tickBrickCooldowns(dt);
+  // Brick refresh. In 'spec' mode, uses BRICK_ECONOMY per-tier rates based on class.
+  // In 'sandbox' mode (default), uses a simple flat table for fast testing.
+  if (player) {
+    if (!player.brickRecharge) player.brickRecharge = {};
+    if (!player.brickMax) player.brickMax = {};
+    var SANDBOX_RATES = { red:1, gray:1, green:1, blue:2, white:2, yellow:2, orange:2, purple:3, black:3 };
+    var useSpec = (cfg && cfg.mode === 'spec');
+    // S013.1: victory-screen refill boost. When the victory overlay is up,
+    // regen rate spikes so players see empty pips fill visibly (~1.5-2s
+    // full refill). This is the "earned-rest" beat between rumble and
+    // next board leg. Only on victory, not defeat or force-quit.
+    var victoryBoost = _victoryRefillActive ? 20 : 1;
+    Object.keys(player.bricks).forEach(function(c) {
+      if (!player.brickMax[c]) player.brickMax[c] = player.bricks[c];
+      var isHeld = overloadState && overloadState.color === c;
+      if (player.bricks[c] < (player.brickMax[c]||0)) {
+        // Daze slows refresh rate (playerRefreshMult 0.5 under daze, 1 else).
+        if (!isHeld) player.brickRecharge[c] = (player.brickRecharge[c]||0) + dt * playerRefreshMult() * victoryBoost;
+        var rate;
+        if (useSpec) {
+          var tier = brickTier(player.cls, c);
+          rate = BRICK_ECONOMY.refreshRates[tier];
+        } else {
+          rate = SANDBOX_RATES[c] || 1;
+        }
+        if (player.brickRecharge[c] >= rate) {
+          player.brickRecharge[c] -= rate;
+          player.bricks[c]++;
+        }
+      } else {
+        player.brickRecharge[c] = 0;
+      }
+    });
+  }
+  if (brickAction) updateBrickAction(dt, bounds);
+  updateOverload(dt);
+
+  // PHASE A: PLAYER SENSORS — expose state that entities read for reactions.
+  // Called every frame after overload/dash updates so fields are current.
+  // Consumed by the reaction dispatcher in updateEntity().
+  if (player) {
+    var _charging = overloadState && !overloadState.fired;
+    player.overloadCharging = !!_charging;
+    player.overloadColor    = _charging ? overloadState.color : null;
+    if (_charging) {
+      var _maxT = (player.bricks[overloadState.color] || 1) * OVERLOAD_TIER;
+      player.overloadChargePct = Math.min(1, overloadState.timer / _maxT);
+    } else {
+      player.overloadChargePct = 0;
+    }
+    player.hpPct = (player.hp || 0) / Math.max(1, player.hpMax || 1);
+    player.dashCharging = !!dashTarget;
+  }
+
+  // PHASE B — status effect tick (poison DoT, timer decay).
+  updateStatusEffects(dt);
+  // PHASE C — hazards on the ground (poison puddles, thorn shards).
+  updatePoisonPuddles(dt);
+  updateThornShards(dt);
+  // PHASE E — arcing projectiles (troll boulder toss)
+  updateBoulders(dt);
+  // v0.16.39 — Blocksmith reactive shrapnel (pip-loss → projectile)
+  updateShrapnel(dt);
+  // v0.16.51 — Snapstep pierce-dash slipstream trails (lifecycle + collision)
+  updatePierceTrails(dt);
+
+  // Blue bolts, traps, armor
+  updateBlueBolts(dt, bounds);
+  updateBlueFieldFlashes(dt);
+  updateWarp(dt);
+  updateWarpTrails(dt);
+  updateWitherbolts(dt);
+  updateTraps(dt);
+  updateChainLinkVisuals(dt);
+  updateGrayWalls(dt);
+  updateArmorBursts(dt);
+  updateGreenBurst(dt);
+  updateGreenSlowAuras(dt);
+  updateGreenBubbles(dt);
+  updateYellowAura(dt);
+  updateWhiteField(dt);
+  updateCritFlash(dt);
+  updateCritBanners(dt);
+  updateCritShockwaves(dt);
+  updateScreenShake(dt);
+  updateConfuseParticles(dt);
+  updateRegen(dt);
+  updateBleedOut(dt);
+  updateYellowDiag(dt);
+  updateDrain(dt);
+  entities.forEach(function(g) {
+    updateEntityPoison(g, dt);
+    g.slowTimer = Math.max(0, (g.slowTimer||0) - dt);
+    if (g.slowTimer <= 0) g.slowed = false;
+    g.attackSlowTimer = Math.max(0, (g.attackSlowTimer||0) - dt);
+    if (g.attackSlowTimer <= 0) g.attackSlowed = false;
+  });
+  updatePurpleBursts(dt);
+  updatePurpleParticles(dt);
+  updateBlackEffect(dt);
+  updateEnemyProjectiles(dt);
+  updateDroppedBricks(dt);
+}
+
+// ═══════════════════════════════════════════════════
+// DRAW
+// ═══════════════════════════════════════════════════
+// ── Multiplayer ally render (v0.16.56, interp v0.16.59) ───
+// Called from main draw() before local player render. Each ally is
+// drawn as a translucent circle with class color + class icon.
+// Ghost styling (alpha 0.55) reads as "team member but not me."
+// Spectating allies show with extra-low alpha.
+//
+// COORDS: ally.nx / ally.ny are normalized (0-1) values relative to
+// SENDER's arena bounds. We map them to OUR arena bounds at render
+// time so each device sees the ally at the correct logical position
+// even though canvas pixel sizes differ across devices. UNITY:
+// arena is a shared logical 0-1 space, not a shared pixel space.
+//
+// INTERPOLATION (v0.16.59): server broadcasts at 20Hz (50ms). Client
+// renders at ~60Hz (16ms). Without smoothing, ally would step every
+// 3rd frame → visible jitter. We lerp currentNX/NY toward targetNX/NY
+// each frame using a time-based factor so motion is smooth across
+// the 50ms gap. Lerp duration ≈ 100ms (slightly longer than snapshot
+// interval to absorb network jitter).
+//
+// UNITY: reads class metadata from CHARACTERS table — same source
+// of truth as local player. Adding a new class = data change in
+// characters.js, NOT a render edit here.
+function drawAllies() {
+  if (!ctx) return;
+  if (!_mpAllyOrder || _mpAllyOrder.length === 0) return;
+  var bounds = getRumbleBounds();
+  var now = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now() : Date.now();
+  // Lerp factor — fraction of remaining distance to close per frame.
+  // _lastDrawAlliesMs lets us time-base the lerp so framerate doesn't
+  // affect smoothing. 100ms lerp window: ~63% closed at 100ms, ~95%
+  // at 300ms. Visually instant for human-paced motion, smooth across
+  // 50ms server snapshots.
+  var dt = _lastDrawAlliesMs ? Math.min(0.1, (now - _lastDrawAlliesMs) / 1000) : 0.016;
+  _lastDrawAlliesMs = now;
+  var INTERP_TAU_S = 0.10;  // 100ms time constant
+  var lerpAlpha = 1 - Math.exp(-dt / INTERP_TAU_S);  // exponential smoothing
+  for (var ai = 0; ai < _mpAllyOrder.length; ai++) {
+    var rec = _mpAllyTargets[_mpAllyOrder[ai]];
+    if (!rec) continue;
+    // Advance current toward target (exponential smoothing)
+    rec.currentNX += (rec.targetNX - rec.currentNX) * lerpAlpha;
+    rec.currentNY += (rec.targetNY - rec.currentNY) * lerpAlpha;
+    // Map normalized to local pixel space
+    var ax = bounds.x + rec.currentNX * bounds.w;
+    var ay = bounds.y + rec.currentNY * bounds.h;
+    var meta = (typeof CHARACTERS !== 'undefined' && CHARACTERS[rec.cls]) ? CHARACTERS[rec.cls] : null;
+    var color = (meta && meta.color) || '#888';
+    var icon = (meta && meta.icon) || '?';
+    var radius = (meta && meta.r) || 22;
+    var baseAlpha = rec.spectating ? 0.2 : 0.55;
+    ctx.save();
+    ctx.globalAlpha = baseAlpha * 0.6;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = color + '99';
+    ctx.beginPath();
+    ctx.arc(ax, ay, radius, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(ax, ay, radius - 4, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = baseAlpha + 0.3;
+    ctx.font = '16px serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(icon, ax, ay);
+    ctx.restore();
+    if (rec.hp != null && rec.hpMax) {
+      var barW = 28, barH = 4;
+      var barX = ax - barW / 2;
+      var barY = ay - radius - 10;
+      var pct = Math.max(0, Math.min(1, rec.hp / rec.hpMax));
+      ctx.save();
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = '#222';
+      ctx.fillRect(barX, barY, barW, barH);
+      ctx.fillStyle = pct > 0.5 ? '#3FB46C' : pct > 0.25 ? '#F5D000' : '#E24B4A';
+      ctx.fillRect(barX, barY, barW * pct, barH);
+      ctx.restore();
+    }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  var bounds = getRumbleBounds();
+
+  // ── Rumble floor ──
+  ctx.save();
+  ctx.fillStyle = '#0d0d14';
+  ctx.strokeStyle = '#1a1a2e';
+  ctx.lineWidth = 2;
+  roundRect(ctx, bounds.x, bounds.y, bounds.w, bounds.h, 16);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+
+  // ── Floor grid ──
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  ctx.lineWidth = 1;
+  var gridSize = 40;
+  for (var gx = bounds.x; gx < bounds.x + bounds.w; gx += gridSize) {
+    ctx.beginPath(); ctx.moveTo(gx, bounds.y); ctx.lineTo(gx, bounds.y + bounds.h); ctx.stroke();
+  }
+  for (var gy = bounds.y; gy < bounds.y + bounds.h; gy += gridSize) {
+    ctx.beginPath(); ctx.moveTo(bounds.x, gy); ctx.lineTo(bounds.x + bounds.w, gy); ctx.stroke();
+  }
+  ctx.restore();
+
+  // ── Rumble border glow ──
+  ctx.save();
+  ctx.shadowColor = player ? player.color : '#333';
+  ctx.shadowBlur = 20;
+  ctx.strokeStyle = player ? player.color + '44' : '#33333344';
+  ctx.lineWidth = 2;
+  roundRect(ctx, bounds.x, bounds.y, bounds.w, bounds.h, 16);
+  ctx.stroke();
+  ctx.restore();
+
+  // ── Drag indicator ──
+  // Shows path from player to drag target. Visible both during active drag
+  // (stronger) and while player is still auto-moving toward the last target
+  // (softer). Without this, two-finger movement on mobile (where finger 1
+  // holds a brick and finger 2 briefly taps the rumble area then lifts) leaves no
+  // feedback for where the player is moving.
+  if (dragTarget && player) {
+    ctx.save();
+    ctx.setLineDash([4, 6]);
+    ctx.strokeStyle = player.color + (dragActive ? 'cc' : '88');
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y);
+    ctx.lineTo(dragTarget.x, dragTarget.y);
+    ctx.stroke();
+    // Target dot
+    ctx.setLineDash([]);
+    ctx.fillStyle = player.color + (dragActive ? '66' : '44');
+    ctx.beginPath();
+    ctx.arc(dragTarget.x, dragTarget.y, 8, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = player.color + (dragActive ? 'cc' : '88');
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ── Black effect (below everything) ──
+  var _bounds = getRumbleBounds();
+  drawBlackEffect(_bounds);
+  // ── Traps ──
+  drawTraps();
+  drawChainLinkVisuals();
+  // ── PHASE C hazards (poison puddles, thorn shards) ── under everything else
+  drawPoisonPuddles();
+  drawThornShards();
+  // ── Yellow aura (persistent daze field) ──
+  drawYellowAura();
+  drawWhiteField();
+  // ── Confuse particles ──
+  drawConfuseParticles();
+  // ── Green burst ──
+  drawGreenSlowAuras();
+  drawGreenBurst();
+  drawGreenBubbles();
+  // ── Purple burst ──
+  drawPurpleBursts();
+  // ── Drag indicators (unified) ──
+  // All 9 colors use drawCastIndicator with their canonical hex. Targeting
+  // shows ONLY the area of effect — no inner circles, labels, or per-color
+  // flourishes. Persistent-effect decoration (orange spike trap, white
+  // field, yellow aura, etc.) lives on each effect's own renderer, drawn
+  // separately when the effect actually exists.
+  drawCastIndicator('red',    '#E24B4A', (typeof redDragPos    !== 'undefined') ? redDragPos    : null);
+  drawCastIndicator('blue',   '#4db8ff', (typeof blueDragPos   !== 'undefined') ? blueDragPos   : null);
+  drawCastIndicator('green',  '#1D9E75', (typeof greenDragPos  !== 'undefined') ? greenDragPos  : null);
+  drawCastIndicator('yellow', '#F5D000', (typeof yellowDragPos !== 'undefined') ? yellowDragPos : null);
+  drawCastIndicator('orange', '#F57C00', (typeof orangeDragPos !== 'undefined') ? orangeDragPos : null);
+  drawCastIndicator('purple', '#9B6FD4', (typeof purpleDragPos !== 'undefined') ? purpleDragPos : null);
+  drawCastIndicator('white',  '#FFFFFF', (typeof whiteDragPos  !== 'undefined') ? whiteDragPos  : null);
+  drawCastIndicator('black',  '#888888', (typeof blackDragPos  !== 'undefined') ? blackDragPos  : null);
+  drawCastIndicator('gray',   '#AAAAAA', (typeof grayDragPos   !== 'undefined') ? grayDragPos   : null);
+  // ── Blue bolts ──
+  drawBlueFieldFlashes();
+  drawBlueBolts();
+  drawWitherbolts();
+  drawWarpTrails();
+
+  // ── Entity ──
+  deadEntities.forEach(function(g) { drawDeadEntity(g); });
+  // PHASE E — burrow telegraphs render BEFORE entity sprites so they
+  // appear as ground markings underneath any living entities.
+  entities.forEach(function(g) { drawBurrowTelegraph(g); });
+  entities.forEach(function(g) { drawEntity(g); });
+  drawEnemyProjectiles();
+  drawBoulders();
+  drawShrapnel();   // v0.16.39 — Blocksmith reactive shrapnel
+  drawPierceTrails();   // v0.16.51 — Snapstep slipstream trail (under entities)
+  drawDroppedBricks();
+
+  // ── Allies (v0.16.56) ──
+  // Multiplayer allies render BEFORE local player so local player
+  // stays on top. Hosts pass ally state via Rumble.setAllyState().
+  // No-op when offline / no allies. See drawAllies() below.
+  drawAllies();
+
+  // ── Player ──
+  if (player) {
+    // Brick action visual — red charge trail, charge phase only
+    if (brickAction && brickAction.type === 'red' && brickAction.phase === 'charge') {
+      var mult = brickAction.dmgMult || 1;
+      var now2 = performance.now();
+      var flicker = 0.85 + 0.15 * Math.sin(now2 * 0.03);
+      var trailLen = Math.max(1, Math.round((1 + Math.ceil(mult * 0.5)) * vScale(mult))); // longer trail at higher tier
+      ctx.save();
+      // Outer heat shockwave rings — scale with mult
+      for (var ri2 = Math.max(1, Math.round(Math.ceil(mult*0.25)*vScale(mult))); ri2 > 0; ri2--) {
+        ctx.globalAlpha = 0.035 * ri2 * flicker * vScale(mult);
+        ctx.fillStyle = ri2 > mult * 0.6 ? '#ff2200' : '#ff6644';
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, (player.r + ri2 * 8) * flicker, 0, Math.PI*2);
+        ctx.fill();
+      }
+      // Trail segments — solid, aggressive, tapered
+      for (var ti = 0; ti < trailLen; ti++) {
+        var tPct = ti / trailLen;
+        var tDist = 12 + ti * (10 + mult * 2);
+        var tSize = player.r * (1 - tPct * 0.7) * (mult > 1 ? 1 + mult * 0.1 : 1);
+        var tAlpha = (1 - tPct) * (0.5 + mult * 0.08);
+        // Shift hotter (more orange) near player, darker at tail
+        var tColor = tPct < 0.3 ? '#ff3300' : tPct < 0.6 ? '#cc2200' : '#881100';
+        ctx.globalAlpha = Math.min(1, tAlpha) * flicker;
+        ctx.shadowColor = '#ff2200';
+        ctx.shadowBlur = (2 + mult * 1.5) * (1 - tPct);
+        ctx.fillStyle = tColor;
+        ctx.beginPath();
+        ctx.arc(
+          player.x - brickAction.dirX * tDist,
+          player.y - brickAction.dirY * tDist,
+          tSize, 0, Math.PI*2
+        );
+        ctx.fill();
+      }
+      // Leading edge glow — brighter with tier
+      ctx.globalAlpha = 0.6 + mult * 0.08;
+      ctx.shadowColor = '#ff4400';
+      ctx.shadowBlur = 4 + mult * 2;
+      ctx.fillStyle = '#ff4400';
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r * 0.6 * flicker, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Dash trail
+    if (dashActive) {
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = player.color;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r * 1.4, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ── Warp visuals (FW purple teleport) ──
+    // Multiplies sprite alpha for fade out/in, layers radiant pulse glow
+    // for departure + arrival beats. Both feed off player.warpState read
+    // by getWarpAlpha / getWarpPulse helpers (see warp module above).
+    var warpAlpha = getWarpAlpha();
+    var warpPulse = getWarpPulse();
+    if (warpPulse > 0) {
+      // Radiant purple aura — large soft halo behind the player. Peaks at
+      // departure and arrival; absent during transit (player is gone).
+      ctx.save();
+      ctx.globalAlpha = 0.55 * warpPulse;
+      var grad = ctx.createRadialGradient(
+        player.x, player.y, player.r * 0.5,
+        player.x, player.y, player.r * (3.0 + warpPulse * 1.5)
+      );
+      grad.addColorStop(0, '#CC99FFcc');
+      grad.addColorStop(0.5, '#9B6FD488');
+      grad.addColorStop(1, '#9B6FD400');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r * (3.0 + warpPulse * 1.5), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Sprite render block — wrapped in alpha multiplier so fade-out/in
+    // cleanly fades the entire player visual without rewriting each layer.
+    ctx.save();
+    ctx.globalAlpha *= warpAlpha;
+
+    // Shadow
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath();
+    ctx.ellipse(player.x, player.y + player.r - 4, player.r * 0.8, 6, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // Glow — flicker white during iframes
+    var iframeFlash = player.iframes > 0 && Math.floor(player.iframes * 10) % 2 === 0;
+    ctx.save();
+    ctx.shadowColor = iframeFlash ? '#ffffff' : player.color;
+    ctx.shadowBlur = 24;
+    ctx.fillStyle = iframeFlash ? '#ffffff88' : player.color + 'cc';
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // Inner circle
+    ctx.save();
+    ctx.fillStyle = iframeFlash ? '#ffffff' : player.color;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r - 4, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // Icon
+    ctx.save();
+    ctx.font = '18px serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(player.icon, player.x, player.y);
+    ctx.restore();
+
+    ctx.restore(); // close warp-alpha wrapper
+
+    // ── Armor pips around player circle ──
+    var aMaxC = getArmorMax();
+    if ((player.armor||0) > 0) {
+      var orbitR = player.r + 10;
+      ctx.save();
+      for (var pi2 = 0; pi2 < (player.armor||0); pi2++) {
+        var pa2 = (pi2 / aMaxC) * Math.PI * 2 - Math.PI / 2;
+        var px2 = player.x + Math.cos(pa2) * orbitR;
+        var py2 = player.y + Math.sin(pa2) * orbitR;
+        ctx.fillStyle = '#AAAAAA';
+        ctx.shadowColor = '#AAAAAA'; ctx.shadowBlur = 4;
+        ctx.beginPath();
+        ctx.arc(px2, py2, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // ── Class armor visual (when armor > 0) ──
+    if ((player.armor||0) > 0) {
+      var ap = player.armor, ar = player.r;
+      var now3 = performance.now();
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, 0.4 + ap * 0.06);
+      ctx.shadowBlur = 8;
+      if (player.cls === 'breaker') {
+        // Plate segments — heavy overlapping arcs
+        ctx.shadowColor = '#cc8844';
+        ctx.strokeStyle = '#cc8844'; ctx.lineWidth = 4;
+        for (var pi=0; pi<6; pi++) {
+          var pa = (pi/6)*Math.PI*2;
+          ctx.beginPath();
+          ctx.arc(player.x+Math.cos(pa)*ar*0.55, player.y+Math.sin(pa)*ar*0.55, ar*0.38, pa-0.6, pa+0.6);
+          ctx.stroke();
+        }
+        // Center plate
+        ctx.fillStyle = '#cc884422';
+        ctx.beginPath(); ctx.arc(player.x, player.y, ar*0.4, 0, Math.PI*2); ctx.fill();
+      } else if (player.cls === 'blocksmith') {
+        // Brick pattern — grid lines
+        ctx.shadowColor = '#C87800';
+        ctx.strokeStyle = '#C87800'; ctx.lineWidth = 2;
+        var bsize = ar * 0.35;
+        for (var bx=-1; bx<=1; bx++) {
+          for (var by=-1; by<=1; by++) {
+            var bpx = player.x + bx*bsize*1.1, bpy = player.y + by*bsize*0.7;
+            if (Math.hypot(bpx-player.x,bpy-player.y) < ar*0.9) {
+              ctx.strokeRect(bpx-bsize/2+(by%2)*bsize*0.5, bpy-bsize*0.35, bsize, bsize*0.7);
+            }
+          }
+        }
+      } else if (player.cls === 'fixer') {
+        // Bandage cross pattern
+        ctx.shadowColor = '#ffffff';
+        ctx.strokeStyle = '#ffffff88'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(player.x, player.y-ar*0.8); ctx.lineTo(player.x, player.y+ar*0.8); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(player.x-ar*0.8, player.y); ctx.lineTo(player.x+ar*0.8, player.y); ctx.stroke();
+        // Rotating ring
+        ctx.strokeStyle = '#ff9999'; ctx.lineWidth = 2;
+        ctx.setLineDash([4,4]);
+        ctx.beginPath(); ctx.arc(player.x, player.y, ar*0.85, now3*0.001, now3*0.001+Math.PI*1.5); ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (player.cls === 'formwright') {
+        // Magic shield — rotating rune ring
+        ctx.shadowColor = '#8866ff';
+        ctx.strokeStyle = '#8866ff'; ctx.lineWidth = 2;
+        ctx.setLineDash([3,5]);
+        ctx.beginPath(); ctx.arc(player.x, player.y, ar*0.9, now3*0.0015, now3*0.0015+Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+        for (var ri3=0; ri3<4; ri3++) {
+          var ra3 = now3*0.002 + (ri3/4)*Math.PI*2;
+          ctx.fillStyle = '#8866ff';
+          ctx.beginPath(); ctx.arc(player.x+Math.cos(ra3)*ar*0.75, player.y+Math.sin(ra3)*ar*0.75, 3, 0, Math.PI*2); ctx.fill();
+        }
+      } else if (player.cls === 'snapstep') {
+        // Lightweight — just fast-rotating dashes
+        ctx.shadowColor = '#085041';
+        ctx.strokeStyle = '#22cc88'; ctx.lineWidth = 2;
+        ctx.setLineDash([6,10]);
+        ctx.beginPath(); ctx.arc(player.x, player.y, ar*0.88, -now3*0.003, -now3*0.003+Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (player.cls === 'wild_one') {
+        // Organic — claw marks / leaf pattern
+        ctx.shadowColor = '#27500A';
+        ctx.strokeStyle = '#44aa44'; ctx.lineWidth = 2;
+        for (var ci=0; ci<3; ci++) {
+          var ca = (ci/3)*Math.PI*2 + now3*0.001;
+          ctx.beginPath();
+          ctx.moveTo(player.x+Math.cos(ca)*ar*0.3, player.y+Math.sin(ca)*ar*0.3);
+          ctx.quadraticCurveTo(
+            player.x+Math.cos(ca+0.6)*ar*0.7, player.y+Math.sin(ca+0.6)*ar*0.7,
+            player.x+Math.cos(ca+0.3)*ar*0.9, player.y+Math.sin(ca+0.3)*ar*0.9
+          );
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    // ── Player HP bar above player ──
+    var pBarW = 60, pBarH = 6;
+    var pBarX = player.x - pBarW/2;
+    var pBarY = player.y - player.r - 46; // above aura ring (r+22) and armor pip orbit (r+10)
+    var pHpPct = Math.min(1, player.hp / player.hpMax);
+    var isOverhealC = player.hp > player.hpMax;
+    var pHpColor = isOverhealC ? '#b06fef' : pHpPct > 0.5 ? '#4a9a35' : pHpPct > 0.25 ? '#F5D000' : '#E24B4A';
+    ctx.save();
+    ctx.fillStyle = '#111'; ctx.fillRect(pBarX-1, pBarY-1, pBarW+2, pBarH+2);
+    ctx.fillStyle = '#2a2a2a'; ctx.fillRect(pBarX, pBarY, pBarW, pBarH);
+    ctx.fillStyle = pHpColor; ctx.shadowColor = pHpColor; ctx.shadowBlur = 4;
+    ctx.fillRect(pBarX, pBarY, pBarW * pHpPct, pBarH);
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 16px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(Math.ceil(player.hp) + '/' + player.hpMax, player.x, pBarY - 9);
+
+    ctx.restore();
+
+    // ── Player buff/debuff icons — unified stack above HP number ──
+    _drawEffectStack(player.x, pBarY, _playerEffects());
+  }
+
+  // ── Player sparkles (white heal — follow player, or world-space for field) ──
+  if (player && playerSparkles.length) {
+    playerSparkles = playerSparkles.filter(function(s) { return s.alpha > 0.05; });
+    playerSparkles.forEach(function(s) {
+      s.alpha -= 0.024;
+      if (s.worldSpace) {
+        s.wx += s.vox * 60;
+        s.wy += s.voy * 60;
+      } else if (s.fixed) {
+        s.fx += s.vox * 60;
+        s.fy += s.voy * 60;
+      } else {
+        s.ox += s.vox;
+        s.oy += s.voy;
+      }
+      ctx.save();
+      ctx.globalAlpha = s.alpha;
+      ctx.font = 'bold ' + Math.round(s.size) + 'px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = s.color;
+      ctx.shadowColor = s.color;
+      ctx.shadowBlur = 10 * s.alpha;
+      var sx = s.worldSpace ? s.wx : (s.fixed ? s.fx : player.x + s.ox);
+      var sy = s.worldSpace ? s.wy : (s.fixed ? s.fy : player.y + s.oy);
+      ctx.fillText(s.text, sx, sy);
+      ctx.restore();
+    });
+  }
+
+  // ── Overload charge ──
+  drawOverloadCharge();
+  drawGrayWalls();
+  drawRegen();
+  drawDrainAura();
+  // ── Armor bursts ──
+  drawArmorBursts();
+
+  // ── PHASE B: status effects ── outline tint on player (ring colors only;
+  // the status icon stack above the player HP bar is drawn at line ~1555 via
+  // _drawEffectStack(_playerEffects()), same system as entities).
+  drawPlayerStatusOutline();
+
+  // ── Debug ── (only renders if #rumble-debug element exists on page)
+  if (player) {
+    var dbg = document.getElementById('rumble-debug');
+    if (dbg) {
+      dbg.textContent = `${player.cls} hp:${player.hp} | dash:${dashActive} dashTimer:${dashTimer.toFixed(2)} dragTarget:${dragTarget?'SET':'null'} dragActive:${dragActive} brickAction:${brickAction?brickAction.type+'/'+brickAction.phase:'null'}`;
+    }
+  }
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ═══════════════════════════════════════════════════
+// GAME LOOP
+// ═══════════════════════════════════════════════════
+// External pause flag — host pages set this via Rumble.setExternalPause(bool)
+// when an overlay/screen is up that should freeze gameplay (wave-victory,
+// run-summary). Same gating semantics as _revivePaused: update is skipped,
+// draw + HUD continue. Without this, enemies still tick and damage still
+// applies while the player is reading stats.
+var _externalPause = false;
+
+function loop(ts) {
+  try {
+    var dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+    if (!_revivePaused && !_externalPause) update(dt);
+    draw();
+    updateHUD();
+    renderBrickBar();
+    if (running) rafId = requestAnimationFrame(loop);
+  } catch (err) {
+    // DIAGNOSTIC — surface render-loop failures to an on-screen panel.
+    // Without this, an exception silently halts the loop and the canvas
+    // shows whatever was last cleared (black). Remove this try/catch
+    // once the underlying bug is identified and fixed.
+    running = false;
+    var d = document.getElementById('rumble-loop-error');
+    if (!d) {
+      d = document.createElement('div');
+      d.id = 'rumble-loop-error';
+      d.style.cssText = 'position:fixed;top:8px;left:8px;right:8px;z-index:9999;'
+        + 'background:#0c0c10;border:1px solid #ff4466;border-radius:8px;'
+        + 'box-shadow:0 8px 32px rgba(0,0,0,0.6),0 0 0 1px rgba(255,68,102,0.2);'
+        + 'padding:0;color:#eeeeee;font-family:ui-monospace,monospace;'
+        + 'font-size:12px;line-height:1.5;max-height:70vh;overflow:hidden;'
+        + 'pointer-events:auto;display:flex;flex-direction:column;';
+      document.body.appendChild(d);
+    }
+    var stack = (err && err.stack) ? err.stack : String(err);
+    var playerInfo = player
+      ? ('cls=' + player.cls + ' hp=' + player.hp + '/' + player.hpMax
+        + ' x=' + Math.round(player.x) + ' y=' + Math.round(player.y)
+        + ' bleed=' + (player.bleedOut ? 'YES' : 'no'))
+      : 'NULL';
+    var safeStack = stack.replace(/[<>&]/g, function(c){ return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c]; });
+    var errMsg = (err && err.message ? err.message : String(err));
+    var safeErr = errMsg.replace(/[<>&]/g, function(c){ return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c]; });
+    d.innerHTML =
+      '<div style="background:#1a0008;border-bottom:1px solid #ff446644;padding:8px 12px;'
+      + 'display:flex;align-items:center;justify-content:space-between;">'
+      +   '<div style="color:#ff6680;font-weight:700;font-size:12px;letter-spacing:.12em;">RUMBLE LOOP ERROR</div>'
+      +   '<button onclick="this.parentNode.parentNode.remove()" '
+      +     'style="background:transparent;border:1px solid #444;color:#888;'
+      +     'border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;'
+      +     'font-family:ui-monospace,monospace;">DISMISS</button>'
+      + '</div>'
+      + '<div style="padding:10px 12px;overflow-y:auto;">'
+      +   '<div style="margin-bottom:4px;"><span style="color:#888;">player </span><span style="color:#eee;">' + playerInfo + '</span></div>'
+      +   '<div style="margin-bottom:4px;"><span style="color:#888;">entities </span><span style="color:#eee;">' + (entities ? entities.length : 'null') + '</span></div>'
+      +   '<div style="margin-bottom:8px;"><span style="color:#888;">error </span><span style="color:#ff8899;">' + safeErr + '</span></div>'
+      +   '<pre style="white-space:pre-wrap;margin:0;color:#aaa;font-size:11px;'
+      +     'background:#000;padding:8px;border-radius:4px;border:1px solid #222;">'
+      +     safeStack
+      +   '</pre>'
+      + '</div>';
+    console.error('[Rumble loop error]', err);
+  }
+}
+
+function updateHUD() {
+  if (!player) return;
+  // All HUD element writes are guarded — test page has hidden compatibility
+  // elements, production host pages may not include them at all.
+  var el;
+  if (el = document.getElementById('hud-hp'))     el.textContent = player.hp;
+  if (el = document.getElementById('hud-hp-max')) el.textContent = '/ ' + player.hpMax + ' HP';
+  if (el = document.getElementById('hud-class'))  el.textContent = player.cls.toUpperCase();
+  var hpPct = Math.min(100, (player.hp / player.hpMax * 100));
+  var isOverheal = player.hp > player.hpMax;
+  var isBleeding = !!player.bleedOut;
+  // Drive the screen-tint overlay — fades in during bleed, out on recovery
+  updateBleedOverlay(isBleeding);
+  var hpBar = document.getElementById('hp-bar');
+  if (hpBar) {
+    hpBar.style.width = hpPct + '%';
+    if (isBleeding) {
+      // Red-purple gradient + glow during bleed, signals critical state
+      hpBar.style.background = 'linear-gradient(90deg,#7B0033,#b06fef)';
+      hpBar.style.boxShadow = '0 0 12px #b06fef, 0 0 24px #7B0033';
+    } else if (isOverheal) {
+      hpBar.style.background = 'linear-gradient(90deg,#7B2FBE,#b06fef)';
+      hpBar.style.boxShadow = '';
+    } else {
+      hpBar.style.background = 'linear-gradient(90deg,#E24B4A,#ff6b6b)';
+      hpBar.style.boxShadow = '';
+    }
+  }
+  if (el = document.getElementById('hud-hp'))     el.style.color = isOverheal ? '#b06fef' : '#E24B4A';
+  // Armor pips — show filled and empty up to max
+  var armorEl = document.getElementById('armor-pips');
+  if (armorEl) {
+    var aMax3 = getArmorMax();
+    var pips = '';
+    for (var i = 0; i < aMax3; i++) {
+      var filled = i < (player.armor||0);
+      pips += '<span style="width:10px;height:10px;border-radius:2px;background:' + (filled ? '#AAAAAA' : '#333') + ';display:inline-block;box-shadow:0 1px 3px rgba(0,0,0,.5);"></span>';
+    }
+    armorEl.innerHTML = pips;
+  }
+  // Timer
+  if (el = document.getElementById('rumble-timer-display')) el.textContent = '∞';
+  // Dash cooldown
+  var dashEl = document.getElementById('dash-cd');
+  var dashLabel = document.getElementById('dash-display');
+  if (dashEl && dashLabel) {
+    if (dashCooldown > 0) {
+      dashEl.textContent = Math.ceil(dashCooldown) + 's';
+      dashEl.style.color = '#E24B4A';
+      dashLabel.style.color = '#555';
+    } else {
+      dashEl.textContent = 'READY';
+      dashEl.style.color = '#F5D000';
+      dashLabel.style.color = '#F5D000';
+    }
+  }
+}
+
+
+// ═══════════════════════════════════════════════════
+// OVERLOAD SYSTEM
+// ═══════════════════════════════════════════════════
+var overloadState = null; // { color, timer, startX, startY, dragPos }
+var OVERLOAD_HOLD = 2.5; // 0.5 second per tier (5 bricks = 2.5s max)
+var OVERLOAD_TIER = 0.5; // seconds per tier
+
+function startOverload(e, color) {
+  if (!player || !player.bricks[color] || player.bricks[color] <= 0) return;
+  var touch = e.touches ? e.touches[0] : e;
+  overloadState = {
+    color: color,
+    timer: 0,
+    startClientX: touch.clientX,
+    startClientY: touch.clientY,
+    dragPos: null,
+    fired: false,
+  };
+}
+
+function updateOverload(dt) {
+  if (!overloadState || overloadState.fired) return;
+  var maxTimer = player ? ((player.bricks[overloadState.color]||1) * OVERLOAD_TIER) : OVERLOAD_TIER;
+  overloadState.timer = Math.min(overloadState.timer + dt, maxTimer);
+}
+
+function cancelOverload() {
+  overloadState = null;
+}
+
+var _currentCrit = false;      // crit flag from last cast; color handlers apply threshold effects
+// S015 v0.15.12: snapshot of red brick inventory at the moment of cast,
+// captured BEFORE the spend in fireOverload. Read by getRedRange callers
+// in startRedCharge / startRedChargeTo / drawCastIndicator (drag preview)
+// to compute range from "bricks committed" rather than "bricks left."
+// null when no red cast in flight; read with `??` style fallback.
+var _redCastOwnedSnapshot = null;
+
+function fireOverload(dragX, dragY, bricksUsed) {
+  if (!overloadState || !player) return;
+  var color = overloadState.color;
+  var maxAvail = player.bricks[color] || 0;
+  var count = bricksUsed !== undefined ? Math.min(bricksUsed, maxAvail) : maxAvail;
+  if (count <= 0) return;
+  count = Math.max(1, count);
+  // S015 v0.15.12: capture pre-spend red brick count so range computation
+  // can read "bricks committed to this cast" rather than "bricks left
+  // after spend." Always clear first (defensive against stale snapshot
+  // from a previous cast that didn't reach termination cleanly), then set
+  // for red casts only. Read B from playtest lock.
+  _redCastOwnedSnapshot = null;
+  if (color === 'red') {
+    _redCastOwnedSnapshot = maxAvail;
+  }
+  player.bricks[color] = Math.max(0, maxAvail - count);
+  if (_battleStats) {
+    _addBrickStat(_battleStats.bricksUsed, color, count);
+    if (count >= 2) _battleStats.overloadsFired++;
+  }
+  renderBrickBar();
+  overloadState.fired = true;
+  overloadState = null;
+
+  // Crit roll — one per cast. Stored globally so per-color handlers can
+  // read it without threading a parameter through every fire function.
+  // Threshold EFFECTS are implemented per-color in Session B; this turn
+  // only establishes the roll + flag + universal "CRIT!" floating text.
+  _currentCrit = rollCrit(color, count);
+  if (_currentCrit) {
+    triggerCritSignature(color, player.x, player.y - 80);
+  }
+
+  // Audit diagnostic snapshot. Captures expected-vs-actual data for the
+  // rumble_test overload-audit panel. expected* uses the unified pipeline
+  // directly — same call the fire function will make. Persistent effects
+  // flag warns the audit that DoT contamination may inflate the actual
+  // delta in the comparison window. No gameplay effect.
+  //
+  // expectedDmg sums ALL damage paths so ratios are honest:
+  //   primary (.dmg) + burst (.burstDmg, applied to each non-primary in radius)
+  //   + wither (.witherDmg, applied per stack to all in radius)
+  // For colors with no damage (white, gray, yellow), expectedDmg is 0.
+  //
+  // expectedHeal mirrors the same shape for healing colors:
+  //   burst (.burst) + total field pool (.totalHeal)
+  // For white: target gets burst + ticks up to totalHeal.
+  if (_battleStats && window.effectiveAt) {
+    var _aOwned = (player.brickMax && player.brickMax[color]) || 0;
+    var _aFx = window.effectiveAt(color, count, player.cls, _aOwned);
+    var _persistentActive = !!(blackEffect || (whiteFields && whiteFields.length > 0) || (orangeAura && orangeAura.charges > 0)
+      || (greenBurst && !greenBurst.done) || (yellowAura && yellowAura.timer > 0));
+    // Estimate "entities likely in radius" — used to scale burst dmg.
+    // For honest expected-vs-actual we'd need to know exactly which
+    // entities are inside, but this is a snapshot at fire time, before
+    // travel/impact. Conservative estimate: count entities currently
+    // within the AoE of the cast origin (player position).
+    var _aoeR = _aFx.radiusPx || 0;
+    var _aEntsInRadius = 0;
+    if (_aoeR > 0 && entities && entities.length) {
+      for (var _ai = 0; _ai < entities.length; _ai++) {
+        var _ag = entities[_ai];
+        if (_ag.hp <= 0) continue;
+        if (Math.hypot(_ag.x - player.x, _ag.y - player.y) <= _aoeR + (_ag.r || 0)) {
+          _aEntsInRadius++;
+        }
+      }
+    }
+    // Sum damage paths
+    var _expDmg = 0;
+    if (_aFx.dmg) _expDmg += _aFx.dmg;
+    // Burst applies to non-primary entities (estimate: total in radius minus 1)
+    if (_aFx.burstDmg && _aEntsInRadius > 1) {
+      _expDmg += _aFx.burstDmg * (_aEntsInRadius - 1);
+    }
+    // Wither: per stack to each entity in radius (initial application)
+    if (_aFx.witherDmg) _expDmg += _aFx.witherDmg * Math.max(1, _aEntsInRadius);
+    // Stack damage (green): per slow tick — show as one-tick value
+    if (_aFx.stackDmg && !_aFx.dmg) _expDmg = _aFx.stackDmg;
+    // Healing path
+    var _expHeal = 0;
+    if (_aFx.totalHeal) _expHeal = _aFx.totalHeal;
+    else if (_aFx.heal) _expHeal = _aFx.heal;
+    if (_aFx.burst && _expHeal === 0) _expHeal = _aFx.burst;
+    _battleStats.lastOverload = {
+      color: color,
+      tier: count,
+      expectedDmg: _expDmg,
+      expectedHeal: _expHeal,
+      expectedRadius: _aFx.radiusPx,
+      // Components for transparency in the panel
+      expDmgPrimary: _aFx.dmg || 0,
+      expDmgBurst: _aFx.burstDmg || 0,
+      expDmgWither: _aFx.witherDmg || 0,
+      expHealBurst: _aFx.burst || 0,
+      expHealTotal: _aFx.totalHeal || 0,
+      entsInRadius: _aEntsInRadius,
+      mult: _aFx.mult,
+      tapMult: _aFx.tap,
+      affMult: _aFx.aff,
+      curveMult: _aFx.curve,
+      isCrit: !!_currentCrit,
+      ts: performance.now(),
+      dmgSnapshot: (_battleStats.damageByColor && _battleStats.damageByColor[color]) || 0,
+      healSnapshot: (_battleStats.healedByColor && _battleStats.healedByColor[color]) || 0,
+      actualDamage: 0,
+      actualHeal: 0,
+      frozen: false,
+      persistentFx: _persistentActive,
+    };
+  }
+
+  // Origin — for most bricks collapse to player if tap, but pass raw coords so individual handlers can decide
+  var _dist = dragX !== undefined ? Math.hypot(dragX - player.x, dragY - player.y) : -1;
+  // dropped on player = regen signal (pass player coords), tap or drag elsewhere = instant heal (undefined/far coords)
+  var droppedOnPlayer = dragX !== undefined && _dist < player.r + 20;
+  var ox = droppedOnPlayer ? player.x : (dragX !== undefined ? dragX : undefined);
+  var oy = droppedOnPlayer ? player.y : (dragY !== undefined ? dragY : undefined);
+  var _usePlayer = (dragX === undefined) || droppedOnPlayer;
+  var oxP = _usePlayer ? player.x : dragX;
+  var oyP = _usePlayer ? player.y : dragY;
+
+  if (color === 'red')    fireOverloadRed(count, oxP, oyP);
+  // v0.16.62 — white routes through engine.applyCast as proof of
+  // dispatch pattern. Other 10 colors stay direct until v0.16.63
+  // extends the pattern. White was chosen as proving ground because
+  // it's the simplest cast (single function, no entity targeting).
+  if (color === 'white') {
+    if (_engine && _engine.applyCast) {
+      _engine.applyCast('local', {
+        cast: 'white_overload',
+        count: count,
+        ox: ox, oy: oy,
+        isCrit: _currentCrit,
+        ts: (typeof performance !== 'undefined' && performance.now)
+            ? performance.now() : Date.now(),
+      });
+    } else {
+      // Fallback: pre-engine direct path. Should never hit during
+      // normal play (engine inits before any cast); safety net for
+      // edge cases (test harness, init failure).
+      fireOverloadWhite(count, ox, oy);
+    }
+  }
+  if (color === 'yellow') fireOverloadYellow(count, oxP, oyP);
+  if (color === 'blue')   fireOverloadBlue(count, oxP, oyP);
+  if (color === 'orange') fireOverloadOrange(count, oxP, oyP);
+  if (color === 'gray')   fireOverloadGray(count, oxP, oyP);
+  if (color === 'green')  fireOverloadGreen(count, oxP, oyP, _usePlayer);
+  if (color === 'purple') fireOverloadPurple(count, oxP, oyP);
+  if (color === 'black')  fireOverloadBlack(count, oxP, oyP);
+
+  // overload announcement handled by each action's flavor text
+}
+
+function fireOverloadRed(count, ox, oy)   {
+  if (ox !== undefined && Math.hypot(ox-player.x, oy-player.y) > scaleDist(40)) {
+    startRedChargeTo(count, ox, oy);
+  } else {
+    startRedCharge(count, null);
+  }
+}
+function fireOverloadWhite(count, ox, oy) {
+  // Overload-white follows the same self-cast vs drag-far split as the
+  // tap path (doWhiteHeal), just at tier `count` instead of T1:
+  //   - Self-cast (no drag, OR drag ≤30px): burst to player + follow-field
+  //   - Drag-far: stationary field, full pool, no burst
+  if (!player) return;
+  var _isDrag = ox !== undefined;
+  var dropX = _isDrag ? ox : player.x;
+  var dropY = _isDrag ? oy : player.y;
+  var distFromPlayer = Math.hypot(dropX - player.x, dropY - player.y);
+  var isSelfCast = distFromPlayer <= 30;
+  if (isSelfCast) {
+    var fx = _fx('white', count);
+    if (fx) {
+      var burstAmt = (fx.burst || 0) * (_currentCrit ? 2 : 1);
+      var prev = player.hp;
+      var cap = Math.max(player.hpMax, player.hp);
+      player.hp = Math.min(cap, player.hp + burstAmt);
+      var actualBurst = player.hp - prev;
+      if (actualBurst > 0) {
+        applyBleedRescue(actualBurst);
+        if (_battleStats) {
+          _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actualBurst;
+          if (actualBurst > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actualBurst;
+          if (!_battleStats.healedByColor) _battleStats.healedByColor = {};
+          _battleStats.healedByColor.white = (_battleStats.healedByColor.white || 0) + actualBurst;
+        }
+        showFloatingText(player.x, player.y - 50, actualBurst + ' ✚', '#EFEFEF', player);
+      }
+    }
+    startWhiteField(player.x, player.y, count, player);
+  } else {
+    startWhiteField(dropX, dropY, count, null);
+  }
+  if (_currentCrit) {
+    spawnCritShockwave(dropX, dropY, '#FFFFFF', { r0: 6, maxR: scaleDist(160), thickness: 3, growth: 240 });
+    spawnCritFlourish(dropX, dropY, '#FFEEFF', 16);
+    spawnCritFlourish(dropX, dropY, '#FFAACC', 10);
+  }
+  spawnHealSparkles(count);
+  var sparkCount = Math.max(1, Math.round(count * 3 * vScale(count)));
+  var sizeBase = 2 + count * 0.4;
+  var speedBase = 0.15 + count * 0.04;
+  var spreadR = 6 + count * 4;
+  var colors2 = ['#ffffff','#ffccee','#ff99cc','#ffe0f0'];
+  if (count >= 4) colors2.push('#ffaaff','#cc88ff');
+  for (var i = 0; i < sparkCount; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var speed = speedBase + Math.random() * speedBase;
+    var size = sizeBase + Math.random() * sizeBase * 0.8;
+    playerSparkles.push({
+      ox: Math.cos(angle)*(spreadR * Math.random()),
+      oy: Math.sin(angle)*(spreadR * Math.random()),
+      vox: Math.cos(angle)*speed, voy: Math.sin(angle)*speed-0.3*(count*0.5),
+      text: i%3===0?'✦':'✧',
+      color: colors2[Math.floor(Math.random()*colors2.length)],
+      size: size, alpha: 1, life: 1
+    });
+  }
+}
+
+// ── WHITE CLEANSE HELPERS ────────────────────────────
+// Crit-only. Tap cleanses 1 status; overload tier N cleanses N statuses.
+// Player priority (most-disruptive first): poison → slow → weaken → daze
+//   → confuse. Returns count actually removed.
+// Entity positives (anti-player buffs): _enraged → attackBoost → speedBoost.
+//   _recoverVulnerable is pro-player (NOT stripped). swingState NOT touched.
+function cleansePlayerStatuses(n) {
+  if (!player || !player.status || n <= 0) return 0;
+  var s = player.status;
+  var removed = 0;
+  if (n > removed && s.poison.timer > 0 && s.poison.stacks > 0) {
+    s.poison.stacks = 0; s.poison.timer = 0; s.poison.tickTimer = 0;
+    removed++;
+  }
+  if (n > removed && s.slow.timer > 0 && s.slow.factor > 0) {
+    s.slow.factor = 0; s.slow.timer = 0;
+    removed++;
+  }
+  if (n > removed && s.weaken.timer > 0) { s.weaken.timer = 0; removed++; }
+  if (n > removed && s.daze.timer > 0) { s.daze.timer = 0; removed++; }
+  if (n > removed && s.confuse.timer > 0) { s.confuse.timer = 0; removed++; }
+  return removed;
+}
+
+function cleanseEntityPositives(g, n) {
+  if (!g || n <= 0) return 0;
+  var removed = 0;
+  if (n > removed && g._enraged) { g._enraged = false; removed++; }
+  if (n > removed && (g.attackBoost || 0) > 0) { g.attackBoost = 0; removed++; }
+  if (n > removed && (g.speedBoost || 0) > 0) { g.speedBoost = 0; removed++; }
+  return removed;
+}
+
+// Apply white-cleanse at cast time. Crit-only. Player cleanse fires only
+// if player is in the field's radius. Entity strips fire on each entity
+// in radius. Counts are tier-scaled.
+function applyWhiteCleanse(ox, oy, radius, tier) {
+  if (!_currentCrit) return;
+  var playerInside = player && Math.hypot(player.x - ox, player.y - oy) <= radius;
+  var playerRemoved = playerInside ? cleansePlayerStatuses(tier) : 0;
+  if (playerRemoved > 0) {
+    var label = playerRemoved > 1 ? ('CLEANSED ×' + playerRemoved) : 'CLEANSED';
+    showFloatingText(player.x, player.y - 68, label, '#FFFFFF', player);
+  }
+  entities.forEach(function(g) {
+    if (g.hp <= 0) return;
+    if (Math.hypot(g.x - ox, g.y - oy) <= radius) {
+      cleanseEntityPositives(g, tier);
+    }
+  });
+}
+
+// ── WHITE HEALING FIELD ─────────────────────────────
+// Each white cast spawns an independent field instance. Multiple fields
+// can coexist in different locations (no stacking — fusion territory).
+// Field heals over time: ticks subtract from healRemaining until exhausted,
+// then field expires. This lets total HP per cast be exactly what
+// effectiveAt('white', tier).totalHeal returns, with strict integer growth.
+//
+// Per-instance shape:
+//   ox, oy           — center (canvas px)
+//   radius           — clamped to arena
+//   healPerTick      — fx.heal (per-tick value)
+//   healRemaining    — counts down; field expires at 0
+//   tickInterval     — derived from fx.duration / fx.ticks (typically 0.5s)
+//   tickTimer        — accumulator
+//   pulse, sparkleTimer  — visual
+//   firstTickDouble  — crit flag
+//   maxHealForViz    — fx.totalHeal at cast time, used for pct in draw
+var whiteFields = [];
+
+// Spawn a white healing field. Two flavors:
+//   followTarget != null  →  field follows that entity (player or ally),
+//                            uses fieldPool (already-burst-deducted),
+//                            target itself does NOT receive ticks (burst was
+//                            their share). Other allies in radius get HoT.
+//                            If a field already follows this target, refresh
+//                            its pool/timers in place instead of stacking.
+//   followTarget == null  →  stationary field at (ox, oy), uses totalHeal
+//                            (full pool — no burst was given to anyone).
+//                            Anyone in radius gets HoT, including caster.
+function startWhiteField(ox, oy, count, followTarget) {
+  var fx = _fx('white', count);
+  if (!fx) return;
+  var radius = clampRadiusToArena(fx.radiusPx);
+  var poolForField = followTarget ? fx.fieldPool : fx.totalHeal;
+  // Refresh-in-place for the same target — don't stack two follow-fields
+  // on the same player.
+  if (followTarget) {
+    for (var i = 0; i < whiteFields.length; i++) {
+      var ex = whiteFields[i];
+      if (ex.followTarget === followTarget) {
+        ex.healRemaining = poolForField;
+        ex.maxHealForViz = poolForField;
+        ex.tickTimer = 0;
+        ex.firstTickDouble = !!_currentCrit;
+        applyWhiteCleanse(ox, oy, radius, count || 1);
+        return;
+      }
+    }
+  }
+  whiteFields.push({
+    ox: ox, oy: oy,
+    radius: radius,
+    healPerTick: fx.heal,
+    healRemaining: poolForField,
+    maxHealForViz: poolForField,
+    tickInterval: fx.ticks > 0 ? (fx.duration / fx.ticks) : 0.5,
+    tickTimer: 0,
+    pulse: 0,
+    sparkleTimer: 0,
+    firstTickDouble: !!_currentCrit,
+    followTarget: followTarget || null, // null = stationary at (ox, oy)
+  });
+  applyWhiteCleanse(ox, oy, radius, count || 1);
+}
+
+function updateWhiteField(dt) {
+  if (!whiteFields.length || !player) return;
+  // Iterate backward so we can splice expired fields without index churn.
+  for (var i = whiteFields.length - 1; i >= 0; i--) {
+    var wf = whiteFields[i];
+    wf.pulse = (wf.pulse + dt * 2) % (Math.PI * 2);
+
+    // Field-follows-target: snap center to the target's current position
+    // each frame. If the target died (hp<=0 or removed), expire the field
+    // immediately — they faded out of existence.
+    if (wf.followTarget) {
+      if (wf.followTarget.hp == null || wf.followTarget.hp <= 0) {
+        whiteFields.splice(i, 1);
+        continue;
+      }
+      wf.ox = wf.followTarget.x;
+      wf.oy = wf.followTarget.y;
+    }
+
+    var cx = wf.ox, cy = wf.oy, r = wf.radius;
+    // ── HEAL TICK (S015 v0.15.16: gated by 'will heal actually deliver') ──
+    // Tick timer ONLY advances when conditions are right for a heal to land
+    // this frame: player inside field, player below max HP, pool > 0.
+    // If any condition fails, timer freezes at its current value — the
+    // field is patient. Step out and back in: tick countdown resumes from
+    // where it paused. Stand at full HP inside the field: timer freezes,
+    // pool stays full. The field drains ONLY when actual healing delivered.
+    var playerInside = Math.hypot(player.x - cx, player.y - cy) <= r;
+    var canHeal = playerInside && wf.healRemaining > 0 && player.hp < player.hpMax;
+    if (canHeal) {
+      wf.tickTimer += dt;
+      if (wf.tickTimer >= wf.tickInterval) {
+        wf.tickTimer -= wf.tickInterval;
+        var prev = player.hp;
+        var tickHeal = Math.min(wf.healPerTick, wf.healRemaining);
+        if (wf.firstTickDouble) {
+          tickHeal = Math.min(tickHeal * 2, wf.healRemaining);
+          wf.firstTickDouble = false;
+          spawnCritShockwave(cx, cy, '#FFFFFF', { r0: 10, maxR: r, thickness: 3, growth: 300 });
+          spawnCritFlourish(player.x, player.y, '#FFEEFF', 12);
+        }
+        var cap = Math.max(player.hpMax, player.hp);
+        player.hp = Math.min(cap, player.hp + tickHeal);
+        var actual = player.hp - prev;
+        // Decrement pool by ACTUAL heal applied (overflow returns to pool).
+        // E.g., player at hpMax-2, tickHeal=5 → applies 2, refunds 3 to pool.
+        // Without this, white fields silently waste pool when player is
+        // near full HP. Only a real concern when player.hp >= hpMax-tickHeal.
+        wf.healRemaining -= actual;
+        if (actual > 0) {
+          applyBleedRescue(actual);
+          if (_battleStats) {
+            _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actual;
+            if (actual > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actual;
+            if (!_battleStats.healedByColor) _battleStats.healedByColor = {};
+            _battleStats.healedByColor.white = (_battleStats.healedByColor.white || 0) + actual;
+          }
+          showFloatingText(player.x, player.y - 40, actual + ' ✚', '#EFEFEF', player);
+        }
+      }
+    }
+    // Soft-slow any entity inside this field
+    entities.forEach(function(e) {
+      if (Math.hypot(e.x - cx, e.y - cy) <= r) {
+        e.whiteFieldSlowed = true;
+        e.whiteFieldSlowTimer = 0.25;
+      }
+    });
+    // Sparkle shimmer (always — visual life of the field, not gated by heal)
+    wf.sparkleTimer += dt;
+    if (wf.sparkleTimer >= 0.08) {
+      wf.sparkleTimer = 0;
+      var angle = Math.random() * Math.PI * 2;
+      var dist = Math.random() * r * 0.9;
+      spawnHealSparkleAt(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
+    }
+    // ── EXPIRY (unified, S015 v0.15.15) ──
+    // Single path: pool exhausted → field expires. No timer fallback.
+    // Both stationary and follow-self fields use this. The only way a
+    // white field disappears is by being fully consumed.
+    if (wf.healRemaining <= 0) {
+      whiteFields.splice(i, 1);
+      continue;
+    }
+  }
+}
+
+function drawWhiteField() {
+  if (!whiteFields.length || !ctx) return;
+  whiteFields.forEach(function(wf) {
+    var cx = wf.ox, cy = wf.oy, r = wf.radius;
+    var pct = wf.healRemaining / wf.maxHealForViz;
+    var a = Math.max(0, Math.min(1, pct)) * 0.55;
+    ctx.save();
+    var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    grad.addColorStop(0, 'rgba(255, 255, 255, ' + (a * 0.28) + ')');
+    grad.addColorStop(0.6, 'rgba(255, 240, 245, ' + (a * 0.18) + ')');
+    grad.addColorStop(1.0, 'rgba(255, 200, 220, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    var pulseScale = 1 + Math.sin(wf.pulse) * 0.04;
+    ctx.strokeStyle = 'rgba(255, 255, 255, ' + a + ')';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.save();
+    ctx.globalAlpha = a * 0.25;
+    ctx.beginPath(); ctx.arc(cx, cy, r * pulseScale, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * pulseScale, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * pct);
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+    // Numeric "+N" label at field center showing remaining heal pool.
+    // Per S015 v0.15.16: pink to match heal sparkle palette so player
+    // reads it as "this is heal storage." Decrements as pool drains.
+    // Hidden when pool is 0 (about to expire anyway).
+    var remaining = Math.ceil(wf.healRemaining);
+    if (remaining > 0) {
+      ctx.save();
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // Subtle dark outline for legibility against varied backdrops
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.strokeText('+' + remaining, cx, cy);
+      ctx.fillStyle = '#FF99CC'; // pink, matches heal sparkle accent color
+      ctx.fillText('+' + remaining, cx, cy);
+      ctx.restore();
+    }
+  });
+}
+
+// Helper used by updateWhiteField for shimmer particles. We reuse the
+// existing playerSparkles array with world-space coords so we don't
+// build a separate particle system.
+function spawnHealSparkleAt(x, y) {
+  playerSparkles.push({
+    worldSpace: true,
+    wx: x, wy: y,
+    vox: (Math.random() - 0.5) * 0.1,
+    voy: -0.2 - Math.random() * 0.15,
+    text: Math.random() < 0.5 ? '✦' : '✧',
+    color: '#ffffff',
+    size: 2 + Math.random() * 2,
+    alpha: 1, life: 1,
+  });
+}
+
+
+function fireOverloadYellow(count, ox, oy) {
+  // Aura with tier-scaled radius and duration. Drag-cast anchors to coords;
+  // tap-cast follows player.
+  var dragOrigin = ox !== undefined && Math.hypot(ox - player.x, oy - player.y) > scaleDist(40);
+  var fx = _fx('yellow', count);
+  if (!fx) return;
+  startYellowAura({
+    follow: !dragOrigin,
+    ox: dragOrigin ? ox : player.x,
+    oy: dragOrigin ? oy : player.y,
+    radius: clampRadiusToArena(fx.radiusPx),
+    duration: fx.duration,
+    yellowSeed: fx.yellowSeed,
+    label: 'MIND SHATTER x' + count + '!',
+    isCrit: _currentCrit,
+  });
+}
+function fireOverloadBlue(count, ox, oy) {
+  // S015 v0.15.23: respect drop point on drag-overload (was always
+  // nearest-to-player, ignoring drop coordinates). Branching:
+  //   - Tap (no drag): home on entity nearest to PLAYER (existing).
+  //   - Drag: drop point IS the target. If an entity is within
+  //     fx.radiusPx of the drop point at button-up, home on it
+  //     (blue is homing by nature). If no entity at drop point,
+  //     fire a fixed-point bolt that travels to the drop coords
+  //     and AOE-impacts on arrival. Non-AOE classes effectively
+  //     miss (no homing target + no AOE = harmless landing).
+  var fx = _fx('blue', count);
+  if (!fx) return;
+  var bcritMult = _currentCrit ? 2.0 : 1.0;
+  var blueProf = (typeof getBlueProfile === 'function') ? getBlueProfile(player.cls) : null;
+  var hasAOE = !!(blueProf && blueProf.hasImpactAOE);
+  var isDrag = ox !== undefined && Math.hypot(ox - player.x, oy - player.y) > scaleDist(40);
+  // Resolve target: nearest-to-player on tap, nearest-to-drop-point on
+  // drag (within fx.radiusPx tolerance — entity must be in the area
+  // the player aimed at, not just somewhere on the field).
+  var target = null;
+  if (isDrag) {
+    var dropRadius = clampRadiusToArena(fx.radiusPx);
+    entities.forEach(function(g) {
+      if (g.hp <= 0) return;
+      var d = Math.hypot(g.x - ox, g.y - oy);
+      if (d > dropRadius + g.r) return;
+      if (!target || d < Math.hypot(target.x - ox, target.y - oy)) target = g;
+    });
+  } else {
+    target = entities.length ? entities.reduce(function(a, b) {
+      return Math.hypot(a.x-player.x, a.y-player.y) < Math.hypot(b.x-player.x, b.y-player.y) ? a : b;
+    }) : null;
+  }
+  if (target) {
+    // Homing bolt — entity is the target.
+    blueBolts.push({
+      x: player.x, y: player.y,
+      target: target,
+      speed: 400 + count * 40,
+      dmg: Math.ceil(fx.dmg * bcritMult),
+      r: 6 + count * 4,       // x1=10, x5=26  (visual size, not damage)
+      dead: false,
+      travelled: 0,
+      tier: count,
+      glow: count * 10,
+      delayTimer: 0,
+      // Burst fields only populated for AOE classes (FW).
+      burstRadius: hasAOE ? clampRadiusToArena(fx.radiusPx) : 0,
+      burstDmg: hasAOE ? Math.ceil(fx.burstDmg * bcritMult) : 0,
+      isCrit: _currentCrit,
+    });
+    return;
+  }
+  // No target. On tap with no entities, nothing fires (legacy behavior).
+  // On drag with no entity at drop point, fire fixed-point bolt to drop
+  // coords. FW gets AOE damage on arrival; other classes' bolts arrive
+  // and impact harmlessly (no primary target + no AOE = miss). Visual
+  // confirms the cast happened even on miss.
+  if (!isDrag) return;
+  blueBolts.push({
+    x: player.x, y: player.y,
+    target: null, fixedPoint: true,
+    targetX: ox, targetY: oy,
+    speed: 400 + count * 40,
+    dmg: 0,  // no primary target → no primary damage
+    r: 6 + count * 4,
+    dead: false,
+    travelled: 0,
+    tier: count,
+    glow: count * 10,
+    delayTimer: 0,
+    // FW still gets AOE damage at the arrival point. Other classes get 0.
+    burstRadius: hasAOE ? clampRadiusToArena(fx.radiusPx) : 0,
+    burstDmg: hasAOE ? Math.ceil(fx.burstDmg * bcritMult) : 0,
+    impactR: clampRadiusToArena(fx.radiusPx),  // legacy field for hit detection
+    isCrit: _currentCrit,
+  });
+}
+function fireOverloadOrange(count, ox, oy) {
+  var isDrag = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) > scaleDist(40);
+  if (isDrag) {
+    fireOverloadOrangeScatter(count, ox, oy);
+  } else {
+    // Tap overload — spike aura with tier-scaled charges
+    var oFx = _fx('orange', count);
+    var charges = oFx ? oFx.charges : 1;
+    if (orangeAura) {
+      orangeAura.charges += charges;
+    } else {
+      orangeAura = { charges: charges, pulse: 0, r: player.r + 22 };
+    }
+  }
+}
+function fireOverloadGray(count, ox, oy) {
+  var isDrag = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) > scaleDist(40);
+  if (isDrag) {
+    // Drag-cast: always produces a ring wall at the drag location,
+    // regardless of armor state. Per S016 v0.16.46 design lock: gesture
+    // distinction maps to wall variant. Drag = ring (placed elsewhere).
+    startGrayWall(ox, oy, count);
+  } else {
+    // Self-cast (tap on player). v0.16.46 mode-switch:
+    //   - If BS at max armor AND has maxArmorArcWall data → spawn arc wall
+    //     centered on BS, facing nearest enemy. Cast tier scales arc HP.
+    //   - Otherwise: standard pip flow (pips → armor up to cap, overflow
+    //     → ring wall around nearest entity).
+    var aMax2 = getArmorMax();
+    var prevArmor = player.armor||0;
+    var atMax = aMax2 > 0 && prevArmor >= aMax2;
+    var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
+    var hasArcData = !!(prof && prof.maxArmorArcWall);
+    if (atMax && hasArcData) {
+      // v0.16.46 — Self-cast at full armor → arc wall (Forge identity beat).
+      // The cast still consumes its bricks (handled upstream), but instead
+      // of futilely trying to add pips to already-full armor and overflowing
+      // a ring, it spawns a directional arc wall around BS. Pure mode switch
+      // at the cast resolution point.
+      spawnArcWall(count);
+      armorBursts.push({ x:player.x, y:player.y, r:player.r, alpha:0.9 });
+      return;
+    }
+    // Tap-gray pips per S015 unified gray economy:
+    //   pips = max(1, round(1 × affinity × tier)) × critMult
+    // Uses getGrayPips helper from characters.js. T1 = 1 pip universally,
+    // sig classes (BK/BS) get larger yield from T2 onward via 1.25 affinity.
+    var gcritMult = _currentCrit ? 2.0 : 1.0;
+    var pips = Math.max(1, Math.round(getGrayPips(player.cls, count) * gcritMult));
+    // Apply pips to armor up to cap. Excess pips (beyond cap) overflow into
+    // a defensive wall around the nearest entity. Wall HP = surplus × 2
+    // (matches universal pips:wall ratio). Universal mechanic — BS arc
+    // wall variant fires above (different code path).
+    var spaceForArmor = Math.max(0, aMax2 - prevArmor);
+    var pipsToArmor = Math.min(pips, spaceForArmor);
+    var pipsOverflow = pips - pipsToArmor;
+    player.armor = prevArmor + pipsToArmor;
+    var gained = pipsToArmor;
+    if (pipsOverflow > 0 && entities.length > 0) {
+      // Find nearest entity to player and spawn wall there. Wall HP scales
+      // with surplus pip count (1 surplus pip = 2 HP wall by universal ratio).
+      var nearest = entities.reduce(function(a, b) {
+        return Math.hypot(a.x - player.x, a.y - player.y) < Math.hypot(b.x - player.x, b.y - player.y) ? a : b;
+      });
+      // Pass `pipsOverflow` as the tier-equivalent so wall HP = pips × 2 holds.
+      // startGrayWall reads getGrayWallHp(cls, tier) for HP.
+      startGrayWall(nearest.x, nearest.y, pipsOverflow);
+    }
+    if (_currentCrit) {
+      spawnCritShockwave(player.x, player.y, '#CCCCCC', { r0: 10, maxR: scaleDist(160), thickness: 4, growth: 240 });
+      spawnCritFlourish(player.x, player.y, '#DDDDDD', 18);
+    }
+    armorBursts.push({ x:player.x, y:player.y, r:player.r, alpha:0.9 });
+  }
+}
+function fireOverloadGreen(count, ox, oy, followPlayer) {
+  // Green burst applies poison stacks. Stacks count and per-stack damage
+  // both scale via the unified pipeline. Burst radius shared with payload.
+  var fx = _fx('green', count);
+  if (!fx) return;
+  var radius = clampRadiusToArena(fx.radiusPx);
+  if (greenBurst && !greenBurst.done) {
+    greenBurst._poisonedIds=[]; greenBurst._pushIds=[];
+  } else {
+    greenBurst = { r:0, maxR:radius, alpha:1, done:false, _poisonedIds:[], _pushIds:[], ox:ox, oy:oy };
+  }
+  // Poison-mult drives per-tick damage on entities in the burst. We feed
+  // it the unified per-stack damage so callers downstream don't need to
+  // know about BASE/COLOR; they just multiply this against their stack
+  // count as before.
+  greenBurst._poisonMult = fx.stackDmg;
+  greenBurst._stacksApplied = fx.stacks;       // tier-scaled stack count
+  greenBurst._castCount = count; // for duration extension (3 + count)
+  // GREEN NECROSIS: on crit, poison applied by this burst doesn't decay.
+  greenBurst._necrosis = !!_currentCrit;
+  greenBurst._followPlayer = !!followPlayer;
+  if (_currentCrit) {
+    spawnCritShockwave(ox, oy, '#39d67a', { r0: 10, maxR: radius, thickness: 4, growth: 350 });
+    spawnCritFlourish(ox, oy, '#1D9E75', 24);
+    spawnCritFlourish(ox, oy, '#7ce39a', 16);
+  }
+}
+function fireOverloadPurple(count, ox, oy) {
+  // Class-driven teleport profile (FW signature, per design doc §2.3).
+  // Detect drag by checking the drop point: if it's not at the player
+  // position, the user dragged the cast. _usePlayer logic in fireOverload
+  // sets oxP/oyP to player position for taps; drop ≠ player = drag intent.
+  var prof = player ? getPurpleProfile(player.cls) : null;
+  var isDrag = Math.hypot(ox - player.x, oy - player.y) > scaleDist(20);
+  if (prof && prof.teleport && isDrag) {
+    doTeleportPurple(prof, ox, oy, count, _currentCrit);
+    return;
+  }
+  var fx = _fx('purple', count);
+  if (!fx) return;
+  var maxR = clampRadiusToArena(fx.radiusPx);
+  // dmg field on purpleBurst: pre-rounded final damage (replaces old
+  // dmgMult × base-3 multiplication at the consumer site).
+  purpleBursts.push({ r:0, maxR:maxR, alpha:1, done:false, hit:false, ox:ox, oy:oy, dmg:fx.dmg, isCrit: _currentCrit, purpleTier: count });
+  if (_currentCrit) {
+    spawnCritShockwave(ox, oy, '#7B2FBE', { r0: 14, maxR: maxR, thickness: 4, growth: 380 });
+    spawnCritFlourish(ox, oy, '#9B6FD4', 26);
+    spawnCritFlourish(ox, oy, '#CC99FF', 16);
+  }
+}
+function fireOverloadBlack(count, ox, oy) {
+  var fx = _fx('black', count);
+  if (!fx) return;
+  var crit = !!_currentCrit;
+  var radius = clampRadiusToArena(fx.radiusPx);
+  // Per S015 v0.15.10: black overload pull strength + duration scale with
+  // tier (count). Half-value lock per playtest tuning.
+  //   T1 pull: 50 px/s, hold 2s
+  //   T10 pull: 220 px/s, hold 5s
+  // Pull = lerp 50→220 across tier 1→10. Duration = lerp 2→5 across same.
+  // Higher tier feels meaningfully stronger; lower tier is brief touch.
+  // Replaces previous fixed pull (220 px/s, 2x crit) and uncapped fx.duration.
+  var t = Math.max(1, Math.min(10, count || 1));
+  var pullStrength = 50 + (220 - 50) * (t - 1) / 9;     // T1=50, T10=220
+  var holdDuration = 2.0 + (5.0 - 2.0) * (t - 1) / 9;   // T1=2, T10=5
+  if (blackEffect) {
+    blackEffect.RADIUS = Math.max(blackEffect.RADIUS, radius);
+    blackEffect.timer = holdDuration;
+    blackEffect.DURATION = holdDuration;
+    blackEffect.tickDmg = fx.dmg;
+    blackEffect.pullStrength = Math.max(blackEffect.pullStrength || 0, pullStrength);
+    if (crit) blackEffect.isCrit = true;
+  } else {
+    blackEffect = { timer: holdDuration, DURATION: holdDuration, tickTimer: 0, TICK: 0.5, alpha: 0,
+      FADE_IN: 0.8, FADE_OUT: 0.8, ox: ox, oy: oy, RADIUS: radius,
+      tickDmg: fx.dmg, isCrit: crit, pullStrength: pullStrength };
+  }
+  if (crit) {
+    spawnCritShockwave(ox, oy, '#552288', { r0: 12, maxR: blackEffect.RADIUS, thickness: 4, growth: 280 });
+    spawnCritShockwave(ox, oy, '#BB88FF', { r0: 16, maxR: blackEffect.RADIUS * 0.8, thickness: 2, growth: 240 });
+    spawnCritFlourish(ox, oy, '#7744AA', 28);
+    spawnCritFlourish(ox, oy, '#333333', 20);
+  }
+  entities.forEach(function(g) {
+    if (Math.hypot(g.x-ox,g.y-oy)<blackEffect.RADIUS) { g.attackSlowed=true; g.attackSlowTimer=blackEffect.DURATION; }
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// PHASE B — PLAYER STATUS OUTLINE (concentric rings)
+// ═══════════════════════════════════════════════════
+// S013.7: The old drawStatusHUD (radial pie-wedge icons above player) was
+// REMOVED. All status effects now flow through _playerEffects() →
+// _drawEffectStack() above the player's HP bar, matching how entities
+// already work. The outline rings below stay — they're a different visual
+// channel (passive body tint at a glance), not duplicated by the stack.
+
+// Subtle outline pulse on the player sprite that telegraphs current status.
+// Rendered as a soft ring just outside player.r in the status's signature
+// color. Multiple statuses stack as concentric thin rings so player can
+// see "I'm poisoned AND weakened" without competing for the same ring.
+function drawPlayerStatusOutline() {
+  if (!player || !player.status) return;
+  var s = player.status;
+  var rings = [];
+  if (s.poison.timer  > 0) rings.push('#1D9E75');
+  if (s.slow.timer    > 0) rings.push('#7FE0FF');
+  if (s.daze.timer    > 0) rings.push('#F5D000');
+  if (s.confuse.timer > 0) rings.push('#E08CF0');
+  if (s.weaken.timer  > 0) rings.push('#553366');
+  if (rings.length === 0) return;
+
+  // Pulse alpha breathes between 0.5 and 0.9.
+  var t = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.004;
+  var pulseA = 0.5 + Math.abs(Math.sin(t)) * 0.4;
+
+  ctx.save();
+  ctx.lineWidth = 2;
+  for (var i = 0; i < rings.length; i++) {
+    ctx.globalAlpha = pulseA * (1 - i * 0.15);
+    ctx.strokeStyle = rings[i];
+    ctx.shadowColor = rings[i];
+    ctx.shadowBlur  = 8;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r + 4 + i * 3, 0, Math.PI*2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+
+function drawOverloadCharge() {
+  if (!overloadState || overloadState.fired) return;
+  // Don't show the charge ring during a tap. The ring only means something
+  // once the user has held long enough to cross the first brick tier (i.e.
+  // they're actually overloading). Before that threshold the press is a tap
+  // and shows no indicator.
+  if (overloadState.timer < OVERLOAD_TIER) return;
+  var col = BRICK_COLORS[overloadState.color] || '#FFD700';
+  var maxBricks = player && player.brickMax ? (player.brickMax[overloadState.color] || 1) : 1;
+  var totalDur = maxBricks * OVERLOAD_TIER;
+  var pct = Math.min(1, overloadState.timer / totalDur);
+  if (pct <= 0) return;
+  var tierDur = OVERLOAD_TIER;
+  var bricksCharged = Math.min(maxBricks, Math.floor(overloadState.timer / tierDur));
+  ctx.save();
+  // Background track
+  ctx.strokeStyle = col + '33';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r + 12, -Math.PI/2, -Math.PI/2 + Math.PI*2);
+  ctx.stroke();
+  // Fill arc
+  ctx.strokeStyle = col;
+  ctx.shadowColor = col;
+  ctx.shadowBlur = 18 * pct;
+  ctx.lineWidth = 4;
+  ctx.globalAlpha = 0.5 + pct * 0.5;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r + 12, -Math.PI/2, -Math.PI/2 + Math.PI*2*pct);
+  ctx.stroke();
+  // Tier tick marks
+  ctx.shadowBlur = 0; ctx.globalAlpha = 0.6;
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 2;
+  for (var t = 1; t < maxBricks; t++) {
+    var ta = -Math.PI/2 + Math.PI*2*(t/maxBricks);
+    ctx.beginPath();
+    ctx.moveTo(player.x + Math.cos(ta)*(player.r+8), player.y + Math.sin(ta)*(player.r+8));
+    ctx.lineTo(player.x + Math.cos(ta)*(player.r+17), player.y + Math.sin(ta)*(player.r+17));
+    ctx.stroke();
+  }
+  // Count label. Position:
+  //   • No active drag → 10 o'clock on the player (current orientation)
+  //   • Dragging → fixed offset ABOVE the cursor, so the count reads at the
+  //     drop target instead of getting lost behind the player avatar.
+  if (bricksCharged > 0) {
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = col;
+    ctx.shadowColor = col; ctx.shadowBlur = 8;
+    ctx.font = 'bold 16px Cinzel,serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    // Look up the current color's drag position, if any. Each color stores
+    // its own drag pos (greenDragPos, purpleDragPos, etc).
+    var dragMap = {
+      blue: typeof blueDragPos !== 'undefined' ? blueDragPos : null,
+      green: typeof greenDragPos !== 'undefined' ? greenDragPos : null,
+      yellow: typeof yellowDragPos !== 'undefined' ? yellowDragPos : null,
+      orange: typeof orangeDragPos !== 'undefined' ? orangeDragPos : null,
+      red: typeof redDragPos !== 'undefined' ? redDragPos : null,
+      purple: typeof purpleDragPos !== 'undefined' ? purpleDragPos : null,
+      white: typeof whiteDragPos !== 'undefined' ? whiteDragPos : null,
+      gray: typeof grayDragPos !== 'undefined' ? grayDragPos : null,
+      black: typeof blackDragPos !== 'undefined' ? blackDragPos : null,
+    };
+    var dragPos = dragMap[overloadState.color];
+    var labelX, labelY;
+    if (dragPos) {
+      // Active drag — convert client coords to canvas space, offset above.
+      var rect = canvas.getBoundingClientRect();
+      labelX = (dragPos.x - rect.left) * (canvas.width / rect.width);
+      labelY = (dragPos.y - rect.top) * (canvas.height / rect.height) - 28;
+    } else {
+      // No drag — 10 o'clock on the player.
+      var _oa = -Math.PI * 5/6;
+      var _or = player.r + 36;
+      labelX = player.x + Math.cos(_oa)*_or;
+      labelY = player.y + Math.sin(_oa)*_or;
+    }
+    ctx.fillText('x' + bricksCharged, labelX, labelY);
+  }
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════
+// BRICK BAR — dynamic distribution rule:
+//   • Signature color goes RIGHT (dominant thumb side)
+//   • Secondary goes LEFT
+//   • Additional bricks (baseline colors carried in) alternate right/left
+// Sort priority: tier (sig > sec > base) then alphabetical inside each tier.
+// ═══════════════════════════════════════════════════
+// S015 v0.15.24: ALL_BRICK_COLORS is now derived from characters.js
+// BRICK_ORDER (master display order) so rumble + players + test_players
+// share a single source of truth. Fallback array preserved for cases
+// where characters.js hasn't loaded yet (load-order safety net).
+var ALL_BRICK_COLORS = (typeof window !== 'undefined' && window.BRICK_ORDER)
+  ? window.BRICK_ORDER.slice()
+  : ['red','orange','yellow','green','blue','purple','white','gray','black'];
+var TEST_BRICKS  = ALL_BRICK_COLORS; // kept for legacy refs
+
+var blueDragActive = false;
+var blueDragPos = null;
+var greenDragActive = false;
+var greenDragPos = null;
+var yellowDragActive = false;
+var yellowDragPos = null;
+var orangeDragActive = false;
+var orangeDragPos = null;
+var redDragActive = false;
+var redDragPos = null;
+var grayDragActive = false;
+var grayDragPos = null;
+var purpleDragActive = false;
+var purpleDragPos = null;
+var blackDragActive = false;
+var blackDragPos = null;
+var whiteDragActive = false;
+var whiteDragPos = null;
+
+// Distribute the given list of colors across left and right bars using
+// Rule E (sig right, sec left, alternate beyond that).
+function _distributeBricks(colors) {
+  if (!player) return { left: [], right: [] };
+  // S015 v0.15.24: muscle-memory layout. Each color renders on a fixed
+  // side determined by its index in BRICK_ORDER (master sequence in
+  // characters.js). Even index → right, odd → left. Class affinity no
+  // longer affects POSITION — only styling (uiColor/uiBg already drive
+  // the visual class identity per-color).
+  //
+  // Filter by player kit AFTER side assignment so positions stay stable
+  // when a color is missing (no shifting). The colors array passed in is
+  // already filtered to brickMax > 0; we just route each to its side.
+  var right = [], left = [];
+  // Walk the master order so output is sorted by BRICK_ORDER index.
+  // (Even though `colors` is already filtered, we loop the master order
+  // and pick out the present ones — guarantees deterministic output.)
+  var order = (typeof window !== 'undefined' && window.BRICK_ORDER)
+    ? window.BRICK_ORDER
+    : ALL_BRICK_COLORS;
+  order.forEach(function(c, i) {
+    if (colors.indexOf(c) < 0) return;  // not in player's kit
+    if (i % 2 === 0) right.push(c);
+    else             left.push(c);
+  });
+  return { left: left, right: right };
+}
+
+function _brickBtnHTML(color) {
+  var qty = player.bricks[color] || 0;
+  var maxQ = player.brickMax ? (player.brickMax[color]||0) : qty;
+  var bg = BRICK_COLORS[color] || '#555';
+  var recharging = qty < maxQ;
+  // Compute the actual refresh rate for this color (mode-dependent) so the
+  // progress bar fills over the FULL rate rather than a hardcoded 1 second.
+  var rate;
+  if (cfg && cfg.mode === 'spec') {
+    var tier = brickTier(player.cls, color);
+    rate = BRICK_ECONOMY.refreshRates[tier];
+  } else {
+    var SANDBOX_RATES_R = { red:1, gray:1, green:1, blue:2, white:2, yellow:2, orange:2, purple:3, black:3 };
+    rate = SANDBOX_RATES_R[color] || 1;
+  }
+  var rechargePct = recharging ? Math.min(100, (player.brickRecharge[color]||0) / rate * 100) : 0;
+  var pips = '';
+  for (var i = 0; i < maxQ; i++) {
+    var filled = i < qty;
+    // Empty pips get a thin color-accent border over a neutral grey fill so
+    // low-contrast colors (notably black at #2a2a2a) still read as distinct
+    // slots. Filled pips keep their glow. Border is omitted when filled
+    // because the filled color + shadow already carry the identity.
+    pips += '<span style="display:inline-block;width:6px;height:6px;border-radius:2px;margin:1px;'
+      + 'background:' + (filled ? bg : '#1a1a1a') + ';'
+      + (filled ? '' : 'border:1px solid ' + bg + 'aa;box-sizing:border-box;')
+      + 'box-shadow:' + (filled ? '0 0 4px '+bg : 'none') + ';"></span>';
+  }
+  return '<button class="rumble-brick-btn" '
+    + 'id="rumble-brick-btn-' + color + '" '
+    + 'style="background:' + bg + (qty>0?'22':'11') + ';border:2px solid ' + bg + (qty>0?'66':'33') + ';" '
+    + 'onpointerdown="onBrickDown(event,\'' + color + '\')" >'
+    + '<span style="width:22px;height:22px;border-radius:4px;background:' + bg + ';opacity:' + (qty>0?'1':'0.3') + ';'
+    + 'display:inline-block;box-shadow:0 1px 4px rgba(0,0,0,.5);"></span>'
+    + '<div style="display:flex;flex-wrap:wrap;justify-content:center;width:44px;">' + pips + '</div>'
+    + (recharging ? '<div style="width:38px;height:3px;background:#111;border-radius:2px;overflow:hidden;">'
+      + '<div style="width:'+rechargePct+'%;height:100%;background:'+bg+';transition:width 0.1s;"></div></div>' : '')
+    + '</button>';
+}
+
+function renderBrickBar() {
+  var left  = document.getElementById('rumble-brick-bar-left');
+  var right = document.getElementById('rumble-brick-bar-right');
+  // Backwards compat: if host still uses single-bar #rumble-brick-bar, render all 9 there.
+  var single = document.getElementById('rumble-brick-bar');
+  if (!left && !right && !single) return;
+  if (!player) {
+    if (left)   left.innerHTML = '';
+    if (right)  right.innerHTML = '';
+    if (single) single.innerHTML = '';
+    return;
+  }
+  // Render only colors where brickMax > 0 (the kit the player brought).
+  // Colors the player never had (brickMax = 0) stay hidden for a clean layout.
+  var kitColors = ALL_BRICK_COLORS.filter(function(c) { return (player.brickMax[c] || 0) > 0; });
+  if (left || right) {
+    var dist = _distributeBricks(kitColors);
+    if (left)  left.innerHTML  = dist.left.map(_brickBtnHTML).join('');
+    if (right) right.innerHTML = dist.right.map(_brickBtnHTML).join('');
+  } else if (single) {
+    single.innerHTML = kitColors.map(_brickBtnHTML).join('');
+  }
+}
+
+// Blue drag-to-target
+function startDragAction(e, color, activeFn, dragActiveVar, dragPosVar) {
+  var touch = e.touches ? e.touches[0] : e;
+  var startX = touch.clientX, startY = touch.clientY;
+  window[dragActiveVar] = true;
+  window[dragPosVar] = { x: startX, y: startY };
+  function onMove(ev) {
+    var t = ev.touches ? ev.touches[0] : ev;
+    window[dragPosVar] = { x: t.clientX, y: t.clientY };
+  }
+  function onUp(ev) {
+    if (!window[dragActiveVar]) return;
+    window[dragActiveVar] = false;
+    var pos = window[dragPosVar];
+    if (pos) {
+      var dragDist = Math.hypot(pos.x - startX, pos.y - startY);
+      if (dragDist < 20) {
+        // Tap — use player position as origin
+        activeFn(player.x, player.y);
+      } else {
+        // Drag — use released canvas position
+        var rect = canvas.getBoundingClientRect();
+        var cx = (pos.x - rect.left) * (canvas.width / rect.width);
+        var cy = (pos.y - rect.top) * (canvas.height / rect.height);
+        activeFn(cx, cy);
+      }
+    }
+    window[dragPosVar] = null;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    document.removeEventListener('touchmove', onMove);
+    document.removeEventListener('touchend', onUp);
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+  document.addEventListener('touchmove', onMove, {passive:true});
+  document.addEventListener('touchend', onUp);
+}
+
+function onBrickDown(e, color) {
+  e.preventDefault();
+  e.stopPropagation();
+
+  // NOTE: we attach pointermove/pointerup to document rather than the button
+  // because renderBrickBar() runs every animation frame, replacing the button's
+  // innerHTML. Listeners on the button would be wiped out mid-press. The pointer
+  // event system still delivers pointerup to document reliably even without
+  // setPointerCapture, as long as the original pointerdown was handled on a
+  // descendant of document (always true here).
+  var pointerId = e.pointerId;
+
+  startOverload(e, color);
+  var startTime = performance.now();
+  var startCX = e.clientX, startCY = e.clientY;
+  var dragPos = null;
+  var dragFns = {
+    green:  function(cx,cy){ startGreenBurst(cx,cy); },
+    purple: function(cx,cy,isDrag){
+      // Drag-and-drop with a class that has a teleport purple profile
+      // (FW signature, per design doc §2.3) → teleport + dual blast.
+      // Tap or no-drag → normal burst at the (typically self) origin.
+      var prof = isDrag && player ? getPurpleProfile(player.cls) : null;
+      if (prof && prof.teleport) {
+        doTeleportPurple(prof, cx, cy, 1, _currentCrit);
+      } else {
+        startPurpleBurst(cx, cy);
+      }
+    },
+    black:  function(cx,cy){ startWitherbolt(cx,cy); },
+    orange: function(cx,cy,isDrag,tier){ startOrangeTrap(cx,cy,isDrag?tier:undefined); },
+    yellow: function(cx,cy,isDrag){
+      var yfx = _fx('yellow', 1);
+      if (!yfx) return;
+      if (isDrag) {
+        // Tap-drag = small confuse spike at target. Use radius / 2 since
+        // tap-drag is sharper-targeted than the broader aura.
+        startYellowConfuse(cx, cy, clampRadiusToArena(yfx.radiusPx * 0.5));
+      } else {
+        startYellowAura({ follow: true, radius: clampRadiusToArena(yfx.radiusPx), duration: yfx.duration, yellowSeed: yfx.yellowSeed, label: 'DAZE FIELD', isCrit: _currentCrit });
+      }
+    },
+    red:    function(cx,cy,isDrag){
+      if (isDrag) {
+        startRedChargeTo(1, cx, cy);
+      } else {
+        startRedCharge(1, null);
+      }
+    },
+    white:  function(cx,cy,isDrag){ if(isDrag && Math.hypot(cx-player.x,cy-player.y) < player.r+30){ startWhiteRegen(1); } else { doWhiteHeal(cx,cy); } },
+    gray:   function(cx,cy){ fireOverloadGray(1, cx, cy); },
+  };
+
+  function onMove(ev) {
+    // Filter to the same pointer that started this press (in case of multitouch)
+    if (pointerId !== undefined && ev.pointerId !== pointerId) return;
+    dragPos = { x: ev.clientX, y: ev.clientY };
+    if (overloadState) overloadState.dragPos = dragPos;
+    var moved = Math.hypot(ev.clientX - startCX, ev.clientY - startCY);
+    if (moved > 15) {
+      if (color === 'blue')   blueDragPos   = dragPos;
+      if (color === 'green')  greenDragPos  = dragPos;
+      if (color === 'purple') purpleDragPos = dragPos;
+      if (color === 'black')  blackDragPos  = dragPos;
+      if (color === 'white')  whiteDragPos  = dragPos;
+      if (color === 'yellow') yellowDragPos = dragPos;
+      if (color === 'orange') orangeDragPos = dragPos;
+      if (color === 'red')    redDragPos    = dragPos;
+      if (color === 'gray')   grayDragPos   = dragPos;
+    }
+  }
+
+  function onUp(ev) {
+    if (pointerId !== undefined && ev.pointerId !== pointerId) return;
+    var held = (performance.now() - startTime) / 1000;
+    var upClientX = ev.clientX !== undefined ? ev.clientX : startCX;
+    var upClientY = ev.clientY !== undefined ? ev.clientY : startCY;
+    var rect = canvas.getBoundingClientRect();
+    var canvasX = (upClientX - rect.left) * (canvas.width / rect.width);
+    var canvasY = (upClientY - rect.top)  * (canvas.height / rect.height);
+    var isDrag = Math.hypot(upClientX - startCX, upClientY - startCY) > scaleDist(20);
+    var _ab = getRumbleBounds();
+    var _outOfRumble = canvasX < _ab.x || canvasX > _ab.x+_ab.w || canvasY < _ab.y || canvasY > _ab.y+_ab.h;
+    if (_outOfRumble) {
+      // Dropped outside playable rumble area (bottom brick bar, top HUD, side gutter).
+      // Treat as plain overload released at player position — as if the drag
+      // never went over the rumble area. Fixes: dragging from brick bar into rumble area
+      // then back to bar should not send the cast to wherever the pointer is.
+      isDrag = false;
+      canvasX = player ? player.x : _ab.x + _ab.w/2;
+      canvasY = player ? player.y : _ab.y + _ab.h/2;
+    }
+
+    blueDragPos=null; greenDragPos=null; purpleDragPos=null; blackDragPos=null;
+    yellowDragPos=null; orangeDragPos=null; redDragPos=null; grayDragPos=null;
+    whiteDragPos=null;
+    blueDragActive=false; greenDragActive=false; purpleDragActive=false; blackDragActive=false;
+    yellowDragActive=false; orangeDragActive=false; redDragActive=false;
+    whiteDragActive=false;
+
+    var currentCharges = player.bricks[color] || 0;
+    var tierDur = OVERLOAD_TIER;
+    var bricksUsed = Math.max(1, Math.min(currentCharges, Math.floor(held / tierDur)));
+
+    if (held >= tierDur && Math.floor(held / tierDur) >= 1) {
+      if (overloadState) {
+        fireOverload(isDrag ? canvasX : undefined, isDrag ? canvasY : undefined, bricksUsed);
+      }
+    } else {
+      cancelOverload();
+      if (!player.bricks[color] || player.bricks[color] <= 0) { cleanup(); return; }
+      if (color === 'blue') {
+        player.bricks[color]--;
+        if (_battleStats) _addBrickStat(_battleStats.bricksUsed, color, 1);
+        player.brickRecharge[color] = player.brickRecharge[color] || 0;
+        renderBrickBar();
+        if (isDrag) {
+          // Drag-far: AoE bolt at drop point.
+          startBlueBoltAtPoint(canvasX, canvasY);
+        } else {
+          // v0.16.68 — Context-aware tap. Blue is smart about what
+          // the player needs:
+          //   - Loot on ground → RETRIEVE all dropped items (priority)
+          //   - No loot → homing bolt to nearest entity (legacy)
+          // Tap is unambiguous and discoverable. Drag-onto-self
+          // gesture (v0.16.63-65) was destroyed by the _outOfRumble
+          // branch above, which slammed isDrag=false and canvasX/Y
+          // back to player position whenever release was outside
+          // rumble bounds (which on mobile is most of the time given
+          // brick bar height + HUD margins). Diagnostic v0.16.67
+          // confirmed all retrieve attempts hit isDrag=false,
+          // outOfRumble=true. Tap-based trigger eliminates the
+          // bounds-fragility entirely.
+          if (typeof droppedBricks !== 'undefined' && droppedBricks.length > 0) {
+            // Loot exists — retrieve takes priority over bolt.
+            doBlueRetrieve();
+          } else {
+            // Tap: home on nearest entity (legacy behavior).
+            startBlueBolt(null);
+          }
+        }
+      } else if (dragFns[color]) {
+        player.bricks[color]--;
+        if (_battleStats) _addBrickStat(_battleStats.bricksUsed, color, 1);
+        player.brickRecharge[color] = player.brickRecharge[color] || 0;
+        renderBrickBar();
+        var ox = isDrag ? canvasX : player.x;
+        var oy = isDrag ? canvasY : player.y;
+        dragFns[color](ox, oy, isDrag, 1);
+      } else {
+        useBrickAction(color);
+      }
+    }
+    cleanup();
+  }
+
+  function onCancel(ev) {
+    if (pointerId !== undefined && ev.pointerId !== pointerId) return;
+    cancelOverload();
+    blueDragPos=null; greenDragPos=null; purpleDragPos=null; blackDragPos=null;
+    yellowDragPos=null; orangeDragPos=null; redDragPos=null; grayDragPos=null;
+    cleanup();
+  }
+
+  function cleanup() {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onCancel);
+  }
+
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointercancel', onCancel);
+
+  if (color === 'blue') { blueDragActive = true; }
+}
+
+function useBrick(color) {
+  useBrickAction(color);
+}
+
+// ═══════════════════════════════════════════════════
+// FLOATING TEXT
+// ═══════════════════════════════════════════════════
+var floatingTexts = [];
+// ═══════════════════════════════════════════════════
+// UNIFIED BUFF / DEBUFF STACK
+// Single renderer for player and entity effect lists. Effects stack
+// vertically above the HP bar. Sort order: longest-remaining timer sits
+// CLOSEST to the HP bar (bottom of stack), shortest at the top. Timerless
+// effects (e.g. zone presence) render above all timered ones at the very
+// top. Stacks shown as "×N" suffix on icon.
+//
+// Each effect: { icon, color, timer, stack? }
+//   icon   — glyph or short string
+//   color  — hex for glow and icon fill
+//   timer  — seconds remaining, or null for untimered
+//   stack  — optional integer; rendered as "icon ×N" if > 1
+// ═══════════════════════════════════════════════════
+function _drawEffectStack(anchorX, anchorBarY, effects) {
+  if (!effects || !effects.length) return;
+  // Sort: timerless → top. Among timered → shortest at top, longest nearest
+  // HP bar (bottom). So sort ascending by timer with nulls as Infinity, then
+  // render in that order from top down.
+  effects.sort(function(a, b) {
+    var ta = a.timer === null ? -1 : a.timer;
+    var tb = b.timer === null ? -1 : b.timer;
+    // Nulls first (smallest). Timered ascending after — longest last.
+    return ta - tb;
+  });
+  var now = performance.now();
+  var pulse = 0.75 + 0.25 * Math.sin(now * 0.005);
+  var rowH = 16;
+  var startY = anchorBarY - 8 - effects.length * rowH;
+  effects.forEach(function(fx, i) {
+    var ry = startY + i * rowH;
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = fx.color; ctx.shadowBlur = 5;
+    // Icon (left of center)
+    ctx.font = '13px serif';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = fx.color;
+    // Stack display: count sits BEFORE the icon (e.g. "3 ☠", "2 ✦", "5 ♥").
+    // Matches the damage-number layout where numbers lead and the status
+    // glyph trails. Keeps one visual grammar for "count + symbol" across
+    // the whole UI. Single-stack effects show just the icon.
+    var iconText = ((fx.stack && fx.stack > 1) ? fx.stack + ' ' : '') + fx.icon;
+    ctx.fillText(iconText, anchorX - 2, ry);
+    // Right-of-icon text: either a timer (Ns) or an explicit label (e.g.
+    // the slow hourglass's "×0.25" move multiplier). Label takes priority
+    // when both are present. Keeps the same mono-right column layout.
+    var rightText = null;
+    if (fx.label) {
+      rightText = fx.label;
+    } else if (fx.timer !== null && fx.timer !== undefined) {
+      rightText = Math.ceil(fx.timer) + 's';
+    }
+    if (rightText) {
+      ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#dddddd';
+      ctx.shadowBlur = 0;
+      ctx.fillText(rightText, anchorX + 2, ry);
+    }
+    ctx.restore();
+  });
+}
+
+// Assemble the entity effect list. Pure state read — returns the array.
+function _entityEffects(g) {
+  var fx = [];
+  // Malady stacks
+  if (g.poisoned) {
+    fx.push({ icon:'☠', color:'#1D9E75', timer: g.poisonTimer || 0,
+              stack: g.poisonStack || 1 });
+  }
+  var gBleeds = bleeds.filter(function(b){ return b.target === g && b.timer > 0; });
+  if (gBleeds.length > 0) {
+    var maxBleed = gBleeds.reduce(function(a,b){ return a.timer>b.timer?a:b; });
+    fx.push({ icon:'🩸', color:'#cc2200', timer: maxBleed.timer });
+  }
+  if ((g.witherStacks||0) > 0) {
+    fx.push({ icon:'✦', color:'#BB88FF', timer: g.witherTimer || 0,
+              stack: g.witherStacks });
+  }
+  // Mind
+  // Mind effects — unified icon language across player and entity sides:
+  //   ‼ (yellow) = daze    — wandering / refresh-slowed
+  //   ? (gold)   = confuse — retarget / movement-inverted
+  if (g.dazed && (g.dazeTimer||0) > 0)
+    fx.push({ icon:'‼', color:'#F5D000', timer: g.dazeTimer });
+  if (g.confused && (g.confuseTimer||0) > 0)
+    fx.push({ icon:'?', color:'#FFEE44', timer: g.confuseTimer });
+  // Vulnerabilities / casting
+  if ((g.markedTimer||0) > 0)
+    fx.push({ icon:'◎', color:'#4db8ff', timer: g.markedTimer });
+  if ((g.silencedTimer||0) > 0)
+    fx.push({ icon:'Ø', color:'#7B2FBE', timer: g.silencedTimer });
+  // Slow — unified indicator. Any slow source (green field, white sanctuary,
+  // generic snare, attack-slow) shows one hourglass icon. Movement and
+  // attack slows are treated as one status visually and mechanically: if
+  // you're move-slowed, you also attack-slow. Timer shown is the longest
+  // remaining across all active sources; zone-refreshed slows (green/white)
+  // register as timerless.
+  //
+  // Color: matches the source color when exactly one slow source is active.
+  // When two or more overlap (e.g. standing in green field AND hit by
+  // darkness attack-slow), the hourglass renders white to signal "multiple
+  // slow sources stacked" without picking a single color arbitrarily.
+  //
+  // Label: decimal movement multiplier shown beside the hourglass so you
+  // can see how hard the slow actually bites. Per-source mults match the
+  // math in updateEntity (white 0.5, green 0.25, snare 0.1, attack-slow is
+  // attack-only so doesn't multiply move speed).
+  var timered = 0;
+  var slowSources = []; // color per active source
+  var moveMult = 1.0;
+  if (g.greenSlowed && (g.greenSlowTimer||0) > 0) {
+    slowSources.push('#1D9E75');
+    moveMult *= 0.75;
+  }
+  if (g.whiteFieldSlowed && (g.whiteFieldSlowTimer||0) > 0) {
+    slowSources.push('#EFEFEF');
+    moveMult *= 0.5;
+  }
+  if (g.slowed && (g.slowTimer||0) > 0) {
+    slowSources.push('#AAAAAA');
+    moveMult *= 0.1;
+    timered = Math.max(timered, g.slowTimer);
+  }
+  if (g.attackSlowed && (g.attackSlowTimer||0) > 0) {
+    // Attack-slow is an attack-cooldown penalty, not a move mult — don't
+    // fold into moveMult. Still counts as a slow source for icon color.
+    slowSources.push('#7744AA');
+    timered = Math.max(timered, g.attackSlowTimer);
+  }
+  if (slowSources.length > 0) {
+    var anyZone = g.greenSlowed || g.whiteFieldSlowed;
+    var slowColor = slowSources.length === 1 ? slowSources[0] : '#FFFFFF';
+    // Show the multiplier as a label (e.g. .25). Use 2 decimals; strip the
+    // leading "0" since the value is always < 1 when surfaced. No prefix —
+    // the hourglass icon itself signals "this is a speed modifier".
+    var slowLabel = null;
+    if (moveMult < 1.0) {
+      var mTxt = moveMult.toFixed(2);
+      if (mTxt.charAt(0) === '0') mTxt = mTxt.slice(1); // "0.25" → ".25"
+      slowLabel = mTxt;
+    }
+    fx.push({
+      icon:'⧖', color: slowColor,
+      timer: anyZone ? null : timered,
+      label: slowLabel,
+    });
+  }
+  // Zone presence — timerless
+  if (blackEffect && blackEffect.alpha > 0) {
+    var bDist = Math.hypot(g.x - (blackEffect.ox||blackEffect.x||0),
+                           g.y - (blackEffect.oy||blackEffect.y||0));
+    if (bDist < (blackEffect.RADIUS || blackEffect.r || 0)) {
+      fx.push({ icon:'◉', color:'#555555', timer: null });
+    }
+  }
+  return fx;
+}
+
+// Assemble the player effect list. Mirrors _entityEffects shape.
+function _playerEffects() {
+  var fx = [];
+  if (!player) return fx;
+  // S013.7: ALL player status effects flow through the unified effect
+  // stack above the HP bar. Previously maladies (poison/slow/daze/confuse/
+  // weaken) used a separate "pie wedge radial timer" above the player sprite
+  // which was occluded by enemies and didn't match the entity side's
+  // rendering. Now everything uses _drawEffectStack via this return array.
+  //
+  // Shape: { icon, color, timer (null = timerless), stack?, label? }
+  if (player.status) {
+    var s = player.status;
+    // Maladies — poison leads (most actionable), stacks badge shown.
+    if (s.poison.timer > 0 && s.poison.stacks > 0) {
+      fx.push({ icon:'☠', color:'#1D9E75', timer: s.poison.timer, stack: s.poison.stacks });
+    }
+    if (s.slow.timer > 0 && s.slow.factor > 0) {
+      // Format move multiplier like the entity side (".25" etc)
+      var pMult = Math.max(0, 1 - s.slow.factor);
+      var mTxt = pMult.toFixed(2);
+      if (mTxt.charAt(0) === '0') mTxt = mTxt.slice(1);
+      fx.push({ icon:'⧖', color:'#7FE0FF', timer: s.slow.timer, label: mTxt });
+    }
+    if (s.daze.timer > 0) {
+      fx.push({ icon:'‼', color:'#F5D000', timer: s.daze.timer });
+    }
+    if (s.confuse.timer > 0) {
+      fx.push({ icon:'?', color:'#FFEE44', timer: s.confuse.timer });
+    }
+    if (s.weaken.timer > 0) {
+      fx.push({ icon:'▼', color:'#553366', timer: s.weaken.timer });
+    }
+  }
+  // Buffs / resource timers. Regen is triggered by WHITE (brick) overload
+  // or tap, so the icon color stays white (matches source).
+  if (playerRegen && playerRegen.timer > 0)
+    fx.push({ icon:'✚', color:'#EFEFEF', timer: playerRegen.timer });
+  if (player.iframes > 0)
+    fx.push({ icon:'🛡', color:'#88aaff', timer: player.iframes });
+  if (dashCooldown > 0)
+    fx.push({ icon:'💨', color:'#F5D000', timer: dashCooldown });
+  // Sanctuary (white field) presence — timerless while inside any field.
+  // Multiple fields can exist (each cast is its own instance); player
+  // shows the sanctuary icon if standing in at least one.
+  if (whiteFields && whiteFields.length) {
+    for (var wfi = 0; wfi < whiteFields.length; wfi++) {
+      var _wf = whiteFields[wfi];
+      if (Math.hypot(player.x - _wf.ox, player.y - _wf.oy) <= _wf.radius) {
+        fx.push({ icon:'✦', color:'#EFEFEF', timer: null });
+        break; // one icon regardless of how many fields you're in
+      }
+    }
+  }
+  // Overheal — player.hp is above hpMax (only source currently: purple
+  // life-steal, which allows up to 3× hpMax). Shows the excess as a stack
+  // count so a glance tells you how much overheal shield remains.
+  if (player.hp > player.hpMax) {
+    var overheal = Math.ceil(player.hp - player.hpMax);
+    fx.push({ icon:'♥', color:'#9B6FD4', timer: null, stack: overheal });
+  }
+  return fx;
+}
+
+function showFloatingText(x, y, text, color, parent) {
+  var now = performance.now();
+  // ── Semantic lane classification ────────────────────────────────────
+  // Three lanes relative to parent:
+  //   RIGHT — damage numbers ("6", "12 ✦"), pickup numbers ("+1 🧀")
+  //   LEFT  — heal numbers ("3 ✚", "+1 ♥", "2 🛡"), entity self-heal ("+1")
+  //   CENTER-ABOVE — banners ("EVADE!", "DAZED", "Well aged.")
+  //
+  // Decision tree (ordered): Letter-led + no digit → banner. Presence of
+  // heal icon (✚✨♥🛡) → heal-left. Presence of pickup icon (🧀🪙) → pickup-right.
+  // Leading "+" with nothing else → treat as heal-left (it's a gain applied
+  // to self — used by entity regen "+1" and similar). Otherwise damage-right.
+  var startsWithLetter = /^[A-Za-z]/.test(text);
+  var hasDigit = /\d/.test(text);
+  var isHealIcon = /[✚✨♥🛡]/.test(text);
+  var isPickupIcon = /[🧀🪙]/.test(text);
+  var isPlainPlus = /^\+\d+\s*$/.test(text); // "+1", "+3 " (no icon) → self-heal tick
+  // Banner: letters, no digits (e.g. "DAZED", "EVADE!", "Well aged.")
+  // OR letters-then-digits like "HP LOW" patterns don't appear in the callers.
+  var isBanner = startsWithLetter && !hasDigit;
+  // Numeric routing:
+  var isNumeric = hasDigit || /^[+\-−]/.test(text);
+  var isHeal = isHealIcon || isPlainPlus;
+  if (parent && parent.r !== undefined && isNumeric && !isBanner) {
+    // Fixed-offset placement relative to parent, matching showDamageNumber.
+    var offset = parent.r + 22;
+    if (isHeal) {
+      x = parent.x - offset;  // LEFT lane
+      y = parent.y;
+    } else {
+      x = parent.x + offset;  // RIGHT lane (damage + pickup)
+      y = parent.y;
+    }
+  }
+  // Damage/heal detection: starts with a digit (we stripped +/- prefixes).
+  // Non-numeric text like "EVADE!" or "WAIT..." stays unmerged.
+  var isDmg = isNumeric;
+  // Merge damage numbers at same target position within 120ms
+  if (isDmg) {
+    var num = parseFloat(text.replace(/[^0-9.]/g, '')) || 0;
+    var merged = floatingTexts.find(function(ft) {
+      return ft.mergeable && ft.color === (color||'#fff') &&
+        Math.hypot(ft.x - x, ft.y - y) < 30 &&
+        now - ft.spawnTime < 120;
+    });
+    if (merged) {
+      merged.accum = (merged.accum||0) + num;
+      // Preserve whatever icon/suffix came with the incoming text (☠, 🩸, HP, 🛡, etc).
+      // Everything after the leading numeric run is the suffix.
+      var suffixMatch = text.match(/^[0-9.]+(.*)$/);
+      var suffix = suffixMatch ? suffixMatch[1] : '';
+      merged.text = merged.accum + suffix;
+      var scale = Math.min(2.6, 0.72 + Math.log2(merged.accum + 1) * 0.38);
+      merged.fontSize = Math.round(10 * scale);
+      merged.fadeRate = Math.max(0.005, 0.02 / scale);
+      merged.vy = -(60 + scale * 24);
+      return;
+    }
+  }
+  var num2 = parseFloat(text.replace(/[^0-9.]/g, '')) || 0;
+  var hasIcon = /[☠🩸💀✚✨🛡♥🧀🪙]/.test(text);
+  // Font scale: numeric hits use log curve; icon-bearing text (pickups)
+  // gets a fixed boost; pure flavor text (no digits, no icons) renders
+  // largest so it reads cleanly against the canvas.
+  var scale2;
+  if (num2 > 0) {
+    scale2 = Math.min(2.6, 0.72 + Math.log2(num2 + 1) * 0.38);
+  } else if (hasIcon) {
+    scale2 = 1.4; // was 1.0 — pickup icons need presence
+  } else {
+    scale2 = 1.5; // was 0.9 — flavor text was sub-10px and unreadable
+  }
+  var fontSize2 = Math.round(10 * scale2);
+  var fadeRate2 = Math.max(0.005, 0.02 / scale2);
+  var riseSpeed2 = 60 + scale2 * 24;
+  // Parent linkage: if a parent ref is passed, store offset from parent at
+  // spawn so the text can track parent motion in the update loop.
+  var par = parent || null;
+  var offX0 = x - (par ? par.x : x);
+  var offY0 = y - (par ? par.y : y);
+  // Side hint for the renderer — heals on the left, everything else right.
+  var _side = par && isHeal ? 'left' : 'right';
+  floatingTexts.push({ x: x, y: y, text: text, color: color||'#fff', alpha:1,
+    vy: -riseSpeed2, fadeRate: fadeRate2, fontSize: fontSize2,
+    mergeable: !!isDmg, accum: num2, spawnTime: now,
+    parent: par, offX: offX0, offY: offY0, side: _side });
+  if (FLOATER_DEBUG && typeof console !== 'undefined') {
+    console.log('[FLOAT-TXT]', JSON.stringify({
+      text: text, isDmg: isDmg, isHeal: isHeal, isNumeric: isNumeric,
+      parent: par ? (par === player ? 'player' : (par.type || '?')) : 'none',
+      parR: par ? par.r : null,
+      parPos: par ? ('(' + Math.round(par.x) + ',' + Math.round(par.y) + ')') : null,
+      spawn: '(' + Math.round(x) + ',' + Math.round(y) + ')',
+      offset: par ? ('(' + Math.round(offX0) + ',' + Math.round(offY0) + ')') : null,
+      side: _side, fontSize: fontSize2,
+    }));
+  }
+}
+
+// Fizzle sparks — small erratic grey-white embers near an entity's edge.
+// Reads as a visual "dink" — a short, twitchy burst of tiny particles that
+// die fast. Contrast with DEFLECTION sparks (big directional punch) and
+// PULSE particles (smooth drift). Each fizzle particle jitters its velocity
+// on every frame (erratic, not smooth), so the effect reads as noise/static
+// rather than a controlled motion.
+//   ex, ey: entity center
+//   count:  particle count (IMMUNE uses more than RESIST)
+//   color:  grey-white shade; pass '#d8d8d8' or similar
+//   entR:   optional entity radius so sparks spawn OUTSIDE the sprite
+//           (prevents clipping). Defaults to 16 if not provided.
+function _spawnFizzleSparks(ex, ey, count, color, entR) {
+  count = count || 8;
+  color = color || '#d8d8d8';
+  entR = entR || 16;
+  var spawnRadius = entR + 6;  // spawn ring sits clear of the sprite edge
+  for (var i = 0; i < count; i++) {
+    var a = Math.random() * Math.PI * 2;
+    // Spawn ring around entity edge, small jitter
+    var sx = ex + Math.cos(a) * spawnRadius + (Math.random() - 0.5) * 3;
+    var sy = ey + Math.sin(a) * spawnRadius + (Math.random() - 0.5) * 3;
+    // Faster emission (40-80 px/s), still outward
+    var s = 40 + Math.random() * 40;
+    // Short life so particles pop and die (2-3x prior decay rate)
+    var life = 0.25 + Math.random() * 0.2;
+    purpleParticles.push({
+      x: sx, y: sy,
+      vx: Math.cos(a) * s,
+      vy: Math.sin(a) * s - 4,           // faint upward bias
+      r: 0.6 + Math.random() * 0.7,       // SMALLER particles (was 1.0-2.3)
+      alpha: 0.85 + Math.random() * 0.15,
+      color: color,
+      shadowColor: color,                 // glow matches fill
+      fadeRate: 0.05 / life,              // ~0.15-0.20/frame = dies in ~5-8 frames
+      // Fizzle-specific behavior flags (read by updatePurpleParticles):
+      isFizzle: true,
+      jitter: 80 + Math.random() * 60,    // erratic velocity perturbation per-frame
+      droop: 30 + Math.random() * 20,     // downward pull while fading
+    });
+  }
+}
+
+// Tiered damage number display. Pure numeric, no text suffix.
+// Each tier conveys effectiveness through VISUAL PHYSICS, not words:
+//   IMMUNE  → tiny "0" that fizzles (shrinks, wobbles, vanishes) + grey puff at entity
+//   RESIST  → small muted number that BOUNCES OUTWARD off the entity edge
+//   NEUTRAL → standard floater (baseline)
+//   VULN    → bigger, brighter, faster rise, pulsing glow
+//   WEAK    → largest, white-outlined, rises with SHAKE jitter + strong glow
+function showDamageNumber(x, y, applied, color, tier, entityX, entityY, prefix, witherBoost, parent, source) {
+  var baseColor = color || '#fff';
+  var now = performance.now();
+  // Entity center defaults to hit point if not supplied.
+  var ex = (entityX !== undefined) ? entityX : x;
+  var ey = (entityY !== undefined) ? entityY : y;
+  // Parent is the entity or player the damage is attached to. When present,
+  // the floating text tracks the parent's position each frame (offX/offY are
+  // the offset from parent center). Lets numbers follow pushed/moved targets
+  // instead of hanging in world space. If the parent dies (hp<=0 or missing),
+  // the text detaches at its last position and continues rising on its own.
+  var par = parent || null;
+  // Spawn position: when parented, numbers appear to the RIGHT of the target's
+  // hitbox at roughly vertical center rather than stacked between the target
+  // and its HP bar. Offset par.r + 22 (unified with showFloatingText) gives
+  // proper clearance past the sprite edge + HP bar region.
+  // RESIST tier overrides this below (its bounce-off geometry is independent).
+  if (par && par.r !== undefined && tier !== 'RESIST') {
+    var rightOffset = par.r + 22;
+    x = par.x + rightOffset;
+    y = par.y;
+    ex = par.x + rightOffset;
+    ey = par.y;
+  }
+  var offX0 = x - (par ? par.x : x);
+  var offY0 = y - (par ? par.y : y);
+  var offExX0 = ex - (par ? par.x : ex);
+  var offExY0 = ey - (par ? par.y : ey);
+  // Optional icon prefix (e.g. ☠ for poison ticks). Rendered slightly smaller
+  // than the damage text; status icon sits left of the number.
+  var icon = prefix || '';
+  // Wither boost — when hits are amplified by wither stacks on the target,
+  // the number renders larger and persists longer so the payoff of stacking
+  // is legible even when base damage is small. Linear growth: +25% font
+  // size per stack, capped at 11 stacks (3.75× size). Fade slows on the
+  // same curve so big numbers linger. Only affects NEUTRAL/VULN/WEAK rises
+  // — RESIST/IMMUNE are unaffected (stacking wither on an immune target
+  // shouldn't look heroic).
+  var wb = witherBoost || 0;
+  var wbClamped = Math.min(11, wb);
+  var witherFontScale = 1 + 0.25 * wbClamped;   // 1 → 1.25, 11 → 3.75
+  var witherFadeScale = Math.max(0.18, Math.pow(0.55, Math.min(wbClamped, 6)));
+  if (tier === 'IMMUNE') {
+    // Fizzle-out "0" — grows a touch then shrinks to nothing. Larger than
+    // before (11 → 15) so it reads against the canvas. Parent-anchored
+    // RIGHT of the target. Offset 24 puts it clear of sprite edge + HP bar
+    // area on larger enemies.
+    var immX = par ? par.x + par.r + 24 : ex;
+    var immY = par ? par.y : ey - 10;
+    var immOffX = par ? par.r + 24 : offExX0;
+    var immOffY = par ? 0 : offExY0 - 10;
+    floatingTexts.push({
+      x: immX, y: immY, text: '0' + (icon ? ' ' + icon : ''), color: '#bfbfbf',
+      alpha: 0.95, vy: -10, fadeRate: 0.035, fontSize: 15,  // slow rise, slightly longer fade
+      mergeable: false, accum: 0, spawnTime: now,
+      tier: 'IMMUNE', shrink: true, wobbleAmp: 2,
+      parent: par, offX: immOffX, offY: immOffY, side: 'right',
+    });
+    // FIZZLE sparks: grey-white embers drifting outward from the entity's
+    // edge, with flutter + droop. Reads as "the attack gave up / scattered
+    // harmlessly". Sparse + slow, not a splash.
+    _spawnFizzleSparks(ex, ey, 10, '#d8d8d8', par ? par.r : 16);
+    return;
+  }
+  var text = '' + applied + (icon ? ' ' + icon : '');
+  if (tier === 'RESIST') {
+    // Bounce OUTWARD off the entity — spawn at entity EDGE plus a gap,
+    // initial velocity carries it a bit further out, then gravity arcs
+    // it down. Font 14 for legibility. Prior 22-unit fixed offset was
+    // too tight on larger entities and could clip their sprite.
+    var dx = x - ex, dy = y - ey;
+    var dist = Math.sqrt(dx*dx + dy*dy) || 1;
+    var nx = dx / dist, ny = dy / dist;
+    var entR = (par && par.r) ? par.r : 16;
+    var spawnDist = entR + 22;        // sprite radius + clear gap
+    floatingTexts.push({
+      x: ex + nx * spawnDist, y: ey + ny * spawnDist, text: text, color: _muteColor(baseColor),
+      alpha: 0.95, vy: ny * 40 - 16, vx: nx * 40,   // halved bounce speed
+      fadeRate: 0.025, fontSize: 14,
+      mergeable: false, accum: applied, spawnTime: now,
+      tier: 'RESIST', glowMult: 0.3,
+      // Bounce physics: gravity pulls it down gently
+      gravity: 140,
+    });
+    // Deflection sparks — directional burst along the bounce vector
+    for (var si = 0; si < 3; si++) {
+      var sa = Math.atan2(ny, nx) + (Math.random() - 0.5) * 0.7;
+      var ss = 60 + Math.random() * 60;
+      purpleParticles.push({
+        x: ex + nx * 18, y: ey + ny * 18,
+        vx: Math.cos(sa) * ss, vy: Math.sin(sa) * ss,
+        r: 1.5 + Math.random() * 1.5, alpha: 0.8, color: _muteColor(baseColor),
+      });
+    }
+    // FIZZLE sparks layer — grey-white embers drifting outward from the
+    // entity's edge with flutter + droop. Sits alongside the deflection
+    // sparks: deflection is fast/directional, fizzle is slow/ambient.
+    _spawnFizzleSparks(ex, ey, 7, '#d0d0d0', par ? par.r : 16);
+    return;
+  }
+  // NEUTRAL / VULN / WEAK use "rising number" style
+  // Rise speeds tuned fast so numbers clear the hit zone before the next
+  // tick arrives. Prior values (35/50/65) let rapid hits overlap into a
+  // muddle; current (70/100/130) double the rise so stacking reads clearly.
+  var cfg;
+  switch (tier) {
+    case 'VULN':
+      cfg = { fontSize: 18, rise: 100, fade: 0.018, color: _brightColor(baseColor),
+              glow: 1.6, pulse: true };
+      break;
+    case 'WEAK':
+      cfg = { fontSize: 24, rise: 130, fade: 0.014, color: _brightColor(baseColor),
+              glow: 2.4, pulse: true, shake: true, outline: true };
+      break;
+    case 'NEUTRAL':
+    default:
+      cfg = { fontSize: 14, rise: 70, fade: 0.02, color: baseColor, glow: 1.0 };
+      break;
+  }
+  // ── Unified text-styling model ────────────────────────────────────────
+  // Final font/fade/glow are the product of independent signal multipliers:
+  //   tier     : NEUTRAL 1.0, VULN 1.3, WEAK 1.7  (via cfg.fontSize curve)
+  //   wither   : +25% per stack (cap 11), fade slows ×0.55^stacks
+  //   magnitude: log2-smooth growth with damage size, cap at ~2.0×
+  // Crit deliberately NOT on damage numbers — handled by the crit banner.
+  //
+  // Magnitude curve: 1 + 0.22 * log2(applied + 1), clamped [1.0, 2.0].
+  //   1 dmg  → 1.22×      (tiny bump keeps low hits legible)
+  //   5 dmg  → 1.57×
+  //   10 dmg → 1.76×
+  //   25 dmg → 1.99× (near cap)
+  //   100+   → 2.00× (cap)
+  // Fade scales inversely with sqrt of magnitude so bigger numbers linger.
+  var magScale = Math.min(2.0, Math.max(1.0, 1 + 0.22 * Math.log2((applied || 0) + 1)));
+  var magFadeScale = 1 / Math.sqrt(magScale);
+  // Compose final multipliers. cfg.fontSize already encodes tier, so we
+  // multiply by wither and magnitude. Same for fade.
+  var finalFontSize = Math.round(cfg.fontSize * witherFontScale * magScale);
+  var finalFadeRate = cfg.fade * witherFadeScale * magFadeScale;
+  var finalGlow     = cfg.glow * (1 + wb * 0.15) * (1 + 0.25 * (magScale - 1));
+  // S015 v0.15.19: Case 1 merge — rapid taps on the same target combine
+  // into one growing number. Anchor on parent entity identity (more
+  // reliable than screen position since entities move); same color +
+  // tier; within mergeWindow ms absorb window. Excluded: RESIST (bounce
+  // geometry would lie if absorbed), IMMUNE (fizzle '0' is distinct
+  // outcome), hits with no parent (world-space hits don't have an
+  // anchor). Wither-boosted hits also merge — wb already baked into
+  // accum text.
+  // S015 v0.15.21: per-color merge window. Slow projectiles (black
+  // witherbolt, ~260px/s) need a longer absorb window than fast hits
+  // because sequential bolts arrive serially with ~250-300ms gaps.
+  // COLOR table can override mergeWindowMs per color; default 200ms.
+  if (par && tier !== 'RESIST' && tier !== 'IMMUNE') {
+    var mergeWindow = 200;  // default
+    if (source && typeof window !== 'undefined' && window.COLOR_PROFILE) {
+      var colorEntry = window.COLOR_PROFILE[source];
+      if (colorEntry && typeof colorEntry.mergeWindowMs === 'number') {
+        mergeWindow = colorEntry.mergeWindowMs;
+      }
+    }
+    var mergeTarget = null;
+    for (var fti = floatingTexts.length - 1; fti >= 0; fti--) {
+      var ft = floatingTexts[fti];
+      if (!ft.mergeable) continue;
+      if (ft.parent !== par) continue;       // same-target only
+      if (ft.color !== cfg.color) continue;  // same color (separates crit/base/heal)
+      if (ft.tier !== tier) continue;        // same tier
+      if (now - ft.spawnTime > mergeWindow) continue;
+      mergeTarget = ft;
+      break;
+    }
+    if (mergeTarget) {
+      // Accumulate. Preserve any prefix icon on the original text.
+      mergeTarget.accum = (mergeTarget.accum || 0) + applied;
+      var oldText = mergeTarget.text || '';
+      var sufMatch = oldText.match(/^[0-9.]+(.*)$/);
+      var sufText = sufMatch ? sufMatch[1] : (icon ? ' ' + icon : '');
+      mergeTarget.text = mergeTarget.accum + sufText;
+      // Re-scale font + fade with new total. Same magScale curve as fresh.
+      var mergedMagScale = Math.min(2.0, Math.max(1.0, 1 + 0.22 * Math.log2(mergeTarget.accum + 1)));
+      var mergedMagFadeScale = 1 / Math.sqrt(mergedMagScale);
+      mergeTarget.fontSize = Math.round(cfg.fontSize * witherFontScale * mergedMagScale);
+      mergeTarget.fadeRate = cfg.fade * witherFadeScale * mergedMagFadeScale;
+      mergeTarget.glowMult = cfg.glow * (1 + wb * 0.15) * (1 + 0.25 * (mergedMagScale - 1));
+      // DO NOT refresh spawnTime — the absorb window is fixed from the
+      // original spawn, so the number locks at 200ms regardless of how
+      // many merges occurred. Prevents indefinite absorption (the
+      // 'continuous' option we deferred).
+      // Brief visual feedback for the merge — small alpha bump if it had
+      // started fading (tiny "kick" effect).
+      mergeTarget.alpha = Math.min(1.0, (mergeTarget.alpha || 1) + 0.15);
+      return;
+    }
+  }
+  floatingTexts.push({
+    x: x, y: y, text: text, color: cfg.color,
+    alpha: 1, vy: -cfg.rise, fadeRate: finalFadeRate,
+    fontSize: finalFontSize,
+    mergeable: (tier !== 'RESIST' && tier !== 'IMMUNE'),  // S015 v0.15.19: enable merging
+    accum: applied, spawnTime: now,
+    tier: tier, glowMult: finalGlow,
+    pulse: !!cfg.pulse || wb > 0, // withered hits pulse even at neutral tier
+    shake: !!cfg.shake, outline: !!cfg.outline || wb >= 3,
+    parent: par, offX: offX0, offY: offY0, side: 'right',
+  });
+  if (FLOATER_DEBUG && typeof console !== 'undefined') {
+    console.log('[FLOAT-DMG]', JSON.stringify({
+      text: text, tier: tier, applied: applied,
+      parent: par ? (par === player ? 'player' : (par.type || '?')) : 'none',
+      parR: par ? par.r : null,
+      parPos: par ? ('(' + Math.round(par.x) + ',' + Math.round(par.y) + ')') : null,
+      spawn: '(' + Math.round(x) + ',' + Math.round(y) + ')',
+      offset: par ? ('(' + Math.round(offX0) + ',' + Math.round(offY0) + ')') : null,
+      side: 'right', fontSize: finalFontSize,
+    }));
+  }
+}
+
+// Helpers to shift color for resist tier rendering.
+// _muteColor desaturates and darkens. _brightColor brightens.
+function _muteColor(hex) {
+  // Simple blend toward grey
+  var rgb = _hexToRgb(hex);
+  if (!rgb) return hex;
+  var r = Math.round(rgb.r * 0.5 + 120 * 0.5);
+  var g = Math.round(rgb.g * 0.5 + 120 * 0.5);
+  var b = Math.round(rgb.b * 0.5 + 120 * 0.5);
+  return '#' + _toHex(r) + _toHex(g) + _toHex(b);
+}
+function _brightColor(hex) {
+  // Saturation boost that preserves hue. Prior version blended 70/30 toward
+  // white, which desaturated everything — red became salmon, blue became
+  // powder-blue, and users read those as wrong colors. Multiplying each
+  // channel by 1.35 with a ceiling clamp brightens vividness while keeping
+  // the color on-hue. Example: #E24B4A (226,75,74) → (255,101,100) = rich
+  // saturated red instead of salmon.
+  var rgb = _hexToRgb(hex);
+  if (!rgb) return hex;
+  var r = Math.min(255, Math.round(rgb.r * 1.35));
+  var g = Math.min(255, Math.round(rgb.g * 1.35));
+  var b = Math.min(255, Math.round(rgb.b * 1.35));
+  return '#' + _toHex(r) + _toHex(g) + _toHex(b);
+}
+function _hexToRgb(hex) {
+  if (!hex || hex[0] !== '#') return null;
+  var h = hex.slice(1);
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  if (h.length !== 6) return null;
+  return { r: parseInt(h.slice(0,2),16), g: parseInt(h.slice(2,4),16), b: parseInt(h.slice(4,6),16) };
+}
+function _toHex(n) { var s = n.toString(16); return s.length < 2 ? '0'+s : s; }
+
+// Shift a hex color toward white (lighten) or toward black (darken) by amount
+// in [0, 1]. Used by drawEntity for inner-body and shadow colors derived
+// from the entity template's base color. Preserves hue.
+function _lightenHex(hex, amount) {
+  var rgb = _hexToRgb(hex);
+  if (!rgb) return hex;
+  var a = Math.max(0, Math.min(1, amount));
+  var r = Math.round(rgb.r + (255 - rgb.r) * a);
+  var g = Math.round(rgb.g + (255 - rgb.g) * a);
+  var b = Math.round(rgb.b + (255 - rgb.b) * a);
+  return '#' + _toHex(r) + _toHex(g) + _toHex(b);
+}
+function _darkenHex(hex, amount) {
+  var rgb = _hexToRgb(hex);
+  if (!rgb) return hex;
+  var a = Math.max(0, Math.min(1, amount));
+  var r = Math.round(rgb.r * (1 - a));
+  var g = Math.round(rgb.g * (1 - a));
+  var b = Math.round(rgb.b * (1 - a));
+  return '#' + _toHex(r) + _toHex(g) + _toHex(b);
+}
+
+// (injected into draw loop)
+var _origDraw = draw;
+draw = function() {
+  // S015 v0.15.13 fix: shake transform must be in this function (the
+  // outer draw that the game loop calls), NOT in the inner _origDraw.
+  // Earlier attempt put the var/restore in different functions causing
+  // a ReferenceError. Wraps everything: world (_origDraw), floating
+  // text, crit visuals, diagnostic — all shift together.
+  var _shaking = (screenShake.dur > 0);
+  if (_shaking) {
+    ctx.save();
+    ctx.translate(screenShake.x, screenShake.y);
+  }
+  _origDraw();
+  var now = performance.now();
+  floatingTexts = floatingTexts.filter(function(ft) { return ft.alpha > 0.05; });
+  floatingTexts.forEach(function(ft) {
+    // Parent tracking: if this text is attached to a live entity/player, its
+    // screen position is parent position + (offX, offY). offY carries the
+    // vertical rise so the number drifts upward from the parent as it does
+    // in world space. If parent dies or disappears, detach — the text falls
+    // back to world-space motion from its last known offset.
+    if (ft.parent) {
+      var parentAlive =
+        (ft.parent.hp === undefined || ft.parent.hp > 0) &&
+        (ft.parent.x !== undefined && ft.parent.y !== undefined);
+      if (parentAlive) {
+        if (ft.offY === undefined) ft.offY = ft.y - ft.parent.y;
+        if (ft.offX === undefined) ft.offX = ft.x - ft.parent.x;
+        ft.offY += (ft.vy || 0) * 0.016;
+        if (ft.vx !== undefined) ft.offX += ft.vx * 0.016;
+        if (ft.gravity) ft.vy += ft.gravity * 0.016;
+        ft.x = ft.parent.x + ft.offX;
+        ft.y = ft.parent.y + ft.offY;
+      } else {
+        // Detach — remember final world pos and continue as if unparented.
+        ft.parent = null;
+        ft.y += (ft.vy || 0) * 0.016;
+        if (ft.vx !== undefined) ft.x += ft.vx * 0.016;
+        if (ft.gravity) ft.vy += ft.gravity * 0.016;
+      }
+    } else {
+      // Position update — supports vx (bounce-back) and gravity (resist arc)
+      ft.y += (ft.vy || 0) * 0.016;
+      if (ft.vx !== undefined) ft.x += ft.vx * 0.016;
+      if (ft.gravity) ft.vy += ft.gravity * 0.016;
+    }
+    ft.alpha -= (ft.fadeRate || 0.02);
+    // Shrink (IMMUNE tier) — font size interpolates down with alpha
+    var fs = ft.fontSize || 14;
+    if (ft.shrink) fs = fs * Math.max(0.3, ft.alpha);
+    // Wobble (IMMUNE tier) — small horizontal jitter
+    var drawX = ft.x;
+    if (ft.wobbleAmp) drawX += Math.sin(performance.now() * 0.02 + ft.spawnTime) * ft.wobbleAmp;
+    // Shake (WEAK tier) — random horizontal jitter in first 200ms
+    if (ft.shake) {
+      var age = now - ft.spawnTime;
+      if (age < 200) {
+        drawX += (Math.random() - 0.5) * 6;
+      }
+    }
+    // Pulse (VULN/WEAK) — glow modulated by sin
+    var glow = ft.glowMult !== undefined ? ft.glowMult : 1.0;
+    if (ft.pulse) {
+      glow *= (1 + 0.3 * Math.sin((now - ft.spawnTime) * 0.025));
+    }
+    ctx.save();
+    ctx.globalAlpha = ft.alpha;
+    ctx.fillStyle = ft.color;
+    ctx.font = 'bold ' + Math.round(fs) + 'px Cinzel, serif';
+    // Alignment rule:
+    //   • Parented + left side (heals): right-align so text reads out
+    //     away from the entity (extends further left).
+    //   • Parented + right side (damage): left-align, text extends right.
+    //   • Unparented: center-align (banners, evade text, etc).
+    var _align = 'center';
+    if (ft.parent) {
+      _align = (ft.side === 'left') ? 'right' : 'left';
+    }
+    ctx.textAlign = _align;
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = ft.color;
+    ctx.shadowBlur = (fs / 14) * 5 * ft.alpha * glow;
+    // Outline (WEAK tier) for extra saturation pop
+    if (ft.outline || ft.tier === 'WEAK') {
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = '#ffffff';
+      ctx.strokeText(ft.text, drawX, ft.y);
+    }
+    ctx.fillText(ft.text, drawX, ft.y);
+    ctx.restore();
+  });
+  // Crit visual polish — flash under everything (but we draw last as
+  // translucent overlay for punch) and banners on top.
+  drawCritShockwaves();
+  drawCritFlash();
+  drawCritBanners();
+  drawYellowDiag();
+  // S015 v0.15.13 fix: paired with ctx.save+translate at top of this
+  // function (NOT inside _origDraw — that's a different function scope).
+  if (_shaking) ctx.restore();
+};
+
+// ═══════════════════════════════════════════════════
+// ENTITY AI HELPERS (projectiles, pulses, shared melee damage)
+// ═══════════════════════════════════════════════════
+// Enemy projectile pool — simple straight-line bolts fired by ranged_kite
+// entities (slingers, etc). Each projectile tracks source for log lines,
+// direction for render orientation, and a TTL so stray misses expire.
+var enemyProjectiles = [];
+
+// Fire a projectile from entity `g` toward a target point (usually player
+// position at time of firing). Physical damage; no homing. TTL long enough
+// to reach the player from any spawn location at the default speed.
+function spawnEnemyProjectile(g, tx, ty, dmg) {
+  var pdx = tx - g.x, pdy = ty - g.y;
+  var pd = Math.hypot(pdx, pdy);
+  if (pd < 0.01) return null; // avoid div-by-zero when player is exactly on entity
+  var speed = 320;
+  var proj = {
+    x: g.x, y: g.y,
+    vx: (pdx/pd) * speed,
+    vy: (pdy/pd) * speed,
+    dmg: dmg || 2,
+    r: 5,
+    ttl: 2.5,
+    sourceType: g.type || 'enemy',
+    color: null,   // Phase C: special variants override (orange/yellow/black)
+  };
+  enemyProjectiles.push(proj);
+  return proj;
+}
+
+function updateEnemyProjectiles(dt) {
+  if (!player) return;
+  enemyProjectiles.forEach(function(p) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.ttl -= dt;
+    if (p.ttl <= 0) { p.done = true; return; }
+    // v0.16.47 — Arc-wall projectile interception (rings let projectiles
+    // pass). Per Forge identity design: ring walls are short containment
+    // fences (projectiles arc over them); arc walls are taller vertical
+    // barriers that erect at max armor (projectiles slam into them).
+    // The visual/structural distinction justifies the mechanical split:
+    // same gray vocabulary, different height profile.
+    //
+    // Pre-v0.16.46, no gray walls blocked projectiles. v0.16.46 added
+    // universal collision (rings + arcs); v0.16.47 narrows to arcs only
+    // per design lock. Ring-wall behavior reverts to passthrough.
+    if (typeof grayWalls !== 'undefined' && grayWalls.length > 0) {
+      var blockedByWall = false;
+      for (var wi = 0; wi < grayWalls.length; wi++) {
+        var w = grayWalls[wi];
+        if (!w || w.hp <= 0 || !w.isArc) continue;  // arc walls only
+        var wdx = p.x - w.x, wdy = p.y - w.y;
+        var wdist = Math.sqrt(wdx*wdx + wdy*wdy);
+        // Within wall radius +/- projectile radius?
+        if (wdist > w.r + p.r) continue;
+        if (wdist < w.r - p.r) continue;
+        // Cone check (always — arc walls only block in their wedge).
+        if (!_pointInArc(w, p.x, p.y)) continue;
+        // v0.16.49 — Damage only from outside the arc. Projectiles
+        // crossing through the arc segment from inside (rare; e.g.
+        // BS arsenal effects fired outward from BS position) do not
+        // damage the wall. Mirrors player + entity rules.
+        var fromOutside = (wdist >= w.r);
+        if (fromOutside) {
+          w.hp = Math.max(0, w.hp - 1);
+          w.flashTimer = 0.15;
+          blockedByWall = true;
+        }
+        break;
+      }
+      if (blockedByWall) { p.done = true; return; }
+    }
+    // Hit player?
+    var pdx = player.x - p.x, pdy = player.y - p.y;
+    if (Math.hypot(pdx, pdy) < p.r + player.r) {
+      if (!player.iframes) {
+        _applyEnemyMeleeDamage({ type: p.sourceType }, p.dmg, -p.vx, -p.vy, 0);
+        // PHASE C — consume slinger special-shot flags on impact.
+        if (p._yellowDaze) {
+          applyStatus('daze', { duration: 1.5 });
+          showFloatingText(player.x, player.y - 60, 'DAZED', '#F5D000', player);
+        }
+        if (p._orangeShrapnel) {
+          // Spawn 3 thorn shards radiating outward at impact point.
+          for (var si = 0; si < 3; si++) {
+            var ang = (si / 3) * Math.PI * 2;
+            spawnThornShard(p.x + Math.cos(ang) * 10, p.y + Math.sin(ang) * 10);
+          }
+        }
+        // PHASE C — black weaken orb on impact.
+        if (p._blackWeaken) {
+          applyStatus('weaken', { duration: 3 });
+          showFloatingText(player.x, player.y - 60, 'WEAKENED', '#553366', player);
+        }
+      }
+      p.done = true;
+    }
+  });
+  enemyProjectiles = enemyProjectiles.filter(function(p) { return !p.done; });
+}
+
+function drawEnemyProjectiles() {
+  if (!ctx) return;
+  enemyProjectiles.forEach(function(p) {
+    var col = p.color || '#E24B4A';
+    ctx.save();
+    ctx.shadowColor = col; ctx.shadowBlur = 10;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+    ctx.fill();
+    // Inner highlight for visibility
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#ffffffcc';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r * 0.5, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  });
+}
+
+// PHASE E — BOULDER TOSS SYSTEM
+// Troll's signature arcing projectile. Flies in a parabolic arc to a
+// pre-selected impact point (player's position at throw time). Lands
+// with 1.2s total travel time, damages 4 in 50px radius, and spawns
+// thorn pool 2s. Shadow on ground telegraphs impact location.
+var boulders = [];
+function spawnBoulder(g, tx, ty) {
+  if (!player) return;
+  boulders.push({
+    sx: g.x, sy: g.y,           // start
+    tx: tx,  ty: ty,            // target (impact point)
+    t: 0,                       // 0..1 progress
+    dur: 1.2,                   // travel time
+    ownerType: g.type || 'boulder',
+    done: false,
+  });
+}
+function updateBoulders(dt) {
+  for (var i = boulders.length - 1; i >= 0; i--) {
+    var b = boulders[i];
+    b.t += dt / b.dur;
+    if (b.t >= 1) {
+      // Impact — AoE damage + thorn pool.
+      if (player && !player.iframes) {
+        var dx = player.x - b.tx, dy = player.y - b.ty;
+        if (Math.hypot(dx, dy) < 50 + player.r) {
+          _applyEnemyMeleeDamage({ type: b.ownerType }, 4, dx, dy, 0);
+        }
+      }
+      // Drop 3 thorn shards around impact for the 2s thorn pool effect.
+      for (var si = 0; si < 3; si++) {
+        var ang = (si / 3) * Math.PI * 2 + Math.random();
+        spawnThornShard(b.tx + Math.cos(ang) * 16, b.ty + Math.sin(ang) * 16);
+      }
+      // Dust puff floater.
+      showFloatingText(b.tx, b.ty, '💥', '#8A7A5B', null);
+      boulders.splice(i, 1);
+    }
+  }
+}
+function drawBoulders() {
+  if (!ctx) return;
+  for (var i = 0; i < boulders.length; i++) {
+    var b = boulders[i];
+    // Parabolic arc position.
+    var x = b.sx + (b.tx - b.sx) * b.t;
+    var y = b.sy + (b.ty - b.sy) * b.t;
+    var arcH = -80 * 4 * b.t * (1 - b.t);    // peak height at t=0.5
+    // Ground shadow at impact target — grows as boulder falls.
+    var shadowA = 0.2 + b.t * 0.5;
+    ctx.save();
+    ctx.globalAlpha = shadowA;
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(b.tx, b.ty, 50 * (0.4 + b.t * 0.6), 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    // Boulder itself
+    ctx.save();
+    ctx.fillStyle = '#6f6f6f';
+    ctx.strokeStyle = '#3a3a3a';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#000';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(x, y + arcH, 12, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ── BLOCKSMITH SHRAPNEL (v0.16.39) ────────────────────────────────────
+// Reactive damage: when an attacker removes a Blocksmith armor pip,
+// a shrapnel projectile flies from BS to the attacker. Visible plate/
+// spike falls off and travels through the air — cinematic at range.
+// Damage = pip count BEFORE loss (1..armorMax). Pure linear curve.
+//
+// Projectile state: { sx, sy, tx, ty, t, dur, dmg, targetEntity, done }
+//   sx/sy   — start position (BS at moment of pip loss)
+//   tx/ty   — target position (attacker's position at moment of pip loss)
+//   t       — 0..1 progress
+//   dur     — flight duration (scaled by distance for consistent feel)
+//   dmg     — damage to deal on hit (linear curve, =armorBeforeLoss)
+//   targetEntity — soft-link to entity if still alive at impact
+var shrapnelPieces = [];
+
+function spawnShrapnel(sx, sy, tx, ty, dmg, targetEntity) {
+  if (typeof dmg !== 'number' || dmg <= 0) return;
+  var dist = Math.hypot(tx - sx, ty - sy);
+  // Flight duration scales gently with distance — close attackers hit
+  // fast, distant attackers see the shrapnel travel. Floor 0.18s, ceiling
+  // 0.55s. Tuned for visibility without slowing combat pace.
+  var dur = Math.max(0.18, Math.min(0.55, dist / 480));
+  shrapnelPieces.push({
+    sx: sx, sy: sy,
+    tx: tx, ty: ty,
+    t: 0,
+    dur: dur,
+    dmg: dmg,
+    targetEntity: targetEntity || null,
+    done: false,
+    // Random rotation for visual variety — each shard tumbles in flight.
+    rotStart: Math.random() * Math.PI * 2,
+    rotSpeed: (Math.random() * 12 - 6),
+  });
+}
+
+function updateShrapnel(dt) {
+  for (var i = shrapnelPieces.length - 1; i >= 0; i--) {
+    var s = shrapnelPieces[i];
+    s.t += dt / s.dur;
+    if (s.t >= 1) {
+      // Impact resolution. Prefer the linked entity if still alive (it may
+      // have moved since spawn). Fall back to position-based hit at the
+      // original target point — small radius forgives misses.
+      var tgt = s.targetEntity;
+      if (tgt && tgt.hp > 0) {
+        damageEntity(tgt, s.dmg);
+        if (typeof spawnCritFlourish === 'function') {
+          spawnCritFlourish(tgt.x, tgt.y, '#EF9F27', 6);
+        }
+      } else {
+        // Target gone — find any entity at impact point within forgiving radius.
+        var hitR = 28;
+        for (var ei = 0; ei < entities.length; ei++) {
+          var g = entities[ei];
+          if (Math.hypot(g.x - s.tx, g.y - s.ty) <= hitR + (g.r || 12)) {
+            damageEntity(g, s.dmg);
+            if (typeof spawnCritFlourish === 'function') {
+              spawnCritFlourish(g.x, g.y, '#EF9F27', 6);
+            }
+            break;
+          }
+        }
+      }
+      // v0.16.42 — victory check now centralized in damageEntity.
+      // Every damageEntity call auto-triggers victory if it killed.
+      s.done = true;
+    }
+  }
+  shrapnelPieces = shrapnelPieces.filter(function(s) { return !s.done; });
+}
+
+function drawShrapnel() {
+  if (!ctx) return;
+  for (var i = 0; i < shrapnelPieces.length; i++) {
+    var s = shrapnelPieces[i];
+    // Linear interpolation with a slight arc — shrapnel pieces tumble
+    // through the air with a subtle peak (smaller than boulders since
+    // shards are lighter). Adds 2D flight feel without overcomplicating.
+    var x = s.sx + (s.tx - s.sx) * s.t;
+    var y = s.sy + (s.ty - s.sy) * s.t;
+    var arcH = -18 * 4 * s.t * (1 - s.t);  // small peak (~18px) at t=0.5
+    var rot = s.rotStart + s.rotSpeed * s.t;
+    ctx.save();
+    ctx.translate(x, y + arcH);
+    ctx.rotate(rot);
+    // Shadow blur for visibility against any background
+    ctx.shadowColor = '#EF9F27';
+    ctx.shadowBlur = 6;
+    // Shrapnel shape: small jagged plate (gray with amber glow edge).
+    // Gray core matches armor pip color; amber glow ties to BS class
+    // palette so the projectile reads as "Blocksmith damage."
+    ctx.fillStyle = '#AAAAAA';
+    ctx.strokeStyle = '#EF9F27';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    // Irregular pentagon — looks like a shard of plate metal
+    ctx.moveTo(-5, -3);
+    ctx.lineTo(4, -4);
+    ctx.lineTo(6, 2);
+    ctx.lineTo(2, 5);
+    ctx.lineTo(-4, 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ── BLOCKSMITH PIP-LOSS HOOK (v0.16.39) ──────────────────────────────
+// Called from armor-absorb sites whenever a BS armor pip is removed by
+// enemy damage. Reads grayProfile.pipLostShrapnel + shrapnelDamageCurve
+// and spawns a shrapnel projectile from BS toward the attacker. Damage
+// is the PRE-LOSS armor count (linear curve: 1..armorMax). Other classes
+// (no pipLostShrapnel) skip silently.
+//
+// Args:
+//   armorBeforeLoss — pip count BEFORE the attack absorbed the pip.
+//                     Linear damage curve uses this directly.
+//   srcX, srcY      — attacker position (where shrapnel flies TO)
+//   srcEntity       — attacker entity (optional; lets shrapnel track
+//                     a moving target if still alive at impact)
+function maybeSpawnPipShrapnel(armorBeforeLoss, srcX, srcY, srcEntity) {
+  if (!player) return;
+  var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
+  if (!prof || !prof.pipLostShrapnel) return;
+  if (armorBeforeLoss <= 0) return;
+  // Pure linear curve: dmg = pre-loss armor count. shrapnelDamageCurve
+  // field is read but currently only 'linear' is supported. Future
+  // curves (exponential, capped, etc.) extend this dispatch.
+  var dmg = armorBeforeLoss;
+  spawnShrapnel(player.x, player.y, srcX, srcY, dmg, srcEntity);
+}
+
+// ── SNAPSTEP SLIPSTREAM TRAIL (v0.16.51) ──────────────────────────────
+// Spawned on pierce-dash completion. The trail is a line segment from
+// (origin - tailBehindOrigin in dash direction) through origin to the
+// dash endpoint. Persists for trail.duration seconds, fading alpha
+// linearly. Entities crossing the line (within trail.lineWidth radius)
+// take trail.damageFraction × pierce damage, ONE TIME per entity per
+// trail (entity is added to .hitEntities Set).
+//
+// On spawn, also fires a push-back burst at the origin point — radial
+// knockback for entities within pushBackBurstRadius. Anti-pursuit beat:
+// "I left, don't come this way."
+//
+// Architecture: trail config lives in characters.js redProfile.trail.
+// Other classes have no trail config → no trail spawned (engine reads
+// dashProfile.trail; null means baseline pierce only). Only pierce
+// model spawns trails (the spawn site checks dashModel === 'pierce').
+var redDashTrails = [];
+
+function spawnPierceTrail(originX, originY, endX, endY, baseDamage, dashProfile, chargeSpeed) {
+  var cfg = dashProfile && dashProfile.trail;
+  if (!cfg) return;
+  // Compute dash direction (from origin to end) for the tail extension.
+  var dx = endX - originX, dy = endY - originY;
+  var len = Math.hypot(dx, dy);
+  if (len < 1) return;  // degenerate — skip
+  var dirX = dx / len, dirY = dy / len;
+  var tailLen = cfg.tailBehindOrigin || 100;
+  // Tail extends BEHIND origin in the OPPOSITE of dash direction.
+  var tailX = originX - dirX * tailLen;
+  var tailY = originY - dirY * tailLen;
+  // v0.16.55 — Progressive trail draw. Both segments start at point A
+  // simultaneously when trail spawns:
+  //   - Forward path (A → endXY) extends at chargeSpeed (matches the
+  //     speed the dash itself flew; trail visually echoes the dash).
+  //   - Rearward tail (A → tailXY) extends at 3× chargeSpeed (snap-quick
+  //     blast backward — anti-pursuit beat).
+  // Segments are tracked independently via drawnFwdLen / drawnTailLen.
+  // Once both reach their full length, trail enters hold/fade phase
+  // until life runs out.
+  var fwdDrawSpeed = chargeSpeed || 1040;        // px/sec
+  var tailDrawSpeed = (chargeSpeed || 1040) * 3; // 3× speed for backward blast
+  redDashTrails.push({
+    // Geometry: full target endpoints (drawn-to over time)
+    tailX: tailX, tailY: tailY,                   // far end of rearward tail
+    originX: originX, originY: originY,           // anchor — both segments grow from here
+    endX: endX, endY: endY,                       // far end of forward path
+    fullFwdLen: len,                              // forward target length
+    fullTailLen: tailLen,                         // rearward target length
+    // Direction unit vectors — used during render to interpolate drawn endpoints
+    dirX: dirX, dirY: dirY,                       // forward unit
+    // Progressive-draw state
+    drawnFwdLen: 0,                               // current drawn forward length
+    drawnTailLen: 0,                              // current drawn rearward length
+    fwdDrawSpeed: fwdDrawSpeed,
+    tailDrawSpeed: tailDrawSpeed,
+    // Lifecycle
+    life: cfg.duration || 1.7,
+    maxLife: cfg.duration || 1.7,
+    // Damage config
+    baseDamage: baseDamage,
+    damageFraction: cfg.damageFraction || 0.5,
+    // Per-entity damage tracking — one hit per entity per trail
+    hitEntities: [],
+    // Visual
+    lineWidth: 18,  // collision band width
+  });
+  // Push-back burst at origin point A — knockback for entities within radius.
+  var burstR = cfg.pushBackBurstRadius || 60;
+  var burstStr = cfg.pushBackBurstStrength || 240;
+  for (var bi = 0; bi < entities.length; bi++) {
+    var bg = entities[bi];
+    if (!bg || bg.hp <= 0) continue;
+    var bdx = bg.x - originX, bdy = bg.y - originY;
+    var bdist = Math.hypot(bdx, bdy);
+    if (bdist > burstR) continue;
+    if (bdist < 1) bdist = 1;  // avoid division by zero
+    bg.bounceVx = (bdx / bdist) * burstStr;
+    bg.bounceVy = (bdy / bdist) * burstStr;
+    bg.bounceTimer = 0.4;
+    bg.state = 'bounce';
+  }
+  // Visual burst at point A
+  if (typeof spawnCritShockwave === 'function') {
+    spawnCritShockwave(originX, originY, '#E24B4A',
+      { r0: 8, maxR: burstR * 1.2, thickness: 3, growth: 320 });
+  }
+  if (typeof spawnCritFlourish === 'function') {
+    spawnCritFlourish(originX, originY, '#FF6644', 12);
+  }
+}
+
+// Returns the perpendicular distance from point (px, py) to the line
+// segment defined by (ax, ay) → (bx, by). Used for trail-collision
+// detection. Returns Infinity if point projects outside the segment
+// (i.e. before A or beyond B along the line direction).
+function _distFromLineSegment(px, py, ax, ay, bx, by) {
+  var dx = bx - ax, dy = by - ay;
+  var len2 = dx * dx + dy * dy;
+  if (len2 < 0.001) return Math.hypot(px - ax, py - ay);
+  var t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  if (t < 0 || t > 1) return Infinity;  // outside segment
+  var projX = ax + t * dx, projY = ay + t * dy;
+  return Math.hypot(px - projX, py - projY);
+}
+
+function updatePierceTrails(dt) {
+  for (var ti = redDashTrails.length - 1; ti >= 0; ti--) {
+    var trail = redDashTrails[ti];
+    trail.life -= dt;
+    if (trail.life <= 0) {
+      redDashTrails.splice(ti, 1);
+      continue;
+    }
+    // v0.16.55 — Grow drawn segments at their respective speeds.
+    // Each segment caps at its full target length once drawn.
+    if (trail.drawnFwdLen < trail.fullFwdLen) {
+      trail.drawnFwdLen = Math.min(trail.fullFwdLen, trail.drawnFwdLen + trail.fwdDrawSpeed * dt);
+    }
+    if (trail.drawnTailLen < trail.fullTailLen) {
+      trail.drawnTailLen = Math.min(trail.fullTailLen, trail.drawnTailLen + trail.tailDrawSpeed * dt);
+    }
+    // Compute current drawn endpoints for collision detection.
+    // Forward: from origin extending toward endX/endY by drawnFwdLen.
+    var fwdEndX = trail.originX + trail.dirX * trail.drawnFwdLen;
+    var fwdEndY = trail.originY + trail.dirY * trail.drawnFwdLen;
+    // Tail: from origin extending OPPOSITE direction by drawnTailLen.
+    var tailEndX = trail.originX - trail.dirX * trail.drawnTailLen;
+    var tailEndY = trail.originY - trail.dirY * trail.drawnTailLen;
+    // Damage detection — entities crossing the DRAWN segment.
+    // Compute distance to the currently-drawn line (tailEndXY → fwdEndXY).
+    for (var ei = 0; ei < entities.length; ei++) {
+      var g = entities[ei];
+      if (!g || g.hp <= 0) continue;
+      // Already hit by this trail? skip.
+      if (trail.hitEntities.indexOf(g) >= 0) continue;
+      var d = _distFromLineSegment(g.x, g.y, tailEndX, tailEndY, fwdEndX, fwdEndY);
+      if (d > trail.lineWidth + (g.r || 0)) continue;
+      // Trail hit. Apply damage, mark entity as hit.
+      trail.hitEntities.push(g);
+      var trailDmg = Math.max(1, Math.ceil(trail.baseDamage * trail.damageFraction));
+      var tRes = damageEntity(g, trailDmg, undefined, 'red', { piercing: true });
+      g.flashTimer = 0.2;
+      showDamageNumber(g.x, g.y - 25, tRes.applied, '#E24B4A', tRes.tier,
+        g.x, g.y, undefined, tRes.witherBoost, g, 'red');
+      if (typeof spawnCritFlourish === 'function') {
+        spawnCritFlourish(g.x, g.y, '#E24B4A', 4);
+      }
+    }
+  }
+}
+
+function drawPierceTrails() {
+  if (!ctx) return;
+  for (var ti = 0; ti < redDashTrails.length; ti++) {
+    var trail = redDashTrails[ti];
+    var alpha = trail.life / trail.maxLife;
+    if (alpha <= 0) continue;
+    // v0.16.55 — Compute current drawn endpoints from origin outward
+    // along respective directions.
+    var fwdEndX = trail.originX + trail.dirX * trail.drawnFwdLen;
+    var fwdEndY = trail.originY + trail.dirY * trail.drawnFwdLen;
+    var tailEndX = trail.originX - trail.dirX * trail.drawnTailLen;
+    var tailEndY = trail.originY - trail.dirY * trail.drawnTailLen;
+    // Skip render if both segments are zero-length (initial frame edge case).
+    if (trail.drawnFwdLen < 0.5 && trail.drawnTailLen < 0.5) continue;
+    ctx.save();
+    // Outer glow stroke (wider, lower alpha — reads as the "hot lane")
+    ctx.globalAlpha = 0.45 * alpha;
+    ctx.strokeStyle = '#E24B4A';
+    ctx.shadowColor = '#E24B4A';
+    ctx.shadowBlur = 18;
+    ctx.lineWidth = trail.lineWidth + 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(tailEndX, tailEndY);
+    ctx.lineTo(fwdEndX, fwdEndY);
+    ctx.stroke();
+    // Inner bright core (narrower, brighter — reads as the dash line itself)
+    ctx.globalAlpha = 0.85 * alpha;
+    ctx.strokeStyle = '#FF6644';
+    ctx.shadowBlur = 8;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(tailEndX, tailEndY);
+    ctx.lineTo(fwdEndX, fwdEndY);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ── BLOCKSMITH MAX-ARMOR ARC WALL (v0.16.46) ──────────────────────────
+// Payoff state for maxing armor: when BS armor === armorMax AND BS
+// uses SELF-CAST gray (tap), the cast produces an ARC WALL instead
+// of pumping armor + overflow ring wall. Arc faces the nearest enemy
+// at cast moment. Drag-cast still produces ring walls regardless of
+// armor state — gesture distinction maps directly to wall variant.
+//
+// Architecture:
+//   - Cast dispatcher (fireOverloadGray) checks armor + maxArmorArcWall
+//     data + isDrag. If self-cast at max with arc data → spawnArcWall.
+//   - Wall lifecycle: existing grayWalls[] system. Arc walls share the
+//     same lifecycle (HP, alpha fade, ownerCls, wallDeathArmorRegen,
+//     gray vocabulary) but with collision/rendering restricted to a
+//     wedge AND solid (no pass-through) inside or outside the cone.
+//   - Wall data: same shape as ring walls + { isArc, arcAngle, arcSpan }.
+//   - drawGrayWalls / updateGrayWalls branch on isArc for geometry.
+//
+// Per S016 v0.16.46 design lock:
+//   - Trigger: self-cast (tap) at max armor (NOT auto-spawn — replaces
+//     v0.16.45 rising-edge trigger entirely).
+//   - HP from getGrayWallHp(cls, tier) — scales with cast tier like ring walls.
+//   - Death gives +1 pip via existing wallDeathArmorRegen.
+//   - Centered on BS at cast moment, faces nearest enemy.
+//   - Static — doesn't track. New cast at max → new arc at new position.
+//   - Solid: blocks player + entities + projectiles in arc cone.
+//   - Outside cone: open (no collision in that direction; passes freely).
+//
+// Other classes have no maxArmorArcWall data → mode-switch never fires,
+// self-cast at max behaves as standard (pips → armor + overflow ring).
+function spawnArcWall(tier) {
+  if (!player) return;
+  var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
+  var arcCfg = prof && prof.maxArmorArcWall;
+  if (!arcCfg) return;
+  // Resolve wall HP via standard formula. Self-cast tier scales HP just
+  // like drag-cast ring walls do.
+  var wcritMult = _currentCrit ? 2.0 : 1.0;
+  var hp = (typeof getGrayWallHp === 'function')
+    ? Math.max(1, Math.round(getGrayWallHp(player.cls, tier || 1) * wcritMult))
+    : 6;
+  // Resolve facing — angle to nearest living enemy at this moment.
+  var nearest = null;
+  var nearestDist = Infinity;
+  for (var ei = 0; ei < entities.length; ei++) {
+    var g = entities[ei];
+    if (!g || g.hp <= 0 || g.dead) continue;
+    var d = Math.hypot(g.x - player.x, g.y - player.y);
+    if (d < nearestDist) { nearest = g; nearestDist = d; }
+  }
+  // No enemy → arc faces "up" by default. Edge case — typically the
+  // player has an enemy on screen by the time they're at max armor.
+  var arcAngle = nearest
+    ? Math.atan2(nearest.y - player.y, nearest.x - player.x)
+    : -Math.PI / 2;
+  var arcSpan = ((arcCfg.arcDegrees || 120) * Math.PI) / 180;
+  // Radius — personal wall around BS. Fixed at 50px for now; can be
+  // surfaced as schema field if tuning needs per-class control.
+  var arcRadius = 50;
+  // Push into grayWalls[] — same shape as ring walls plus arc fields.
+  // expanding=false because arc is placed at full radius (no cast
+  // animation; it just appears as the cast resolves).
+  grayWalls.push({
+    x: player.x, y: player.y,
+    r: arcRadius, maxR: arcRadius,
+    hp: hp, hpMax: hp,
+    expanding: false,
+    alpha: 1, pulse: 0,
+    containedIds: [],            // arc walls don't cage — just block in cone
+    ownerCls: player.cls,        // for wallDeathArmorRegen
+    isArc: true,                 // updateGrayWalls / drawGrayWalls branch on this
+    arcAngle: arcAngle,          // center angle of wedge (radians)
+    arcSpan: arcSpan,            // wedge span (radians)
+  });
+  // Visual cinematic — gray vocabulary, same as ring-wall cast.
+  if (_currentCrit) {
+    spawnCritShockwave(player.x, player.y, '#CCCCCC',
+      { r0: 12, maxR: arcRadius * 1.2, thickness: 4, growth: 280 });
+    spawnCritFlourish(player.x, player.y, '#DDDDDD', 18);
+  } else {
+    if (typeof spawnCritShockwave === 'function') {
+      spawnCritShockwave(player.x, player.y, '#AAAAAA',
+        { r0: 8, maxR: arcRadius * 1.2, thickness: 3, growth: 240 });
+    }
+  }
+}
+
+// Helper: returns true if (px, py) is inside the wall's arc cone.
+// Used by collision + projectile + render logic when w.isArc is true.
+function _pointInArc(w, px, py) {
+  var srcAngle = Math.atan2(py - w.y, px - w.x);
+  var diff = srcAngle - w.arcAngle;
+  while (diff > Math.PI) diff -= 2 * Math.PI;
+  while (diff < -Math.PI) diff += 2 * Math.PI;
+  return Math.abs(diff) <= (w.arcSpan / 2);
+}
+
+// v0.16.66 — Does any active arc wall block the line from (ax, ay)
+// to (bx, by)? Used by touch, pulse, and swing attacks so entities
+// can't damage through arc walls. Ring walls remain passable
+// (per design lock — short fences vs. tall barriers).
+//
+// Geometry: for each arc wall, test if the segment intersects the
+// circle's arc geometry. We use a sampled approach (5 points along
+// the segment): if any sample lies inside the arc wall (within the
+// wall radius AND within the cone wedge), the attack is blocked.
+// Sampling is approximate but fast and correct for typical
+// entity-distance attacks. Edge cases (a segment that passes
+// through the wedge but skims the circle) get caught by enough
+// samples crossing the wall band.
+//
+// Returns true if blocked, false if clear.
+function _arcWallBlocksAttack(ax, ay, bx, by) {
+  if (typeof grayWalls === 'undefined' || grayWalls.length === 0) return false;
+  var samples = 7;
+  for (var wi = 0; wi < grayWalls.length; wi++) {
+    var w = grayWalls[wi];
+    if (!w || w.hp <= 0 || !w.isArc) continue;
+    // Bounding-circle quick reject: if both endpoints are far
+    // outside the wall radius (and segment doesn't cross the band),
+    // skip the sample loop. Cheap optimization for the common case
+    // of a wall placed far from the action.
+    var dax = ax - w.x, day = ay - w.y;
+    var dbx = bx - w.x, dby = by - w.y;
+    var distA = Math.sqrt(dax*dax + day*day);
+    var distB = Math.sqrt(dbx*dbx + dby*dby);
+    var maxR = w.r + 8;  // small margin for sampling tolerance
+    var minR = Math.max(0, w.r - 8);
+    // If both endpoints are inside the wall band ring but not
+    // on opposite sides, can still cross. Just sample.
+    if ((distA > maxR && distB > maxR) || (distA < minR && distB < minR)) {
+      // Both outside the band on same side. Could still skim
+      // through the band if segment is tangent — sample to verify.
+      // For close-range attacks this rarely matters; skip optimization.
+    }
+    for (var si = 1; si < samples; si++) {
+      var t = si / samples;
+      var sx = ax + (bx - ax) * t;
+      var sy = ay + (by - ay) * t;
+      var sdx = sx - w.x, sdy = sy - w.y;
+      var sdist = Math.sqrt(sdx*sdx + sdy*sdy);
+      // Sample inside the wall band?
+      if (sdist >= minR && sdist <= maxR && _pointInArc(w, sx, sy)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+
+// PHASE C/D — fire one slinger shot, tagging for orange shrapnel (every 3rd)
+// or yellow daze (every 5th). Extracted into a helper so both legacy
+// single-shot rhythm and burst_fire signature can share the arsenal logic.
+function _fireSlingerShot(g) {
+  if (!g || !player) return;
+  g._shotCount = (g._shotCount || 0) + 1;
+  var proj = spawnEnemyProjectile(g, player.x, player.y, g.rangedDmg || 2);
+  if (proj && g.affinityColors) {
+    if (g.affinityColors.indexOf('yellow') >= 0 && g._shotCount % 5 === 0) {
+      proj._yellowDaze = true;
+      proj.color = '#F5D000';
+    } else if (g.affinityColors.indexOf('orange') >= 0 && g._shotCount % 3 === 0) {
+      proj._orangeShrapnel = true;
+      proj.color = '#F57C00';
+    }
+  }
+}
+
+// Pulse FX — spawned by stationary entities on AoE cooldown. Piggybacks
+// the existing armorBursts visual pool since it already handles the
+// expanding-ring animation and fadeout.
+function spawnEnemyPulseFX(g, r) {
+  if (typeof armorBursts !== 'undefined') {
+    armorBursts.push({
+      x: g.x, y: g.y,
+      r: 8, maxR: r,
+      color: '#aa2030',
+      age: 0, ttl: 0.6,
+      _enemyPulse: true,
+    });
+  }
+}
+
+// Shared enemy melee damage resolver — handles armor absorb then HP,
+// shows floaters, sets iframes. Called by heavy_melee swing resolution,
+// stationary pulse, and projectile impacts.
+// ═══════════════════════════════════════════════════
+// PHASE C — ENTITY ARSENAL EFFECTS
+// ═══════════════════════════════════════════════════
+// Each entity's affinityColors drive on-touch and per-frame effects.
+// Three hook points:
+//   1. applyArsenalOnTouch(g) — called whenever entity makes contact damage.
+//        Fires touch-triggered arsenal: poison (green), vampire heal (purple),
+//        knockback (red handled inline at damage site).
+//   2. tickPassiveArsenal(g, dt) — called once per frame per entity. Handles
+//        continuous arsenals: gray armor-pip refresh, white slow regen.
+//   3. entityIncomingDmgMult(g) — called when PLAYER hits entity. Returns
+//        multiplier (0.7 for gray DR, 1.0 default). Hook adds "−30%" floater.
+//
+// Projectile/emerge arsenals (black weaken orb, slinger orange/yellow,
+// colossus orange cracks, worm poison trail) hook in their respective
+// firing sites, not here.
+
+function applyArsenalOnTouch(g, dx, dy, dist) {
+  if (!g || !g.affinityColors || !player) return;
+  var cols = g.affinityColors;
+  // GREEN — apply poison DoT (3 dmg over 6s, stacks)
+  if (cols.indexOf('green') >= 0) {
+    applyStatus('poison', { stacks: 1, duration: 6, dmgPerTick: 1 });
+  }
+  // PURPLE — vampiric heal to entity. +5 for cursed_knight (swing-hit),
+  // +2 for all others (touch contact).
+  // PHASE E — stone_colossus purple vampirism is phase-2 only (gated by
+  // _enraged flag set via enrage_phase signature).
+  if (cols.indexOf('purple') >= 0) {
+    var purpleOK = (g.type !== 'stone_colossus') || g._enraged;
+    if (purpleOK) {
+      var healAmt = (g.type === 'cursed_knight') ? 5
+                  : (g.type === 'stone_colossus') ? 3 : 2;
+      var prevEntityHp = g.hp;
+      g.hp = Math.min(g.hpMax, g.hp + healAmt);
+      var entityHealed = g.hp - prevEntityHp;
+      if (_battleStats && entityHealed > 0) {
+        _battleStats.totalEntityHeal = (_battleStats.totalEntityHeal || 0) + entityHealed;
+        if (entityHealed > (_battleStats.biggestHealEntity || 0)) _battleStats.biggestHealEntity = entityHealed;
+      }
+      // Reactive tell: red heart floater from player toward entity
+      spawnHeartFloat(player.x, player.y, g.x, g.y);
+    }
+  }
+  // RED knockback is applied inline at the damage site via bounce vectors;
+  // nothing needed here (the default bounce IS the knockback for red users).
+}
+
+// Per-frame passive arsenals. Called from updateEntity for each entity.
+// Does not interact with touch damage — handles continuous/timed effects.
+function tickPassiveArsenal(g, dt) {
+  if (!g || !g.affinityColors || !running) return;
+  var cols = g.affinityColors;
+
+  // GRAY — periodic armor-pip refresh. Every arsenalCooldown seconds,
+  // grant entity 3 armor pips (reduces next 3 hits by 50% via resistMult
+  // existing system). Only applies if entity has arsenalCooldown > 0
+  // AND has gray in affinity.
+  if (cols.indexOf('gray') >= 0 && (g.arsenalCooldown || 0) > 0) {
+    g._grayArmorTimer = (g._grayArmorTimer || 0) - dt;
+    if (g._grayArmorTimer <= 0) {
+      g._grayArmorPips = Math.min(3, (g._grayArmorPips || 0) + 3);
+      g._grayArmorTimer = g.arsenalCooldown;
+      // Small gray flash to signal armor refresh
+      showFloatingText(g.x, g.y - (g.r + 10), '🛡 +3', '#AAAAAA', g);
+    }
+  }
+
+  // WHITE — slow self regen. +1 HP every 3s while not hit in 2s.
+  if (cols.indexOf('white') >= 0 && g.hp < g.hpMax) {
+    g._whiteDisengageTimer = (g._whiteDisengageTimer || 0) + dt;
+    // If recently flashed (took damage), reset disengage timer.
+    if (g.flashTimer > 0) g._whiteDisengageTimer = 0;
+    if (g._whiteDisengageTimer >= 2.0) {
+      g._whiteRegenAccum = (g._whiteRegenAccum || 0) + dt;
+      if (g._whiteRegenAccum >= 3.0) {
+        g._whiteRegenAccum -= 3.0;
+        g.hp = Math.min(g.hpMax, g.hp + 1);
+        showFloatingText(g.x, g.y - (g.r + 10), '+1', '#EFEFEF', g);
+      }
+    } else {
+      g._whiteRegenAccum = 0;
+    }
+  }
+
+  // GREEN POISON TRAIL — worm-style: leaves poison puddle in wake.
+  // Spawns every 0.4s while moving. Only on entities with green in arsenal
+  // AND family 'malady' (so it's boss-tier distinctive, not on grunts).
+  if (cols.indexOf('green') >= 0 && g.family === 'malady' && g.speed > 0) {
+    g._poisonTrailTimer = (g._poisonTrailTimer || 0) + dt;
+    if (g._poisonTrailTimer >= 0.4) {
+      g._poisonTrailTimer = 0;
+      spawnPoisonPuddle(g.x, g.y);
+    }
+  }
+}
+
+// Applied to PLAYER-DEALT damage before it hits entity. 0.7 if gray pips active.
+// Hooked into the entity damage path — called in the existing damage function.
+function entityIncomingDmgMult(g) {
+  if (!g) return 1;
+  // Troll passive DR: 30% reduction (constant) if gray in affinity AND
+  // template is stone_troll. Other gray users rely on pip system.
+  if (g.type === 'stone_troll' && g.affinityColors && g.affinityColors.indexOf('gray') >= 0) {
+    return 0.7;
+  }
+  // Gray pip system: consume one pip and halve damage.
+  if ((g._grayArmorPips || 0) > 0) {
+    g._grayArmorPips -= 1;
+    return 0.5;
+  }
+  return 1;
+}
+
+// Small visual: red heart floater from (ax,ay) toward (bx,by).
+// Used to telegraph vampiric heal on an entity.
+function spawnHeartFloat(ax, ay, bx, by) {
+  floatingTexts.push({
+    text: '♥',
+    color: '#E24B4A',
+    size: 18,
+    alpha: 1,
+    timer: 0.6,
+    maxTimer: 0.6,
+    worldSpace: true,
+    wx: ax, wy: ay,
+    vox: (bx - ax) / 36,   // reach target in ~36 frames at 60fps
+    voy: (by - ay) / 36,
+  });
+}
+
+// Poison puddle hazard. Short-lived ground patch that damages player
+// on contact and applies poison. Boss/elite-only arsenal effect.
+var poisonPuddles = [];
+function spawnPoisonPuddle(x, y) {
+  poisonPuddles.push({ x: x, y: y, r: 18, timer: 2.0, tickTimer: 0 });
+}
+function updatePoisonPuddles(dt) {
+  for (var i = poisonPuddles.length - 1; i >= 0; i--) {
+    var p = poisonPuddles[i];
+    p.timer -= dt;
+    if (p.timer <= 0) { poisonPuddles.splice(i, 1); continue; }
+    if (player && !player.iframes) {
+      var dx = player.x - p.x, dy = player.y - p.y;
+      if (Math.hypot(dx, dy) < p.r + player.r) {
+        p.tickTimer -= dt;
+        if (p.tickTimer <= 0) {
+          p.tickTimer = 0.5;
+          applyStatus('poison', { stacks: 1, duration: 4, dmgPerTick: 1 });
+        }
+      }
+    }
+  }
+}
+function drawPoisonPuddles() {
+  for (var i = 0; i < poisonPuddles.length; i++) {
+    var p = poisonPuddles[i];
+    var a = Math.min(1, p.timer / 2.0);
+    ctx.save();
+    ctx.globalAlpha = 0.35 * a;
+    ctx.fillStyle = '#1D9E75';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 0.6 * a;
+    ctx.strokeStyle = '#0B5C3B';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// Thorn shards — small ground hazards from slinger orange shrapnel.
+// Tiny, short-lived, 1 dmg on contact then consumed.
+var thornShards = [];
+function spawnThornShard(x, y) {
+  thornShards.push({ x: x, y: y, r: 6, timer: 2.5 });
+}
+function updateThornShards(dt) {
+  for (var i = thornShards.length - 1; i >= 0; i--) {
+    var s = thornShards[i];
+    s.timer -= dt;
+    if (s.timer <= 0) { thornShards.splice(i, 1); continue; }
+    if (player && !player.iframes) {
+      var dx = player.x - s.x, dy = player.y - s.y;
+      if (Math.hypot(dx, dy) < s.r + player.r) {
+        _applyEnemyMeleeDamage({ type: 'thorn' }, 1, dx, dy, 0);
+        thornShards.splice(i, 1);
+      }
+    }
+  }
+}
+function drawThornShards() {
+  for (var i = 0; i < thornShards.length; i++) {
+    var s = thornShards[i];
+    var a = Math.min(1, s.timer / 2.5);
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#F57C00';
+    ctx.strokeStyle = '#8A4500';
+    ctx.lineWidth = 1.5;
+    // 4-pointed star (thorn shape)
+    ctx.beginPath();
+    var pts = 4;
+    for (var k = 0; k < pts * 2; k++) {
+      var angK = (k / (pts * 2)) * Math.PI * 2 - Math.PI / 2;
+      var rK = (k % 2 === 0) ? s.r : s.r * 0.4;
+      var px = s.x + Math.cos(angK) * rK;
+      var py = s.y + Math.sin(angK) * rK;
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+
+function _applyEnemyMeleeDamage(g, dmg, dx, dy, dist) {
+  if (!player || player.iframes) return;
+  // PHASE B — weaken amplifies incoming damage (×1.5 while active).
+  var dmgLeft = Math.ceil((dmg || 1) * playerDamageTakenMult());
+  // Armor absorb first.
+  if ((player.armor||0) > 0) {
+    var absorbed = Math.min(player.armor, dmgLeft);
+    var _bsArmorBefore = player.armor;  // v0.16.39 — capture pre-loss for shrapnel
+    player.armor -= absorbed;
+    dmgLeft -= absorbed;
+    if (_battleStats) _battleStats.armorAbsorbed += absorbed;
+    showFloatingText(player.x, player.y - 55, absorbed + ' 🛡', '#AAAAAA', player);
+    // v0.16.39 — Blocksmith reactive shrapnel. Pip lost → projectile flies
+    // back to the attacker. damage = pre-loss armor count (linear curve).
+    // Source position: prefer g.x/g.y if provided (full entity), else
+    // resolve from dx/dy passed by caller (boulder/projectile path).
+    if (typeof maybeSpawnPipShrapnel === 'function') {
+      var srcX, srcY, srcEnt;
+      if (g && typeof g.x === 'number' && typeof g.y === 'number') {
+        srcX = g.x; srcY = g.y;
+        srcEnt = (g.hp !== undefined) ? g : null;  // only link if real entity
+      } else if (typeof dx === 'number' && typeof dy === 'number') {
+        // dx/dy is offset from attacker to player (player.x - g.x = dx).
+        // Reverse: attacker = player - (dx, dy).
+        srcX = player.x - dx;
+        srcY = player.y - dy;
+        srcEnt = null;
+      } else {
+        srcX = player.x; srcY = player.y - 60;  // last-resort fallback
+        srcEnt = null;
+      }
+      maybeSpawnPipShrapnel(_bsArmorBefore, srcX, srcY, srcEnt);
+    }
+  }
+  if (dmgLeft > 0) {
+    if (_battleStats) {
+      _battleStats.damageTaken += dmgLeft;
+      if ((player.hp - dmgLeft) < _battleStats.hpLow) _battleStats.hpLow = Math.max(0, player.hp - dmgLeft);
+      if (dmgLeft > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmgLeft;
+    }
+    showFloatingText(player.x, player.y - 40, dmgLeft + ' HP', '#E24B4A', player);
+    applyDamageToPlayer(dmgLeft);
+  }
+  player.iframes = 0.9;
+  // PHASE C — arsenal triggers on every successful enemy hit on player.
+  applyArsenalOnTouch(g, dx, dy, dist);
+  if (player.hp <= 0 && !player.bleedOut && typeof respawnPlayer === 'function') respawnPlayer();
+}
+
+// ═══════════════════════════════════════════════════
+// LOOT DROP SYSTEM
+// ═══════════════════════════════════════════════════
+// When entities die, they roll their loot table and spawn physical pickups
+// in the rumble area. Pickups pop out with a small arc, settle, then magnet-pull
+// toward the player when close. Collection is automatic on contact.
+//
+// Kinds:
+//   brick   — adds to player.bricks pool by color
+//   cheese  — permanent +1 max HP and +1 current HP
+//   gold    — adds amount to player.gold (surfaces to server on battleEnd)
+var droppedBricks = [];
+                               // Used by victory flow to skip grace period when no loot existed.
+var LOOT_MAGNET_RANGE = 80;   // player must be this close before magnet kicks in
+var LOOT_PICKUP_RADIUS = 24;  // actual contact radius for collection (generous)
+var LOOT_VISUAL_R = 8;        // rendered size — kept small so drops don't dominate the scene
+
+// Roll an entity's loot table. Each entry is independent.
+// Returns an array of drop descriptors:
+//   { kind: 'brick', color: 'red' }
+//   { kind: 'cheese' }
+//   { kind: 'gold', amount: 2 }
+function rollLoot(entity) {
+  if (!entity.loot) return [];
+  var drops = [];
+  // S013.3: revive loot penalty. Each heart-revive this run cuts drop chance
+  // by 10% (multiplicative), floored at 10% of normal. reviveCount carries
+  // across rumbles on player state; cheese-revives reset it to 0.
+  // cfg.suppressLootPenalty (waves mode) bypasses this — the test tool
+  // needs clean drop-rate observation, the live penalty is still in place.
+  var reviveMult = 1.0;
+  if (player && player.reviveCount > 0 && !(cfg && cfg.suppressLootPenalty)) {
+    reviveMult = Math.max(0.1, 1.0 - 0.1 * player.reviveCount);
+  }
+  entity.loot.forEach(function(entry) {
+    var effectiveChance = entry.chance * reviveMult;
+    if (Math.random() >= effectiveChance) return;
+    var kind = entry.kind || 'brick';
+    if (kind === 'brick') {
+      var n = entry.min + Math.floor(Math.random() * (entry.max - entry.min + 1));
+      for (var i = 0; i < n; i++) {
+        drops.push({ kind: 'brick', color: entry.color });
+      }
+    } else if (kind === 'cheese') {
+      // Cheese is a single pickup per successful roll (rare permanent buff).
+      drops.push({ kind: 'cheese' });
+    } else if (kind === 'gold') {
+      // One coin pickup per roll, carrying a random amount in [min, max].
+      var amt = entry.min + Math.floor(Math.random() * (entry.max - entry.min + 1));
+      drops.push({ kind: 'gold', amount: amt });
+    }
+  });
+  return drops;
+}
+
+function spawnLootFromEntity(entity) {
+  var drops = rollLoot(entity);
+  // PHASE E — bone_rise: second death of a revived skeleton gives half loot.
+  // Halve min/max on brick amounts and gold stacks. Cheese has no "half"
+  // (it's a discrete 1-HP bonus) so we roll it at 50% chance of keeping.
+  if (entity._boneRisen) {
+    drops = drops.map(function(d) {
+      if (d.kind === 'cheese') {
+        return (Math.random() < 0.5) ? d : null;
+      }
+      if (d.kind === 'gold') {
+        return { kind:'gold', amount: Math.max(1, Math.floor((d.amount||1) * 0.5)) };
+      }
+      if (d.color) {
+        return { kind:'brick', color: d.color, amount: Math.max(1, Math.floor((d.amount||1) * 0.5)) };
+      }
+      return d;
+    }).filter(Boolean);
+  }
+  drops.forEach(function(drop, i) {
+    // Pop out in a spread pattern around the death position.
+    var angle = (i / Math.max(1, drops.length)) * Math.PI * 2 + Math.random() * 0.3;
+    var popSpeed = 80 + Math.random() * 60;
+    droppedBricks.push({
+      x: entity.x, y: entity.y,
+      vx: Math.cos(angle) * popSpeed,
+      vy: Math.sin(angle) * popSpeed - 40, // slight upward arc
+      kind: drop.kind,
+      color: drop.color,    // brick only
+      amount: drop.amount,  // gold only
+      r: LOOT_VISUAL_R,     // visual radius — draw size
+      pickupR: LOOT_PICKUP_RADIUS,  // detection radius — collection contact
+      age: 0,
+      ttl: 30.0, // 30s before expiry
+      state: 'popping',
+      bobPhase: Math.random() * Math.PI * 2,
+    });
+  });
+}
+
+function updateDroppedBricks(dt) {
+  if (!player) return;
+  droppedBricks.forEach(function(p) {
+    p.age += dt;
+    if (p.age >= p.ttl) { p.done = true; return; }
+    if (p.state === 'popping') {
+      // Decelerate pop-out velocity, settle into idle after ~0.6s
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.9; p.vy *= 0.9;
+      p.vy += 80 * dt; // gravity pulls it back down
+      if (p.age > 0.6) { p.state = 'idle'; p.vx = 0; p.vy = 0; }
+    } else {
+      // Check distance to player for magnet / collection.
+      var ddx = player.x - p.x, ddy = player.y - p.y;
+      var dist = Math.hypot(ddx, ddy);
+      var contactR = (p.pickupR || p.r) + player.r;
+      if (dist < contactR) {
+        // Collect by kind. Each pickup type has its own effect.
+        if (p.kind === 'cheese') {
+          // v4: Cheese loot goes into player's cheese inventory (+1 per pickup).
+          // Previously cheese gave permanent +1 max HP + +1 HP — replaced so cheese
+          // is a tradeable consumable, eaten via the out-of-battle menu for +1 Max HP.
+          //
+          // EXCEPTION: cfg.cheeseAutoApply (waves mode test tool) restores the
+          // old behavior — pickups apply immediately for visible feedback during
+          // stress testing. Live game keeps the inventory model.
+          if (cfg && cfg.cheeseAutoApply) {
+            player.hpMax += 1;
+            player.hp = Math.min(player.hpMax, player.hp + 1);
+            if (_battleStats) {
+              if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+              _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+            }
+            showFloatingText(player.x, player.y, '🧀 +1 HP MAX', '#FFD96A', player);
+          } else {
+            player.cheese = (player.cheese || 0) + 1;
+            if (_battleStats) _battleStats.cheeseEaten++;
+            if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+            _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+            showFloatingText(player.x, player.y, '+1 🧀', '#FFD96A', player);
+            // S013.3: occasional flavor line for cheese pickups — every 3rd to avoid spam
+            if (player.cheese % 3 === 1) {
+              // Spawn ABOVE the player (not parented) so it floats independently
+              // and doesn't stack on top of the pickup number.
+              showFloatingText(player.x, player.y - (player.r + 48), _pickCheeseEventFlavor(), '#FFD96A');
+            }
+          }
+        } else if (p.kind === 'gold') {
+          // Coins accumulate on player.gold; battleTick surfaces to server.
+          var amt = p.amount || 1;
+          player.gold = (player.gold || 0) + amt;
+          if (_battleStats) _battleStats.goldGained += amt;
+          showFloatingText(player.x, player.y - 40, '+' + amt + ' 🪙', '#F5D000', player);
+        } else {
+          // Brick — looted mid-rumble grows both inventory ceiling AND active
+          // charges. S013.6: previously only spec mode grew the ceiling, which
+          // meant non-spec loot vanished after the battle (ceiling unchanged →
+          // server never saw the pickup). Now looted bricks persist AND are
+          // immediately usable.
+          //   bricks[c]   += 1  — charges (immediately usable)
+          //   brickMax[c] += 1  — inventory ceiling (persists post-rumble)
+          player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
+          player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
+          if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
+          showFloatingText(player.x, player.y - 40, '+1 ' + p.color.charAt(0).toUpperCase(),
+            BRICK_COLORS[p.color] || '#fff', player);
+        }
+        p.done = true;
+        return;
+      }
+      if (dist < scaleDist(LOOT_MAGNET_RANGE)) {
+        // Magnet pull — accelerate toward player, snappy.
+        var pullStrength = 240 + (1 - dist / scaleDist(LOOT_MAGNET_RANGE)) * 300;
+        p.x += (ddx/dist) * pullStrength * dt;
+        p.y += (ddy/dist) * pullStrength * dt;
+      } else {
+        // Idle bob — small vertical oscillation.
+        p.bobPhase += dt * 3;
+      }
+    }
+  });
+  droppedBricks = droppedBricks.filter(function(p) { return !p.done; });
+}
+
+function drawDroppedBricks() {
+  if (!ctx) return;
+  droppedBricks.forEach(function(p) {
+    ctx.save();
+    // Fading alpha in the last 3s of life
+    var life = Math.min(1, (p.ttl - p.age) / 3);
+    var alpha = life < 1 ? Math.max(0.3, life) : 1;
+    // Idle bob
+    var bobY = p.state === 'idle' ? Math.sin(p.bobPhase) * 2 : 0;
+    ctx.globalAlpha = alpha;
+
+    if (p.kind === 'cheese') {
+      // Render the 🧀 emoji so the on-ground cheese loot matches the cheese
+      // icon used everywhere else (DM chips, player HUD, victory card).
+      // Previously rendered as a yellow triangle with dark dots, which was
+      // stylized but didn't read as cheese at a glance.
+      var cz = p.r * 2.4; // slightly larger than a brick
+      ctx.shadowColor = '#F5C800'; ctx.shadowBlur = 10;
+      ctx.font = cz + 'px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🧀', p.x, p.y + bobY);
+      ctx.shadowBlur = 0;
+    } else if (p.kind === 'gold') {
+      // Gold coin: round disc with rim + inner highlight.
+      var rad = p.r;
+      ctx.shadowColor = '#F5D000'; ctx.shadowBlur = 10;
+      ctx.fillStyle = '#F5D000';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y + bobY, rad, 0, Math.PI*2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#A88B00';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y + bobY, rad - 2, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.beginPath();
+      ctx.arc(p.x - rad/3, p.y + bobY - rad/3, rad * 0.25, 0, Math.PI*2);
+      ctx.fill();
+    } else {
+      // Brick (default): small colored square. The LEGO-style stud dot
+      // used to sit on top but reads as a visual artifact at this size,
+      // so it's been removed — the square + glow is enough to identify.
+      var col = BRICK_COLORS[p.color] || '#888';
+      ctx.shadowColor = col; ctx.shadowBlur = 8;
+      ctx.fillStyle = col;
+      var sz = p.r * 1.4;
+      ctx.fillRect(p.x - sz/2, p.y - sz/2 + bobY, sz, sz);
+    }
+    ctx.restore();
+  });
+}
+
+// ═══════════════════════════════════════════════════
+//  ENTITY REGISTRY — content library for all creature types
+// ═══════════════════════════════════════════════════
+// Every creature that can appear in the rumble is defined here. The game.js
+// ENTITY_TYPES/ENTITY_META arrays must stay in sync with the keys below.
+// Loot tables use shape: { kind?, color?, chance, min, max }
+//   kind: 'brick' (default) | 'cheese' | 'gold'
+//   color: required for 'brick', ignored for 'cheese'/'gold'
+//   chance: 0-1, rolled independently per entry on entity death
+//   min/max: for 'brick' = count; for 'gold' = amount-per-coin; 'cheese' always 1
+// Each entity's `family` drives its resistance profile via _familyResist().
+// AI behavior (`ai` field) drives the update-loop dispatcher:
+//   chase        — run at player, touch to damage (default legacy behavior)
+//   ranged_kite  — back away to kiteDistance, fire ranged projectiles
+//   stationary   — doesn't move; periodic AoE pulse around itself
+//   heavy_melee  — chase then telegraph a wind-up swing, AoE damage
+//   teleport     — chase + periodic blink to near player
+var ENTITY_REGISTRY = {
+  // ── Tier 1 grunts ──────────────────────────────────────────────────
+  goblin: {
+    hp: 12, hpMax: 12, speed: 180, r: 16,
+    family: 'physical',
+    resistances: _familyResist('physical'),
+    ai: 'chase', attackPattern: 'touch',
+    color: '#8b5a2b', icon: '👺',
+    // Rare-ish drops — most goblin kills yield nothing; occasionally a
+    // green or red chip falls. Gold is the most common drop.
+    loot: [
+      { color: 'green', chance: 0.05, min: 1, max: 1 },
+      { color: 'red',   chance: 0.10, min: 1, max: 1 },
+      { kind: 'gold',   chance: 1.00, min: 1, max: 1 },
+      { kind: 'cheese', chance: 0.15, min: 1, max: 1 },
+    ],
+    // PHASE A — intelligence fields
+    affinityColors: ['red', 'green'],
+    signature: 'pack_flank',        // implemented in Phase E
+    reactions: {
+      green: 'close_fast',          // interrupt player AoE charge
+      red:   'backstep',            // avoid knockback AoE
+    },
+    reactionCooldown: 7,
+    arsenalCooldown: 5,             // headbutt (Phase C)
+  },
+  skeleton: {
+    hp: 16, hpMax: 16, speed: 140, r: 17,
+    family: 'physical',
+    resistances: _familyResist('physical'),
+    ai: 'chase', attackPattern: 'touch',
+    dmg: 3,
+    color: '#dcdcdc', icon: '💀',
+    loot: [
+      { color: 'gray',  chance: 0.07, min: 1, max: 1 },
+      { color: 'white', chance: 0.03, min: 1, max: 1 },
+      { kind: 'gold',   chance: 1.00, min: 1, max: 1 },
+    ],
+    // PHASE A
+    affinityColors: ['gray', 'white'],
+    signature: 'bone_rise',         // Phase E: revive once at 40% HP if small-hit kill
+    reactions: {
+      gray:  'shield_up',           // add more armor
+      white: 'close_fast',          // don't let player heal
+    },
+    reactionCooldown: 8,
+    arsenalCooldown: 5,             // gray armor refresh (Phase C)
+  },
+  // ── Tier 1 ranged / special ────────────────────────────────────────
+  slinger: {
+    hp: 10, hpMax: 10, speed: 160, r: 14,
+    family: 'physical',
+    resistances: _familyResist('physical'),
+    ai: 'ranged_kite', attackPattern: 'ranged',
+    kiteDistance: 260, rangedCooldown: 1.5, rangedDmg: 2,
+    color: '#a4682a', icon: '🏹',
+    loot: [
+      { color: 'orange', chance: 0.05, min: 1, max: 1 },
+      { color: 'yellow', chance: 0.10, min: 1, max: 1 },
+      { kind: 'gold',    chance: 1.00, min: 1, max: 1 },
+      { kind: 'cheese',  chance: 0.25, min: 1, max: 1 },
+    ],
+    // PHASE A
+    affinityColors: ['orange', 'yellow'],
+    signature: 'burst_fire',        // Phase D: 3 rocks in sequence
+    reactions: {
+      red:   'backstep',
+      blue:  'evade',
+      green: 'backstep',
+    },
+    reactionCooldown: 5,
+  },
+  shadow_wolf: {
+    hp: 14, hpMax: 14, speed: 240, r: 18,
+    family: 'ethereal',
+    resistances: _familyResist('ethereal'),
+    ai: 'chase', attackPattern: 'touch',
+    color: '#3d2e5a', icon: '🐺',
+    loot: [
+      { color: 'purple', chance: 0.05, min: 1, max: 1 },
+      { color: 'blue',   chance: 0.10, min: 1, max: 1 },
+      { kind: 'gold',    chance: 0.30, min: 1, max: 3 },
+    ],
+    // PHASE A
+    affinityColors: ['purple', 'blue'],
+    signature: 'leap_lunge',        // Phase E
+    reactions: {
+      red:    'interrupt_swing',    // swift peck before swing
+      yellow: 'close_fast',         // interrupt daze cast
+      green:  'backstep',
+    },
+    reactionCooldown: 5,
+  },
+  creeping_vines: {
+    hp: 25, hpMax: 25, speed: 0, r: 20,
+    family: 'malady',
+    resistances: _familyResist('malady'),
+    ai: 'stationary', attackPattern: 'pulse',
+    pulseCooldown: 2.0, pulseRadius: 90, pulseDmg: 2,
+    color: '#2d5c2e', icon: '🌿',
+    loot: [
+      { color: 'green',  chance: 0.15, min: 1, max: 2 },
+      { color: 'yellow', chance: 0.10, min: 1, max: 1 },
+      { kind: 'gold',    chance: 0.30, min: 1, max: 1 },
+    ],
+    // PHASE A — stationary, no movement reactions
+    affinityColors: ['green', 'yellow'],
+    signature: 'root_pulse',        // Phase D: pulse applies 0.7s slow
+    reactions: {
+      // stationary; no physical reactions. Arsenal-side fires early on charge.
+    },
+    reactionCooldown: 3,
+  },
+  // ── Tier 2 heavy ───────────────────────────────────────────────────
+  // Elites drop a bit more reliably. Cheese starts appearing here as a
+  // rare bonus (permanent +1 max HP on pickup).
+  // ── Tier 1.5 splitter — bridge between grunts and elites ─────────
+  rot_grub: {
+    hp: 20, hpMax: 20, speed: 150, r: 16,
+    family: 'malady',
+    resistances: _familyResist('malady'),
+    ai: 'chase', attackPattern: 'touch',
+    color: '#7a5a2a', icon: '🪱',
+    loot: [
+      { color: 'green',  chance: 0.12, min: 1, max: 2 },
+      { color: 'black',  chance: 0.08, min: 1, max: 1 },
+      { kind: 'gold',    chance: 1.00, min: 1, max: 2 },
+      { kind: 'cheese',  chance: 0.10, min: 1, max: 1 },
+    ],
+    // PHASE E — mitosis_split primary (2-level recursion: 1 → 2 → 4 grubs).
+    // Teaches the split mechanic before blight_worm boss fight.
+    affinityColors: ['green', 'black'],
+    signature: 'mitosis_split',
+    splitMaxDepth: 2,
+    reactions: {
+      red:   'backstep',
+    },
+    reactionCooldown: 6,
+  },
+  stone_troll: {
+    hp: 40, hpMax: 40, speed: 110, r: 24,
+    family: 'physical',
+    resistances: _familyResist('physical'),
+    ai: 'heavy_melee', attackPattern: 'telegraph_swing',
+    swingTelegraph: 0.6, swingDmg: 6, swingRadius: 60,
+    color: '#6f6f6f', icon: '🪨',
+    loot: [
+      { color: 'gray',   chance: 0.15, min: 1, max: 2 },
+      { color: 'orange', chance: 0.10, min: 1, max: 1 },
+      { color: 'red',    chance: 0.12, min: 1, max: 1 },
+      { kind: 'gold',    chance: 0.60, min: 1, max: 3 },
+      { kind: 'cheese',  chance: 0.08, min: 1, max: 1 },
+    ],
+    // PHASE A
+    affinityColors: ['gray', 'orange', 'red'],
+    signature: 'boulder_toss',      // Phase E
+    reactions: {
+      blue:   'close_fast',
+      green:  'close_fast',
+      white:  'close_fast',
+    },
+    reactionCooldown: 4,
+  },
+  cursed_knight: {
+    hp: 30, hpMax: 30, speed: 160, r: 20,
+    family: 'physical',
+    resistances: _familyResist('physical'),
+    ai: 'chase', attackPattern: 'telegraph_swing',
+    swingTelegraph: 0.45, swingDmg: 4, swingRadius: 50,
+    color: '#4a4a6a', icon: '⚔️',
+    loot: [
+      { color: 'red',    chance: 0.30, min: 1, max: 1 },
+      { color: 'purple', chance: 0.10, min: 1, max: 1 },
+      { color: 'gray',   chance: 0.15, min: 1, max: 1 },
+      { kind: 'gold',    chance: 0.60, min: 1, max: 5 },
+      { kind: 'cheese',  chance: 0.17, min: 1, max: 1 },
+    ],
+    // PHASE A
+    affinityColors: ['red', 'purple', 'gray'],
+    signature: 'front_shield',      // Phase E
+    reactions: {
+      red:    'shield_up',
+      blue:   'shield_up',
+      green:  'interrupt_swing',
+    },
+    reactionCooldown: 3,
+  },
+  void_wraith: {
+    hp: 20, hpMax: 20, speed: 200, r: 17,
+    family: 'ethereal',
+    resistances: _familyResist('ethereal'),
+    ai: 'teleport', attackPattern: 'touch',
+    teleportCooldown: 3.0, teleportRange: 80,
+    color: '#5a2e7a', icon: '👻',
+    loot: [
+      { color: 'purple', chance: 0.20, min: 1, max: 1 },
+      { color: 'black',  chance: 0.15, min: 1, max: 1 },
+      { kind: 'gold',    chance: 0.50, min: 1, max: 3 },
+      { kind: 'cheese',  chance: 0.16, min: 1, max: 1 },
+    ],
+    // PHASE A
+    affinityColors: ['purple', 'black', 'white'],
+    signature: 'phase_fade',        // Phase D
+    reactions: {
+      red:    'teleport_away',
+      green:  'teleport_away',
+      blue:   'teleport_away',
+      orange: 'teleport_away',
+    },
+    reactionCooldown: 2,            // highly reactive
+  },
+  // ── Bosses ─────────────────────────────────────────────────────────
+  // Boss kills drop a meaningful haul: bricks + reliable gold + likely cheese.
+  stone_colossus: {
+    hp: 80, hpMax: 80, speed: 90, r: 32,
+    family: 'physical',
+    resistances: _familyResist('physical'),
+    ai: 'heavy_melee', attackPattern: 'telegraph_swing',
+    swingTelegraph: 0.75, swingDmg: 10, swingRadius: 80,
+    color: '#565656', icon: '🗿',
+    loot: [
+      { color: 'gray',   chance: 0.60, min: 1, max: 3 },
+      { color: 'red',    chance: 0.30, min: 1, max: 1 },
+      { color: 'orange', chance: 0.35, min: 1, max: 2 },
+      { color: 'purple', chance: 0.15, min: 1, max: 1 },
+      { kind: 'gold',    chance: 1.00, min: 3, max: 6 },
+      { kind: 'cheese',  chance: 0.45, min: 1, max: 3 },
+    ],
+    // PHASE A
+    affinityColors: ['gray', 'red', 'orange', 'purple'],
+    signature: 'enrage_phase',      // Phase E — phase 2 at 50% HP
+    reactions: {
+      blue:  'close_fast',
+      green: 'interrupt_swing',
+      white: 'close_fast',
+    },
+    reactionCooldown: 3,
+  },
+  blight_worm: {
+    hp: 120, hpMax: 120, speed: 130, r: 28,
+    family: 'malady',
+    resistances: _familyResist('malady'),
+    ai: 'heavy_melee', attackPattern: 'telegraph_swing', // true_burrow replaces in Phase E
+    swingTelegraph: 0.6, swingDmg: 8, swingRadius: 70,
+    color: '#3e2a1a', icon: '🪱',
+    loot: [
+      { color: 'green',  chance: 0.60, min: 1, max: 3 },
+      { color: 'yellow', chance: 0.50, min: 1, max: 2 },
+      { color: 'purple', chance: 0.35, min: 1, max: 1 },
+      { color: 'black',  chance: 0.30, min: 1, max: 1 },
+      { kind: 'gold',    chance: 1.00, min: 4, max: 8 },
+      { kind: 'cheese',  chance: 0.50, min: 1, max: 5 },
+    ],
+    // PHASE A
+    affinityColors: ['green', 'yellow', 'purple', 'black'],
+    signature: 'true_burrow',       // Phase E + mitosis_split on death
+    // mitosis_split is a secondary death behavior. Treated as a tag, not
+    // a primary signature (primary drives AI, secondary fires at death).
+    deathSignature: 'mitosis_split',
+    splitMaxDepth: 1,
+    reactions: {
+      red:   'interrupt_swing',
+      white: 'burrow',              // heal-denial via disengagement
+    },
+    reactionCooldown: 4,
+  },
+};
+
+// ═══════════════════════════════════════════════════
+// ENTITY OBJECT
+// ═══════════════════════════════════════════════════
+// Resolve an entityType config value to an actual registry key. Pass-through
+// for known type names; 'random' rolls a fresh type from the registry each
+// call (used by sandbox respawn loop for variety). Unknown strings fall back
+// to goblin so unrecognized configs don't crash the spawn.
+function _resolveEntityType(t) {
+  if (t === 'random') {
+    var keys = Object.keys(ENTITY_REGISTRY);
+    return keys[Math.floor(Math.random() * keys.length)];
+  }
+  if (t && ENTITY_REGISTRY[t]) return t;
+  return 'goblin';
+}
+
+// PHASE E — mitosis_split: spawn smaller clones at parent's position.
+// Shared between rot_grub (2-level recursion) and blight_worm (1 level).
+// Max split depth is configured per-entity via template field splitMaxDepth
+// (default 1). Clone stats:
+//   hp    = parent.hp * 0.6   (at max)
+//   speed = parent.speed * 0.8
+//   r     = parent.r * 0.7
+// Clones inherit affinityColors/reactions but with weaker arsenal.
+// Clones do NOT drop gold/cheese on death (only parent's loot was full).
+// Clones drop minimal bricks (5% green/black for grubs, 10% green for worm).
+function _spawnSplitClones(parent) {
+  if (!parent || !running) return;
+  var currentDepth = parent._splitDepth || 0;
+  var maxDepth = parent.splitMaxDepth || 1;
+  if (currentDepth >= maxDepth) return;
+
+  var bounds = getRumbleBounds();
+  var cloneHpMax  = Math.max(2, Math.round((parent.hpMax || parent.hp || 20) * 0.6));
+  var cloneSpeed  = (parent.speed || 120) * 0.8;
+  var cloneR      = Math.max(8, Math.round(parent.r * 0.7));
+  for (var ci = 0; ci < 2; ci++) {
+    var ang = Math.random() * Math.PI * 2;
+    var off = 14 + Math.random() * 10;
+    var cx = parent.x + Math.cos(ang) * off;
+    var cy = parent.y + Math.sin(ang) * off;
+    cx = Math.max(bounds.x + cloneR, Math.min(bounds.x + bounds.w - cloneR, cx));
+    cy = Math.max(bounds.y + cloneR, Math.min(bounds.y + bounds.h - cloneR, cy));
+    // Build a minimal clone entity — copy fields from parent's current state
+    // rather than going through makeEntity (we want positional control + trim loot).
+    var clone = Object.assign({}, parent);
+    clone.x = cx; clone.y = cy;
+    clone.spawnX = cx; clone.spawnY = cy;
+    clone.hp = cloneHpMax;
+    clone.hpMax = cloneHpMax;
+    clone.speed = cloneSpeed;
+    clone.r = cloneR;
+    clone.dead = false;
+    clone.deathTimer = 0;
+    // Reset runtime state (so reactions and AI aren't carried over)
+    clone._reactionTimer = 0;
+    clone._arsenalTimer = 0;
+    clone._reactionState = null;
+    clone._lastSeenCharge = null;
+    clone._burrowState = null;
+    clone._burrowTimer = 0;
+    clone._burrowHidden = false;
+    clone._phaseFadeTimer = 0;
+    clone._enraged = false;
+    clone._boneRisen = false;
+    clone._splitDepth = currentDepth + 1;
+    // Clones get reduced loot — small bricks only, no gold/cheese.
+    if (parent.type === 'rot_grub') {
+      clone.loot = [{ color: 'green', chance: 0.05, min: 1, max: 1 }];
+    } else if (parent.type === 'blight_worm') {
+      clone.loot = [
+        { color: 'green', chance: 0.10, min: 1, max: 1 },
+        { kind: 'gold',   chance: 0.50, min: 1, max: 2 },
+      ];
+    } else {
+      clone.loot = [];
+    }
+    // Disable split-on-death if we've reached max depth
+    if (clone._splitDepth >= maxDepth) {
+      clone.signature = null;
+    }
+    // Clone resistances must be a fresh copy (not shared reference)
+    clone.resistances = Object.assign({}, parent.resistances || {});
+    // Also clone status object refs where applicable
+    clone.affinityColors = (parent.affinityColors || []).slice();
+    clone.reactions = Object.assign({}, parent.reactions || {});
+    entities.push(clone);
+  }
+  // Telegraphy: "SPLIT!" floater at parent's death point
+  showFloatingText(parent.x, parent.y - parent.r - 12, 'SPLIT!', '#2d5c2e', parent);
+}
+
+function makeEntity(bounds, angleOffset, entityType) {
+  // Spawn on side opposite player, spread by angleOffset
+  var px = player.x, py = player.y;
+  var cx = bounds.x + bounds.w/2, cy = bounds.y + bounds.h/2;
+  var baseAngle = Math.atan2(cy - py, cx - px) + Math.PI; // opposite side
+  var angle = baseAngle + (angleOffset||0);
+  var spawnR = Math.min(bounds.w, bounds.h) * 0.42;
+  var gx = cx + Math.cos(angle) * spawnR;
+  var gy = cy + Math.sin(angle) * spawnR;
+  gx = Math.max(bounds.x+40, Math.min(bounds.x+bounds.w-40, gx));
+  gy = Math.max(bounds.y+40, Math.min(bounds.y+bounds.h-40, gy));
+  var scale = getDisplayScale();
+  // Resolve type (handles 'random' rolls, unknown fallbacks).
+  var resolvedType = _resolveEntityType(entityType);
+  var tpl = ENTITY_REGISTRY[resolvedType];
+  return {
+    x: gx, y: gy,
+    spawnX: gx, spawnY: gy,
+    // Core stats from template — apply scale for display parity.
+    r: Math.round(tpl.r * scale),
+    speed: tpl.speed,
+    hp: tpl.hp, hpMax: tpl.hpMax,
+    // Type identity — for HP-reporting, log lines, and debugging.
+    type: resolvedType,
+    family: tpl.family,
+    resistances: Object.assign({}, tpl.resistances || {}),
+    // Visual identity (used by drawEntity)
+    visColor: tpl.color,
+    visIcon:  tpl.icon,
+    // AI behavior fields
+    ai: tpl.ai || 'chase',
+    attackPattern: tpl.attackPattern || 'touch',
+    // Ranged_kite fields
+    kiteDistance: tpl.kiteDistance || 0,
+    rangedCooldown: tpl.rangedCooldown || 0,
+    rangedTimer: 0,
+    rangedDmg: tpl.rangedDmg || 0,
+    // Stationary pulse fields
+    pulseCooldown: tpl.pulseCooldown || 0,
+    pulseTimer: tpl.pulseCooldown ? (tpl.pulseCooldown * 0.5) : 0, // half-delay first pulse
+    pulseRadius: tpl.pulseRadius || 0,
+    pulseDmg: tpl.pulseDmg || 0,
+    // Heavy_melee (telegraph swing) fields
+    swingTelegraph: tpl.swingTelegraph || 0,
+    swingDmg: tpl.swingDmg || 0,
+    swingRadius: tpl.swingRadius || 0,
+    swingState: 'idle',      // 'idle' | 'winding' | 'cooldown'
+    swingTimer: 0,
+    swingTargetX: 0, swingTargetY: 0,
+    swingCooldown: 0,
+    // Teleport fields
+    teleportCooldown: tpl.teleportCooldown || 0,
+    teleportTimer: tpl.teleportCooldown || 0,
+    teleportRange: tpl.teleportRange || 0,
+    // Loot table (copied by reference — templates aren't mutated at runtime)
+    loot: tpl.loot,
+    state: 'patrol',   // 'patrol' | 'chase' | 'bounce'
+    AGGRO_RANGE: Math.round(200 * scale),
+    DEAGGRO_RANGE: Math.round(320 * scale),
+    aggroed: false,
+    // Patrol wander
+    wanderTarget: { x: gx, y: gy },
+    wanderTimer: 0,
+    // Bounce after attack
+    bounceVx: 0, bounceVy: 0,
+    bounceTimer: 0,
+    // Attack cooldown (for touch-damage pattern)
+    attackCooldown: 0,
+    attackDebuff: 0,
+    // Flash on hit
+    flashTimer: 0,
+    // Contact damage (touch pattern) — from template, default 1
+    dmg: tpl.dmg || 1,
+    // ── PHASE A ENTITY INTELLIGENCE FIELDS ─────────────────────────
+    // Copied from template so per-entity mutations (cooldown drift)
+    // don't leak back to the registry. All null/empty defaults so
+    // existing entities without these fields behave exactly as before.
+    affinityColors:   (tpl.affinityColors || []).slice(),
+    signature:        tpl.signature || null,
+    deathSignature:   tpl.deathSignature || null,
+    splitMaxDepth:    tpl.splitMaxDepth || 1,
+    _splitDepth:      0,
+    reactions:        Object.assign({}, tpl.reactions || {}),
+    reactionCooldown: tpl.reactionCooldown || 0,
+    arsenalCooldown:  tpl.arsenalCooldown || 0,
+    // Runtime counters (internal)
+    _reactionTimer:     0,   // ticks down; when 0, entity can react again
+    _arsenalTimer:      0,   // ticks down; when 0, arsenal can fire
+    _reactionState:     null,// current active reaction: { kind, timer, ... }
+    _lastSeenCharge:    null,// last overload color seen — detects edge (new charge)
+  };
+}
+
+
+// Color-to-family mapping for resistance system.
+// Physical = weapons/armor/traps. Ethereal = spells/bolts/blessings.
+// Malady = stateful afflictions (poison, daze, curse).
+var FAMILY_OF_COLOR = {
+  red:    'physical', gray:   'physical', orange: 'physical',
+  blue:   'ethereal', purple: 'ethereal', white:  'ethereal',
+  yellow: 'malady',   green:  'malady',   black:  'malady',
+};
+
+// Build a resistance profile for an entity of the given family.
+// Strict rock-paper-scissors cycle: physical > ethereal > malady > physical.
+// - Same family → 1.0 (neutral)
+// - Family this one BEATS → 0.5 (resistant — they hit me weakly)
+// - Family that beats THIS one → 1.5 (vulnerable — they hit me hard)
+// Used by ENTITY_REGISTRY templates so each enemy's family drives its
+// full resistance profile without manual bookkeeping.
+function _familyResist(family) {
+  var cycle = { physical: 'ethereal', ethereal: 'malady', malady: 'physical' };
+  var resistant = cycle[family];                  // this family RESISTS attacks from
+  var vulnerable = Object.keys(cycle).find(function(k) { return cycle[k] === family; });
+  var r = { physical: 1.0, ethereal: 1.0, malady: 1.0 };
+  r[resistant] = 0.5;
+  r[vulnerable] = 1.5;
+  return r;
+}
+
+// Lookup resistance multiplier for (entity, source-color or family).
+// Per-color overrides take priority over family default.
+// Returns 1.0 for untyped sources (aggro damage, environmental).
+function resistMult(g, source) {
+  if (!source) return 1.0;
+  var rs = g.resistances;
+  if (!rs) return 1.0;
+  // Per-color override (specific color, e.g. "red")
+  if (rs[source] !== undefined) return rs[source];
+  // Family default (e.g. 'physical')
+  var fam = FAMILY_OF_COLOR[source];
+  if (fam && rs[fam] !== undefined) return rs[fam];
+  return 1.0;
+}
+
+// Translate raw resist multiplier to tier name.
+// Tiers drive visual styling of damage floaters.
+function resistTier(mult) {
+  if (mult <= 0.01) return 'IMMUNE';
+  if (mult <= 0.6)  return 'RESIST';
+  if (mult <  1.3)  return 'NEUTRAL';
+  if (mult <= 1.7)  return 'VULN';
+  return 'WEAK';
+}
+
+function vScale(tier) { return tier <= 1 ? 1.5 : 0.5; }
+
+// damageEntity (v0.16.61): public wrapper that routes through the
+// engine choke point. ALL damage callsites should call this. It
+// delegates to _engine.applyDamage which:
+//   1. Calls _applyDamageInternal (host-injected handler)
+//   2. Emits 'damage' event after handler returns
+//   3. Emits 'death' event if result.killed
+// If engine isn't available (early init / test path), falls back
+// to direct internal call so damage still applies.
+function damageEntity(g, dmg, aggro, source, opts) {
+  if (_engine && _engine.applyDamage) {
+    // opts._aggro carries the aggro arg through (engine.applyDamage
+    // signature is (entity, dmg, source, opts), no aggro param).
+    var mergedOpts = opts || {};
+    if (aggro !== undefined && mergedOpts._aggro === undefined) {
+      mergedOpts._aggro = aggro;
+    }
+    return _engine.applyDamage(g, dmg, source, mergedOpts);
+  }
+  // Fallback: pre-engine direct path
+  return _applyDamageInternal(g, dmg, aggro, source, opts);
+}
+
+// damageEntity (renamed _applyDamageInternal in v0.16.61):
+//   This is the host-side damage policy. Engine's applyDamage delegates
+//   here via registerDamageHandler. ALL callsites should now route
+//   through _engine.applyDamage(g, dmg, source, opts) — NOT this
+//   function directly. The choke point gives us:
+//     - centralized damage policy (eventually moves into engine)
+//     - 'damage' / 'death' event emission for FX subscribers
+//     - foundation for server-authoritative validation (v0.16.63)
+//
+//   g: entity
+//   dmg: pre-resist incoming damage
+//   aggro: pass false to prevent aggro trigger (environmental damage)
+//   source: color string ('red', 'blue', ...) or family string ('physical'),
+//           or null/undefined for untyped (bypasses resistance)
+// Returns { applied, tier, witherBoost, killed } so caller can render
+// a floater matching result.
+function _applyDamageInternal(g, dmg, aggro, source, opts) {
+  // v0.16.51 — opts param for damage variants. Currently supports:
+  //   { piercing: true } — SS pierce-dash hits. Front-shield reduction
+  //     softens from 50% to 25% (pierce is designed to pass through
+  //     defenses; reduces the effectiveness of guard but doesn't ignore).
+  // Other damage paths pass undefined and get baseline behavior.
+  opts = opts || {};
+  // PHASE D — phase_fade signature: wraith is fully invulnerable during
+  // the brief post-teleport window. Damage is absorbed to zero with a
+  // "PHASED" floater telling the player why their hit didn't land.
+  if ((g._phaseFadeTimer || 0) > 0) {
+    showFloatingText(g.x, g.y - (g.r + 16), 'PHASED', '#9060C0', g);
+    return { applied: 0, tier: 'none' };
+  }
+  // PHASE E — front_shield signature (cursed knight): 50% damage reduction
+  // when hit from within the 120° arc the knight is facing. Knight's
+  // "facing" is the direction from knight → player (tracked continuously).
+  // For player-origin hits, the incoming angle is from knight → player.
+  // Shield absorbs frontal, ignores side/back.
+  // v0.16.51: piercing hits (SS pierce-dash) reduce shield effectiveness
+  // from 50% block to 25% block. Pierce is designed to pass through
+  // defenses but not ignore them entirely.
+  var _shieldBlockedPct = 0;
+  if (g.signature === 'front_shield' && player) {
+    // Knight's current facing vector (always points at player)
+    var fx = player.x - g.x, fy = player.y - g.y;
+    var fd = Math.hypot(fx, fy) || 1;
+    // Assume damage comes from player's direction (true for melee, overloads
+    // targeted at entity, and projectiles player fires). Incoming vector
+    // points FROM player TO knight (opposite of facing).
+    // If the knight is facing the player, any frontal hit is at angle 0
+    // from the facing vector. 120° arc = ±60° tolerance.
+    // cos(60°) = 0.5 — so if dot(incoming, facing) > 0.5 → inside arc.
+    // Incoming is -facing direction, so dot is -1 (fully behind facing).
+    // We want: is player WITHIN knight's front cone. Yes by construction,
+    // so always true for player-origin hits. The meaningful test is:
+    // was the knight actively facing when the hit landed? During a swing
+    // wind-up the knight is locked facing swingTargetX/Y — hits from the
+    // side should bypass the shield. That's the real skill-check.
+    var ffx, ffy;
+    if (g.swingState === 'winding' || g.swingState === 'cooldown') {
+      ffx = g.swingTargetX - g.x;
+      ffy = g.swingTargetY - g.y;
+    } else {
+      ffx = fx; ffy = fy;
+    }
+    var ffd = Math.hypot(ffx, ffy) || 1;
+    var toPlayerX = fx / fd, toPlayerY = fy / fd;
+    var facingX = ffx / ffd, facingY = ffy / ffd;
+    var dotFacing = facingX * toPlayerX + facingY * toPlayerY;
+    // dot > 0.5 ≡ within 60° of facing direction ≡ player in front arc
+    if (dotFacing > 0.5) {
+      // v0.16.51: piercing hits reduce shield block from 50% to 25%.
+      _shieldBlockedPct = opts.piercing ? 0.25 : 0.5;
+    }
+  }
+  // BLUE MARK: target takes +50% damage from all sources while marked.
+  var finalDmg = dmg;
+  if ((g.markedTimer || 0) > 0) {
+    finalDmg = Math.ceil(dmg * 1.5);
+  }
+  // FIRST STRIKE: First entity-damage event in the rumble gets a
+  // class-defined multiplier. Flag + multiplier come from rumblePassive
+  // (kind: 'firstHitMod'). Currently only Breaker has this passive, but
+  // the consumer is class-agnostic — any class with firstHitMod gets
+  // the multiplier. Stacks with blue mark since they're independent
+  // multipliers (blue mark is a debuff on target, first-strike is a
+  // class buff on player).
+  if (player && player.firstHitActive) {
+    var _fhMult = player.firstHitMult || 1.5;
+    finalDmg = Math.ceil(finalDmg * _fhMult);
+    player.firstHitActive = false;
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(g.x, g.y - 50, 'FIRST STRIKE!', '#993C1D', g);
+    }
+  }
+  // PHASE E — true_burrow recover window: worm takes 1.5× damage while
+  // stunned post-emerge. Rewards catching the emerge timing.
+  if (g._recoverVulnerable) {
+    finalDmg = Math.ceil(finalDmg * 1.5);
+    showFloatingText(g.x, g.y - (g.r + 44), 'CRIT WINDOW', '#ffee55', g);
+  }
+  // (The old yellow-daze +2× damage rider was removed in v0.15.0-pre.
+  // Yellow crit now applies CONFUSE — entities target nearest entity
+  // and damage that entity instead of the player. See touch-attack
+  // block where g.confused is consumed for retargeting.)
+  // WITHER: damage from non-witherbolt sources is amplified by diminishing
+  // returns curve based on current stacks. Witherbolt itself is excluded.
+  // The witherBoost return field lets callers size the damage number up when
+  // the hit was amplified (visual payoff for stacking wither).
+  var _witherBoost = 0;
+  if (!_witherboltDamage && (g.witherStacks || 0) > 0) {
+    var ampBefore = finalDmg;
+    finalDmg = Math.ceil(finalDmg * witherOtherAmp(g.witherStacks));
+    if (finalDmg > ampBefore) _witherBoost = g.witherStacks;
+  }
+  // FAMILY RESISTANCE: apply the entity's resistance to this damage source.
+  var rMult = resistMult(g, source);
+  finalDmg = Math.ceil(finalDmg * rMult);
+  // PHASE C — Arsenal-side damage reduction (troll passive 30%, gray pips 50%).
+  // Called AFTER family resist so it's a last-line reduction. Shows floater
+  // so player knows the hit was mitigated.
+  var armorMult = entityIncomingDmgMult(g);
+  if (armorMult < 1 && finalDmg > 0) {
+    var pre = finalDmg;
+    finalDmg = Math.ceil(finalDmg * armorMult);
+    var reduction = pre - finalDmg;
+    if (reduction > 0) {
+      var pct = Math.round((1 - armorMult) * 100);
+      showFloatingText(g.x, g.y - (g.r + 22), '−' + pct + '%', '#AAAAAA', g);
+    }
+  }
+  // PHASE E — front_shield: 50% reduction for frontal hits on cursed knight.
+  // Applied AFTER resist and arsenal DR so it's the final layer. Shows a
+  // shield flash floater so player can see the block.
+  if (_shieldBlockedPct > 0 && finalDmg > 0) {
+    var preShield = finalDmg;
+    finalDmg = Math.ceil(finalDmg * (1 - _shieldBlockedPct));
+    if (preShield > finalDmg) {
+      showFloatingText(g.x, g.y - (g.r + 32), '🛡 BLOCK', '#BBBBFF', g);
+    }
+  }
+  // Clamp to min 0 (for immune/zero-damage cases)
+  finalDmg = Math.max(0, finalDmg);
+
+  g.hp = Math.max(0, g.hp - finalDmg);
+  // PHASE E — enrage_phase signature (stone colossus). At 50% HP, trigger
+  // a 1s roar freeze, then permanently boost speed/telegraph and enable
+  // purple vampirism on future hits. Only fires once per life via _enraged.
+  if (g.signature === 'enrage_phase' && !g._enraged && g.hp > 0
+      && g.hp <= Math.floor(g.hpMax * 0.5)) {
+    g._enraged = true;
+    g._enrageRoarTimer = 1.0;          // frozen/invulnerable during roar
+    g._enrageRegenTimer = 3.0;         // +1 HP/sec for 3s post-roar
+    showFloatingText(g.x, g.y - (g.r + 20), 'ENRAGED', '#ff3300', g);
+    // Apply the combat buffs immediately
+    g.speed = 140;
+    g.swingTelegraph = 0.40;
+  }
+  // PHASE E — bone_rise signature. Skeleton killed by a hit dealing ≤10
+  // damage doesn't die on the first kill — it collapses and reassembles
+  // at 40% HP. Big hits (overloads, crits) bypass this by doing >10 dmg.
+  // Only happens once per skeleton (_boneRisen gates). Flag is consumed
+  // by the entity's own update loop to trigger the revive timer.
+  if (g.hp <= 0
+      && g.signature === 'bone_rise'
+      && !g._boneRisen
+      && finalDmg > 0 && finalDmg <= 10) {
+    g._boneRiseQueued = true;
+  }
+  if (_battleStats) {
+    _battleStats.damageDealt += finalDmg;
+    if (finalDmg > (_battleStats.biggestDamageDealt || 0)) {
+      _battleStats.biggestDamageDealt = finalDmg;
+    }
+    // Mark this moment as "actively dealing damage" — used by the
+    // active-combat accumulator to compute time-on-target DPS.
+    if (finalDmg > 0) _battleStats._lastDamageAt = performance.now();
+    // Damage-by-color (which kit colors carry your output) and
+    // damage-by-target (which enemy types absorb your damage).
+    // Both are critical for tuning analysis on the run summary.
+    if (finalDmg > 0) {
+      if (!_battleStats.damageByColor) _battleStats.damageByColor = {};
+      var srcKey = source || 'untyped';
+      _battleStats.damageByColor[srcKey] = (_battleStats.damageByColor[srcKey] || 0) + finalDmg;
+      if (!_battleStats.damageByTarget) _battleStats.damageByTarget = {};
+      var tgtKey = g.type || 'unknown';
+      _battleStats.damageByTarget[tgtKey] = (_battleStats.damageByTarget[tgtKey] || 0) + finalDmg;
+    }
+  }
+  if (aggro !== false) {
+    g.aggroed = true;
+    g.state = 'chase';
+  }
+  // v0.16.42 — UNITY: victory check lives at the single damage choke point.
+  // Every damage path (player attacks, projectiles, traps, DoTs, shrapnel,
+  // confused-entity attacks, etc) flows through this function. If this
+  // damage application killed the target, check whether the rumble should
+  // end. Replaces 16 scattered triggerVictory() calls at individual damage
+  // sites — those were a UNITY violation (same concern, distributed
+  // implementation). Adding a new damage source no longer requires
+  // remembering to manually trigger victory.
+  var _killed = (g.hp <= 0);
+  if (_killed && typeof triggerVictory === 'function') {
+    triggerVictory();
+  }
+  return { applied: finalDmg, tier: resistTier(rMult), source: source, witherBoost: _witherBoost, killed: _killed };
+}
+
+// ═══════════════════════════════════════════════════
+// PHASE A — REACTION VOCABULARY
+// ═══════════════════════════════════════════════════
+// Each reaction sets up a transient state on the entity that updateEntity
+// consults during its normal update. The reaction persists for its own
+// `timer` duration, then clears. Reactions modify MOVEMENT and TIMING but
+// never directly damage — they exist to make enemies FEEL responsive.
+//
+// Tell the player visually: when a reaction starts we emit a floating
+// icon above the entity. Cheap but readable.
+
+function _entityFaceDir(g) {
+  // unit vector from entity to player, or 0,0 if player gone
+  if (!player) return { x: 0, y: 0 };
+  var dx = player.x - g.x, dy = player.y - g.y;
+  var d = Math.hypot(dx, dy) || 1;
+  return { x: dx/d, y: dy/d };
+}
+
+function _reactClose(g, speedMult, duration) {
+  // Sprint at player at speedMult × normal speed for duration seconds.
+  g._reactionState = { kind:'close', speedMult: speedMult, timer: duration };
+}
+
+function _reactBackstep(g, speedMult, duration) {
+  // Move AWAY from player at speedMult × normal speed for duration seconds.
+  g._reactionState = { kind:'backstep', speedMult: speedMult, timer: duration };
+}
+
+function _reactEvade(g, speedMult, duration) {
+  // Strafe perpendicular to player line. Pick left-or-right once and commit.
+  var sign = Math.random() < 0.5 ? -1 : 1;
+  g._reactionState = { kind:'evade', speedMult: speedMult, timer: duration, sign: sign };
+}
+
+function _reactInterruptSwing(g) {
+  // Cancel any telegraph in progress; perform a fast 1-dmg jab.
+  // If entity has swingState machine, reset it. Spawn a short peck animation.
+  if (g.swingState && g.swingState !== 'idle') {
+    g.swingState = 'idle';
+    g.swingTimer = 0;
+  }
+  g._reactionState = { kind:'peck', timer: 0.35, damage: 1, _fired: false };
+}
+
+function _reactPeck(g) {
+  // Light 1-dmg quick jab. Same as interrupt_swing but without swing cancel.
+  g._reactionState = { kind:'peck', timer: 0.35, damage: 1, _fired: false };
+}
+
+function _reactShieldUp(g) {
+  // For front_shield entities, refresh the shield. For others, pass-through.
+  g._shieldUpTimer = 1.5;
+  g._reactionState = { kind:'shield', timer: 0.3 };
+}
+
+function _reactTeleportAway(g, bounds) {
+  // Blink to a point on the opposite side of the arena from the player.
+  // Only call for entities that support teleport (void_wraith).
+  if (!player || !bounds) return;
+  var cx = bounds.x + bounds.w/2, cy = bounds.y + bounds.h/2;
+  var dx = cx - player.x, dy = cy - player.y;
+  var dist = Math.hypot(dx, dy) || 1;
+  var tx = cx + (dx/dist) * (Math.min(bounds.w, bounds.h) * 0.35);
+  var ty = cy + (dy/dist) * (Math.min(bounds.w, bounds.h) * 0.35);
+  tx = Math.max(bounds.x + 40, Math.min(bounds.x + bounds.w - 40, tx));
+  ty = Math.max(bounds.y + 40, Math.min(bounds.y + bounds.h - 40, ty));
+  // Instant telegraph-less move for Phase A. Phase-fade signature comes later.
+  g.x = tx; g.y = ty;
+  g._reactionState = { kind:'teleport', timer: 0.4 };
+}
+
+function _reactBurrow(g) {
+  // Reserved for blight_worm. For Phase A just flag; the true_burrow signature
+  // in Phase E will do the real cycle management. Here we just set a flag
+  // the worm's update logic reads.
+  g._reactionState = { kind:'burrow', timer: 0.5 };
+  g._wantsBurrow = true;
+}
+
+// Dispatcher — called once per entity per frame BEFORE any other AI logic.
+// Detects the "edge" of a new player overload charge and triggers the
+// reaction for that color, if any. Reactions are one-shot per overload.
+function runEntityReactions(g, dt, bounds) {
+  // Tick timers
+  if (g._reactionTimer > 0) g._reactionTimer = Math.max(0, g._reactionTimer - dt);
+  if (g._arsenalTimer  > 0) g._arsenalTimer  = Math.max(0, g._arsenalTimer  - dt);
+  if (g._reactionState) {
+    g._reactionState.timer -= dt;
+    if (g._reactionState.timer <= 0) g._reactionState = null;
+  }
+
+  if (!player) return;
+
+  // Detect edge: player just STARTED a new overload
+  var currentCharge = (player.overloadCharging && player.overloadColor) ? player.overloadColor : null;
+  var edge = currentCharge && currentCharge !== g._lastSeenCharge;
+  g._lastSeenCharge = currentCharge;
+
+  if (!edge) return;
+  if (g._reactionTimer > 0) return; // on cooldown, no new reaction
+
+  // Pick reaction for this color from the entity's policy
+  var rxnKind = g.reactions && g.reactions[currentCharge];
+  if (!rxnKind) return;
+
+  // Run the reaction
+  switch (rxnKind) {
+    case 'close_fast':       _reactClose(g, 1.5, 1.5);     break;
+    case 'backstep':         _reactBackstep(g, 1.2, 1.0);  break;
+    case 'evade':            _reactEvade(g, 1.0, 1.0);     break;
+    case 'interrupt_swing':  _reactInterruptSwing(g);      break;
+    case 'peck_attack':      _reactPeck(g);                break;
+    case 'shield_up':        _reactShieldUp(g);            break;
+    case 'teleport_away':    _reactTeleportAway(g, bounds); break;
+    case 'burrow':           _reactBurrow(g);              break;
+    default: return;
+  }
+
+  // Put reaction on cooldown; show a small tell above the entity.
+  g._reactionTimer = g.reactionCooldown || 5;
+  showFloatingText(g.x, g.y - (g.r + 14), '!', '#F5D000', g);
+}
+
+// Apply the active reaction state as a velocity override / damage jab.
+// Returns true if the reaction commandeered movement this frame (so the
+// default AI should skip its own movement logic).
+function applyReactionMovement(g, dt, bounds) {
+  var rs = g._reactionState;
+  if (!rs) return false;
+
+  if (rs.kind === 'close') {
+    var dir = _entityFaceDir(g);
+    var spd = (g.speed || 120) * rs.speedMult;
+    g.x += dir.x * spd * dt;
+    g.y += dir.y * spd * dt;
+    return true;
+  }
+  if (rs.kind === 'backstep') {
+    var dir2 = _entityFaceDir(g);
+    var spd2 = (g.speed || 120) * rs.speedMult;
+    g.x -= dir2.x * spd2 * dt;
+    g.y -= dir2.y * spd2 * dt;
+    return true;
+  }
+  if (rs.kind === 'evade') {
+    // Perpendicular to face direction.
+    var dir3 = _entityFaceDir(g);
+    var perpX = -dir3.y * rs.sign;
+    var perpY =  dir3.x * rs.sign;
+    var spd3 = (g.speed || 120) * rs.speedMult;
+    g.x += perpX * spd3 * dt;
+    g.y += perpY * spd3 * dt;
+    return true;
+  }
+  if (rs.kind === 'peck' && !rs._fired) {
+    // Fire once when timer is between 0.1-0.2 remaining (mid-windup).
+    var windDone = rs.timer <= 0.15;
+    if (windDone && typeof _applyEnemyMeleeDamage === 'function') {
+      var dx = player.x - g.x, dy = player.y - g.y;
+      var dist = Math.hypot(dx, dy);
+      // Peck has short reach — only lands if close enough.
+      if (dist < g.r + player.r + 20) {
+        _applyEnemyMeleeDamage(g, rs.damage || 1, dx, dy, dist);
+      }
+      rs._fired = true;
+    }
+    // Peck does not move the entity itself
+    return false;
+  }
+  // teleport / shield / burrow: no per-frame movement
+  return false;
+}
+
+
+function updateEntity(g, dt, bounds) {
+  if (!player) return;
+
+  // PHASE A — reaction dispatcher runs FIRST so reactions can override AI.
+  // Detects edges (new overload charges), picks from g.reactions policy,
+  // and sets g._reactionState. applyReactionMovement (called later where
+  // each AI branch runs) will consume that state.
+  runEntityReactions(g, dt, bounds);
+  // PHASE C — tick per-frame arsenals (gray armor refresh, white regen,
+  // malady poison trails).
+  tickPassiveArsenal(g, dt);
+
+  g.attackCooldown = Math.max(0, g.attackCooldown - dt);
+  // Post-darkness attack debuff
+  if (g.attackDebuff > 0) {
+    g.attackDebuff = Math.max(0, g.attackDebuff - dt);
+  }
+  g.flashTimer     = Math.max(0, g.flashTimer - dt);
+  // PHASE D — phase_fade invulnerability window
+  if ((g._phaseFadeTimer || 0) > 0) g._phaseFadeTimer = Math.max(0, g._phaseFadeTimer - dt);
+  // PHASE E — enrage_phase roar (frozen + invulnerable) and regen window.
+  if ((g._enrageRoarTimer || 0) > 0) {
+    g._enrageRoarTimer = Math.max(0, g._enrageRoarTimer - dt);
+    // Freeze by reusing phase_fade invuln (already prevents damage) + no-move
+    g._phaseFadeTimer = Math.max(g._phaseFadeTimer || 0, 0.05);
+    // Visible roar pulse
+    if (Math.random() < 0.4) {
+      showFloatingText(g.x, g.y - g.r - 6, '🔥', '#ff6600', g);
+    }
+    return; // skip all AI this frame
+  }
+  if ((g._enrageRegenTimer || 0) > 0) {
+    g._enrageRegenTimer = Math.max(0, g._enrageRegenTimer - dt);
+    g._enrageRegenAccum = (g._enrageRegenAccum || 0) + dt;
+    if (g._enrageRegenAccum >= 1.0 && g.hp < g.hpMax) {
+      g._enrageRegenAccum -= 1.0;
+      g.hp = Math.min(g.hpMax, g.hp + 1);
+      showFloatingText(g.x, g.y - (g.r + 10), '+1', '#ff9933', g);
+    }
+  }
+
+  // White field soft-slow decays every frame; refreshed from updateWhiteField
+  // while entity is inside the healing zone. Slows movement to ~50% when active.
+  if ((g.whiteFieldSlowTimer || 0) > 0) {
+    g.whiteFieldSlowTimer = Math.max(0, g.whiteFieldSlowTimer - dt);
+    if (g.whiteFieldSlowTimer <= 0) g.whiteFieldSlowed = false;
+  }
+  // BLUE MARK: decay marked timer; +50% damage amp fades when it hits 0.
+  if ((g.markedTimer || 0) > 0) {
+    g.markedTimer = Math.max(0, g.markedTimer - dt);
+  }
+  // PURPLE SILENCE: decay silenced timer; entity can't attack while > 0.
+  if ((g.silencedTimer || 0) > 0) {
+    g.silencedTimer = Math.max(0, g.silencedTimer - dt);
+  }
+  // WITHER: decay shared timer. When it expires, all stacks drop.
+  decayWither(g, dt);
+  // GREEN FIELD SLOW: decay every frame; refreshed while inside green burst.
+  if ((g.greenSlowTimer || 0) > 0) {
+    g.greenSlowTimer = Math.max(0, g.greenSlowTimer - dt);
+    if (g.greenSlowTimer <= 0) g.greenSlowed = false;
+  }
+  var whiteFieldMult = g.whiteFieldSlowed ? 0.5 : 1;
+  // GREEN slow: entities inside a green burst or slow-aura afterimage move
+  // at 25% of their normal speed (a -75% move-rate debuff). Stacks
+  // multiplicatively with white-field slow.
+  var greenSlowMult  = g.greenSlowed ? 0.75 : 1;
+  var zoneSlowMult   = whiteFieldMult * greenSlowMult; // stacks multiplicatively
+
+  var dx = player.x - g.x;
+  var dy = player.y - g.y;
+  var distToPlayer = Math.sqrt(dx*dx + dy*dy);
+
+  // ── State transitions ──
+  if (g.state !== 'bounce') {
+    if (!g.aggroed && distToPlayer < g.AGGRO_RANGE) {
+      g.aggroed = true;
+    } else if (g.aggroed && distToPlayer > g.DEAGGRO_RANGE) {
+      g.aggroed = false;
+    }
+    g.state = g.aggroed ? 'chase' : 'patrol';
+  }
+
+  if (g.state === 'bounce') {
+    // Bounce back from attack
+    g.x += g.bounceVx * dt;
+    g.y += g.bounceVy * dt;
+    g.bounceVx *= 0.82;
+    g.bounceVy *= 0.82;
+    g.bounceTimer -= dt;
+    if (g.bounceTimer <= 0) {
+      g.state = g.aggroed ? 'chase' : 'patrol';
+    }
+    // Clamp
+    g.x = Math.max(bounds.x + g.r, Math.min(bounds.x + bounds.w - g.r, g.x));
+    g.y = Math.max(bounds.y + g.r, Math.min(bounds.y + bounds.h - g.r, g.y));
+    return;
+  }
+
+  if (g.state === 'patrol') {
+    // Wander near spawn
+    g.wanderTimer -= dt;
+    var wdx = g.wanderTarget.x - g.x;
+    var wdy = g.wanderTarget.y - g.y;
+    var wdist = Math.sqrt(wdx*wdx + wdy*wdy);
+    if (wdist < 10 || g.wanderTimer <= 0) {
+      // Pick new wander target near spawn
+      var spread = 180;
+      g.wanderTarget = {
+        x: Math.max(bounds.x + g.r, Math.min(bounds.x + bounds.w - g.r, g.spawnX + (Math.random()-0.5)*spread*2)),
+        y: Math.max(bounds.y + g.r, Math.min(bounds.y + bounds.h - g.r, g.spawnY + (Math.random()-0.5)*spread*2))
+      };
+      g.wanderTimer = 1.5 + Math.random() * 2;
+    }
+    var slowMult = g.slowed ? 0.1 : 1;
+    var patrolSpeed = g.speed * 0.35 * slowMult * zoneSlowMult;
+    if (wdist > 4) {
+      g.x += (wdx/wdist) * patrolSpeed * dt;
+      g.y += (wdy/wdist) * patrolSpeed * dt;
+    }
+  }
+
+  if (g.state === 'chase') {
+    if (g.confused) {
+      // CONFUSE: move toward nearest other entity (or sit still if alone).
+      // Target picked here per-frame for simplicity; a stable cached target
+      // would be marginally smoother but adds bookkeeping. Speed parity
+      // with chase (no wander-penalty) so confused entities can actually
+      // reach their target in a reasonable time.
+      var cTarget = null, cTd = Infinity;
+      for (var cei = 0; cei < entities.length; cei++) {
+        var co = entities[cei];
+        if (co === g || co.hp <= 0 || co.dead) continue;
+        var cod = Math.hypot(co.x - g.x, co.y - g.y);
+        if (cod < cTd) { cTarget = co; cTd = cod; }
+      }
+      if (cTarget) {
+        var cMoveSpeed = g.speed * (g.slowed ? 0.1 : 1) * zoneSlowMult;
+        var cdx = cTarget.x - g.x, cdy = cTarget.y - g.y;
+        var cdd = Math.hypot(cdx, cdy) || 1;
+        // Stop just shy of contact so we don't tunnel through the target.
+        if (cdd > g.r + cTarget.r) {
+          g.x += (cdx/cdd) * cMoveSpeed * dt;
+          g.y += (cdy/cdd) * cMoveSpeed * dt;
+        }
+      }
+      // (No movement if alone — target=self, sit and self-attack via the
+      // confuse-attack block in updateEntity.)
+    } else if (g.dazed && g.dazeDirX !== undefined) {
+      // DAZE: wander randomly. Half-speed.
+      var confusedSpeed = g.speed * 0.5 * (g.slowed ? 0.1 : 1) * zoneSlowMult;
+      g.x += g.dazeDirX * confusedSpeed * dt;
+      g.y += g.dazeDirY * confusedSpeed * dt;
+    } else {
+      // PHASE A — if an active reaction is commandeering movement this
+      // frame, let it do its thing and skip the default AI locomotion.
+      // Reactions still allow attack cooldowns / arsenal timers to tick.
+      if (applyReactionMovement(g, dt, bounds)) {
+        // Reaction moved the entity. Don't run chase/kite/etc this frame,
+        // but still clamp position inside rumble bounds so sprint doesn't
+        // push the entity off-screen.
+        g.x = Math.max(bounds.x + g.r, Math.min(bounds.x + bounds.w - g.r, g.x));
+        g.y = Math.max(bounds.y + g.r, Math.min(bounds.y + bounds.h - g.r, g.y));
+        return;
+      }
+
+      // ═══════════════════════════════════════════════
+      // AI DISPATCHER — branch on entity's template-declared behavior
+      // ═══════════════════════════════════════════════
+      var aiType = g.ai || 'chase';
+      var effSpeed = (g.slowed ? g.speed * 0.1 : g.speed) * zoneSlowMult;
+
+      // PHASE E — true_burrow signature (blight_worm). Custom 4-phase cycle
+      // that supersedes the template ai/attackPattern. Phases:
+      //   chase   (~6s): normal chase + poison trail (trail via tickPassiveArsenal)
+      //   dive    (1s telegraph): dirt cloud, then become hidden
+      //   hidden  (3s): invisible + invulnerable, tracks player position
+      //   emerge  (0.8s telegraph): shadow circle beneath player
+      //   erupt   (instant): 8 dmg AoE, arsenal effects (confuse/weaken/heart)
+      //   recover (1s): surfaces stunned, takes 1.5× damage
+      if (g.signature === 'true_burrow') {
+        if (!g._burrowState) { g._burrowState = 'chase'; g._burrowTimer = 6.0; }
+        g._burrowTimer = Math.max(0, (g._burrowTimer || 0) - dt);
+
+        if (g._burrowState === 'chase') {
+          if (distToPlayer > 2) {
+            g.x += (dx/distToPlayer) * effSpeed * dt;
+            g.y += (dy/distToPlayer) * effSpeed * dt;
+          }
+          if (g._burrowTimer <= 0) {
+            g._burrowState = 'dive';
+            g._burrowTimer = 1.0;
+          }
+        } else if (g._burrowState === 'dive') {
+          // Telegraph: dirt swirl. Entity slows to stop.
+          if (g._burrowTimer <= 0) {
+            g._burrowState = 'hidden';
+            g._burrowTimer = 3.0;
+            g._phaseFadeTimer = 3.0 + 0.8;   // invuln through hidden + emerge
+            g._burrowHidden = true;
+          }
+        } else if (g._burrowState === 'hidden') {
+          // Invisible; track player so emerge point is current.
+          g._burrowEmergeX = player.x;
+          g._burrowEmergeY = player.y;
+          if (g._burrowTimer <= 0) {
+            g._burrowState = 'emerge';
+            g._burrowTimer = 0.8;
+          }
+        } else if (g._burrowState === 'emerge') {
+          // Shadow on ground at emerge point. Worm stays hidden until resolve.
+          if (g._burrowTimer <= 0) {
+            // Resolve: snap to emerge position, damage in AoE, apply arsenals.
+            g.x = g._burrowEmergeX;
+            g.y = g._burrowEmergeY;
+            g._burrowHidden = false;
+            var eruptR = 70;
+            var edx = player.x - g.x, edy = player.y - g.y;
+            var ed = Math.hypot(edx, edy);
+            if (ed < eruptR + player.r && !player.iframes) {
+              _applyEnemyMeleeDamage(g, 8, edx, edy, ed);
+              // PHASE E — worm erupt arsenal:
+              // yellow = confuse, purple = vampire heal, black = weaken
+              if (g.affinityColors) {
+                if (g.affinityColors.indexOf('yellow') >= 0) {
+                  applyStatus('confuse', { duration: 1.5 });
+                  showFloatingText(player.x, player.y - 60, 'CONFUSED', '#E08CF0', player);
+                }
+                if (g.affinityColors.indexOf('purple') >= 0) {
+                  g.hp = Math.min(g.hpMax, g.hp + 4);
+                  spawnHeartFloat(player.x, player.y, g.x, g.y);
+                }
+                if (g.affinityColors.indexOf('black') >= 0) {
+                  applyStatus('weaken', { duration: 5 });
+                  showFloatingText(player.x, player.y - 76, 'WEAKENED', '#553366', player);
+                }
+              }
+            }
+            // Ring shockwave visual (reuse spawnEnemyPulseFX)
+            spawnEnemyPulseFX(g, eruptR);
+            g._burrowState = 'recover';
+            g._burrowTimer = 1.0;
+            g._recoverVulnerable = true;   // consumed by damageEntity crit-window
+            g._phaseFadeTimer = 0;          // become vulnerable again
+          }
+        } else { // recover
+          // Stunned — takes 1.5× damage. No move, no attack.
+          if (g._burrowTimer <= 0) {
+            g._burrowState = 'chase';
+            g._burrowTimer = 5.5 + Math.random() * 1.5;
+            g._recoverVulnerable = false;
+          }
+        }
+      } else if (aiType === 'ranged_kite') {
+        // S015 v0.15.18: while confused, replace ranged_kite AI with
+        // "walk toward nearest other entity." The wrong-target attack
+        // block downstream (line ~5493) handles the actual bonk. Without
+        // this branch, a confused slinger would kite the player AND fire
+        // projectiles AND attempt wrong-target melee — three contradictory
+        // behaviors. With it, a confused slinger walks toward neighbor and
+        // hits them once in range. Daze still uses wander logic separately.
+        if (g.confused) {
+          var nearestOther = null, ndOther = Infinity;
+          for (var ki = 0; ki < entities.length; ki++) {
+            var o = entities[ki];
+            if (o === g || o.hp <= 0 || o.dead) continue;
+            var od = Math.hypot(o.x - g.x, o.y - g.y);
+            if (od < ndOther) { nearestOther = o; ndOther = od; }
+          }
+          if (nearestOther && ndOther > g.r + nearestOther.r + 2) {
+            var ndx = (nearestOther.x - g.x) / ndOther;
+            var ndy = (nearestOther.y - g.y) / ndOther;
+            g.x += ndx * effSpeed * dt;
+            g.y += ndy * effSpeed * dt;
+          }
+          // Fall through — DON'T return. Wrong-target attack block runs later.
+        } else {
+          // Normal ranged_kite AI: kite player + fire projectiles
+          var kite = scaleDist(g.kiteDistance || 260);
+        if (distToPlayer < kite * 0.9) {
+          // Too close — back away
+          g.x -= (dx/distToPlayer) * effSpeed * dt;
+          g.y -= (dy/distToPlayer) * effSpeed * dt;
+        } else if (distToPlayer > kite * 1.1) {
+          // Too far — close in slowly
+          g.x += (dx/distToPlayer) * effSpeed * 0.5 * dt;
+          g.y += (dy/distToPlayer) * effSpeed * 0.5 * dt;
+        }
+        // Fire ranged projectile on cooldown (suppressed while silenced).
+        g.rangedTimer = Math.max(0, g.rangedTimer - dt);
+        // PHASE D — burst_fire signature overrides the single-shot rhythm.
+        // Instead of one shot every 1.5s, the slinger fires 3 shots in
+        // rapid succession (0.15s apart) every 2.5s.
+        var _isBurst = (g.signature === 'burst_fire');
+        if (_isBurst) {
+          // Burst state machine on the entity:
+          //   _burstRemaining: shots left to fire in current burst (0-3)
+          //   _burstNextShotIn: time until next shot within a burst
+          //   rangedTimer acts as "time until NEXT burst" when _burstRemaining=0
+          if ((g._burstRemaining || 0) > 0 && (g.silencedTimer||0) <= 0) {
+            g._burstNextShotIn = (g._burstNextShotIn || 0) - dt;
+            if (g._burstNextShotIn <= 0) {
+              _fireSlingerShot(g);
+              g._burstRemaining -= 1;
+              g._burstNextShotIn = 0.15;
+              if (g._burstRemaining <= 0) {
+                g.rangedTimer = 2.5;   // cooldown to next burst
+              }
+            }
+          } else if (g.rangedTimer <= 0 && (g.silencedTimer||0) <= 0) {
+            // Start a new burst.
+            g._burstRemaining = 3;
+            g._burstNextShotIn = 0;
+          }
+        } else {
+          // Legacy single-shot rhythm.
+          if (g.rangedTimer <= 0 && (g.silencedTimer||0) <= 0) {
+            _fireSlingerShot(g);
+            g.rangedTimer = g.rangedCooldown || 1.5;
+          }
+        }
+        }  // close the non-confused ranged_kite path opened at v0.15.18
+      } else if (aiType === 'stationary') {
+        // Doesn't move. Periodic AoE pulse centered on self.
+        g.pulseTimer = Math.max(0, g.pulseTimer - dt);
+        if (g.pulseTimer <= 0 && (g.silencedTimer||0) <= 0) {
+          var pulseR = scaleDist(g.pulseRadius || 90);
+          spawnEnemyPulseFX(g, pulseR);
+          // PHASE C — arsenal per pulse. Track pulse count so every Nth can
+          // be a confuse variant (yellow affinity). Applied only if player
+          // is inside the pulse radius.
+          g._pulseCount = (g._pulseCount || 0) + 1;
+          if (distToPlayer < pulseR) {
+            // v0.16.66 — Arc wall block. Pulse damage is line-of-sight:
+            // if a wall sits between pulse source and player, the pulse
+            // doesn't damage the player even if they're within radius.
+            // Status arsenal (poison, confuse, slow) also gated — they
+            // ride on the damaging pulse, no damage = no status.
+            if (_arcWallBlocksAttack(g.x, g.y, player.x, player.y)) {
+              // Wall flash for visual feedback
+              var midX = (g.x + player.x) / 2;
+              var midY = (g.y + player.y) / 2;
+              grayWalls.forEach(function(w) {
+                if (w && w.hp > 0 && w.isArc && _pointInArc(w, midX, midY)) {
+                  w.flashTimer = Math.max(w.flashTimer || 0, 0.1);
+                }
+              });
+              g.pulseTimer = g.pulseCooldown || 2.0;
+              return;  // skip damage + arsenal application
+            }
+            _applyEnemyMeleeDamage(g, g.pulseDmg || 2, dx, dy, distToPlayer);
+            // GREEN arsenal: poison DoT (4 dmg over 4s — stronger than grunt poison)
+            if (g.affinityColors && g.affinityColors.indexOf('green') >= 0) {
+              applyStatus('poison', { stacks: 1, duration: 4, dmgPerTick: 1 });
+            }
+            // YELLOW arsenal: every 3rd pulse applies confuse (1.5s)
+            if (g.affinityColors && g.affinityColors.indexOf('yellow') >= 0
+                && g._pulseCount % 3 === 0) {
+              applyStatus('confuse', { duration: 1.5 });
+              showFloatingText(player.x, player.y - 60, 'CONFUSED', '#E08CF0', player);
+            }
+            // root_pulse signature: 0.7s slow on pulse hit (vines only for now)
+            if (g.signature === 'root_pulse') {
+              applyStatus('slow', { factor: 0.6, duration: 0.7 });
+            }
+          }
+          g.pulseTimer = g.pulseCooldown || 2.0;
+        }
+      } else if (aiType === 'heavy_melee') {
+        // Close to swing range, then telegraph a wind-up swing.
+        var swingR = scaleDist(g.swingRadius || 60);
+        // PHASE E — boulder_toss signature (stone troll). When player is
+        // beyond 120px AND troll is idle (not mid-swing/cooldown), lob a
+        // boulder instead of closing. Alternates naturally with swings
+        // because the boulder tosses use their own cooldown.
+        if (g.signature === 'boulder_toss'
+            && g.swingState === 'idle'
+            && distToPlayer > 120
+            && (g._boulderCd || 0) <= 0
+            && (g.silencedTimer || 0) <= 0) {
+          spawnBoulder(g, player.x, player.y);
+          g._boulderCd = 3.5;
+        }
+        if ((g._boulderCd || 0) > 0) g._boulderCd -= dt;
+
+        if (g.swingState === 'idle') {
+          // Chase in until we're in swing range
+          if (distToPlayer > swingR * 0.7) {
+            g.x += (dx/distToPlayer) * effSpeed * dt;
+            g.y += (dy/distToPlayer) * effSpeed * dt;
+          } else if ((g.silencedTimer||0) <= 0 && g.swingCooldown <= 0) {
+            // Begin telegraph at player's current position.
+            g.swingState = 'winding';
+            g.swingTimer = g.swingTelegraph || 0.6;
+            g.swingTargetX = player.x;
+            g.swingTargetY = player.y;
+          }
+          g.swingCooldown = Math.max(0, g.swingCooldown - dt);
+        } else if (g.swingState === 'winding') {
+          // Telegraph: stand still, tick timer; on zero, resolve swing.
+          g.swingTimer -= dt;
+          if (g.swingTimer <= 0) {
+            // Resolve swing — damage if player is in radius at landing.
+            var sdx = player.x - g.swingTargetX;
+            var sdy = player.y - g.swingTargetY;
+            var sd = Math.sqrt(sdx*sdx + sdy*sdy);
+            if (sd < swingR + player.r) {
+              // v0.16.66 — Arc wall block. Heavy swings respect arc
+              // walls between the swing target and the player. Wall
+              // flashes for visual feedback. Swing still resolves
+              // (telegraph completes) but damage is suppressed.
+              if (!_arcWallBlocksAttack(g.swingTargetX, g.swingTargetY, player.x, player.y)) {
+                _applyEnemyMeleeDamage(g, g.swingDmg || 6, dx, dy, distToPlayer);
+              } else {
+                var midX = (g.swingTargetX + player.x) / 2;
+                var midY = (g.swingTargetY + player.y) / 2;
+                grayWalls.forEach(function(w) {
+                  if (w && w.hp > 0 && w.isArc && _pointInArc(w, midX, midY)) {
+                    w.flashTimer = Math.max(w.flashTimer || 0, 0.1);
+                  }
+                });
+              }
+            }
+            g.swingState = 'cooldown';
+            g.swingCooldown = 1.2;
+          }
+        } else if (g.swingState === 'cooldown') {
+          // Resting; don't move.
+          g.swingCooldown -= dt;
+          if (g.swingCooldown <= 0) g.swingState = 'idle';
+        }
+      } else if (aiType === 'teleport') {
+        // Chase normally, but periodically blink to near player.
+        if (distToPlayer > 2) {
+          g.x += (dx/distToPlayer) * effSpeed * dt;
+          g.y += (dy/distToPlayer) * effSpeed * dt;
+        }
+        g.teleportTimer = Math.max(0, g.teleportTimer - dt);
+        if (g.teleportTimer <= 0 && (g.silencedTimer||0) <= 0) {
+          // Blink to a spot within teleportRange of player (but not ON them).
+          var tpR = scaleDist(g.teleportRange || 80);
+          var blinkAngle = Math.random() * Math.PI * 2;
+          var blinkDist = tpR * (0.6 + Math.random() * 0.4);
+          g.x = player.x + Math.cos(blinkAngle) * blinkDist;
+          g.y = player.y + Math.sin(blinkAngle) * blinkDist;
+          g.teleportTimer = g.teleportCooldown || 3.0;
+          g.flashTimer = 0.25; // brief flash on reappear
+          // PHASE D — phase_fade signature: brief invulnerability window
+          // during and just after teleport. Player must time attacks.
+          if (g.signature === 'phase_fade') {
+            g._phaseFadeTimer = 0.3;
+          }
+          // PHASE C — WHITE arsenal: wraith heals +3 HP on each teleport.
+          if (g.affinityColors && g.affinityColors.indexOf('white') >= 0
+              && g.hp < g.hpMax) {
+            g.hp = Math.min(g.hpMax, g.hp + 3);
+            showFloatingText(g.x, g.y - (g.r + 10), '+3', '#EFEFEF', g);
+          }
+        }
+        // PHASE C — BLACK arsenal: wraith fires weaken orb on own cooldown.
+        // Slow-moving projectile; on impact applies weaken 3s.
+        if (g.affinityColors && g.affinityColors.indexOf('black') >= 0) {
+          g._blackOrbTimer = (g._blackOrbTimer || 0) - dt;
+          if (g._blackOrbTimer <= 0 && (g.silencedTimer||0) <= 0 && distToPlayer < 300) {
+            var orb = spawnEnemyProjectile(g, player.x, player.y, 1);
+            if (orb) {
+              orb._blackWeaken = true;
+              orb.color = '#553366';
+              orb.vx *= 0.55; orb.vy *= 0.55; // slow (telegraphed)
+              orb.ttl = 4.0;
+              orb.r = 7;
+            }
+            g._blackOrbTimer = 4.5;   // every 4.5s
+          }
+        }
+      } else {
+        // Default: chase (goblin/skeleton/wolf/knight legacy behavior).
+        // PHASE E — leap_lunge signature (shadow wolf). Wolf periodically
+        // winds up a straight-line charge when the player is in mid-range.
+        // States via g._leapState: 'ready' (cooldown) | 'winding' (telegraph)
+        //                         | 'leaping' (charge) | 'recovering' (cooldown)
+        if (g.signature === 'leap_lunge') {
+          if (!g._leapState) { g._leapState = 'ready'; g._leapTimer = 2.0; }
+          g._leapTimer = Math.max(0, (g._leapTimer || 0) - dt);
+
+          if (g._leapState === 'ready') {
+            // Normal chase until cooldown elapses and player is in leap range.
+            if (distToPlayer > 2) {
+              g.x += (dx/distToPlayer) * effSpeed * dt;
+              g.y += (dy/distToPlayer) * effSpeed * dt;
+            }
+            if (g._leapTimer <= 0 && distToPlayer >= 80 && distToPlayer <= 220) {
+              g._leapState = 'winding';
+              g._leapTimer = 0.5;
+              // Lock in direction at telegraph start — player must sidestep
+              g._leapDirX = dx / distToPlayer;
+              g._leapDirY = dy / distToPlayer;
+              g._leapOrigX = g.x;
+              g._leapOrigY = g.y;
+            }
+          } else if (g._leapState === 'winding') {
+            // Stationary during wind-up so the telegraph is readable.
+            if (g._leapTimer <= 0) {
+              g._leapState = 'leaping';
+              g._leapTimer = 0.35; // leap duration at 600 speed ≈ 210px
+            }
+          } else if (g._leapState === 'leaping') {
+            // Charge straight along locked direction.
+            var leapSpd = 600;
+            g.x += (g._leapDirX || 0) * leapSpd * dt;
+            g.y += (g._leapDirY || 0) * leapSpd * dt;
+            // Connect with player?
+            if (!player.iframes && distToPlayer < g.r + player.r + 6) {
+              _applyEnemyMeleeDamage(g, 3, dx, dy, distToPlayer);
+              g._leapState = 'recovering';
+              g._leapTimer = 0.6;
+            }
+            if (g._leapTimer <= 0) {
+              g._leapState = 'recovering';
+              g._leapTimer = 0.4;
+            }
+          } else { // recovering
+            if (g._leapTimer <= 0) {
+              g._leapState = 'ready';
+              g._leapTimer = 3.0 + Math.random() * 1.5; // next leap in 3-4.5s
+            }
+            // Slow drift during recovery
+            if (distToPlayer > 2) {
+              g.x += (dx/distToPlayer) * effSpeed * 0.35 * dt;
+              g.y += (dy/distToPlayer) * effSpeed * 0.35 * dt;
+            }
+          }
+        } else {
+          // Plain chase (goblin, skeleton, knight).
+          if (distToPlayer > 2) {
+            g.x += (dx/distToPlayer) * effSpeed * dt;
+            g.y += (dy/distToPlayer) * effSpeed * dt;
+          }
+        }
+      }
+    }
+  }
+
+  // Clamp
+  g.x = Math.max(bounds.x + g.r, Math.min(bounds.x + bounds.w - g.r, g.x));
+  g.y = Math.max(bounds.y + g.r, Math.min(bounds.y + bounds.h - g.r, g.y));
+
+  // ── Contact attack — only for touch-damage entities (default legacy).
+  // Registry entities with attackPattern 'ranged', 'pulse', or 'telegraph_swing'
+  // have their damage handled by the AI dispatcher above, not contact.
+  var pat = g.attackPattern || 'touch';
+  var contact = g.r + player.r;
+  // ── CONFUSE: retarget attack at nearest entity (or self if alone) ──
+  // Yellow-crit applies g.confused. Confused entities deal real damage to
+  // their new target — friendly fire on other entities, self-damage if
+  // alone. Yellow flash on the attacker telegraphs the wrong-target hit.
+  // Runs BEFORE the player-touch path; player-touch is gated to skip when
+  // confused so a single entity doesn't attack twice in one frame.
+  // S015 v0.15.18: confused entities attack nearest other entity
+  // REGARDLESS of attack pattern. Previously gated on pat === 'touch',
+  // which silently excluded ranged_kite entities (slingers) — confused
+  // slingers wandered but never attacked anyone. Now any confused entity
+  // applies contact damage to the nearest other entity when in physical
+  // range. Their normal ranged firing logic is already suppressed by
+  // g.confused elsewhere, so they don't fire at the player either.
+  // The g.dazed exclusion is implicit — confuse stomps daze on apply.
+  if (g.confused && (g.silencedTimer||0) <= 0 && g.attackCooldown <= 0) {
+    // Find nearest other living entity, excluding self.
+    var nearest = null;
+    var nearestDist = Infinity;
+    for (var ci = 0; ci < entities.length; ci++) {
+      var other = entities[ci];
+      if (other === g) continue;
+      if (other.hp <= 0 || other.dead) continue;
+      var od = Math.hypot(other.x - g.x, other.y - g.y);
+      if (od < nearestDist) { nearest = other; nearestDist = od; }
+    }
+    var target = nearest || g; // fall back to self if alone
+    var dmgAmt = Math.max(1, g.dmg || 1);
+    var inRange = (target === g) ? true : (nearestDist < g.r + target.r + 4);
+    if (inRange) {
+      // Real damage to the target. Source 'yellow' so resist/wither
+      // attribution hooks treat it like a yellow-induced hit, which is
+      // accurate — the confuse came from yellow.
+      damageEntity(target, dmgAmt, false, 'yellow');
+      target.flashTimer = Math.max(target.flashTimer || 0, 0.2);
+      // Yellow flash on the ATTACKER — visual cue that this entity is
+      // confused and just struck a wrong target.
+      g._confuseFlashTimer = 0.25;
+      // Floating "wrong-target" indicator above the attacker.
+      showFloatingText(g.x, g.y - (g.r + 28), dmgAmt + ' ?', '#FFEE44', g);
+      // S015 v0.15.18: record for yellow diagnostic.
+      recordYellowConfuseAttack(g, target, dmgAmt);
+      // Standard attack cooldown applies so confused entities don't
+      // chain-hit. Slow modifiers respected the same as normal attacks.
+      var _cIsSlowed = g.attackSlowed || g.attackDebuff > 0
+        || g.slowed || g.greenSlowed || g.whiteFieldSlowed;
+      g.attackCooldown = _cIsSlowed ? 2.4 : 1.2;
+    }
+  }
+  if (pat === 'touch' && !g.dazed && !g.confused && (g.silencedTimer||0) <= 0 && distToPlayer < contact && g.attackCooldown <= 0 && !player.iframes) {
+    // v0.16.66 — Arc wall block check. If an arc wall sits between
+    // entity and player, attack is blocked. Wall flashes briefly for
+    // visual feedback. Reset attack cooldown so the entity tries
+    // again next tick if the wall persists.
+    if (_arcWallBlocksAttack(g.x, g.y, player.x, player.y)) {
+      g.attackCooldown = 0.4;
+      // Flash the blocking wall(s) for player feedback
+      var midX = (g.x + player.x) / 2;
+      var midY = (g.y + player.y) / 2;
+      grayWalls.forEach(function(w) {
+        if (w && w.hp > 0 && w.isArc && _pointInArc(w, midX, midY)) {
+          w.flashTimer = Math.max(w.flashTimer || 0, 0.1);
+        }
+      });
+      return;  // exit attack tick — no damage applied
+    }
+    // Physical attack — absorbed by armor pips first.
+    // PHASE B — weaken amplifies incoming damage.
+    var dmgLeft = Math.ceil((g.dmg || 1) * playerDamageTakenMult());
+    if ((player.armor||0) > 0) {
+      var absorbed = Math.min(player.armor, dmgLeft);
+      var _bsArmorBefore = player.armor;  // v0.16.39 — capture pre-loss for shrapnel curve
+      player.armor -= absorbed;
+      dmgLeft -= absorbed;
+      if (_battleStats) _battleStats.armorAbsorbed += absorbed;
+      showFloatingText(player.x, player.y - 55, absorbed + ' 🛡', '#AAAAAA', player);
+      // v0.16.39 — Blocksmith reactive shrapnel. Pip lost → projectile flies
+      // back to the attacker. damage = pre-loss armor count (linear curve).
+      // Other classes have no pipLostShrapnel profile → no-op.
+      if (typeof maybeSpawnPipShrapnel === 'function') {
+        maybeSpawnPipShrapnel(_bsArmorBefore, g.x, g.y, g);
+      }
+    }
+    if (dmgLeft > 0) {
+      if (_battleStats) {
+        _battleStats.damageTaken += dmgLeft;
+        if ((player.hp - dmgLeft) < _battleStats.hpLow) _battleStats.hpLow = Math.max(0, player.hp - dmgLeft);
+        if (dmgLeft > (_battleStats.biggestDamageTaken || 0)) _battleStats.biggestDamageTaken = dmgLeft;
+      }
+      showFloatingText(player.x, player.y - 40, dmgLeft + ' HP', '#E24B4A', player);
+      applyDamageToPlayer(dmgLeft);
+    }
+    player.iframes = 0.9;
+    // PHASE C — fire arsenal effects for entities with affinityColors.
+    applyArsenalOnTouch(g, dx, dy, distToPlayer);
+
+    // Bounce entity back
+    var nx = -dx/distToPlayer, ny = -dy/distToPlayer;
+    g.bounceVx = nx * 320;
+    g.bounceVy = ny * 320;
+    g.bounceTimer = 0.5;
+    g.state = 'bounce';
+    // Unified slow: any active slow source (greenSlowed, whiteFieldSlowed,
+    // slowed, attackSlowed) all flow into the same attack-cooldown penalty.
+    // Previously attackSlowed drove this alone; now movement slows piggyback
+    // so "slow" is one concept mechanically and visually.
+    var _isSlowed = g.attackSlowed || g.attackDebuff > 0
+      || g.slowed || g.greenSlowed || g.whiteFieldSlowed;
+    g.attackCooldown = _isSlowed ? 2.4 : 1.2;
+    g.flashTimer = 0.2;
+
+    if (player.hp <= 0 && !player.bleedOut) respawnPlayer();
+  }
+
+  // Player iframes
+  if (player.iframes > 0) {
+    player.iframes = Math.max(0, player.iframes - dt);
+  }
+}
+
+function drawDeadEntity(g) {
+  var fadeAlpha = Math.min(1, g.deathTimer / 0.5); // fade out in last 0.5s
+  ctx.save();
+  ctx.globalAlpha = fadeAlpha;
+  ctx.translate(g.x, g.y);
+  ctx.rotate(Math.PI / 2); // on its side
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(0, g.r - 3, g.r * 1.2, 4, 0, 0, Math.PI*2);
+  ctx.fill();
+  // Body — greyed out
+  ctx.fillStyle = '#2a3a2a';
+  ctx.beginPath();
+  ctx.arc(0, 0, g.r, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = '#3a4a3a';
+  ctx.beginPath();
+  ctx.arc(0, 0, g.r - 4, 0, Math.PI*2);
+  ctx.fill();
+  // Icon sideways — use the entity's own icon (not hardcoded goblin).
+  // Scale icon the same way the living entity scaled it, so bosses remain
+  // imposing in death; small entities look compact.
+  var deadIconPx = Math.max(12, Math.round(g.r * 0.9));
+  ctx.font = deadIconPx + 'px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.globalAlpha = fadeAlpha * 0.7;
+  ctx.fillText(g.visIcon || '👺', 0, 0);
+  // X eyes — sized with entity radius
+  ctx.globalAlpha = fadeAlpha;
+  var xPx = Math.max(9, Math.round(g.r * 0.55));
+  ctx.font = 'bold ' + xPx + 'px sans-serif';
+  ctx.fillStyle = '#ffffff88';
+  var xOff = Math.max(4, Math.round(g.r * 0.3));
+  ctx.fillText('✕', -xOff, -Math.round(xPx * 0.4));
+  ctx.fillText('✕', xOff, -Math.round(xPx * 0.4));
+  ctx.restore();
+}
+
+// PHASE E — burrow telegraphs for true_burrow entities. Dive swirl during
+// 'dive' phase, expanding ground shadow during 'emerge' phase. Drawn before
+// entity sprites so they sit underneath.
+function drawBurrowTelegraph(g) {
+  if (g.signature !== 'true_burrow') return;
+  if (g._burrowState === 'dive') {
+    // Dirt swirl around the diving worm.
+    var diveT = 1 - (g._burrowTimer / 1.0);   // 0..1
+    ctx.save();
+    ctx.globalAlpha = 0.3 + diveT * 0.5;
+    ctx.fillStyle = '#6a4a2a';
+    for (var s = 0; s < 8; s++) {
+      var ang = (s / 8) * Math.PI * 2 + diveT * Math.PI * 2;
+      var rad = 8 + diveT * 22;
+      var sx = g.x + Math.cos(ang) * rad;
+      var sy = g.y + Math.sin(ang) * rad;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 4, 0, Math.PI*2);
+      ctx.fill();
+    }
+    // Hole outline under worm
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = '#3a2510';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, g.r + 2, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+  if (g._burrowState === 'emerge' && g._burrowEmergeX !== undefined) {
+    // Shadow circle beneath player's tracked position — grows as emerge lands.
+    var emT = 1 - (g._burrowTimer / 0.8);     // 0..1
+    ctx.save();
+    ctx.globalAlpha = 0.35 + emT * 0.45;
+    ctx.fillStyle = '#1a0d0a';
+    ctx.beginPath();
+    ctx.arc(g._burrowEmergeX, g._burrowEmergeY, 70 * (0.45 + emT * 0.55), 0, Math.PI*2);
+    ctx.fill();
+    // Threat ring around the shadow
+    ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = '#7a2510';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.arc(g._burrowEmergeX, g._burrowEmergeY, 70, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+}
+
+function drawEntity(g) {
+  ctx.save();
+
+  // PHASE E — true_burrow: hide worm sprite entirely when underground.
+  // Emerge shadow telegraph is drawn separately (see drawBurrowTelegraph).
+  if (g.signature === 'true_burrow' && g._burrowHidden) {
+    ctx.restore();
+    return;
+  }
+
+  // PHASE E — enrage_phase visual: colossus in phase 2 gets a pulsing
+  // red-orange corona. During the 1s roar freeze, the aura peaks with
+  // a shockwave ring.
+  if (g.signature === 'enrage_phase' && g._enraged) {
+    var nowE = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.006;
+    var pulseE = 0.5 + Math.abs(Math.sin(nowE)) * 0.5;
+    ctx.save();
+    ctx.globalAlpha = 0.35 * pulseE;
+    ctx.shadowColor = '#ff3300';
+    ctx.shadowBlur  = 24;
+    ctx.fillStyle   = '#ff4422';
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, g.r + 10, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    if ((g._enrageRoarTimer || 0) > 0) {
+      var rt = 1 - g._enrageRoarTimer;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - rt);
+      ctx.strokeStyle = '#ff6600';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(g.x, g.y, g.r + rt * 80, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+  // red-orange corona. During the 1s roar freeze, the aura peaks with
+  // a shockwave ring.
+  if (g.signature === 'enrage_phase' && g._enraged) {
+    var nowE = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.006;
+    var pulseE = 0.5 + Math.abs(Math.sin(nowE)) * 0.5;
+    ctx.save();
+    ctx.globalAlpha = 0.35 * pulseE;
+    ctx.shadowColor = '#ff3300';
+    ctx.shadowBlur  = 24;
+    ctx.fillStyle   = '#ff4422';
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, g.r + 10, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    if ((g._enrageRoarTimer || 0) > 0) {
+      var rt = 1 - g._enrageRoarTimer;   // 0..1 through roar
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - rt);
+      ctx.strokeStyle = '#ff6600';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(g.x, g.y, g.r + rt * 80, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // PHASE E — front_shield: visible shield arc on the side the knight
+  // is facing. Brightens briefly after absorbing a hit (reuse flashTimer
+  // as the brighten signal).
+  if (g.signature === 'front_shield' && player) {
+    var sfx, sfy;
+    if (g.swingState === 'winding' || g.swingState === 'cooldown') {
+      sfx = g.swingTargetX - g.x;
+      sfy = g.swingTargetY - g.y;
+    } else {
+      sfx = player.x - g.x;
+      sfy = player.y - g.y;
+    }
+    var sfd = Math.hypot(sfx, sfy) || 1;
+    var ang = Math.atan2(sfy, sfx);
+    var shieldR = g.r + 6;
+    ctx.save();
+    ctx.globalAlpha = g.flashTimer > 0 ? 0.9 : 0.55;
+    ctx.strokeStyle = '#BBBBFF';
+    ctx.shadowColor = '#BBBBFF';
+    ctx.shadowBlur  = g.flashTimer > 0 ? 16 : 6;
+    ctx.lineWidth   = 4;
+    ctx.beginPath();
+    // 120° arc centered on facing direction (±60°)
+    ctx.arc(g.x, g.y, shieldR, ang - Math.PI/3, ang + Math.PI/3);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // PHASE E — leap_lunge telegraph line during windup, so player has a
+  // readable sidestep cue. Drawn beneath everything else on the entity.
+  if (g.signature === 'leap_lunge' && g._leapState === 'winding') {
+    var lwPct = 1 - (g._leapTimer / 0.5);
+    ctx.save();
+    ctx.globalAlpha = 0.25 + lwPct * 0.5;
+    ctx.strokeStyle = '#9060C0';
+    ctx.shadowColor = '#9060C0';
+    ctx.shadowBlur = 10;
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.moveTo(g.x, g.y);
+    ctx.lineTo(g.x + (g._leapDirX || 0) * 210, g.y + (g._leapDirY || 0) * 210);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // PHASE D — phase_fade visual: when the wraith is in the invulnerable
+  // window, render its sprite at reduced alpha with a purple smoke glow
+  // so the player can SEE it's untouchable. The timer peaks at 0.3s;
+  // alpha drops to ~0.35 at peak and fades back in as the timer ticks.
+  if ((g._phaseFadeTimer || 0) > 0) {
+    var pfPct = Math.min(1, g._phaseFadeTimer / 0.3); // 1 at fresh, 0 at end
+    ctx.globalAlpha = 0.35 + (1 - pfPct) * 0.4;       // 0.35 → 0.75
+    ctx.shadowColor = '#9060C0';
+    ctx.shadowBlur = 24 * pfPct;
+  }
+
+  // Flash on attack. White = took damage (flashTimer). Yellow = confused
+  // entity just LANDED an attack on its wrong target. Yellow takes
+  // priority so the wrong-target signal is unambiguous.
+  var flashing = g.flashTimer > 0;
+  var confuseFlashing = (g._confuseFlashTimer || 0) > 0;
+  var flashBody  = confuseFlashing ? '#FFEE44' : '#ffffff';
+  var flashInner = confuseFlashing ? '#FFD700' : '#eeeeee';
+  var anyFlash = flashing || confuseFlashing;
+
+  // Template-provided visual identity (falls back to legacy goblin colors
+  // if absent — keeps the file tolerant of any rogue manual spawns).
+  var bodyColor  = g.visColor || '#3a7a2a';
+  var innerColor = _lightenHex(bodyColor, 0.2);
+  var entityIcon = g.visIcon || '👺';
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(g.x, g.y + g.r - 3, g.r * 0.75, 5, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Swing telegraph (heavy_melee wind-up) — render first so body draws on
+  // top. Orange dashed ring plus a fill pulse that grows as the telegraph
+  // completes, so players can read the timing visually.
+  if (g.swingState === 'winding') {
+    var swR = scaleDist(g.swingRadius || 60);
+    var swPct = 1 - (g.swingTimer / (g.swingTelegraph || 0.6)); // 0→1 fill
+    ctx.save();
+    ctx.globalAlpha = 0.3 + swPct * 0.4;
+    ctx.strokeStyle = '#ff6600';
+    ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 12;
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.arc(g.swingTargetX, g.swingTargetY, swR, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = swPct * 0.15;
+    ctx.fillStyle = '#ff3300';
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(g.swingTargetX, g.swingTargetY, swR, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // State ring — red when chasing/bouncing; darker shadow otherwise.
+  if (g.state === 'chase' || g.state === 'bounce') {
+    ctx.shadowColor = '#E24B4A';
+    ctx.shadowBlur = 16;
+  } else {
+    ctx.shadowColor = _darkenHex(bodyColor, 0.5);
+    ctx.shadowBlur = 10;
+  }
+
+  // Body
+  ctx.fillStyle = anyFlash ? flashBody : bodyColor;
+  ctx.beginPath();
+  ctx.arc(g.x, g.y, g.r, 0, Math.PI*2);
+  ctx.fill();
+
+  // Inner
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = anyFlash ? flashInner : innerColor;
+  ctx.beginPath();
+  ctx.arc(g.x, g.y, g.r - 4, 0, Math.PI*2);
+  ctx.fill();
+
+  // Entity icon — sized relative to radius so bosses look imposing.
+  var iconPx = Math.max(12, Math.round(g.r * 0.9));
+  ctx.font = iconPx + 'px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(entityIcon, g.x, g.y);
+
+  // Aggro indicator — small red dot when chasing
+  if (g.state === 'chase') {
+    ctx.fillStyle = '#E24B4A';
+    ctx.beginPath();
+    ctx.arc(g.x + g.r - 4, g.y - g.r + 4, 4, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // HP bar above entity
+  var barW = 60, barH = 7;
+  var barX = g.x - barW/2, barY = g.y - g.r - 16;
+  var hpPct = g.hp / g.hpMax;
+  var hpColor = hpPct > 0.5 ? '#4a9a35' : hpPct > 0.25 ? '#F5D000' : '#E24B4A';
+  // Background
+  ctx.fillStyle = '#111';
+  ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+  // Empty bar
+  ctx.fillStyle = '#2a2a2a';
+  ctx.fillRect(barX, barY, barW, barH);
+  // Fill
+  ctx.fillStyle = hpColor;
+  ctx.shadowColor = hpColor;
+  ctx.shadowBlur = 6;
+  ctx.fillRect(barX, barY, barW * hpPct, barH);
+  ctx.shadowBlur = 0;
+  // HP numbers — match player style
+  ctx.font = 'bold 16px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(g.hp + '/' + g.hpMax, g.x, barY - 9);
+
+  // ── Unified status effect stack (above HP bar) ──
+  _drawEffectStack(g.x, barY, _entityEffects(g));
+
+  // Aggro range indicator (faint, patrol only)
+  if (g.state === 'patrol') {
+    ctx.strokeStyle = 'rgba(255,100,100,0.08)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3,5]);
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, g.AGGRO_RANGE, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Deaggro ring when chasing — shows player how far to run
+  if (g.state === 'chase') {
+    ctx.strokeStyle = 'rgba(255,80,80,0.12)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6,6]);
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, g.DEAGGRO_RANGE, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Wither body stain — preserved as a per-entity visual cue.
+  // The stack above shows the count + timer; the stain reinforces "this
+  // entity is being withered" at a glance without reading text.
+  if ((g.witherStacks||0) > 0) {
+    ctx.save();
+    var stainAlpha = Math.min(0.45, 0.08 * g.witherStacks);
+    ctx.globalAlpha = stainAlpha;
+    ctx.fillStyle = '#1a0033';
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, g.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════
+// BRICK ACTIONS
+// ═══════════════════════════════════════════════════
+var brickAction = null;
+var blackEffect = null; // current active brick action state
+
+// ═══════════════════════════════════════════════════
+// WITHERBOLT — Fixer black tap
+// Medium-range slow bolt, damages + stacks WITHER on target.
+// Witherbolts scale HARD per stack ("curse hits harder each time") while other
+// damage sources benefit from a softer diminishing-returns amp per stack.
+// Any new witherbolt cast refreshes the shared timer to WITHER_DURATION.
+// Stacks have no hard cap; diminishing returns keep other-source amp bounded.
+// ═══════════════════════════════════════════════════
+var witherBolts = [];
+var WITHER_DURATION = 5.0;       // seconds; any new cast refreshes to this
+var WITHER_BOLT_SPEED = 260;     // slow compared to blue (500) — "slow application"
+
+// Damage scaling of the NEXT witherbolt against a target that already has stacks.
+// Accelerating: 1x, 1.5x, 2.25x, 3.375x, 5.06x, 7.59x...
+// This is what makes back-to-back witherbolts snowball.
+function witherSelfScale(stacks) {
+  // v0.15.0 nerf: linear scaling, +10% per stack (capped naturally by
+  // MAX_WITHER_STACKS at the apply site). Old exponential 1.5^stacks
+  // produced 7.59× at 5 stacks and 57× at 10, which broke balance even
+  // with cap. Linear keeps wither rewarding without runaway.
+  return 1.0 + 0.10 * Math.max(0, stacks);
+}
+
+// Amplifier applied to damage from NON-witherbolt sources (red, blue, etc.)
+// against a withered target. Soft cap, approaches +60%.
+// stacks=0 → 1.0, 1 → 1.15, 2 → 1.26, 3 → 1.34, 5 → 1.46, 10 → 1.57
+function witherOtherAmp(stacks) {
+  // v0.15.0 nerf: gentler asymptote (1.4× max vs 1.6×) and slower
+  // approach (0.85^s vs 0.75^s). At cap (5 stacks) = 1.22×; was 1.46×.
+  if (stacks <= 0) return 1.0;
+  return 1.0 + 0.4 * (1 - Math.pow(0.85, stacks));
+}
+
+// Hard cap on wither stacks per entity. Apply site enforces this; new
+// stacks past the cap just refresh the duration timer. Without this,
+// stacks could accumulate indefinitely and witherSelfScale would still
+// keep boosting damage even with a softened curve.
+var MAX_WITHER_STACKS = 5;
+
+function startWitherbolt(ox, oy) {
+  if (!player) return;
+  var crit = !!_currentCrit;
+  // Tier=1 for tap-witherbolt. Overload-black goes through fireOverloadBlack
+  // (the persistent zone), not this path. Future: if we want overload-tier
+  // witherbolts (tier>1) we can pass count here.
+  var fx = _fx('black', 1);
+  if (!fx) return;
+  // Target: drag-coords if provided, else nearest-to-player.
+  var targetX = (ox !== undefined) ? ox : player.x;
+  var targetY = (oy !== undefined) ? oy : player.y;
+  var target = null;
+  var best = Infinity;
+  entities.forEach(function(g) {
+    if (g.hp <= 0) return;
+    var d = Math.hypot(g.x - targetX, g.y - targetY);
+    if (d < best) { best = d; target = g; }
+  });
+  if (!target) {
+    showFloatingText(player.x, player.y - 50, 'NO TARGET', '#555', player);
+    return false;
+  }
+  // Base damage from unified pipeline. Crit doubles base damage (matches
+  // red/blue/gray/purple convention).
+  var baseDmg = (fx.witherDmg || 2) * (crit ? 2.0 : 1.0);
+  // Stacks per cast: pipeline value + 1 on crit (was ×2 — too steep).
+  var stacksApplied = (fx.witherStacks || 1) + (crit ? 1 : 0);
+  witherBolts.push({
+    x: player.x, y: player.y,
+    target: target,
+    speed: WITHER_BOLT_SPEED,
+    baseDmg: baseDmg,
+    r: 8,
+    alpha: 1.0,
+    wobble: 0,
+    wobbleAmp: 12,
+    trailTimer: 0,
+    dead: false,
+    stacksApplied: stacksApplied,
+    isCrit: crit,
+  });
+  return true;
+}
+
+function updateWitherbolts(dt) {
+  witherBolts = witherBolts.filter(function(b) { return !b.dead; });
+  witherBolts.forEach(function(b) {
+    if (!b.target || b.target.hp <= 0) { b.dead = true; return; }
+    var dx = b.target.x - b.x, dy = b.target.y - b.y;
+    var dist = Math.sqrt(dx*dx + dy*dy) || 1;
+    // Perpendicular wobble for the curved "sinister" flight path
+    b.wobble += dt * 6;
+    var nx = dx / dist, ny = dy / dist;
+    var px = -ny, py = nx; // perp
+    var wob = Math.sin(b.wobble) * b.wobbleAmp;
+    var step = b.speed * dt;
+    b.x += nx * step + px * wob * dt;
+    b.y += ny * step + py * wob * dt;
+    // Trail particles
+    b.trailTimer += dt;
+    if (b.trailTimer >= 0.05) {
+      b.trailTimer = 0;
+      purpleParticles.push({
+        x: b.x + (Math.random()-0.5)*6, y: b.y + (Math.random()-0.5)*6,
+        vx: (Math.random()-0.5)*20, vy: (Math.random()-0.5)*20,
+        r: 2 + Math.random()*2, alpha: 0.7, color: '#552288',
+      });
+    }
+    // Impact check
+    if (dist < b.r + b.target.r) {
+      // Compute damage: base scaled by current stacks on target (pre-new).
+      var existing = b.target.witherStacks || 0;
+      var dmg = Math.max(1, Math.ceil(b.baseDmg * witherSelfScale(existing)));
+      // Mark as witherbolt-source so damageEntity doesn't double-amp it.
+      _witherboltDamage = true;
+      var res = damageEntity(b.target, dmg, undefined, 'black');
+      _witherboltDamage = false;
+      b.target.flashTimer = 0.2;
+      showDamageNumber(b.target.x, b.target.y - 30, res.applied, '#552288', res.tier, b.target.x, b.target.y, undefined, res.witherBoost, b.target, 'black');
+      // Apply wither stacks + refresh shared timer. Stack readout lives in
+      // the unified buff bar above the entity now — no impact floater.
+      // Apply stacks, capped at MAX_WITHER_STACKS. Casts beyond cap still
+      // refresh the timer (so wither doesn't fall off mid-fight) but don't
+      // accumulate, which keeps the linear witherSelfScale bounded at 1.5×.
+      b.target.witherStacks = Math.min(MAX_WITHER_STACKS, (b.target.witherStacks || 0) + b.stacksApplied);
+      b.target.witherTimer = WITHER_DURATION;
+      // WITHERED threshold banner only when it crits and reaches the cap.
+      if (b.target.witherStacks >= MAX_WITHER_STACKS && b.isCrit) {
+        showFloatingText(b.target.x, b.target.y - 70, 'WITHERED!', '#9B6FD4', b.target);
+      }
+      // Crit visuals
+      if (b.isCrit) {
+        spawnCritShockwave(b.target.x, b.target.y, '#552288', { r0: 6, maxR: scaleDist(140), thickness: 3, growth: 280 });
+        spawnCritFlourish(b.target.x, b.target.y, '#7744AA', 16);
+        spawnCritFlourish(b.target.x, b.target.y, '#CC99FF', 10);
+      }
+      b.dead = true;
+    }
+  });
+}
+
+function drawWitherbolts() {
+  if (!ctx) return;
+  witherBolts.forEach(function(b) {
+    ctx.save();
+    // Outer glow
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = '#7744AA';
+    ctx.shadowColor = '#552288'; ctx.shadowBlur = 14;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 1.5, 0, Math.PI*2); ctx.fill();
+    // Core
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#333';
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.7, 0, Math.PI*2); ctx.fill();
+    // Inner highlight
+    ctx.globalAlpha = 0.8;
+    ctx.fillStyle = '#BB88FF';
+    ctx.shadowBlur = 0;
+    ctx.beginPath(); ctx.arc(b.x - b.r*0.2, b.y - b.r*0.2, b.r * 0.3, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  });
+}
+
+// Track when damageEntity is being called FROM a witherbolt so we don't
+// apply the other-source amp to the witherbolt itself (that would double-count).
+var _witherboltDamage = false;
+
+// Per-entity wither timer decay — called each frame from updateEntity.
+function decayWither(g, dt) {
+  if ((g.witherTimer || 0) > 0) {
+    g.witherTimer = Math.max(0, g.witherTimer - dt);
+    if (g.witherTimer <= 0) {
+      g.witherStacks = 0;
+    }
+  }
+}
+
+var BRICK_COOLDOWNS = {};
+var BRICK_CD_TIMES = { red:8, yellow:10 }; // kept for reference but not used for timing
+
+function tickBrickCooldowns(dt) {
+  // No-op — cooldowns now only block while brickAction is active
+}
+
+function useBrickAction(color) {
+  if (!player || !running) return;
+  // Only block if a duration action is in progress AND this brick also needs exclusive control
+  var exclusiveColors = ['red']; // only these block others
+  if (brickAction && exclusiveColors.indexOf(color) >= 0) {
+    showFloatingText(player.x, player.y - 50, 'WAIT...', '#888', player);
+    return;
+  }
+  if (!player.bricks[color] || player.bricks[color] <= 0) return;
+
+  if (player.bricks[color] <= 0) return; // no charges
+  player.bricks[color]--;
+  if (_battleStats) _addBrickStat(_battleStats.bricksUsed, color, 1);
+  player.brickRecharge[color] = player.brickRecharge[color] || 0;
+  renderBrickBar();
+
+  // Crit roll for taps. Count=1 for taps. Threshold EFFECTS per color
+  // land in Session B; universal signature fires here for consistency
+  // across tap and overload paths.
+  _currentCrit = rollCrit(color, 1);
+  if (_currentCrit) {
+    triggerCritSignature(color, player.x, player.y - 80);
+  }
+
+  if (color === 'red')    startRedCharge(1);
+  if (color === 'white')  doWhiteHeal(player.x, player.y);
+  if (color === 'yellow') {
+    var yTapFx = _fx('yellow', 1);
+    if (yTapFx) {
+      startYellowAura({ follow: true, radius: clampRadiusToArena(yTapFx.radiusPx), duration: yTapFx.duration, yellowSeed: yTapFx.yellowSeed, label: 'DAZE FIELD', isCrit: _currentCrit });
+    }
+  }
+  if (color === 'blue')   startBlueBolt(null);
+  if (color === 'orange') startOrangeTrap(player.x, player.y);
+  if (color === 'gray')   fireOverloadGray(1, player.x, player.y);
+  if (color === 'purple') startPurpleBurst(player.x, player.y);
+  if (color === 'black') {
+    var fired = startWitherbolt();
+    if (fired === false) {
+      // No target — refund the brick.
+      player.bricks[color]++;
+      renderBrickBar();
+    }
+  }
+}
+
+// ── RED — Charge ──────────────────────────────────
+
+
+// ─── YELLOW CONFUSE DIAGNOSTIC (S015 v0.15.18) ─────────────────────
+// Goal: capture why confused entities sometimes don't attack each
+// other in playtest. Two suspect failure modes:
+//   1. Yellow cast applied DAZE not CONFUSE (only crit causes confuse;
+//      a non-crit yellow tap dazes but doesn't trigger entity-vs-entity
+//      attacks). User may have expected base yellow to confuse.
+//   2. Confused state IS set but a gating field (pat !== 'touch',
+//      attackCooldown stuck > 0, silencedTimer stuck > 0, range never
+//      satisfied) prevents the wrong-target attack from firing.
+//
+// Diagnostic captures:
+//   - At cast time (snapshotYellowCast): isCrit, hit count, dazed count,
+//     confused count, cast position
+//   - Per-frame for each confused entity (recordYellowConfuseFrame):
+//     entity id, pat, confused/timer, silencedTimer, attackCooldown,
+//     nearestOther id + dist, contactThreshold, attackedThisFrame flag
+//   - On attack attempt (recordYellowConfuseAttack): the actual hit
+//     event so we can confirm the wrong-target path fired vs missed
+//
+// Renders bottom-left of arena: cast summary + per-entity status table.
+// Persists for 4s after all confused entities expire.
+var yellowDiag = null;
+
+function snapshotYellowCast(isCrit, hitCount, dazedCount, confusedCount, cx, cy) {
+  yellowDiag = {
+    castX: cx, castY: cy,
+    castIsCrit: isCrit,
+    hitCount: hitCount,
+    dazedCount: dazedCount,
+    confusedCount: confusedCount,
+    capturedAt: performance.now(),
+    perEntity: {},  // keyed by entity id
+    attackEvents: [], // {attackerId, targetId, dmgAmt, t}
+    state: 'live',
+    ttl: 0,
+  };
+}
+
+function recordYellowConfuseFrame(g) {
+  if (!yellowDiag || yellowDiag.state !== 'live') return;
+  var id = g.id || ('e' + entities.indexOf(g));
+  // Find nearest other entity for this entity right now
+  var nearest = null, nearestDist = Infinity;
+  for (var ci = 0; ci < entities.length; ci++) {
+    var o = entities[ci];
+    if (o === g || o.hp <= 0 || o.dead) continue;
+    var od = Math.hypot(o.x - g.x, o.y - g.y);
+    if (od < nearestDist) { nearest = o; nearestDist = od; }
+  }
+  var contactThreshold = nearest ? (g.r + nearest.r + 4) : 0;
+  yellowDiag.perEntity[id] = {
+    id: id,
+    pat: g.atk || g.attackPattern || 'unknown',  // store whatever pattern field is in use
+    confused: !!g.confused,
+    confuseTimer: +(g.confuseTimer || 0).toFixed(2),
+    silencedTimer: +(g.silencedTimer || 0).toFixed(2),
+    attackCooldown: +(g.attackCooldown || 0).toFixed(2),
+    nearestId: nearest ? (nearest.id || ('e' + entities.indexOf(nearest))) : null,
+    nearestDist: nearest ? +nearestDist.toFixed(1) : null,
+    contactThreshold: +contactThreshold.toFixed(1),
+    inRange: nearest ? (nearestDist < contactThreshold) : false,
+    lastSeen: performance.now(),
+  };
+}
+
+function recordYellowConfuseAttack(g, target, dmgAmt) {
+  if (!yellowDiag) return;
+  var aid = g.id || ('e' + entities.indexOf(g));
+  var tid = target.id || ('e' + entities.indexOf(target));
+  yellowDiag.attackEvents.push({
+    attackerId: aid,
+    targetId: tid,
+    dmgAmt: dmgAmt,
+    t: performance.now(),
+  });
+}
+
+function updateYellowDiag(dt) {
+  if (!yellowDiag) return;
+  // Determine if any entity in perEntity is still confused live.
+  var anyLive = false;
+  if (yellowDiag.state === 'live') {
+    Object.keys(yellowDiag.perEntity).forEach(function(id) {
+      var rec = yellowDiag.perEntity[id];
+      if (rec.confused && rec.confuseTimer > 0) anyLive = true;
+    });
+    if (!anyLive) {
+      yellowDiag.state = 'persist';
+      yellowDiag.ttl = 4000;
+    }
+  } else {
+    yellowDiag.ttl -= dt * 1000;
+    if (yellowDiag.ttl <= 0) yellowDiag = null;
+  }
+}
+
+function drawYellowDiag() {
+  if (!yellowDiag || !ctx) return;
+  var d = yellowDiag;
+  var alpha = (d.state === 'persist') ? Math.max(0, d.ttl / 4000) : 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  // Cast marker
+  ctx.strokeStyle = d.castIsCrit ? '#FFD700' : '#FFEE44';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.arc(d.castX, d.castY, 8, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  // Build text panel
+  var lines = [];
+  lines.push('YELLOW DIAG');
+  lines.push('cast: ' + (d.castIsCrit ? 'CRIT (confuse)' : 'BASE (daze only)'));
+  lines.push('hit: ' + d.hitCount + ' | dazed: ' + d.dazedCount + ' | confused: ' + d.confusedCount);
+  if (!d.castIsCrit) {
+    lines.push('NOTE: base yellow does NOT confuse');
+    lines.push('only crit yellow triggers entity-vs-entity attacks');
+  }
+  lines.push('');
+  lines.push('--- per confused entity ---');
+  var ids = Object.keys(d.perEntity);
+  if (ids.length === 0) {
+    lines.push('(none captured)');
+  } else {
+    ids.forEach(function(id) {
+      var r = d.perEntity[id];
+      lines.push(id + ' pat=' + r.pat + ' conf=' + r.confused +
+                 ' tmr=' + r.confuseTimer);
+      lines.push('  cd=' + r.attackCooldown + ' silenced=' + r.silencedTimer +
+                 ' nearest=' + (r.nearestId || 'none') +
+                 ' d=' + (r.nearestDist != null ? r.nearestDist : '-') +
+                 '/' + r.contactThreshold +
+                 ' inRange=' + r.inRange);
+    });
+  }
+  lines.push('');
+  lines.push('--- attack events ---');
+  if (d.attackEvents.length === 0) {
+    lines.push('(none — no wrong-target attacks fired)');
+  } else {
+    d.attackEvents.slice(-6).forEach(function(ev) {
+      lines.push(ev.attackerId + ' -> ' + ev.targetId + ' (' + ev.dmgAmt + ' dmg)');
+    });
+  }
+  // Render
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  var pad = 4, lh = 12;
+  // Position bottom-left of arena
+  var tx = 12;
+  var ty = (canvas.height || H) - (lines.length * lh) - 16;
+  var maxW = 0;
+  lines.forEach(function(l){ maxW = Math.max(maxW, ctx.measureText(l).width); });
+  ctx.fillStyle = 'rgba(0,0,0,0.78)';
+  ctx.fillRect(tx - pad, ty - pad, maxW + pad*2, lines.length * lh + pad*2);
+  ctx.fillStyle = '#FFEE44';
+  lines.forEach(function(l, i){
+    if (l.indexOf('NOTE:') === 0) ctx.fillStyle = '#FF6666';
+    else if (l.indexOf('--- ') === 0) ctx.fillStyle = '#88CCFF';
+    else ctx.fillStyle = '#FFEE44';
+    ctx.fillText(l, tx, ty + i * lh + 8);
+  });
+  ctx.restore();
+}
+
+function startRedChargeTo(dmgMult, tx, ty) {
+  // Charge toward a specific canvas point. Range gate: if drop point is
+  // beyond the class's effective red range, clamp the dash endpoint to
+  // the max-range mark in the same direction. Player still gets to
+  // commit and travel; they just don't reach further than their
+  // inventory + affinity allows. See getRedRange(cls, owned) for math.
+  // Per S015 v0.15.9: range is INVENTORY-driven, not tier-driven. Tap
+  // and overload have the same range; tier scales damage only.
+  var _dmgMult = dmgMult || 1;
+  var startX = player.x, startY = player.y;
+  var dx = tx - player.x, dy = ty - player.y;
+  var dist = Math.sqrt(dx*dx+dy*dy) || 1;
+  var nx = dx/dist, ny = dy/dist;
+  // Read B (S015 v0.15.12): prefer pre-spend snapshot from fireOverload
+  // (set BEFORE bricks were consumed). Falls back to current inventory
+  // for tap-path dashes that don't go through fireOverload. Snapshot is
+  // null between casts, so the fallback covers all non-overload paths.
+  var ownedRed = (_redCastOwnedSnapshot != null)
+    ? _redCastOwnedSnapshot
+    : ((player.bricks && player.bricks.red) || 0);
+  var maxRange = (typeof getRedRange === 'function')
+    ? getRedRange(player.cls, ownedRed)
+    : 1e9;
+  // Clamp endpoint to maxRange in the dash direction
+  var endDist = Math.min(dist, maxRange);
+  var endX = startX + nx * endDist;
+  var endY = startY + ny * endDist;
+  brickAction = {
+    type: 'red', phase: 'charge',
+    startX: startX, startY: startY,
+    dirX: nx, dirY: ny,
+    chargeSpeed: player.speed * 4,
+    hit: false, dmgMult: _dmgMult,
+    targetX: endX, targetY: endY,    // clamped target
+    usePoint: true,
+    maxRange: maxRange,              // hard cap on travel distance
+    isCrit: _currentCrit,
+  };
+}
+
+function startRedCharge(dmgMult, targetEntity) {
+  if (!entities.length) return;
+  var _dmgMult = dmgMult || 1;
+  var entity = targetEntity || entities.reduce(function(a,b){
+    return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;});
+  var startX = player.x, startY = player.y;
+  var dx = entity.x - player.x, dy = entity.y - player.y;
+  var dist = Math.sqrt(dx*dx + dy*dy) || 1;
+  var nx = dx/dist, ny = dy/dist;
+  // Range gate: same as startRedChargeTo. Auto-targeted dash to nearest
+  // entity is also capped at inventory-driven range. If nearest entity is
+  // out of range, dash still launches and ends at the max-range mark
+  // (entity escapes this swing — design choice favors the entity).
+  // Per S015 v0.15.9: range driven by red brick inventory, not tier.
+  // Read B (S015 v0.15.12): prefer pre-spend snapshot from fireOverload.
+  var ownedRed = (_redCastOwnedSnapshot != null)
+    ? _redCastOwnedSnapshot
+    : ((player.bricks && player.bricks.red) || 0);
+  var maxRange = (typeof getRedRange === 'function')
+    ? getRedRange(player.cls, ownedRed)
+    : 1e9;
+  brickAction = {
+    type: 'red',
+    phase: 'charge',
+    startX: startX, startY: startY,
+    dirX: nx, dirY: ny,
+    chargeSpeed: player.speed * 4,
+    hit: false,
+    dmgMult: _dmgMult,
+    maxRange: maxRange,
+    isCrit: _currentCrit,
+  };
+  // v0.16.54 — Pierce dashes lock direction at cast time. Without this,
+  // the auto-target retarget block flips direction every frame as the
+  // player moves through entities (nearest entity changes after each
+  // pierce hit), producing the "shaking / odd positions" visual.
+  // Other dash models (recoil, aoe-blast) STOP on first hit, so they
+  // don't suffer this — they want auto-tracking until impact.
+  var _ddProf2 = (typeof getRedDashProfile === 'function') ? getRedDashProfile(player.cls) : null;
+  if (_ddProf2 && _ddProf2.dashModel === 'pierce') {
+    brickAction._lockDirection = true;
+  }
+}
+
+// ── WHITE — Heal ─────────────────────────────────
+var playerSparkles = [];
+var playerRegen = null; // { hpPerSec, timer, duration, tick } // anchored to player position
+
+
+function getArmorMax() {
+  if (!player) return 0;
+  // v0.16.33: canonical armor cap reads from CHARACTERS[cls].armorCapMult.
+  // Replaces hardcoded BK 0.75 / else 0.5 ternary. Adding/changing class
+  // armor caps = data change in characters.js, not engine surgery.
+  var mult = (typeof CHARACTERS !== 'undefined' && CHARACTERS[player.cls]
+    && typeof CHARACTERS[player.cls].armorCapMult === 'number')
+    ? CHARACTERS[player.cls].armorCapMult : 0.5;
+  return Math.floor(player.hpMax * mult);
+}
+
+// v0.16.34 — RUMBLE PASSIVE DISPATCHER
+// Reads CHARACTERS[player.cls].rumblePassive (declarative) and applies
+// the kind-specific effect at rumble start. Replaces the 6-class
+// hardcoded if/else switch that previously sat inline at the rumble
+// init site. Adding a passive variant = (1) add the kind to this
+// dispatcher and (2) populate the field for the class. No engine
+// site outside this function knows about per-class passives.
+//
+// Visual confirmation: every passive shows a Crit Banner (large
+// glowing text, 1.4s duration) PLUS a particle flourish ring. Bigger
+// presence than the previous showFloatingText, since the passive is
+// the player's identity moment at rumble start.
+//
+// Kinds (extend by adding case + populating class entry):
+//   firstHitMod       — { mult }      → flag for damageEntity
+//   invulnMs          — { duration }  → timestamp for applyDamageToPlayer
+//   armorBonus        — { amount }    → direct armor add (cap-aware)
+//   hpOverheal        — { amount }    → hp = hpMax + amount
+//   firstEnemyDebuff  — { effect, stacks, duration } → deferred to post-spawn
+function applyRumblePassive() {
+  if (!player) return;
+  var cdata = (typeof CHARACTERS !== 'undefined') ? CHARACTERS[player.cls] : null;
+  var p = cdata && cdata.rumblePassive;
+  if (!p) return;
+
+  switch (p.kind) {
+    case 'firstHitMod':
+      player.firstHitActive = true;
+      player.firstHitMult = p.mult || 1.5;
+      break;
+    case 'invulnMs':
+      player.passiveInvulnUntil = performance.now() + (p.duration || 0);
+      break;
+    case 'armorBonus':
+      var aMax = getArmorMax();
+      player.armor = Math.min(aMax || 99, (player.armor || 0) + (p.amount || 1));
+      break;
+    case 'hpOverheal':
+      // v0.16.43 — Fixer overheal climbs over multiple rumbles. Spec:
+      //   - Add `amount` pips on every rumble entry (no gate)
+      //   - Cap at hpMax × capMult (default 2.0 = double HP max)
+      //   - Damage model: overheal lost like normal HP, no reset on hit
+      // Per S016 design lock: Fixer at 1/8 → 2/8 next rumble. Climbs
+      // every rumble regardless of HP state. 8 rumbles from full = 16/8
+      // cap. Damage takes pips off; resume climb on next rumble entry.
+      var _ohAmount = p.amount || 1;
+      var _ohCapMult = (typeof p.capMult === 'number') ? p.capMult : 2.0;
+      var _ohCap = Math.floor((player.hpMax || 1) * _ohCapMult);
+      player.hp = Math.min(_ohCap, (player.hp || 0) + _ohAmount);
+      break;
+    case 'firstEnemyDebuff':
+      // Deferred — applied after entities spawn, see applyPendingEnemyDebuff
+      player._pendingEnemyDebuff = {
+        effect: p.effect,
+        stacks: p.stacks || 1,
+        duration: p.duration || 6.0
+      };
+      break;
+  }
+
+  // Visual confirmation — banner + particle flourish at player.
+  // Banner is the bigger presence; flourish reinforces it as a moment
+  // worth noticing. Same visual vocabulary as crit firings so the player
+  // already reads it as "something just happened."
+  // v0.16.35: 1s delay before visual fires. Mechanic effects above
+  // apply immediately (SS invuln starts at t=0, BK flag set at t=0,
+  // etc.) but the cinematic plays after a settling beat so the player
+  // has context for what they're seeing. Skip if player died in the
+  // delay window.
+  setTimeout(function() {
+    if (!player || player.hp <= 0) return;
+    if (typeof spawnCritBanner === 'function' && p.label) {
+      spawnCritBanner(player.x, player.y - 50, p.label, p.color || '#FFFFFF');
+    }
+    if (typeof spawnCritFlourish === 'function') {
+      spawnCritFlourish(player.x, player.y, p.color || '#FFFFFF', 18);
+    }
+  }, 1000);
+}
+
+// v0.16.34 — Deferred passive application for firstEnemyDebuff kind.
+// Called after entities have spawned. Reads player._pendingEnemyDebuff
+// (set by applyRumblePassive earlier), applies to entities[0], clears
+// the flag. Today only 'poison' supported; future debuff types extend
+// this dispatcher (e.g. 'wither', 'slow', 'bleed').
+function applyPendingEnemyDebuff() {
+  if (!player || !player._pendingEnemyDebuff) return;
+  if (!entities || entities.length === 0) return;
+  var ed = player._pendingEnemyDebuff;
+  var target = entities[0];
+  if (target && target.hp > 0) {
+    if (ed.effect === 'poison') {
+      target.poisoned = true;
+      target.poisonStack = (target.poisonStack || 0) + ed.stacks;
+      target.poisonTimer = Math.max(target.poisonTimer || 0, ed.duration);
+      target.poisonTick = 0;
+      if (typeof showFloatingText === 'function') {
+        showFloatingText(target.x, target.y - 30, 'BLIGHT MARK', '#1D9E75', target);
+      }
+    }
+    // Future debuff effects added here (wither, slow, bleed, etc).
+  }
+  player._pendingEnemyDebuff = null;
+}
+function startWhiteRegen(tier) {
+  var tap = tapScaleMult('white');
+  var mult = affinityMult('white');
+  var baseAmt = window.baseHeal(player.cls);
+  var baseDur = 5;
+  var hpPerSec = baseAmt * tap * Math.pow(1.25, tier-1) / baseDur * mult;
+  var duration = baseDur * Math.pow(2, tier-1) * mult;
+  if (playerRegen) {
+    // Stack — extend duration
+    playerRegen.hpPerSec = Math.max(playerRegen.hpPerSec, hpPerSec);
+    playerRegen.timer = Math.max(playerRegen.timer, duration);
+    playerRegen.duration = duration;
+  } else {
+    playerRegen = { hpPerSec: hpPerSec, timer: duration, duration: duration, tick: 0 };
+  }
+}
+
+function updateRegen(dt) {
+  if (!playerRegen || !player) return;
+  playerRegen.timer -= dt;
+  playerRegen.tick += dt;
+  if (playerRegen.tick >= 1.0) {
+    playerRegen.tick -= 1.0;
+    var cap = Math.max(player.hpMax, player.hp);
+    var prev = player.hp;
+    player.hp = Math.min(cap, player.hp + playerRegen.hpPerSec);
+    var healed = Math.ceil(player.hp - prev);
+    if (healed > 0) {
+      if (_battleStats) {
+        _battleStats.totalHealed = (_battleStats.totalHealed || 0) + healed;
+        if (healed > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = healed;
+      }
+      showFloatingText(player.x, player.y-40, healed + ' ✨', '#EFEFEF', player);
+      spawnHealSparkles(1);
+      // Regen counts as a heal — could rescue from bleed.
+      applyBleedRescue(healed);
+    }
+  }
+  if (playerRegen.timer <= 0) playerRegen = null;
+}
+
+// ── BLEED-OUT (per design doc §1.4, refined) ───────────────────────────
+// Every killing blow initiates a bleed window — no damage threshold.
+// The window's length scales with how much overflow damage was dealt:
+//   overflow=1  (barely fatal)  → 2400ms
+//   overflow=5                  → 2000ms
+//   overflow=15                 → 1000ms
+//   overflow=25+ (catastrophic) → 500ms (floor)
+//
+// Heals during the window can push toHp positive (rescue trajectory).
+// Additional damage during bleed compounds toHp lower without extending duration.
+//
+// Three central helpers route HP changes through bleed-aware paths:
+//   applyDamageToPlayer(dmg) — replaces direct `player.hp -= dmg`. Triggers
+//     bleed on any killing blow, else applies instantly.
+//   applyHealToPlayer(amount) — caps + heals, also rescues from bleed if active.
+//   applyBleedRescue(healed) — called by any heal path to interrupt bleed.
+
+var BLEED_DURATION_MAX_MS = 2500;
+var BLEED_DURATION_MIN_MS = 500;
+var BLEED_OVERFLOW_PENALTY_MS = 100; // ms shaved off duration per point of overflow
+
+function applyDamageToPlayer(dmg) {
+  if (!player || dmg <= 0) return;
+  // PASSIVE INVULN WINDOW: any class with rumblePassive.kind === 'invulnMs'
+  // gets a class-defined invuln period at rumble start (timestamp set in
+  // applyRumblePassive). Currently only Snapstep, but consumer is class-
+  // agnostic. Player skips ALL incoming damage during this window.
+  if (player.passiveInvulnUntil && performance.now() < player.passiveInvulnUntil) {
+    showFloatingText(player.x, player.y - 40, 'EVADED', '#1D9E75', player);
+    return;
+  }
+  // Warp invuln (FW purple teleport, runs during entire 1000ms warp event).
+  // Player.warpState set when warp begins, cleared when sequence completes.
+  if (player.warpState) {
+    showFloatingText(player.x, player.y - 40, 'WARP', '#9B6FD4', player);
+    return;
+  }
+  var newHp = player.hp - dmg;
+  // Non-killing blow — instant apply, no bleed. Round so HP stays integer.
+  if (newHp > 0) {
+    player.hp = Math.max(0, Math.round(newHp));
+    return;
+  }
+  // Killing blow path. Bleed initiates universally — even for BK with
+  // an unused death save. Save only fires at the END of bleed if HP
+  // actually bottoms out (see updateBleedOut completion). This keeps the
+  // bleed rescue window meaningful — allies healing during bleed can
+  // save BK without consuming the death save.
+  if (player.bleedOut) {
+    // Already bleeding — stack overflow into existing toHp (drives rescue
+    // target deeper). Don't extend duration; existing window plays out.
+    player.bleedOut.toHp -= dmg;
+    return;
+  }
+  // Initiate fresh bleed
+  var overflow = Math.max(1, dmg - player.hp);
+  var duration = Math.max(
+    BLEED_DURATION_MIN_MS,
+    Math.min(BLEED_DURATION_MAX_MS, BLEED_DURATION_MAX_MS - overflow * BLEED_OVERFLOW_PENALTY_MS)
+  );
+  player.bleedOut = {
+    fromHp: player.hp,
+    toHp: -overflow,    // negative; we visually clamp to 0 in the renderer
+    startTime: performance.now(),
+    duration: duration,
+  };
+  showFloatingText(player.x, player.y - 60, '⚠ BLEED', '#b06fef', player);
+}
+
+// ── DEATH SAVE (BK gray signature) ────────────────────────────────────
+// One-per-rumble lethal-blow recovery. Triggers when player would die,
+// has a deathSave-eligible grayProfile, has at least 1 armor pip, and
+// hasn't used the save already this rumble.
+//
+// Flow: start sequence → freeze world → drain pips one-at-a-time over
+// (pip × pipDrainMs) → each pip raises HP by armorToHpRatio (rounded
+// up) → final beat (SAVED floater + flash) → unfreeze.
+//
+// Per design doc §2.3 (BREAKER GRAY: armor absorbs lethal blow once
+// per rumble). Future fusion (0.16.5): refactor to be a forge recipe
+// available to all classes who invest the bricks. Currently a baseline
+// BK passive for immediate gameplay impact.
+function tryDeathSave() {
+  if (!player) return false;
+  var prof = (typeof getGrayProfile === 'function') ? getGrayProfile(player.cls) : null;
+  if (!prof || !prof.deathSave) return false;
+  if (player.deathSaveUsed) return false;
+  if ((player.armor || 0) <= 0) return false;
+  // Save fires. Set HP target up front; sequence ticks pips for the visual.
+  var armorCount = player.armor;
+  var targetHp = Math.max(prof.minHp || 1, Math.ceil(armorCount * (prof.armorToHpRatio || 0.5)));
+  player.deathSave = {
+    armorStart: armorCount,
+    pipsDrained: 0,
+    pipsTotal: armorCount,
+    targetHp: targetHp,
+    hpStart: 0,           // we treat the save as starting at 0 hp; clamp avoids bleed/death
+    pipDrainMs: prof.pipDrainMs || 150,
+    nextPipAt: performance.now(), // first pip fires immediately
+    finished: false,
+  };
+  // Pre-zero hp + clear armor so external systems don't see a partial state.
+  // Pip ticks rebuild hp visibly during the sequence.
+  player.hp = 0;
+  player.armor = 0;
+  player.deathSaveUsed = true;
+  // Global freeze — paused world during the cinematic. Render keeps running.
+  _globalFreeze = true;
+  return true;
+}
+
+function updateDeathSave(dt) {
+  if (!player || !player.deathSave) return;
+  var ds = player.deathSave;
+  if (ds.finished) return;
+  var now = performance.now();
+  // Drain one pip per pipDrainMs. Each drained pip increments HP by the
+  // ratio (ceiling), clamped to targetHp so we don't overshoot.
+  while (ds.pipsDrained < ds.pipsTotal && now >= ds.nextPipAt) {
+    ds.pipsDrained++;
+    var hpGain = Math.ceil(ds.targetHp * (ds.pipsDrained / ds.pipsTotal)) - player.hp;
+    if (hpGain > 0) {
+      player.hp = Math.min(ds.targetHp, player.hp + hpGain);
+    }
+    // Particle burst per pip — gray sparks radiating from player
+    for (var i = 0; i < 8; i++) {
+      var ang = Math.random() * Math.PI * 2;
+      var spd = 60 + Math.random() * 80;
+      purpleParticles.push({
+        x: player.x, y: player.y,
+        vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+        r: 2 + Math.random() * 2,
+        alpha: 0.95,
+        color: '#cccccc',
+      });
+    }
+    // Show the cumulative HP gain inline (small floater per pip)
+    showFloatingText(player.x + (Math.random() - 0.5) * 20, player.y - 20, '+' + hpGain + ' HP', '#ddd', player);
+    ds.nextPipAt = now + ds.pipDrainMs;
+  }
+  if (ds.pipsDrained >= ds.pipsTotal) {
+    // Final beat — big SAVED floater + bright flash
+    showFloatingText(player.x, player.y - 50, '◆ SAVED', '#ffffff', player);
+    spawnCritShockwave(player.x, player.y, '#cccccc', { r0: 14, maxR: scaleDist(120), thickness: 4, growth: 280 });
+    spawnCritFlourish(player.x, player.y, '#ffffff', 22);
+    ds.finished = true;
+    // Unfreeze world after a brief hold so the SAVED beat reads
+    setTimeout(function() {
+      _globalFreeze = false;
+      if (player) player.deathSave = null;
+    }, 250);
+  }
+}
+
+// Global pause flag — when true, gameplay updates skip dt advancement.
+// Used by death save cinema. Render loop runs unaffected so visuals
+// keep playing.
+var _globalFreeze = false;
+
+function applyHealToPlayer(amount) {
+  if (!player || amount <= 0) return 0;
+  var prev = player.hp;
+  var cap = Math.max(player.hpMax, player.hp);
+  player.hp = Math.min(cap, Math.round(player.hp + amount));
+  var actual = player.hp - prev;
+  if (actual > 0) applyBleedRescue(actual);
+  return actual;
+}
+
+// Called by any heal path to interrupt bleed-out. Raises the bleed's toHp
+// toward rescue. If the new toHp is positive, the trajectory becomes a
+// rescue arc — bleed will resolve to a saved state when its window ends.
+function applyBleedRescue(healAmount) {
+  if (!player || !player.bleedOut || healAmount <= 0) return;
+  var b = player.bleedOut;
+  // Compute current visual HP based on bleed progress (mirrors update logic)
+  var elapsed = performance.now() - b.startTime;
+  var t = Math.min(1, elapsed / b.duration);
+  var currentVisualHp = b.fromHp + (b.toHp - b.fromHp) * t;
+  // New target = current visual HP + heal amount, capped at hpMax
+  var newToHp = Math.min(player.hpMax, currentVisualHp + healAmount);
+  // Restart math from current visual position toward new target.
+  // Remaining duration stays the same — heal just bends the trajectory.
+  var remaining = Math.max(0, b.duration - elapsed);
+  b.fromHp = currentVisualHp;
+  b.toHp = newToHp;
+  b.startTime = performance.now();
+  b.duration = remaining;
+  // If toHp positive, this is a rescue trajectory — show the rescued floater
+  if (newToHp > 0) {
+    showFloatingText(player.x, player.y - 70, '✓ RESCUED', '#5dd055', player);
+  }
+}
+
+// ── BLEED SCREEN TINT ───────────────────────────────────────────────
+// Faint red overlay during bleed-out. Lazy-created so it works in any
+// host page (test harness, players.html) without needing HTML markup.
+// Pulses subtly while bleeding; fades in/out cleanly on enter/exit.
+function _ensureBleedOverlay() {
+  var el = document.getElementById('rumble-bleed-overlay');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'rumble-bleed-overlay';
+  el.style.cssText = [
+    'position:fixed', 'inset:0',
+    'pointer-events:none',
+    'z-index:150',                      // below HUD/picker, above canvas
+    'opacity:0',
+    'transition:opacity 600ms ease-out',
+    // Radial gradient — vignette-style. Deeper red at edges, light center.
+    // Layered with subtle inner pulse via animation.
+    'background:radial-gradient(ellipse at center, rgba(176,0,40,0) 30%, rgba(176,0,40,0.18) 75%, rgba(120,0,30,0.32) 100%)',
+    'animation:bleedPulse 1.4s ease-in-out infinite',
+  ].join(';');
+  // Inject keyframes once — no-op if already present
+  if (!document.getElementById('rumble-bleed-keyframes')) {
+    var style = document.createElement('style');
+    style.id = 'rumble-bleed-keyframes';
+    style.textContent =
+      '@keyframes bleedPulse {'
+      + '  0%, 100% { filter:brightness(1.0); }'
+      + '  50%      { filter:brightness(1.25); }'
+      + '}';
+    document.head.appendChild(style);
+  }
+  document.body.appendChild(el);
+  return el;
+}
+
+function updateBleedOverlay(isBleeding) {
+  var el = _ensureBleedOverlay();
+  if (isBleeding) {
+    // Faster fade IN (urgency) than fade OUT (relief)
+    el.style.transition = 'opacity 300ms ease-out';
+    el.style.opacity = '1';
+  } else {
+    el.style.transition = 'opacity 600ms ease-out';
+    el.style.opacity = '0';
+  }
+}
+
+function updateBleedOut(dt) {
+  if (!player || !player.bleedOut) return;
+  var b = player.bleedOut;
+  var elapsed = performance.now() - b.startTime;
+  var t = b.duration > 0 ? Math.min(1, elapsed / b.duration) : 1;
+  // Linear interpolation from fromHp to toHp over duration. Clamp visual to 0.
+  // Round to whole int — internal interp is float for smooth math but the
+  // displayed HP should always be a whole number.
+  var interp = b.fromHp + (b.toHp - b.fromHp) * t;
+  player.hp = Math.max(0, Math.round(interp));
+  if (t >= 1) {
+    // Bleed complete. Lock in toHp (clamped to 0, rounded) and clear state.
+    player.hp = Math.max(0, Math.round(b.toHp));
+    player.bleedOut = null;
+    if (player.hp <= 0) {
+      // HP bottomed out — the bleed rescue window passed without enough
+      // healing. Try death save (BK gray signature). If it fires, the
+      // pip-drain cinema rebuilds HP from the save's armor pool. If not
+      // (no armor, save used, or non-BK), fall through to respawn.
+      if (!tryDeathSave()) {
+        if (typeof respawnPlayer === 'function') respawnPlayer();
+      }
+    }
+  }
+}
+
+// ── PURPLE DRAIN ────────────────────────────────────────────────────
+// Inverse of bleed: bleed shrinks HP over a window, drain grows HP over
+// a window. Triggered by purple lifesteal. Faster than bleed because
+// feeding is eager (drain ~700ms vs bleed 2500ms).
+// Compounds: multiple lifesteal hits during an active drain extend toHp.
+// Visual: pulsing purple aura around the player, local (follows player),
+// in contrast to bleed's global red screen tint.
+
+var DRAIN_DURATION_MS = 700;        // baseline drain window
+var DRAIN_DURATION_EXTRA_MS = 80;   // ms added per HP per stacked hit
+
+function applyDrainHeal(amount) {
+  if (!player || amount <= 0) return 0;
+  // If currently bleeding, route to existing rescue path — drain animation
+  // doesn't apply here because bleed is the dominant state and its rescue
+  // arc is the visual that already plays. The two systems share the same
+  // intent (HP rising over time) so doubling them up would clash.
+  if (player.bleedOut) {
+    var prev = player.hp;
+    var cap = player.hpMax * 2;
+    player.hp = Math.min(cap, Math.round(player.hp + amount));
+    var actual = player.hp - prev;
+    if (actual > 0) applyBleedRescue(actual);
+    return actual;
+  }
+  var cap = player.hpMax * 2;
+  if (player.draining) {
+    // Compound — extend toHp toward new target, refresh duration so the
+    // newly-added heal has time to play out (don't truncate mid-arc)
+    var d = player.draining;
+    var newTo = Math.min(cap, d.toHp + amount);
+    var added = newTo - d.toHp;
+    if (added > 0) {
+      d.toHp = newTo;
+      d.duration += DRAIN_DURATION_EXTRA_MS * added;
+    }
+    return added;
+  }
+  // Initiate fresh drain
+  var fromHp = player.hp;
+  var toHp = Math.min(cap, fromHp + amount);
+  if (toHp <= fromHp) return 0;
+  player.draining = {
+    fromHp: fromHp,
+    toHp: toHp,
+    startTime: performance.now(),
+    duration: DRAIN_DURATION_MS + DRAIN_DURATION_EXTRA_MS * (toHp - fromHp),
+  };
+  return toHp - fromHp;
+}
+
+function updateDrain(dt) {
+  if (!player || !player.draining) return;
+  var d = player.draining;
+  var elapsed = performance.now() - d.startTime;
+  var t = d.duration > 0 ? Math.min(1, elapsed / d.duration) : 1;
+  // Linear interp from fromHp to toHp. Round so displayed HP stays integer.
+  var interp = d.fromHp + (d.toHp - d.fromHp) * t;
+  player.hp = Math.round(interp);
+  if (t >= 1) {
+    // Drain complete. Lock in toHp, account stats, clear state.
+    var totalGained = Math.round(d.toHp) - Math.round(d.fromHp);
+    player.hp = Math.round(d.toHp);
+    if (_battleStats && totalGained > 0) {
+      _battleStats.totalHealed = (_battleStats.totalHealed || 0) + totalGained;
+      if (totalGained > (_battleStats.biggestHealPlayer || 0)) {
+        _battleStats.biggestHealPlayer = totalGained;
+      }
+    }
+    // Overheal floater on completion if we ended above hpMax
+    if (player.hp > player.hpMax) {
+      var oh = player.hp - Math.max(player.hpMax, Math.round(d.fromHp));
+      if (oh > 0) showFloatingText(player.x, player.y - 50, oh + ' ♥', '#9B6FD4', player);
+    }
+    player.draining = null;
+  }
+}
+
+// Pulsing purple aura — drawn each frame while draining. The pulse syncs
+// with the int-HP increments so the player sees the aura flare each time
+// HP visibly rises. Fades in over 100ms (eager onset), stays bright while
+// active, fades out via no-render once player.draining clears.
+function drawDrainAura() {
+  if (!player || !player.draining) return;
+  var d = player.draining;
+  var elapsed = performance.now() - d.startTime;
+  var t = d.duration > 0 ? Math.min(1, elapsed / d.duration) : 1;
+  // Fade-in ramp during first 100ms, full intensity through middle,
+  // taper off slightly toward end (subtle release).
+  var fadeIn = Math.min(1, elapsed / 100);
+  var fadeOut = (t > 0.85) ? (1 - (t - 0.85) / 0.15) : 1;
+  var intensity = fadeIn * Math.max(0.4, fadeOut);
+  // Pulse — frequency matches the visual HP-tick cadence (one beat per HP
+  // gained, roughly). The sin wave makes the aura "breathe" with the heal.
+  var hpGained = Math.max(1, Math.round(d.toHp - d.fromHp));
+  var pulseFreq = (hpGained * Math.PI) / Math.max(0.05, d.duration / 1000);
+  var pulse = 0.5 + 0.5 * Math.sin(elapsed / 1000 * pulseFreq);
+  ctx.save();
+  // Outer ring — soft purple glow at player.r + 14, throbs with pulse
+  var outerR = player.r + 12 + pulse * 8;
+  var grad = ctx.createRadialGradient(player.x, player.y, player.r, player.x, player.y, outerR);
+  grad.addColorStop(0, 'rgba(155,111,212,0)');
+  grad.addColorStop(0.5, 'rgba(155,111,212,' + (0.35 * intensity) + ')');
+  grad.addColorStop(1, 'rgba(123,47,190,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, outerR, 0, Math.PI * 2);
+  ctx.fill();
+  // Inner ring — sharper edge, brighter purple, slightly smaller
+  ctx.strokeStyle = 'rgba(204, 153, 255,' + (0.7 * intensity * (0.5 + 0.5 * pulse)) + ')';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#9B6FD4';
+  ctx.shadowBlur = 14 * intensity;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.r + 8, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRegen() {
+  if (!playerRegen || !player) return;
+  var pct = playerRegen.timer / playerRegen.duration;
+  var now5 = performance.now();
+  ctx.save();
+  ctx.globalAlpha = 0.3 + 0.1 * Math.sin(now5*0.005);
+  ctx.strokeStyle = '#ffffff'; ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 8;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4,6]);
+  ctx.beginPath(); ctx.arc(player.x, player.y, player.r+10, -Math.PI/2, -Math.PI/2 + Math.PI*2*pct);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+function spawnHealSparkles(tier) {
+  var count = Math.max(1, Math.round(3 * tier * vScale(tier)));
+  var colors = ['#ffffff', '#ffeeee', '#ffe0f0', '#ffddff'];
+  var sizeBase = 5 + tier * 1.2;
+  var speedBase = 0.3 + tier * 0.1;
+  for (var i = 0; i < count; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var r = 3 + Math.random() * (6 + tier * 2);
+    playerSparkles.push({
+      ox: Math.cos(angle)*r, oy: Math.sin(angle)*r,
+      vox: Math.cos(angle)*speedBase*(0.5+Math.random()),
+      voy: Math.sin(angle)*speedBase*(0.5+Math.random()) - 0.15,
+      text: tier >= 3 ? '✦' : '✧',
+      color: colors[Math.floor(Math.random()*colors.length)],
+      size: sizeBase + Math.random()*sizeBase, alpha: 0.9, life: 1,
+    });
+  }
+}
+
+function doWhiteHeal(targetX, targetY) {
+  // White v0.15.0:
+  //   - Self-cast (tap on bar OR drag near player, ≤30px): instant burst
+  //     to player + follow-field around player (heals other allies in
+  //     radius, target itself doesn't tick — got the burst).
+  //   - Drag-far (>30px from player): no burst, stationary field at drop,
+  //     heals anyone (incl. caster) who enters.
+  // Cleanse fires inside startWhiteField, gated on crit + tier statuses.
+  if (!player) return;
+  var dropX = targetX !== undefined ? targetX : player.x;
+  var dropY = targetY !== undefined ? targetY : player.y;
+  var distFromPlayer = Math.hypot(dropX - player.x, dropY - player.y);
+  var isSelfCast = distFromPlayer <= 30; // 30px is the "tap zone" around player
+  if (isSelfCast) {
+    // Burst to player. Crit doubles burst (matches red/blue/gray convention).
+    var fx = _fx('white', 1);
+    if (fx) {
+      var burstAmt = (fx.burst || 0) * (_currentCrit ? 2 : 1);
+      var prev = player.hp;
+      var cap = Math.max(player.hpMax, player.hp);
+      player.hp = Math.min(cap, player.hp + burstAmt);
+      var actualBurst = player.hp - prev;
+      if (actualBurst > 0) {
+        applyBleedRescue(actualBurst);
+        if (_battleStats) {
+          _battleStats.totalHealed = (_battleStats.totalHealed || 0) + actualBurst;
+          if (actualBurst > (_battleStats.biggestHealPlayer || 0)) _battleStats.biggestHealPlayer = actualBurst;
+          if (!_battleStats.healedByColor) _battleStats.healedByColor = {};
+          _battleStats.healedByColor.white = (_battleStats.healedByColor.white || 0) + actualBurst;
+        }
+        showFloatingText(player.x, player.y - 50, actualBurst + ' ✚', '#EFEFEF', player);
+      }
+    }
+    // Spawn follow-field around player. Burst already given; field uses fieldPool.
+    startWhiteField(player.x, player.y, 1, player);
+  } else {
+    // Drag-far: stationary field, no burst. Field uses full totalHeal pool.
+    startWhiteField(dropX, dropY, 1, null);
+  }
+  // Crit flourish — always plays on crit, independent of cleanse outcome.
+  if (_currentCrit) {
+    spawnCritShockwave(dropX, dropY, '#FFFFFF', { r0: 6, maxR: scaleDist(160), thickness: 3, growth: 240 });
+    spawnCritFlourish(dropX, dropY, '#FFEEFF', 16);
+    spawnCritFlourish(dropX, dropY, '#FFAACC', 10);
+  }
+  spawnHealSparkles(1);
+}
+
+// ── YELLOW — Confuse ──────────────────────────────
+// Two flavors:
+//   • Aura (tap, overload):       3s ring that follows player or stays anchored;
+//                                  any entity inside gets confused, refreshed
+//                                  each frame while in contact.
+//   • Instant burst (drag-to-pt): one-shot confuse burst at the drop point.
+var yellowAura = null; // { timer, baseRadius, followPlayer, ox, oy, label }
+
+function startYellowAura(opts) {
+  // opts = { radius, duration, follow, ox, oy, label, isCrit, yellowSeed }
+  yellowAura = {
+    timer: opts.duration || 3.0,
+    duration: opts.duration || 3.0,
+    baseRadius: opts.radius || scaleDist(120),
+    followPlayer: !!opts.follow,
+    ox: opts.ox !== undefined ? opts.ox : player.x,
+    oy: opts.oy !== undefined ? opts.oy : player.y,
+    label: opts.label || 'DAZE FIELD',
+    pulse: 0,
+    isCrit: !!opts.isCrit,  // YELLOW DAZE flag
+    // Tier-scaled confuse-seed duration. Set by callers who pass tier
+    // through the unified pipeline. Falls back to 2.0s legacy default
+    // for any callers that don't supply it.
+    yellowSeed: opts.yellowSeed || 2.0,
+  };
+  if (opts.isCrit) {
+    spawnCritShockwave(yellowAura.ox, yellowAura.oy, '#F5D000', { r0: 10, maxR: yellowAura.baseRadius, thickness: 3, growth: 300 });
+    spawnCritFlourish(yellowAura.ox, yellowAura.oy, '#FFEE44', 20);
+    spawnCritFlourish(yellowAura.ox, yellowAura.oy, '#FFD700', 12);
+  }
+}
+
+function updateYellowAura(dt) {
+  if (!yellowAura) return;
+  yellowAura.timer -= dt;
+  yellowAura.pulse = (yellowAura.pulse + dt * 3) % (Math.PI * 2);
+  if (yellowAura.timer <= 0) { yellowAura = null; return; }
+  // Anchor follows player if flagged
+  var cx = yellowAura.followPlayer ? player.x : yellowAura.ox;
+  var cy = yellowAura.followPlayer ? player.y : yellowAura.oy;
+  var r = yellowAura.baseRadius;
+  // Yellow seed comes from the unified pipeline (set at aura creation,
+  // tier-scaled). Drives both daze and confuse durations equally —
+  // crit just routes which flag fires. Top-up duration is half the seed.
+  var seed = yellowAura.yellowSeed || 2.0;
+  var topUp = seed * 0.5;
+  // v0.16.39 — Blocksmith yellow forces confuse instead of daze.
+  // forcesConfuse profile flag overrides the isCrit gate so BS yellow
+  // ALWAYS applies confuse regardless of universal crit roll. Other
+  // classes still go through standard isCrit-based daze/confuse routing.
+  // Per The Forge identity: confuse → enemies attack each other →
+  // indirect damage that pairs with gray walls funneling them.
+  var _yProf = (typeof getYellowProfile === 'function' && player) ? getYellowProfile(player.cls) : null;
+  var isCrit = !!yellowAura.isCrit || !!(_yProf && _yProf.forcesConfuse);
+  entities.forEach(function(g) {
+    if (Math.hypot(g.x - cx, g.y - cy) <= r) {
+      if (isCrit) {
+        // CONFUSE (crit): entity retargets to nearest other entity (or self
+        // if alone) and damages that target instead of player. Mutually
+        // exclusive with daze — confuse replaces daze on the same entity.
+        if (!g.confused) {
+          g.confused = true;
+          g.confuseTimer = Math.max(g.confuseTimer || 0, seed);
+          g.dazed = false; g.dazeTimer = 0; // confuse stomps daze
+        } else {
+          g.confuseTimer = Math.max(g.confuseTimer || 0, topUp);
+        }
+      } else {
+        // DAZE (base): wandering AI. No-op if entity is already confused —
+        // base-yellow doesn't downgrade your own crit-yellow.
+        if (g.confused && (g.confuseTimer || 0) > 0) return;
+        if (!g.dazed) {
+          g.dazed = true;
+          g.dazeTimer = Math.max(g.dazeTimer || 0, seed);
+        } else {
+          g.dazeTimer = Math.max(g.dazeTimer || 0, topUp);
+        }
+      }
+    }
+  });
+  // Occasional "?" particle shimmer while active — tuned sparse so the field
+  // reads without visual noise.
+  if (Math.random() < 0.13) {
+    spawnConfuseParticles(cx, cy, r, 1);
+  }
+}
+
+function drawYellowAura() {
+  if (!yellowAura || !ctx) return;
+  var cx = yellowAura.followPlayer ? player.x : yellowAura.ox;
+  var cy = yellowAura.followPlayer ? player.y : yellowAura.oy;
+  var r  = yellowAura.baseRadius;
+  var pct = yellowAura.timer / yellowAura.duration;
+  var a = Math.max(0, Math.min(1, pct)) * 0.55;
+  ctx.save();
+  // Soft glow
+  var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+  grad.addColorStop(0, 'rgba(245, 208, 0, 0)');
+  grad.addColorStop(0.6, 'rgba(245, 208, 0, ' + (a * 0.15) + ')');
+  grad.addColorStop(1.0, 'rgba(245, 208, 0, ' + (a * 0.35) + ')');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  // Pulsing edge ring that doubles as duration indicator.
+  var pulseScale = 1 + Math.sin(yellowAura.pulse) * 0.03;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  // Full dim background ring
+  ctx.save();
+  ctx.strokeStyle = 'rgba(245, 208, 0, ' + (a * 0.25) + ')';
+  ctx.beginPath(); ctx.arc(cx, cy, r * pulseScale, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+  // Timer arc (foreground)
+  ctx.strokeStyle = 'rgba(245, 208, 0, ' + a + ')';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * pulseScale, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * pct);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function startYellowConfuse(ox, oy, radius) {
+  // Drag-to-point instant burst. Aura behavior lives in startYellowAura.
+  var fx = _fx('yellow', 1);
+  var seed = fx ? fx.yellowSeed : 2.0;
+  var cx = ox !== undefined ? ox : player.x;
+  var cy = oy !== undefined ? oy : player.y;
+  var r = radius || (fx ? clampRadiusToArena(fx.radiusPx) : scaleDist(50));
+  var hit = 0;
+  var dazedThisCast = 0, confusedThisCast = 0;
+  // v0.16.39 — BS forcesConfuse overrides isCrit gate (same logic as
+  // updateYellowAura). Burst-yellow always confuses for BS regardless
+  // of crit roll.
+  var _yProf = (typeof getYellowProfile === 'function' && player) ? getYellowProfile(player.cls) : null;
+  var isCrit = _currentCrit || !!(_yProf && _yProf.forcesConfuse);
+  entities.forEach(function(g) {
+    if (Math.hypot(g.x-cx, g.y-cy) <= r) {
+      if (isCrit) {
+        // CONFUSE replaces any existing daze on the entity.
+        var wasConfused = !!g.confused;
+        g.confused = true;
+        g.confuseTimer = (g.confuseTimer || 0) + seed;
+        g.dazed = false; g.dazeTimer = 0;
+        if (!wasConfused) confusedThisCast++;
+      } else if (!g.confused || (g.confuseTimer || 0) <= 0) {
+        // DAZE — but only if entity isn't already confused (don't downgrade).
+        var wasDazed = !!g.dazed;
+        g.dazed = true;
+        g.dazeTimer = (g.dazeTimer || 0) + seed;
+        if (!wasDazed) dazedThisCast++;
+      }
+      hit++;
+    }
+  });
+  // S015 v0.15.18: snapshot for yellow diagnostic. Captures cast intent
+  // so we can see in playtest whether the issue is "not crit" (no confuse
+  // applied) or "confuse applied but not behaving" (next-frame data).
+  snapshotYellowCast(isCrit, hit, dazedThisCast, confusedThisCast, cx, cy);
+  brickAction = null;
+  // Spawn ? particles within radius
+  spawnConfuseParticles(cx, cy, r, Math.round((8 + hit * 3) * vScale(1)));
+  if (isCrit) {
+    spawnCritShockwave(cx, cy, '#F5D000', { r0: 8, maxR: r, thickness: 3, growth: 320 });
+    spawnCritFlourish(cx, cy, '#FFEE44', 18);
+    spawnCritFlourish(cx, cy, '#FFD700', 10);
+  }
+}
+
+// ── UPDATE BRICK ACTION ───────────────────────────
+function updateBrickAction(dt, bounds) {
+  if (!brickAction) return;
+
+  if (brickAction.type === 'red') {
+    if (brickAction.phase === 'charge') {
+      // Read full dash profile from characters.js. All class identity
+      // for dash mechanics lives in CHARACTERS[cls].redProfile and is
+      // read here as a normalized object with defaults filled in. Engine
+      // does NOT check class names — adding a new class with custom dash
+      // = data change in characters.js, no engine edits needed.
+      // Per S015 v0.15.13 architectural refactor.
+      var dashProfile = (typeof getRedDashProfile === 'function')
+        ? getRedDashProfile(player.cls)
+        : { hitboxScale: 1.0, knockbackScale: 1.0, dashModel: 'recoil',
+            blastRadiusMult: 1.0, knockbackMode: 'forward', recoilOnHit: true,
+            blastVisual: null, critScreenShake: null };
+      var hitboxScale = dashProfile.hitboxScale;
+      var knockbackScale = dashProfile.knockbackScale;
+      if (brickAction.usePoint) {
+        // Fixed direction toward dropped point
+      } else if (brickAction._lockDirection) {
+        // v0.16.54 — Pierce dashes lock direction at cast time. The
+        // standard auto-target retargets every frame to the nearest
+        // entity, which causes pierce dashes to zigzag as the player
+        // moves through entities (nearest entity changes after each
+        // pierce hit, sometimes flipping to the opposite side of the
+        // player → direction snaps → visual "shaking" + entities
+        // ending up at unexpected positions because dash isn't a
+        // straight line). Pierce identity = straight-line motion;
+        // the initial cast-time target sets direction, and that's
+        // what the dash follows.
+      } else {
+        // Track nearest entity
+        var nearestG = entities.length ? entities.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null;
+        if (nearestG) {
+          var cdx = nearestG.x - player.x, cdy = nearestG.y - player.y;
+          var cdist = Math.sqrt(cdx*cdx+cdy*cdy);
+          if (cdist > 1) { brickAction.dirX = cdx/cdist; brickAction.dirY = cdy/cdist; }
+        }
+      }
+      brickAction.chargeTimer = (brickAction.chargeTimer||0) + dt;
+      var step = brickAction.chargeSpeed * dt;
+      // Range cap: if travelling further would exceed maxRange, clamp the
+      // step and end the charge (transition to return phase). Without this,
+      // the dash would run unlimited toward target. Per S015 design:
+      // class-specific reach driven by characters.js redProfile.rangeBase
+      // and rangeAffinityBonus, with tier-curve scaling.
+      var traveled = Math.hypot(player.x - brickAction.startX, player.y - brickAction.startY);
+      if (brickAction.maxRange && traveled + step >= brickAction.maxRange) {
+        // Clamp to remaining distance, mark hit so dash terminates this
+        // frame. Per S015 v0.15.12: brickAction.hit triggers immediate
+        // dash termination + finalize (no return phase).
+        step = Math.max(0, brickAction.maxRange - traveled);
+        brickAction.hit = true;
+      }
+      // Wall sweep: test the line segment from current position to the
+      // intended next position against each gray wall. If it intersects,
+      // clamp the move to the wall's near edge and end the charge. Without
+      // this, chargeSpeed (player.speed × 4) can move the player further
+      // than wall thickness in one frame, letting them phase clean through.
+      var nextX = player.x + brickAction.dirX * step;
+      var nextY = player.y + brickAction.dirY * step;
+      var blocked = false;
+      for (var wi = 0; wi < grayWalls.length && !blocked; wi++) {
+        var w = grayWalls[wi];
+        if (w.hp <= 0 || w.alpha < 0.05) continue;
+        // Skip if player is already inside (e.g. wall expanded around them).
+        var startDist = Math.hypot(player.x - w.x, player.y - w.y);
+        if (startDist < w.r + player.r) continue;
+        // Parametric line-circle intersection along the move vector.
+        var fx0 = player.x - w.x, fy0 = player.y - w.y;
+        var dxm = brickAction.dirX * step, dym = brickAction.dirY * step;
+        var aQ = dxm*dxm + dym*dym;
+        var bQ = 2 * (fx0*dxm + fy0*dym);
+        var cQ = fx0*fx0 + fy0*fy0 - (w.r + player.r)*(w.r + player.r);
+        var disc = bQ*bQ - 4*aQ*cQ;
+        if (disc < 0) continue; // no intersection this frame
+        var tHit = (-bQ - Math.sqrt(disc)) / (2*aQ);
+        if (tHit < 0 || tHit > 1) continue; // intersection is outside this step
+        // Stop just before contact, cancel charge.
+        var tStop = Math.max(0, tHit - 0.01);
+        player.x = player.x + dxm * tStop;
+        player.y = player.y + dym * tStop;
+        blocked = true;
+        brickAction.hit = true; // terminates dash this frame (v0.15.12)
+      }
+      if (!blocked) {
+        player.x = nextX;
+        player.y = nextY;
+      }
+      player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
+      player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
+
+      // v0.16.50 — Pierce charge-phase trail particles. Only fires for
+      // pierce model — recoil + aoe-blast models don't have a charge-trail
+      // (recoil leaves its trail in the return phase, blast is stationary).
+      // Pierce needs a visible dash-through streak so the multi-hit reads
+      // as a continuous flying lane rather than instantaneous teleport-hits.
+      if (dashProfile.dashModel === 'pierce') {
+        var _ptBackAngle = Math.atan2(-brickAction.dirY, -brickAction.dirX);
+        for (var _pti2 = 0; _pti2 < 2; _pti2++) {
+          var _pta = _ptBackAngle + (Math.random() - 0.5) * 0.8;
+          var _pts = 40 + Math.random() * 60;
+          purpleParticles.push({
+            x: player.x + Math.cos(_pta) * (player.r * 0.5),
+            y: player.y + Math.sin(_pta) * (player.r * 0.5),
+            vx: Math.cos(_pta) * _pts,
+            vy: Math.sin(_pta) * _pts,
+            r: 2 + Math.random() * 2,
+            alpha: 0.7,
+            color: '#E24B4A',
+          });
+        }
+      }
+      // ── DASH HIT DETECTION (S015 v0.15.13, extended v0.16.50) ──
+      // Three models, dispatched by class via dashProfile.dashModel:
+      //   'recoil' (default Model 3): dash stops at first entity hit,
+      //     single entity damaged, knockback in dash direction, then
+      //     recoil back to start (return phase). Hit-and-run rhythm.
+      //   'aoe-blast' (Model 2, BK identity): dash stops at first entity
+      //     hit, AOE blast at impact, all entities in blast radius take
+      //     damage. No recoil. Visual: shockwave ring + central bloom.
+      //   'pierce' (Model 4, SS identity, v0.16.50): dash CONTINUES
+      //     through entities. Each frame, ALL entities inside the bubble
+      //     that haven't been hit yet (via _hitSet) take damage. No
+      //     blast, no recoil. Dash terminates at max range or wall block.
+      //     Identity: "go through, hit everyone, don't slow down."
+      //
+      // Bubble radius for hit detection: (player.r + 14) × hitboxScale.
+      // brickAction._hitSet tracks already-hit entities to prevent
+      // double-hitting in pierce model and double-counting in blast model.
+      if (!brickAction.hit) {
+        if (!brickAction._hitSet) brickAction._hitSet = [];
+        var hbR = (player.r + 14) * hitboxScale;
+        var isPierceModel = (dashProfile.dashModel === 'pierce');
+
+        // ── PIERCE PATH ──
+        // Each frame during dash, hit ALL new entities inside the bubble.
+        // Don't terminate the dash; let it continue to max range or wall.
+        if (isPierceModel) {
+          var pierceTargets = [];
+          for (var _phi = 0; _phi < entities.length; _phi++) {
+            var _peg = entities[_phi];
+            if (!_peg || _peg.hp <= 0) continue;
+            // Already hit by this dash? skip.
+            if (brickAction._hitSet.indexOf(_peg) >= 0) continue;
+            var _ped = Math.hypot(player.x - _peg.x, player.y - _peg.y);
+            if (_ped < hbR + (_peg.r || 0)) {
+              pierceTargets.push(_peg);
+            }
+          }
+          if (pierceTargets.length > 0) {
+            var pTier = brickAction.dmgMult || 1;
+            var pCrit = !!brickAction.isCrit;
+            var pCritMult = pCrit ? 2.0 : 1.0;
+            var pKnockMult = (pCrit ? 2.0 : 1.0) * knockbackScale;
+            var pFx = _fx('red', pTier);
+            var pBaseDmg = Math.ceil((pFx ? pFx.dmg : 3) * pCritMult);
+            // v0.16.51 — stash base damage for trail spawn at termination.
+            // Captures the exact damage that pierce hits dealt so the
+            // trail's 50% fraction is consistent with what the dash did.
+            brickAction._pierceBaseDmg = pBaseDmg;
+            // Apply pierce damage to each new target.
+            for (var _pti = 0; _pti < pierceTargets.length; _pti++) {
+              var pHitG = pierceTargets[_pti];
+              brickAction._hitSet.push(pHitG);
+              // Pierce damage (full or falloff per schema).
+              var pDmg = Math.ceil(pBaseDmg * (dashProfile.pierceDamageFalloff || 1.0));
+              var pRes = damageEntity(pHitG, pDmg, undefined, 'red', { piercing: true });
+              pHitG.flashTimer = 0.3;
+              showDamageNumber(pHitG.x, pHitG.y - 30, pRes.applied,
+                pCrit ? '#FFAA00' : '#E24B4A', pRes.tier, pHitG.x, pHitG.y,
+                undefined, pRes.witherBoost, pHitG, 'red');
+              // v0.16.52 — Pierce knockback is PERPENDICULAR to dash
+              // direction. Entities get spun out sideways from the path,
+              // not punched forward through it. Side is determined by
+              // which side of the dash line the entity is on (cross
+              // product). Magnitude is fixed for all entities — no
+              // weight-class scaling — reads as "you cut through them
+              // so fast they spun out of the way."
+              //
+              // Cross product (entity_offset × dashDir) sign:
+              //   positive → entity is on left of dash direction
+              //   negative → entity is on right
+              //   zero     → exactly on the line (pick right by default)
+              var _ofx = pHitG.x - player.x;
+              var _ofy = pHitG.y - player.y;
+              var _cross = _ofx * brickAction.dirY - _ofy * brickAction.dirX;
+              // Perpendicular vectors:
+              //   right of dash: ( dirY, -dirX)
+              //   left of dash:  (-dirY,  dirX)
+              var _perpX, _perpY;
+              if (_cross < 0) {
+                // Entity left of dash → knock further left
+                _perpX = -brickAction.dirY;
+                _perpY = brickAction.dirX;
+              } else {
+                // Entity on right or on line → knock right
+                _perpX = brickAction.dirY;
+                _perpY = -brickAction.dirX;
+              }
+              // Fixed magnitude — all entities knocked back same amount.
+              // Crit doubles velocity (matches existing crit visual beat).
+              var _pierceKnockMag = pCrit ? 360 : 220;
+              pHitG.bounceVx = _perpX * _pierceKnockMag;
+              pHitG.bounceVy = _perpY * _pierceKnockMag;
+              pHitG.bounceTimer = 0.3;
+              pHitG.state = 'bounce';
+              // Per-target spark (visual cue at each pierce point)
+              if (typeof spawnCritFlourish === 'function') {
+                spawnCritFlourish(pHitG.x, pHitG.y, '#E24B4A', 6);
+                spawnCritFlourish(pHitG.x, pHitG.y, '#FF6644', 3);
+              }
+              // Crit visuals if applicable (less heavy than recoil/blast
+              // models — pierce identity is fast, not flashy).
+              if (pCrit && _pti === 0) {
+                spawnCritShockwave(pHitG.x, pHitG.y, '#FFAA00',
+                  { r0: 4, maxR: scaleDist(80), thickness: 2, growth: 280 });
+              }
+            }
+          }
+          // Pierce DOES NOT set brickAction.hit — dash continues until
+          // range cap or wall block (handled by the wall-sweep above
+          // and the maxRange clamp earlier in this same frame).
+        } else {
+        // ── SINGLE-HIT PATH (recoil + aoe-blast models) ──
+        // Find first entity inside bubble (closest preferred).
+        var firstHit = null;
+        var firstHitDist = Infinity;
+        for (var _hi = 0; _hi < entities.length; _hi++) {
+          var _eg = entities[_hi];
+          if (!_eg || _eg.hp <= 0) continue;
+          var _ed = Math.hypot(player.x - _eg.x, player.y - _eg.y);
+          if (_ed >= hbR + (_eg.r || 0)) continue;
+          if (_ed < firstHitDist) { firstHit = _eg; firstHitDist = _ed; }
+        }
+        if (firstHit) {
+          var rTier = brickAction.dmgMult || 1;
+          var crit = !!brickAction.isCrit;
+          var critMult = crit ? 2.0 : 1.0;
+          var knockMult = (crit ? 2.0 : 1.0) * knockbackScale;
+          var rfx = _fx('red', rTier);
+          var rDmg = Math.ceil((rfx ? rfx.dmg : 3) * critMult);
+          // Schema-driven dispatch — no class-name checks. Engine reads
+          // dashProfile fields and acts on them generically.
+          var isBlastModel = (dashProfile.dashModel === 'aoe-blast');
+          // Targets list: 'aoe-blast' collects all entities in blast
+          // radius; other models hit only the primary target.
+          var targets = [firstHit];
+          if (isBlastModel) {
+            // Blast radius = bubble × dashProfile.blastRadiusMult.
+            // Centered on impact (player position at the moment of
+            // contact). Sweep all entities within that radius (primary
+            // already in list).
+            var blastR = hbR * dashProfile.blastRadiusMult;
+            for (var _bi = 0; _bi < entities.length; _bi++) {
+              var _be = entities[_bi];
+              if (!_be || _be === firstHit || _be.hp <= 0) continue;
+              if (Math.hypot(player.x - _be.x, player.y - _be.y) < blastR + (_be.r || 0)) {
+                targets.push(_be);
+              }
+            }
+          }
+          // Apply per-entity damage + knockback.
+          for (var _ti = 0; _ti < targets.length; _ti++) {
+            var hitG = targets[_ti];
+            brickAction._hitSet.push(hitG);
+            var rRes = damageEntity(hitG, rDmg, undefined, 'red');
+            hitG.flashTimer = 0.3;
+            showDamageNumber(hitG.x, hitG.y - 30, rRes.applied,
+              crit ? '#FFAA00' : '#E24B4A', rRes.tier, hitG.x, hitG.y,
+              undefined, rRes.witherBoost, hitG, 'red');
+            // Per-target particle burst — schema-gated. Only fires for
+            // classes whose blastVisual defines perTargetCount/perTargetColor
+            // (BK has these; other classes don't, so their dashes are visually
+            // quieter — just damage number, no surrounding sparks).
+            // Per S015 v0.15.17: red burst is now BK-only via schema, no
+            // class-name check needed in engine.
+            var bv = dashProfile.blastVisual;
+            if (bv && bv.perTargetCount) {
+              var ptColor = bv.perTargetColor || '#ff3300';
+              var rBurst = bv.perTargetCount + Math.ceil(rTier * 2);
+              for (var rbi = 0; rbi < rBurst; rbi++) {
+                var rba = Math.random()*Math.PI*2;
+                var rbs = (1.5+Math.random())*(30+rTier*15);
+                purpleParticles.push({ x:hitG.x, y:hitG.y,
+                  vx:Math.cos(rba)*rbs, vy:Math.sin(rba)*rbs,
+                  r:3+rTier+Math.random()*3, alpha:0.9, color: ptColor });
+              }
+            }
+            // Knockback direction reads dashProfile.knockbackMode:
+            //   'radial'  — outward from impact center (explosion feel)
+            //   'forward' — along dash direction (punch through)
+            var kvx, kvy;
+            if (dashProfile.knockbackMode === 'radial') {
+              var kdx = hitG.x - player.x;
+              var kdy = hitG.y - player.y;
+              var kd = Math.hypot(kdx, kdy) || 1;
+              kvx = (kdx / kd) * 300 * knockMult;
+              kvy = (kdy / kd) * 300 * knockMult;
+            } else {
+              kvx = brickAction.dirX * 300 * knockMult;
+              kvy = brickAction.dirY * 300 * knockMult;
+            }
+            hitG.bounceVx = kvx;
+            hitG.bounceVy = kvy;
+            hitG.bounceTimer = 0.35;
+            hitG.state = 'bounce';
+          }
+          // First-hit metadata for diagnostic
+          brickAction._firstHitEntity = firstHit;
+          // Per-crit standard visuals (apply to any model)
+          if (crit) {
+            spawnCritShockwave(firstHit.x, firstHit.y, '#FFAA00', { r0: 6, maxR: scaleDist(180), thickness: 4, growth: 320 });
+            spawnCritShockwave(firstHit.x, firstHit.y, '#FF4400', { r0: 10, maxR: scaleDist(140), thickness: 2, growth: 220, fadeRate: 2.6 });
+            spawnCritFlourish(firstHit.x, firstHit.y, '#FFAA00', 24);
+          }
+          // Blast visual — reads dashProfile.blastVisual config. Engine
+          // doesn't pick the colors; data does. Any class with blast
+          // visuals defined gets them automatically. null = no blast viz.
+          if (isBlastModel && dashProfile.blastVisual) {
+            var bv = dashProfile.blastVisual;
+            // Shockwave rings — one per color in ringColors array.
+            var ringColors = bv.ringColors || ['#E24B4A'];
+            if (ringColors[0]) {
+              spawnCritShockwave(player.x, player.y, ringColors[0],
+                { r0: 8, maxR: blastR * 1.3, thickness: 4, growth: 360, fadeRate: 2.2 });
+            }
+            if (ringColors[1]) {
+              spawnCritShockwave(player.x, player.y, ringColors[1],
+                { r0: 4, maxR: blastR, thickness: 2, growth: 280, fadeRate: 2.6 });
+            }
+            // Central particle bloom. bloomCount scales +3 per tier.
+            var bloomCount = (bv.bloomCount || 12) + rTier * 3;
+            var bloomColor = bv.bloomColor || '#FFAA00';
+            for (var _bli = 0; _bli < bloomCount; _bli++) {
+              var _bla = Math.random() * Math.PI * 2;
+              var _bls = 60 + Math.random() * 80;
+              purpleParticles.push({ x: player.x, y: player.y,
+                vx: Math.cos(_bla) * _bls, vy: Math.sin(_bla) * _bls,
+                r: 3 + Math.random() * 4, alpha: 0.95, color: bloomColor });
+            }
+          }
+          // Crit-only screen shake — reads dashProfile.critScreenShake.
+          // null disables shake for that class. Schema-driven; any class
+          // with config gets shake on crit automatically.
+          if (crit && dashProfile.critScreenShake && typeof triggerScreenShake === 'function') {
+            triggerScreenShake(dashProfile.critScreenShake.mag, dashProfile.critScreenShake.ms);
+          }
+          // Terminate dash. Set hit flag so the unified termination
+          // block below handles cleanup.
+          brickAction.hit = true;
+          // Recoil decision reads dashProfile.recoilOnHit. true = enter
+          // return phase (Model 3 default); false = end at impact (BK).
+          if (dashProfile.recoilOnHit) {
+            brickAction.phase = 'return';
+            brickAction.returnTimer = 0;
+            brickAction._trailRMult = rTier;
+          }
+        }
+        }  // close non-pierce branch
+      }
+      // Stop charge / transition. Per S015 v0.15.13 (Model 2/3 split):
+      //   Model 2 (BK): brickAction.hit set + phase still 'charge' →
+      //     terminate (no recoil for BK).
+      //   Model 3 (other): brickAction.hit set + phase changed to
+      //     'return' → don't terminate here, let the return-phase block
+      //     animate the recoil back to start.
+      //   Range-cap, wall-block, timeout, target-reached: phase still
+      //     'charge', hit flag set → terminate immediately.
+      // The phase check is the discriminator.
+      if (brickAction && brickAction.hit && brickAction.phase === 'charge') {
+        // v0.16.51 — Pierce dash spawns a slipstream trail at termination
+        // (before the brickAction is nulled). Trail covers the dash path
+        // from origin → end, plus a tail extension behind origin. Other
+        // dashModels (recoil, aoe-blast) skip this — only pierce profiles
+        // have the trail config.
+        if (dashProfile.dashModel === 'pierce' && dashProfile.trail) {
+          var pierceFx = _fx('red', brickAction.dmgMult || 1);
+          var fallbackBaseDmg = Math.ceil((pierceFx ? pierceFx.dmg : 3) * (brickAction.isCrit ? 2.0 : 1.0));
+          var trailBaseDmg = (typeof brickAction._pierceBaseDmg === 'number')
+            ? brickAction._pierceBaseDmg
+            : fallbackBaseDmg;
+          spawnPierceTrail(brickAction.startX, brickAction.startY,
+            player.x, player.y, trailBaseDmg, dashProfile,
+            brickAction.chargeSpeed);
+        }
+        brickAction = null;
+      } else if (brickAction && brickAction.chargeTimer >= 2.0) {
+        brickAction = null;
+      } else if (brickAction && brickAction.usePoint && brickAction.phase === 'charge') {
+        var ptDist = Math.hypot(player.x - brickAction.targetX, player.y - brickAction.targetY);
+        // S015 v0.15.11 fix (per diagnostic capture from v0.15.10): old buffer
+        // was player.r + 8 (≈22px), causing every drag-drop dash to stop
+        // ~22px short of the visible endpoint marker. Diagnostic showed
+        // 92% travel ratio universally — bug confirmed. New 2px buffer
+        // is just float-precision tolerance; dash now reaches the marker.
+        if (ptDist < 2) {
+          brickAction = null;
+        }
+      }
+    } else if (brickAction && brickAction.phase === 'return') {
+      // ── RETURN PHASE (Model 3 only, S015 v0.15.13) ──
+      // Triggered after Model 3 entity-hit. Player springs back toward
+      // dash start position. Emits red trail particles. Ends when player
+      // reaches start (rd <= 8), distance to nearest entity exceeds the
+      // safe stop threshold, or 3s safety timeout.
+      // Model 2 (BK) never enters this phase.
+      if (player && brickAction._trailRMult !== undefined) {
+        var _rMult2 = brickAction._trailRMult;
+        var _ba2 = Math.atan2(-brickAction.dirY, -brickAction.dirX);
+        for (var _ei = 0; _ei < 2; _ei++) {
+          var _ea = _ba2 + (Math.random()-0.5)*1.2;
+          var _es = 30 + Math.random()*50;
+          purpleParticles.push({
+            x: player.x + Math.cos(_ea)*(player.r*0.6),
+            y: player.y + Math.sin(_ea)*(player.r*0.6),
+            vx: Math.cos(_ea)*_es, vy: Math.sin(_ea)*_es,
+            r: 2 + Math.random()*_rMult2, alpha: 0.8,
+            color: '#ff3300', isRed: true,
+          });
+        }
+      }
+      var rx = brickAction.startX - player.x;
+      var ry = brickAction.startY - player.y;
+      var rd = Math.sqrt(rx*rx+ry*ry);
+      var nearestForReturn = entities.length ? entities[0] : null;
+      var safeStop = nearestForReturn ? nearestForReturn.AGGRO_RANGE * 1.5 : 0;
+      var distToEntity = nearestForReturn ? Math.hypot(player.x-nearestForReturn.x, player.y-nearestForReturn.y) : 9999;
+      brickAction.returnTimer = (brickAction.returnTimer||0) + dt;
+      if (distToEntity >= safeStop || rd <= 8 || brickAction.returnTimer >= 3.0) {
+        brickAction = null;
+      } else {
+        var rs = Math.min((player.speed * 2) * dt, rd);
+        player.x += (rx/rd)*rs;
+        player.y += (ry/rd)*rs;
+      }
+    }
+  }
+}
+
+// ── UPDATE ENTITY MIND-EFFECT TICK ───────────────────
+// Drives both yellow-base (daze, wandering) and yellow-crit (confuse,
+// retarget-and-attack). Both timers decay independently; an entity can
+// only have one active at a time because the apply path makes them
+// mutually exclusive (confuse replaces daze, daze no-ops on confused).
+function updateEntityConfusion(g, dt) {
+  // Daze decay + wander vector
+  if (g.dazed) {
+    g.dazeTimer -= dt;
+    if (g.dazeTimer <= 0) {
+      g.dazed = false;
+      g.dazeTimer = 0;
+    } else {
+      // Pick a new wander direction every 0.3-0.6s while dazed.
+      if (!g.confuseDashTimer || g.confuseDashTimer <= 0) {
+        var da = Math.random() * Math.PI * 2;
+        g.dazeDirX = Math.cos(da);
+        g.dazeDirY = Math.sin(da);
+        g.confuseDashTimer = 0.3 + Math.random() * 0.3;
+      }
+    }
+  }
+  // Confuse decay (target lookup happens at attack site, not here)
+  if (g.confused) {
+    g.confuseTimer -= dt;
+    if (g.confuseTimer <= 0) {
+      g.confused = false;
+      g.confuseTimer = 0;
+      g._confuseTargetId = null;
+    }
+    // S015 v0.15.18: per-frame snapshot for yellow diagnostic. Captures
+    // gating fields (pat, silencedTimer, attackCooldown) and nearest
+    // entity geometry. Cheap — only runs while confused.
+    recordYellowConfuseFrame(g);
+  }
+  // Yellow-flash decay (set by attack site when confused entity lands a hit)
+  if (g._confuseFlashTimer && g._confuseFlashTimer > 0) {
+    g._confuseFlashTimer -= dt;
+    if (g._confuseFlashTimer < 0) g._confuseFlashTimer = 0;
+  }
+  // Tick down the wander-direction refresh timer regardless (cheap; clamps
+  // negative naturally in the next dazed pass when dazeDirX gets reseeded).
+  if (g.confuseDashTimer) g.confuseDashTimer -= dt;
+}
+
+// ═══════════════════════════════════════════════════
+// BLUE — Homing Bolt
+// ═══════════════════════════════════════════════════
+var blueBolts = [];
+
+// Lingering glow rings at blue impact sites. Each entry fades from full
+// alpha to 0 over `duration` seconds, then is removed. Drawn behind bolts
+// for layering. Filled by impact handler in updateBlueBolts.
+var blueFieldFlashes = [];
+
+function updateBlueFieldFlashes(dt) {
+  for (var i = blueFieldFlashes.length - 1; i >= 0; i--) {
+    blueFieldFlashes[i].timer -= dt;
+    if (blueFieldFlashes[i].timer <= 0) blueFieldFlashes.splice(i, 1);
+  }
+}
+
+function drawBlueFieldFlashes() {
+  if (!blueFieldFlashes.length || !ctx) return;
+  blueFieldFlashes.forEach(function(f) {
+    var pct = Math.max(0, f.timer / f.duration);
+    ctx.save();
+    // Soft fading radial glow
+    var grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.radius);
+    grad.addColorStop(0,    'rgba(110, 184, 255, ' + (pct * 0.45) + ')');
+    grad.addColorStop(0.55, 'rgba(77, 184, 255, '  + (pct * 0.25) + ')');
+    grad.addColorStop(1.0,  'rgba(77, 184, 255, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.radius, 0, Math.PI * 2); ctx.fill();
+    // Subtle edge ring
+    ctx.globalAlpha = pct * 0.6;
+    ctx.strokeStyle = '#6fb8ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.radius, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  });
+}
+
+function startBlueBolt(lockedTarget) {
+  var target = lockedTarget || (entities.length ? entities.reduce(function(a,b){return Math.hypot(a.x-player.x,a.y-player.y)<Math.hypot(b.x-player.x,b.y-player.y)?a:b;}) : null);
+  if (!target || !player) return;
+  // BLUE CRUSHING STRIKE: crit doubles damage (matches red/gray/purple).
+  var bcritTap = _currentCrit ? 2.0 : 1.0;
+  blueBolts.push({ x: player.x, y: player.y, target: target, speed: 500, dmg: Math.ceil(4 * tapScaleMult('blue') * affinityMult('blue') * bcritTap), r: 7, dead: false, travelled: 0, tier: 1, glow: 0, delayTimer: 0, isCrit: _currentCrit });
+}
+
+// Blue drag-drop variant: fires a bolt at a fixed world-space point.
+// On arrival the bolt performs an AoE impact that damages any entity within
+// the impact radius. Dropping on empty rumble area causes a visible impact effect
+// but deals no damage (no entities in range). Used for positioning /
+// area-denial casts instead of always homing on the nearest entity.
+function startBlueBoltAtPoint(tx, ty) {
+  if (!player) return;
+  // Unified pipeline: tap-drag uses _fx('blue', 1) for damage, radius, and
+  // burst-dmg. All entities in impact radius take fx.burstDmg (no primary
+  // distinction — drag-drop is pure AoE bomb). Crit doubles burst.
+  var fx = _fx('blue', 1);
+  if (!fx) return;
+  var bcrit = _currentCrit ? 2.0 : 1.0;
+  blueBolts.push({
+    x: player.x, y: player.y,
+    target: null, fixedPoint: true,
+    targetX: tx, targetY: ty,
+    speed: 500,
+    // No primary "homing" target — bolt is just a moving bomb. dmg field
+    // unused on impact; burstDmg applies to all in radius.
+    dmg: 0,
+    burstDmg: Math.ceil(fx.burstDmg * bcrit),
+    burstRadius: clampRadiusToArena(fx.radiusPx),
+    impactR: clampRadiusToArena(fx.radiusPx), // legacy field name kept for hit detection
+    r: 7, dead: false, travelled: 0, tier: 1, glow: 0, delayTimer: 0,
+    isCrit: _currentCrit,
+  });
+}
+
+// ── BLUE RETRIEVE (v0.16.63, FX redesign v0.16.65) ─────
+// Drop blue brick onto player → teleport ALL dropped loot to inventory
+// with directional "reverse rain" particle FX flowing from items
+// toward player. Fits blue's identity (precision, ranged effect, fast).
+//
+// FX (v0.16.65 — directional, not radial):
+//   For each item, spawn a stream of small particles AT item position
+//   moving TOWARD player. Like inverted rain — sparkles falling INWARD
+//   instead of outward. Tight spread, varied speeds → "tiny tiny
+//   fireworks pulled by gravity to the hero." Color-keyed to item.
+//
+// UNITY: pickup logic mirrors updateDroppedBricks contact branch
+// (line ~4778). Could refactor into shared helper if other features
+// need item-collect-without-magnet behavior.
+function doBlueRetrieve() {
+  if (!player) return;
+  if (!droppedBricks || droppedBricks.length === 0) {
+    // Nothing to retrieve — give visual feedback so it doesn't feel
+    // like the cast did nothing. Small puff at player.
+    if (typeof spawnCritFlourish === 'function') {
+      spawnCritFlourish(player.x, player.y, '#4db8ff', 6);
+    }
+    showFloatingText(player.x, player.y - 40, '— nothing to retrieve —', '#4db8ff', player);
+    return;
+  }
+  var retrievedCount = 0;
+  var scale = (typeof getDisplayScale === 'function') ? getDisplayScale() : 1;
+  for (var di = 0; di < droppedBricks.length; di++) {
+    var p = droppedBricks[di];
+    if (p.done) continue;
+    // Color keyed to item kind for legibility — player sees what they grabbed.
+    var streamColor;
+    if (p.kind === 'brick') {
+      streamColor = BRICK_COLORS[p.color] || '#FFFFFF';
+    } else if (p.kind === 'cheese') {
+      streamColor = '#FFD96A';
+    } else if (p.kind === 'gold') {
+      streamColor = '#F5D000';
+    } else {
+      streamColor = '#FFFFFF';
+    }
+    // Reverse-rain stream: spawn 8 small particles at item, each with
+    // velocity pointing toward player + randomized perpendicular offset.
+    // Particles fade as they travel (purpleParticles system handles
+    // alpha decay). Stagger speeds so the stream looks like falling
+    // sparkles, not a uniform spray.
+    var dx = player.x - p.x;
+    var dy = player.y - p.y;
+    var dist = Math.hypot(dx, dy) || 1;
+    var dirX = dx / dist, dirY = dy / dist;
+    // Perpendicular for spread (turn dir 90°)
+    var perpX = -dirY, perpY = dirX;
+    var streamCount = 8;
+    for (var si = 0; si < streamCount; si++) {
+      // Speed varies so particles don't all arrive simultaneously
+      var sp = (180 + Math.random() * 200) * scale;
+      // Small perpendicular offset for stream width
+      var spread = (Math.random() - 0.5) * 18 * scale;
+      var startX = p.x + perpX * spread * 0.3;
+      var startY = p.y + perpY * spread * 0.3;
+      // Slight perpendicular velocity component for natural-looking
+      // arc (not perfectly straight)
+      var perpV = (Math.random() - 0.5) * sp * 0.2;
+      purpleParticles.push({
+        x: startX, y: startY,
+        vx: dirX * sp + perpX * perpV,
+        vy: dirY * sp + perpY * perpV,
+        r: (1.5 + Math.random() * 2) * scale,
+        alpha: 0.95,
+        color: streamColor,
+      });
+    }
+    // Tiny accent burst at item (so player sees WHERE the stream
+    // started) — much smaller than the v0.16.63 burst
+    if (typeof spawnCritFlourish === 'function') {
+      spawnCritFlourish(p.x, p.y, streamColor, 3);
+    }
+    // Apply pickup effect — mirrors updateDroppedBricks contact branch.
+    if (p.kind === 'cheese') {
+      if (cfg && cfg.cheeseAutoApply) {
+        player.hpMax += 1;
+        player.hp = Math.min(player.hpMax, player.hp + 1);
+        if (_battleStats) {
+          if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+          _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+        }
+      } else {
+        player.cheese = (player.cheese || 0) + 1;
+        if (_battleStats) _battleStats.cheeseEaten = (_battleStats.cheeseEaten || 0) + 1;
+        if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+        _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+      }
+    } else if (p.kind === 'gold') {
+      var amt = p.amount || 1;
+      player.gold = (player.gold || 0) + amt;
+      if (_battleStats) _battleStats.goldGained = (_battleStats.goldGained || 0) + amt;
+    } else {
+      // Brick — same as standard pickup: grow charges AND ceiling.
+      player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
+      player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
+      if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
+    }
+    p.done = true;
+    retrievedCount++;
+  }
+  // Convergence flash at player — small bright pulse where streams arrive
+  if (retrievedCount > 0 && typeof spawnCritShockwave === 'function') {
+    spawnCritShockwave(player.x, player.y, '#4db8ff',
+      { r0: 4, maxR: 32 * scale, thickness: 2, growth: 180 });
+  }
+  // Refresh brick bar so retrieved bricks immediately show in HUD
+  if (typeof renderBrickBar === 'function') renderBrickBar();
+  // Single floater summarizing the grab
+  showFloatingText(player.x, player.y - 50, '+' + retrievedCount + ' ✦', '#4db8ff', player);
+}
+
+function updateBlueBolts(dt, bounds) {
+  blueBolts = blueBolts.filter(function(b) { return !b.dead; });
+  blueBolts.forEach(function(b) {
+    if (b.dead) return;
+    if (b.delayTimer > 0) { b.delayTimer -= dt; return; } // staggered launch
+    // Fixed-point bolts navigate to targetX/targetY regardless of entities.
+    // Homing bolts require a live target; if target dies mid-flight the bolt
+    // dies (legacy behavior).
+    if (!b.fixedPoint && (!b.target || b.target.hp <= 0)) { b.dead = true; return; }
+    var tx, ty;
+    if (b.fixedPoint) { tx = b.targetX; ty = b.targetY; }
+    else              { tx = b.target.x; ty = b.target.y; }
+    var dx = tx - b.x, dy = ty - b.y;
+    var dist = Math.sqrt(dx*dx + dy*dy);
+    var step = b.speed * dt;
+    b.x += (dx/dist) * step;
+    b.y += (dy/dist) * step;
+    b.travelled = (b.travelled||0) + step;
+    // Spawn healing-style trail particles
+    var tier = b.tier || 1;
+    var trailCount = Math.max(1, Math.round(Math.ceil(tier * 0.25) * vScale(tier)));
+    for (var ti = 0; ti < trailCount; ti++) {
+      var trailColor = tier >= 4 ? '#1a8fff' : tier >= 3 ? '#2299ff' : tier >= 2 ? '#2299ff' : '#4db8ff';
+      playerSparkles.push({
+        ox: b.x - player.x + (Math.random()-0.5)*b.r,
+        oy: b.y - player.y + (Math.random()-0.5)*b.r,
+        vox: (Math.random()-0.5)*0.4,
+        voy: (Math.random()-0.5)*0.4 - 0.1,
+        text: tier >= 3 ? '✦' : '✧',
+        color: trailColor,
+        size: 2 + tier * 0.4 + Math.random(),
+        alpha: 0.7 + Math.random()*0.3,
+        life: 1,
+        fixed: true, // don't follow player
+        fx: b.x + (Math.random()-0.5)*b.r,
+        fy: b.y + (Math.random()-0.5)*b.r,
+      });
+    }
+    // Fixed-point bolt arrival: reached the drop location. AoE damage any
+    // entity within impact radius using burstDmg (all-burst, no primary
+    // distinction). Always leaves a visible burst even on empty ground.
+    if (b.fixedPoint && b.travelled > 30 && dist < b.r + 6) {
+      var impactR = b.impactR || scaleDist(42);
+      var ix = b.targetX, iy = b.targetY;
+      var primaryHit = null;
+      // β model: every entity in radius takes burstDmg (or fall back to dmg
+      // for legacy bolts that didn't set burstDmg).
+      var hitDmg = b.burstDmg || b.dmg || 0;
+      entities.forEach(function(ent) {
+        if (ent.hp <= 0) return;
+        if (Math.hypot(ent.x - ix, ent.y - iy) <= impactR + ent.r) {
+          var fpRes = damageEntity(ent, hitDmg, undefined, 'blue');
+          ent.flashTimer = 0.2;
+          showDamageNumber(ent.x, ent.y - 30, fpRes.applied, '#4db8ff', fpRes.tier, ent.x, ent.y, undefined, fpRes.witherBoost, ent, 'blue');
+          if (b.isCrit && !primaryHit) {
+            primaryHit = ent;
+            ent.markedTimer = 3.0;
+          }
+        }
+      });
+      // BLUE LANDING FLASH (every cast, not just crits): snappy shockwave
+      // sized to the actual blast radius + lingering glow that fades over
+      // ~0.4s. Players see exactly where the AoE landed and how big it was.
+      spawnCritShockwave(ix, iy, '#4db8ff', { r0: 6, maxR: impactR, thickness: 3, growth: impactR * 4 });
+      blueFieldFlashes.push({
+        x: ix, y: iy,
+        radius: impactR,
+        timer: 0.4,
+        duration: 0.4,
+      });
+      // CRIT-only extra flourish layered on top
+      if (b.isCrit) {
+        spawnCritShockwave(ix, iy, '#4db8ff', { r0: 8, maxR: impactR * 1.4, thickness: 3, growth: 280 });
+        spawnCritFlourish(ix, iy, '#6fb8ff', 14);
+        spawnCritFlourish(ix, iy, '#a0dfff', 10);
+      }
+      // Impact burst at drop point regardless of hit
+      var tierFP = b.tier || 1;
+      var burstCountFP = Math.max(1, Math.round((2 + Math.ceil(tierFP * 1.25)) * vScale(tierFP)));
+      for (var fpi = 0; fpi < burstCountFP; fpi++) {
+        var fpa = Math.random() * Math.PI * 2;
+        var fps = (1 + Math.random()) * (8 + tierFP * 5);
+        purpleParticles.push({
+          x: ix, y: iy,
+          vx: Math.cos(fpa)*fps, vy: Math.sin(fpa)*fps,
+          r: 1 + tierFP * 0.5 + Math.random() * 1.5,
+          alpha: 0.9, color: '#4db8ff',
+        });
+      }
+      b.dead = true;
+      return;
+    }
+    // Require minimum travel before hit registers
+    if (!b.fixedPoint && b.travelled > 30 && dist < b.r + b.target.r) {
+      var bRes = damageEntity(b.target, b.dmg, undefined, 'blue');
+      b.target.flashTimer = 0.2;
+      showDamageNumber(b.target.x, b.target.y - 30, bRes.applied, '#4db8ff', bRes.tier, b.target.x, b.target.y, undefined, bRes.witherBoost, b.target, 'blue');
+      // BLUE MARK: on crit, mark target to take +50% damage from all sources for 3s.
+      if (b.isCrit) {
+        b.target.markedTimer = 3.0;
+        // BLUE flourish: cyan shockwave + rainbow-ish halo burst
+        spawnCritShockwave(b.target.x, b.target.y, '#4db8ff', { r0: 8, maxR: scaleDist(140), thickness: 3, growth: 280 });
+        spawnCritFlourish(b.target.x, b.target.y, '#6fb8ff', 14);
+        spawnCritFlourish(b.target.x, b.target.y, '#a0dfff', 10);
+      }
+      // Overload impact burst: damage entities near the target (primary target
+      // excluded since it already took full dmg). burstRadius/burstDmg only set
+      // on overload bolts, so tap-blue impacts act as before.
+      if (b.burstRadius && b.burstDmg) {
+        entities.forEach(function(other) {
+          if (other === b.target || other.hp <= 0) return;
+          if (Math.hypot(other.x - b.target.x, other.y - b.target.y) <= b.burstRadius) {
+            var burstRes = damageEntity(other, b.burstDmg, undefined, 'blue');
+            other.flashTimer = 0.2;
+            showDamageNumber(other.x, other.y - 30, burstRes.applied, '#6fb8ff', burstRes.tier, other.x, other.y, undefined, burstRes.witherBoost, other, 'blue');
+          }
+        });
+      }
+      // Impact burst scaled by tier
+      var tier = b.tier || 1;
+      var burstCount = Math.max(1, Math.round((2 + Math.ceil(tier * 1.25)) * vScale(tier)));
+      var cImpact = '#4db8ff';
+      for (var bi = 0; bi < burstCount; bi++) {
+        var ba = Math.random() * Math.PI * 2;
+        var bs = (1 + Math.random()) * (8 + tier * 5);
+        purpleParticles.push({
+          x: b.target.x, y: b.target.y,
+          vx: Math.cos(ba)*bs, vy: Math.sin(ba)*bs,
+          r: 1 + tier * 0.5 + Math.random() * 1.5,
+          alpha: 0.9, color: cImpact,
+        });
+      }
+      b.dead = true;
+      return;
+    }
+    if (b.x < bounds.x || b.x > bounds.x+bounds.w || b.y < bounds.y || b.y > bounds.y+bounds.h) b.dead = true;
+  });
+}
+
+function drawBlueBolts() {
+  var now = performance.now();
+  blueBolts.forEach(function(b) {
+    if (b.delayTimer > 0) return;
+    var tier = b.tier || 1;
+    // All blue — deepen with tier
+    var hue = 210 + tier * 4;
+    var coreColor = 'hsl(' + hue + ',100%,' + Math.max(45, 65 - tier * 4) + '%)';
+    var glowColor = 'hsl(' + hue + ',100%,60%)';
+    // Flicker — oscillate radius and alpha slightly
+    var flicker = 0.9 + 0.1 * Math.sin(now * 0.02 + b.x);
+    var flickerR = b.r * flicker;
+    ctx.save();
+    // Outer energy rings
+    for (var ri = Math.max(1, Math.round(Math.ceil(tier*0.25)*vScale(tier))); ri > 0; ri--) {
+      ctx.globalAlpha = (0.02 + 0.01 * Math.sin(now * 0.015 + ri)) * ri * vScale(tier);
+      ctx.fillStyle = glowColor;
+      ctx.beginPath(); ctx.arc(b.x, b.y, flickerR * (1 + ri * 0.5), 0, Math.PI*2); ctx.fill();
+    }
+    // Core
+    ctx.globalAlpha = flicker;
+    ctx.shadowColor = glowColor;
+    ctx.shadowBlur = (6 + tier * 3) * flicker * vScale(tier);
+    ctx.fillStyle = coreColor;
+    ctx.beginPath(); ctx.arc(b.x, b.y, flickerR, 0, Math.PI*2); ctx.fill();
+    // Bright blue center — not white
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'hsl(' + hue + ',80%,85%)';
+    ctx.globalAlpha = flicker * 0.8;
+    ctx.beginPath(); ctx.arc(b.x, b.y, flickerR * 0.3, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  });
+}
+
+// ── UNIFIED CAST INDICATOR ──────────────────────────────────
+// One function for every color's drag-targeting reticle. Renders:
+//   1. Dashed line from player to cursor (when cursor is over arena)
+//   2. Outer ring at cursor showing exact AoE radius (tier + class scaled
+//      via _fx so the preview matches what the cast will actually deliver)
+//   3. Faint preview ring at player position when held but not yet dragged
+//
+// No inner circles, labels, spikes, cross-marks, or other decorations —
+// those belong on persistent fields/effects (drawn by the effect's own
+// renderer), not on the cursor preview. Targeting is "where" and "how big",
+// nothing else.
+//
+// Trigger: shows whenever color is being held (overloadState.color === c)
+// OR is being dragged (dragPos set). Universal "show while held" — every
+// color previews at the player position before drag begins, then snaps to
+// cursor with brighter alpha when drag goes over the arena.
+//
+// color: canonical color key (used for _fx lookup AND overload tier resolution)
+// hex:   stroke color (without alpha — alpha handled internally)
+// dragPos: {x, y} screen-space drag position or null
+function drawCastIndicator(color, hex, dragPos) {
+  if (!player) return;
+  var isHeld = overloadState && overloadState.color === color;
+  if (!dragPos && !isHeld) return; // nothing to show
+  var rect = canvas.getBoundingClientRect();
+  var overArena = dragPos &&
+    dragPos.x >= rect.left && dragPos.x <= rect.right &&
+    dragPos.y >= rect.top  && dragPos.y <= rect.bottom;
+  // Resolve canvas-space center: cursor when over arena, else player position
+  var cx, cy, isActiveDrag;
+  if (overArena) {
+    cx = (dragPos.x - rect.left) * (canvas.width / rect.width);
+    cy = (dragPos.y - rect.top)  * (canvas.height / rect.height);
+    isActiveDrag = true;
+  } else {
+    cx = player.x; cy = player.y;
+    isActiveDrag = false;
+  }
+  // Tier from overload state (held) or tap (1)
+  var brickMax = (player.brickMax && player.brickMax[color]) || 1;
+  var tier = isHeld
+    ? Math.max(1, Math.min(brickMax, Math.floor(overloadState.timer / OVERLOAD_TIER) + 1))
+    : 1;
+  var fx = _fx(color, tier);
+  if (!fx) return;
+  // S015 v0.15.20: SS chain-trap drop zone preview. When a class with
+  // orangeProfile.trapsChainOnTrigger is overload-holding orange, render
+  // dashed rings around existing chained traps showing where a new trap
+  // would join the chain network. Renders before standard indicator so
+  // the player sees both the drop-zone hints AND the standard cast preview.
+  if (color === 'orange' && isHeld && player) {
+    var oProf = (typeof getOrangeProfile === 'function') ? getOrangeProfile(player.cls) : null;
+    if (oProf && oProf.trapsChainOnTrigger) {
+      var chainR = oProf.chainRadius || 200;
+      ctx.save();
+      ctx.strokeStyle = hex;
+      ctx.shadowColor = hex;
+      ctx.shadowBlur = 4;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 6]);
+      // Pulse alpha softly so the rings read as "advisory" not "primary"
+      var pulseT = performance.now() * 0.003;
+      var ringAlpha = 0.18 + 0.12 * (0.5 + 0.5 * Math.sin(pulseT));
+      ctx.globalAlpha = ringAlpha;
+      // Iterate active chain traps. Skip triggered ones (they won't link).
+      for (var tci = 0; tci < traps.length; tci++) {
+        var tc = traps[tci];
+        if (!tc.chained || tc.triggered) continue;
+        ctx.beginPath();
+        ctx.arc(tc.x, tc.y, chainR, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+  // Class-driven dual preview for purple teleport profile (FW signature).
+  // When active-dragging purple and the class has a teleport profile, show
+  // BOTH blast zones at their scaled radii plus the warp line between them.
+  // Held-without-drag preview stays single ring at player (no drop point yet).
+  var purpleProf = (color === 'purple' && isActiveDrag && player) ? getPurpleProfile(player.cls) : null;
+  if (purpleProf && purpleProf.teleport) {
+    var rTarget = clampRadiusToArena(fx.radiusPx * purpleProf.targetScale);
+    var rOrigin = clampRadiusToArena(fx.radiusPx * purpleProf.originScale);
+    ctx.save();
+    // Warp line: solid arrow from origin (player) to target (drop point).
+    // Stronger than a normal drag-line — this is a teleport, not a cast.
+    ctx.setLineDash([8, 4]);
+    ctx.strokeStyle = hex + 'CC';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
+    ctx.setLineDash([]);
+    // Target ring (larger, where player will arrive)
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = hex;
+    ctx.shadowColor = hex;
+    ctx.shadowBlur = 12;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 8]);
+    ctx.beginPath(); ctx.arc(cx, cy, rTarget, 0, Math.PI * 2); ctx.stroke();
+    // Origin ring (smaller, residual blast at prior position) — fainter
+    // because it fires after the teleport, not now
+    ctx.globalAlpha = 0.30;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(player.x, player.y, rOrigin, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+    return;
+  }
+  // Class-driven RED range preview. When active-dragging red, show the
+  // effective range as a faint arc around the player + an endpoint marker
+  // showing where the dash will actually stop. If the drop point is
+  // within range the endpoint matches it; if past range, the endpoint is
+  // the max-range mark in the dash direction.
+  // Per S015 v0.15.9: range is INVENTORY-driven, not tier-driven. Tap and
+  // overload show the same arc; tier scales damage, not range.
+  // See characters.js getRedRange(cls, owned).
+  if (color === 'red' && isActiveDrag && player && typeof getRedRange === 'function') {
+    var ownedRed = (player.bricks && player.bricks.red) || 0;
+    var maxRange = getRedRange(player.cls, ownedRed);
+    var rdx = cx - player.x, rdy = cy - player.y;
+    var rdist = Math.hypot(rdx, rdy) || 1;
+    var inRange = rdist <= maxRange;
+    var endX, endY;
+    if (inRange) { endX = cx; endY = cy; }
+    else {
+      endX = player.x + (rdx / rdist) * maxRange;
+      endY = player.y + (rdy / rdist) * maxRange;
+    }
+    ctx.save();
+    // Max-range arc — faint circle around player showing reach bubble
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = hex;
+    ctx.shadowColor = hex;
+    ctx.shadowBlur = 6;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 8]);
+    ctx.beginPath(); ctx.arc(player.x, player.y, maxRange, 0, Math.PI * 2); ctx.stroke();
+    // Dash line from player to clamped endpoint — solid + brighter than
+    // standard drag line so it reads as a strike vector
+    ctx.setLineDash([]);
+    ctx.globalAlpha = inRange ? 0.65 : 0.40;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(endX, endY); ctx.stroke();
+    // Hit-radius bubble at endpoint — shows the "connect zone" where an
+    // enemy's center must land for the dash to STOP (first-hit detection).
+    // Standard entity radius = 14px (typical goblin); the bubble = the
+    // exact circle hit detection uses at impact: (player.r + 14) × scale.
+    // For aoe-blast classes, ALSO render an outer blast ring showing
+    // where AOE damage will land at impact. Two rings communicate two
+    // things: inner = "dash stops here," outer = "everything in here
+    // takes damage." Per S015 v0.15.16, schema-driven.
+    var dashProfile = (typeof getRedDashProfile === 'function')
+      ? getRedDashProfile(player.cls)
+      : { hitboxScale: 1.0, dashModel: 'recoil', blastRadiusMult: 1.0 };
+    var hbScale = dashProfile.hitboxScale;
+    var hitBubbleR = (player.r + 14) * hbScale;
+    // Inner bubble — where the dash stops on first contact
+    ctx.globalAlpha = 0.22;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 6]);
+    ctx.strokeStyle = hex;
+    ctx.beginPath(); ctx.arc(endX, endY, hitBubbleR, 0, Math.PI * 2); ctx.stroke();
+    // Outer blast ring — only for aoe-blast model. Shows AOE damage zone.
+    // Slightly thicker dash + brighter alpha so it reads as the "louder"
+    // ring (the gameplay-relevant one for BK), with the inner bubble as
+    // a quieter "this is where I stop" hint.
+    if (dashProfile.dashModel === 'aoe-blast') {
+      var blastR = hitBubbleR * dashProfile.blastRadiusMult;
+      ctx.globalAlpha = 0.32;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([7, 5]);
+      ctx.strokeStyle = hex;
+      ctx.beginPath(); ctx.arc(endX, endY, blastR, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    // Endpoint marker — small filled circle where the dash will stop.
+    // When out of range, this lands at the max-range mark, not the cursor,
+    // so the player can see "I dropped past my reach, this is where I stop".
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = hex;
+    ctx.beginPath(); ctx.arc(endX, endY, 7, 0, Math.PI * 2); ctx.fill();
+    // Out-of-range hint: small ring around cursor showing the drop point
+    // is NOT where the dash ends
+    if (!inRange) {
+      ctx.globalAlpha = 0.30;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = hex + '88';
+      ctx.beginPath(); ctx.arc(cx, cy, 12, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+  // Standard single-ring indicator for all other casts.
+  var radius = clampRadiusToArena(fx.radiusPx);
+  // S015 v0.15.17: blue-specific — gate the AOE ring on blueProfile.
+  // Only classes with hasImpactAOE (FW) get the growing AOE preview;
+  // other classes see a small target marker showing single-target bolt
+  // landing point. Schema-driven, no class-name checks. Engine reads
+  // dashProfile-style data and renders accordingly.
+  var skipAOERing = false;
+  var showTargetMarker = false;
+  if (color === 'blue' && typeof getBlueProfile === 'function') {
+    var blueProf = getBlueProfile(player.cls);
+    if (!blueProf || !blueProf.hasImpactAOE) {
+      skipAOERing = true;
+      showTargetMarker = true;
+    }
+  }
+  ctx.save();
+  // Dashed line from player to drop point — only when cursor is over the
+  // arena (otherwise we'd be drawing a line into the brick bar).
+  if (isActiveDrag) {
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = hex + '88';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(cx, cy); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Outer AoE ring. Brighter and solid-bordered when actively dragged;
+  // faint pulsing preview when only held. Skipped for blue casts on
+  // non-AOE classes (would mislead — no AOE will land).
+  if (!skipAOERing) {
+    if (isActiveDrag) {
+      ctx.globalAlpha = 0.5;
+    } else {
+      // Pulse 0.10 → 0.30 over ~0.5s for a gentle "ready" indicator at player
+      var t = performance.now() * 0.003;
+      ctx.globalAlpha = 0.10 + 0.20 * (0.5 + 0.5 * Math.sin(t));
+    }
+    ctx.strokeStyle = hex;
+    ctx.shadowColor = hex;
+    ctx.shadowBlur = 10;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 8]);
+    ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Single-target marker — small ring at landing point for non-AOE blue
+  // casters. Communicates "bolt lands here, hits one entity, no spread."
+  if (showTargetMarker && isActiveDrag) {
+    ctx.globalAlpha = 0.65;
+    ctx.strokeStyle = hex;
+    ctx.shadowColor = hex;
+    ctx.shadowBlur = 6;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(cx, cy, 10, 0, Math.PI * 2); ctx.stroke();
+    // Tiny center dot
+    ctx.fillStyle = hex;
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════
+// ORANGE — Trap
+// ═══════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════
+// YELLOW — Confuse Particles
+// ═══════════════════════════════════════════════════
+var confuseParticles = [];
+
+function spawnConfuseParticles(cx, cy, radius, count) {
+  for (var i = 0; i < count; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var r = Math.random() * radius;
+    confuseParticles.push({
+      x: cx + Math.cos(angle) * r,
+      y: cy + Math.sin(angle) * r,
+      vx: (Math.random() - 0.5) * 30,
+      vy: -(20 + Math.random() * 40),
+      size: 10 + Math.random() * 16,
+      alpha: 0.9 + Math.random() * 0.1,
+      fadeRate: 0.025 + Math.random() * 0.02,
+    });
+  }
+}
+
+function updateConfuseParticles(dt) {
+  confuseParticles = confuseParticles.filter(function(p) { return p.alpha > 0.05; });
+  confuseParticles.forEach(function(p) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 10 * dt; // gentle gravity
+    p.alpha -= p.fadeRate;
+    p.size *= 1.008; // grow slightly as they rise
+  });
+}
+
+function drawConfuseParticles() {
+  confuseParticles.forEach(function(p) {
+    ctx.save();
+    ctx.globalAlpha = p.alpha;
+    ctx.fillStyle = '#F5D000';
+    ctx.shadowColor = '#F5D000';
+    ctx.shadowBlur = 8 * p.alpha;
+    ctx.font = 'bold ' + Math.round(p.size) + 'px serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('?', p.x, p.y);
+    ctx.restore();
+  });
+}
+
+var traps = [];
+var orangeAura = null;
+
+// Bleed tracking
+var bleeds = []; // { target, dmg, timer, tick }
+
+// ─── ORANGE CHAIN NETWORK (S015 v0.15.20, SS signature) ───────────
+// When an SS chain trap triggers, the entire transitive network of
+// linked chain traps detonates together. The trap that triggered is
+// the seed; BFS finds all chained traps within chainRadius of any
+// already-found trap (chains can be longer than a single chainRadius
+// hop because A→B→C still all fire when A triggers).
+//
+// Damage to entities scales smoothly by how many trap radii contain
+// them. Curve: min(stackingMaxMult, 1 + 0.5 × (N - 1)) where N is the
+// count of trap radii covering the entity. So:
+//   N=1 → 1.0× (single trap, normal damage)
+//   N=2 → 1.5×
+//   N=4 → 2.5×
+//   N=5+ caps at stackingMaxMult (default 3.0)
+// This rewards careful clustering placement without becoming an
+// instakill at high cluster density.
+//
+// Chain detonation marks every trap in the network as triggered so
+// they don't re-fire when a second entity walks into another node.
+// Each entity gets ONE damage event from the chain, not one per trap.
+function detonateChainNetwork(seedTrap) {
+  if (!seedTrap || !seedTrap.chained) return;
+  // BFS to find the network. Includes the seed.
+  var network = [seedTrap];
+  var visited = [seedTrap];  // small N, array indexOf is fine
+  var queue = [seedTrap];
+  while (queue.length > 0) {
+    var current = queue.shift();
+    var linkR = current.chainRadius || 0;
+    for (var ti = 0; ti < traps.length; ti++) {
+      var other = traps[ti];
+      if (!other.chained) continue;
+      if (visited.indexOf(other) >= 0) continue;
+      if (other.triggered) continue;  // already-fired traps don't re-link
+      if (Math.hypot(other.x - current.x, other.y - current.y) <= linkR) {
+        visited.push(other);
+        network.push(other);
+        queue.push(other);
+      }
+    }
+  }
+  // Mark all triggered + start hold timer + spawn caught list
+  network.forEach(function(t) {
+    t.triggered = true;
+    t.holdTimer = t.HOLD_DURATION;
+    t.caughtEntities = t.caughtEntities || [];
+  });
+  // S015 v0.15.22: unified-blast damage model. Damage scales by NETWORK
+  // SIZE N (count of traps in the chain), not by per-entity overlap count.
+  // Curve: min(stackingMaxMult, 1 + 0.5 × (N - 1)). All entities inside
+  // the UNION of trap radii take the same scaled damage. Replaces the
+  // earlier per-overlap stacking model — chain now reads as one big blast
+  // with damage scaled to its size, not as many overlapping per-trap hits.
+  var maxMult = seedTrap.stackingMaxMult || 3.0;
+  var networkSize = network.length;
+  var blastMult = Math.min(maxMult, 1 + 0.5 * (networkSize - 1));
+  var entityHits = []; // {entity}
+  entities.forEach(function(g) {
+    if (g.hp <= 0 || g.dead) return;
+    // Inside union iff inside any trap's radius
+    for (var nti = 0; nti < network.length; nti++) {
+      var nt = network[nti];
+      if (Math.hypot(g.x - nt.x, g.y - nt.y) < nt.r + g.r) {
+        entityHits.push({ entity: g });
+        return;
+      }
+    }
+  });
+  // Apply damage uniformly. Use seed's initialDmg for base.
+  var baseDmg = seedTrap.initialDmg;
+  var dmgAmt = Math.ceil(baseDmg * blastMult);
+  entityHits.forEach(function(hit) {
+    var dRes = damageEntity(hit.entity, dmgAmt, false, 'orange');
+    hit.entity.flashTimer = 0.25;
+    // Damage number color hints at the chain bonus: standard orange for
+    // single-trap (no bonus), brighter shrapnel orange for any chain size > 1.
+    var dmgColor = networkSize > 1 ? '#FF8833' : '#ff6600';
+    showDamageNumber(hit.entity.x, hit.entity.y - 30, dRes.applied,
+      dmgColor, dRes.tier, hit.entity.x, hit.entity.y,
+      undefined, dRes.witherBoost, hit.entity, 'orange');
+    // Add to caughtEntities list of any trap that contained the entity,
+    // so the hold-timer visual cleanup works the same as standard traps.
+    network.forEach(function(nt) {
+      if (Math.hypot(hit.entity.x - nt.x, hit.entity.y - nt.y) < nt.r + hit.entity.r) {
+        if (nt.caughtEntities.indexOf(hit.entity) < 0) {
+          nt.caughtEntities.push(hit.entity);
+        }
+      }
+    });
+  });
+  // Spawn visual chain links between connected traps in the network.
+  // Each pair within chainRadius gets a brief line.
+  for (var ai = 0; ai < network.length; ai++) {
+    for (var bi = ai + 1; bi < network.length; bi++) {
+      var ta = network[ai], tb = network[bi];
+      var d = Math.hypot(ta.x - tb.x, ta.y - tb.y);
+      var maxLink = Math.max(ta.chainRadius || 0, tb.chainRadius || 0);
+      if (d <= maxLink) {
+        chainLinkVisuals.push({
+          x1: ta.x, y1: ta.y, x2: tb.x, y2: tb.y,
+          alpha: 1.0, life: 0.35,
+          age: 0,
+        });
+      }
+    }
+  }
+  // S015 v0.15.22: per-trap explosion visuals. Every trap in the network
+  // gets its own shockwave + particle burst at its position so the chain
+  // reads as multiple synchronized blasts, not a single silent trigger.
+  // Without this, only the seed trap had visible feedback.
+  network.forEach(function(nt) {
+    // Orange shockwave ring at this trap's position
+    spawnCritShockwave(nt.x, nt.y, '#F57C00',
+      { r0: 6, maxR: nt.r * 1.6, thickness: 3, growth: 320, fadeRate: 2.4 });
+    // Inner brighter shockwave for layering
+    spawnCritShockwave(nt.x, nt.y, '#FFAA44',
+      { r0: 3, maxR: nt.r * 1.2, thickness: 2, growth: 260, fadeRate: 2.8 });
+    // Particle bloom — orange shrapnel scattering outward
+    var burstCount = 8 + Math.floor(networkSize * 1.5);
+    for (var pi = 0; pi < burstCount; pi++) {
+      var pa = Math.random() * Math.PI * 2;
+      var ps = (1.5 + Math.random()) * (60 + networkSize * 8);
+      purpleParticles.push({
+        x: nt.x, y: nt.y,
+        vx: Math.cos(pa) * ps,
+        vy: Math.sin(pa) * ps,
+        r: 2 + Math.random() * 3,
+        alpha: 0.95,
+        color: Math.random() < 0.4 ? '#FFCC44' : '#FF6600',
+      });
+    }
+  });
+  // Crit shockwave on the seed gets an extra flourish (the chain originator
+  // gets the loudest visual). Other traps already have the standard burst above.
+  if (seedTrap.isCrit) {
+    spawnCritShockwave(seedTrap.x, seedTrap.y, '#F57C00',
+      { r0: 12, maxR: seedTrap.r * 2.4, thickness: 4, growth: 380 });
+    spawnCritFlourish(seedTrap.x, seedTrap.y, '#FF9933', 22);
+    spawnCritFlourish(seedTrap.x, seedTrap.y, '#FFCC80', 14);
+  }
+}
+
+// Visual links between linked chain traps when the network detonates.
+// Drawn as fading orange lines for ~350ms after detonation, then expire.
+var chainLinkVisuals = [];
+
+function updateChainLinkVisuals(dt) {
+  for (var i = chainLinkVisuals.length - 1; i >= 0; i--) {
+    var l = chainLinkVisuals[i];
+    l.age += dt;
+    l.alpha = Math.max(0, 1 - (l.age / l.life));
+    if (l.age >= l.life) chainLinkVisuals.splice(i, 1);
+  }
+}
+
+function drawChainLinkVisuals() {
+  if (!chainLinkVisuals.length || !ctx) return;
+  ctx.save();
+  chainLinkVisuals.forEach(function(l) {
+    ctx.globalAlpha = l.alpha * 0.7;
+    ctx.strokeStyle = '#FF8833';
+    ctx.lineWidth = 2.5;
+    ctx.shadowColor = '#FF6600';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(l.x1, l.y1);
+    ctx.lineTo(l.x2, l.y2);
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+function spawnSpikeTrap(x, y, r, initialDmg, sealed, isCrit, chainOpts) {
+  // sealed=true means trap immediately snaps (used for aura/drag at placement)
+  // isCrit=true flags ORANGE SHRAPNEL: detonation hits AoE radius instead of single target.
+  // chainOpts={chained, chainRadius, stackingMaxMult} — when present, trap is part
+  //   of a chain network. Per S015 v0.15.20 (SS orange signature).
+  var t = {
+    x: x, y: y, r: r,
+    triggered: false, sealed: sealed||false,
+    snapTimer: 0, SNAP: 0.3,  // snap animation duration
+    holdTimer: 0, HOLD_DURATION: 1.5,
+    initialDmg: initialDmg || 2,
+    pulse: 0, done: false, target: null,
+    spikeAngle: Math.random() * Math.PI * 2,
+    isCrit: !!isCrit,
+    // if sealed, trap contains already-caught entities
+    caughtEntities: [],
+    // S015 v0.15.20: chain-linked trap fields. Other classes' traps have
+    // chained=false (default falsy) and use the standard single-trap path.
+    chained: !!(chainOpts && chainOpts.chained),
+    chainRadius: (chainOpts && chainOpts.chainRadius) || 0,
+    stackingMaxMult: (chainOpts && chainOpts.stackingMaxMult) || 1.0,
+  };
+  traps.push(t);  // push BEFORE potential chain detonation so the trap is in
+                  // the network when detonateChainNetwork scans
+  if (sealed) {
+    if (t.chained) {
+      // Chain-linked sealed trap: if an entity is already inside the radius
+      // at placement, treat that as the trigger and detonate the network.
+      var anyEntityCaught = false;
+      for (var sci = 0; sci < entities.length; sci++) {
+        var sg = entities[sci];
+        if (Math.hypot(sg.x-x, sg.y-y) < r + sg.r) { anyEntityCaught = true; break; }
+      }
+      if (anyEntityCaught) {
+        detonateChainNetwork(t);
+      }
+      // If no entity caught, the trap waits as a network node (will detonate
+      // when something walks into ANY linked trap).
+    } else {
+      // Standard sealed-trap path (no chain): immediate per-entity damage.
+      entities.forEach(function(g) {
+        if (Math.hypot(g.x-x, g.y-y) < r + g.r) {
+          t.caughtEntities.push(g);
+          t.triggered = true;
+          t.holdTimer = t.HOLD_DURATION;
+          var tRes = damageEntity(g, t.initialDmg, false, 'orange');
+          showDamageNumber(g.x, g.y-30, tRes.applied, '#ff6600', tRes.tier, g.x, g.y, undefined, tRes.witherBoost, g, 'orange');
+        }
+      });
+      // ORANGE SHRAPNEL: on crit sealed-trap placement, also hit anyone in a
+      // wider AoE around the trap center (1.8x radius).
+      if (isCrit) {
+        var aoeR = r * 1.8;
+        entities.forEach(function(g) {
+          // Skip already-caught entities so we don't double-hit them
+          if (t.caughtEntities.indexOf(g) >= 0) return;
+          if (Math.hypot(g.x-x, g.y-y) < aoeR + g.r) {
+            var sRes = damageEntity(g, t.initialDmg, true, 'orange');
+            g.flashTimer = 0.2;
+            showDamageNumber(g.x, g.y-30, sRes.applied, '#ff9933', sRes.tier, g.x, g.y, undefined, sRes.witherBoost, g, 'orange');
+          }
+        });
+        spawnCritShockwave(x, y, '#F57C00', { r0: 10, maxR: aoeR, thickness: 4, growth: 360 });
+        spawnCritFlourish(x, y, '#FF9933', 22);
+        spawnCritFlourish(x, y, '#FFC080', 14);
+      }
+    }
+  }
+}
+
+function startOrangeTrap(ox, oy, tier) {
+  var crit = _currentCrit;
+  var isDrag = ox !== undefined && Math.hypot(ox-player.x, oy-player.y) > scaleDist(40);
+  var fx = _fx('orange', tier || 1);
+  if (!fx) return;
+  // S015 v0.15.22: thread chainOpts through tap and tap-drag paths too.
+  // Previously only fireOverloadOrangeScatter (overload-drag) tagged traps
+  // as chained, leaving tap-at-feet and tap-drag SS traps as isolated nodes.
+  // Now ALL SS-placed orange traps (tap, tap-drag, overload-drag) join the
+  // chain network. Spike aura (overload no-drag) is NOT a trap and stays
+  // exempt — see Design Parking Lot for the aura→fusion-gate idea.
+  var oProf = (typeof getOrangeProfile === 'function') ? getOrangeProfile(player.cls) : null;
+  var chainOpts = (oProf && oProf.trapsChainOnTrigger) ? {
+    chained: true,
+    chainRadius: oProf.chainRadius || 200,
+    stackingMaxMult: oProf.stackingMaxMult || 3.0,
+  } : null;
+  if (isDrag) {
+    spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, crit, chainOpts);
+  } else {
+    // Tap-on-self trap is 0.75-radius (sharper than tap-drag, focused at
+    // feet) but full damage. Was 0.5 in earlier sessions — felt too small
+    // for the trap's spatial role; bumped to 0.75 in S015 v0.15.24.
+    spawnSpikeTrap(player.x, player.y, clampRadiusToArena(fx.radiusPx * 0.75), fx.dmg, false, crit, chainOpts);
+  }
+}
+
+function fireOverloadOrangeScatter(count, ox, oy) {
+  var fx = _fx('orange', count);
+  if (!fx) return;
+  // S015 v0.15.20: SS overload-orange traps are chain-linked. Read class
+  // orangeProfile to determine whether this trap joins the chain network.
+  // Other classes get null → no chain → standard single trap.
+  var oProf = (typeof getOrangeProfile === 'function') ? getOrangeProfile(player.cls) : null;
+  var chainOpts = (oProf && oProf.trapsChainOnTrigger) ? {
+    chained: true,
+    chainRadius: oProf.chainRadius || 200,
+    stackingMaxMult: oProf.stackingMaxMult || 3.0,
+  } : null;
+  spawnSpikeTrap(ox, oy, clampRadiusToArena(fx.radiusPx), fx.dmg, true, _currentCrit, chainOpts);
+}
+
+function applyBleed(g, dmg, tier) {
+  var bleedDmg = Math.max(1, Math.floor(dmg * 0.5));
+  var fx = _fx('orange', tier || 1);
+  var duration = fx ? fx.bleedDur : 3.0;
+  bleeds.push({ target: g, dmg: bleedDmg, timer: duration, tick: 0 });
+}
+
+function updateBleeds(dt) {
+  bleeds = bleeds.filter(function(b) { return b.timer > 0 && b.target && b.target.hp > 0; });
+  bleeds.forEach(function(b) {
+    b.timer -= dt;
+    b.tick += dt;
+    if (b.tick >= 1.0) {
+      b.tick -= 1.0;
+      var bRes2 = damageEntity(b.target, b.dmg, false, 'orange');
+      showDamageNumber(b.target.x, b.target.y-20, bRes2.applied, '#cc2200', bRes2.tier, b.target.x, b.target.y, '🩸', bRes2.witherBoost, b.target, 'orange');
+    }
+  });
+}
+
+function updateTraps(dt) {
+  // Aura
+  if (orangeAura) {
+    orangeAura.pulse = (orangeAura.pulse + dt*4) % (Math.PI*2);
+    entities.forEach(function(g) {
+      // orangeAura can be nulled mid-loop when charges hit 0; guard each iter.
+      if (!orangeAura) return;
+      if (Math.hypot(g.x-player.x, g.y-player.y) < orangeAura.r + g.r) {
+        if (!g._auraTrap) {
+          g._auraTrap = true;
+          orangeAura.charges--;
+          spawnSpikeTrap(g.x, g.y, 20, 2, true);
+          if (orangeAura.charges <= 0) orangeAura = null;
+        }
+      } else { g._auraTrap = false; }
+    });
+  }
+
+  traps = traps.filter(function(t) { return !t.done; });
+  traps.forEach(function(t) {
+    t.pulse = (t.pulse + dt*3) % (Math.PI*2);
+
+    if (t.triggered) {
+      // Snap animation
+      if (t.snapTimer < t.SNAP) t.snapTimer += dt;
+      t.holdTimer -= dt;
+      if (t.holdTimer <= 0) {
+        // Release — apply bleed to caught entities
+        var bTier = Math.max(1, t.initialDmg - 1);
+        t.caughtEntities.forEach(function(g) {
+          applyBleed(g, t.initialDmg, bTier);
+        });
+        t.done = true;
+        return;
+      }
+      // Hold caught entities in place — no movement at all while snared.
+      // Prior behavior pulled them toward trap center (0.08 interp each
+      // frame), which looked like the trap was sucking them in. Snares
+      // read better as "feet are stuck" — entity stays exactly where it
+      // was caught until the hold expires.
+      t.caughtEntities.forEach(function(g) {
+        g.bounceVx=0; g.bounceVy=0; g.bounceTimer=0.05; g.state='bounce';
+      });
+    } else {
+      // Waiting — detect entity
+      entities.forEach(function(g) {
+        if (!t.triggered && Math.hypot(g.x-t.x,g.y-t.y)<t.r+g.r) {
+          // S015 v0.15.20: chain-linked traps fire the entire network.
+          if (t.chained) {
+            detonateChainNetwork(t);
+            return; // detonate handles everything
+          }
+          t.triggered = true;
+          t.holdTimer = t.HOLD_DURATION;
+          t.caughtEntities = [g];
+          var uRes = damageEntity(g, t.initialDmg, false, 'orange');
+          showDamageNumber(g.x, g.y-30, uRes.applied, '#ff6600', uRes.tier, g.x, g.y, undefined, uRes.witherBoost, g, 'orange');
+          // ORANGE SHRAPNEL: on crit unsealed-trap trigger, detonate AoE.
+          if (t.isCrit) {
+            var aoeR2 = t.r * 1.8;
+            entities.forEach(function(other) {
+              if (other === g) return;
+              if (Math.hypot(other.x-t.x, other.y-t.y) < aoeR2 + other.r) {
+                var shRes = damageEntity(other, t.initialDmg, true, 'orange');
+                other.flashTimer = 0.2;
+                showDamageNumber(other.x, other.y-30, shRes.applied, '#ff9933', shRes.tier, other.x, other.y, undefined, shRes.witherBoost, other, 'orange');
+              }
+            });
+            spawnCritShockwave(t.x, t.y, '#F57C00', { r0: 8, maxR: aoeR2, thickness: 4, growth: 340 });
+            spawnCritFlourish(t.x, t.y, '#FF9933', 20);
+            spawnCritFlourish(t.x, t.y, '#FFC080', 12);
+          }
+        }
+      });
+    }
+  });
+
+  updateBleeds(dt);
+}
+
+function drawSpike(ctx, x, y, r, angle, alpha, color) {
+  var spikes = 6;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.shadowColor = color; ctx.shadowBlur = 6;
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  for (var i=0; i<spikes; i++) {
+    var a = (i/spikes)*Math.PI*2;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r);
+    ctx.lineTo(Math.cos(a+0.2)*r*0.4, Math.sin(a+0.2)*r*0.4);
+    ctx.lineTo(Math.cos(a-0.2)*r*0.4, Math.sin(a-0.2)*r*0.4);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawTraps() {
+  if (orangeAura) {
+    ctx.save();
+    var p = Math.sin(orangeAura.pulse)*0.3+0.7;
+    ctx.globalAlpha = p*0.5; ctx.strokeStyle='#F57C00';
+    ctx.shadowColor='#F57C00'; ctx.shadowBlur=16; ctx.lineWidth=2;
+    ctx.setLineDash([5,4]);
+    ctx.beginPath(); ctx.arc(player.x,player.y,orangeAura.r,0,Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    for (var i=0;i<orangeAura.charges;i++){
+      var a=(i/Math.max(1,orangeAura.charges))*Math.PI*2-Math.PI/2;
+      ctx.globalAlpha=0.9; ctx.fillStyle='#F57C00';
+      ctx.beginPath(); ctx.arc(player.x+Math.cos(a)*(orangeAura.r+8),player.y+Math.sin(a)*(orangeAura.r+8),4,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  traps.forEach(function(t) {
+    var snapPct = t.triggered ? Math.min(1, t.snapTimer/t.SNAP) : 0;
+    var color = t.triggered ? '#ff3300' : '#F57C00';
+    ctx.save();
+
+    if (!t.triggered) {
+      // Dormant — subtle spike hints at ground level
+      ctx.globalAlpha = 0.3 + Math.sin(t.pulse)*0.1;
+      drawSpike(ctx, t.x, t.y, t.r*0.5, t.spikeAngle, 0.4, '#F57C00');
+      // Trigger radius ring
+      ctx.globalAlpha = 0.2 + Math.sin(t.pulse)*0.1;
+      ctx.strokeStyle = '#F57C0066'; ctx.lineWidth=1;
+      ctx.setLineDash([3,5]);
+      ctx.beginPath(); ctx.arc(t.x,t.y,t.r,0,Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+    } else {
+      // Triggered — spikes shoot up
+      var spikeR = t.r * (0.3 + 0.7 * snapPct);
+      ctx.globalAlpha = 0.9;
+      drawSpike(ctx, t.x, t.y, spikeR, t.spikeAngle, 1, color);
+      drawSpike(ctx, t.x, t.y, spikeR*0.7, t.spikeAngle + Math.PI/6, 0.6, '#ffaa00');
+      // Hold timer — shrinking arc around the trap edge, matching field style
+      var pct = t.holdTimer/t.HOLD_DURATION;
+      pct = Math.max(0, Math.min(1, pct));
+      ctx.globalAlpha = 0.3;
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(t.x, t.y, t.r + 6, 0, Math.PI*2); ctx.stroke();
+      ctx.globalAlpha = 0.9;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.r + 6, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * pct);
+      ctx.stroke();
+    }
+    ctx.restore();
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// GRAY — Armor
+// ═══════════════════════════════════════════════════
+var armorBursts = [];
+var grayWalls = []; // drag-placed walls
+
+// v0.16.48 — `startGrayArmor` deleted as part of UNITY consolidation.
+// Was a duplicate of fireOverloadGray (rumble.js:2190) — both implemented
+// the same drag/tap split + pip flow + overflow ring wall logic. The
+// duplication caused a v0.16.46/v0.16.48 bug where the BS arc wall
+// mode-switch was added to fireOverloadGray but missed startGrayArmor,
+// silently breaking the BS Forge cycle for the brick-tap cast path.
+// Both call sites now route to fireOverloadGray. One canonical gray
+// cast handler. Adding/changing cast behavior = one function, no
+// "remember to update both" tax.
+
+function startGrayWall(cx, cy, tier) {
+  var fx = _fx('gray', tier);
+  if (!fx) return;
+  var wcritMult = _currentCrit ? 2.0 : 1.0;
+  // Wall radius: arena clamp baked in. Radius keeps reading _fx because
+  // it's a spatial/presentation property, not a power scale. Wall HP
+  // now uses the unified getGrayWallHp helper from characters.js (per
+  // S015 v0.15.8 gray economy unification: HP = pips × 2).
+  var maxR = clampRadiusToArena(fx.radiusPx);
+  var _bounds = getRumbleBounds();
+
+  // RULE 1 — wall spawns from player position outward when it would contain
+  // the player. Shifts the wall center AWAY from the player along the
+  // tap-direction so the player ends up at the wall's edge, not inside it.
+  if (player) {
+    var pdx = cx - player.x, pdy = cy - player.y;
+    var pdist = Math.sqrt(pdx*pdx + pdy*pdy);
+    var insideThreshold = maxR + player.r;
+    if (pdist < insideThreshold) {
+      var dirX, dirY;
+      if (pdist > 0.5) {
+        dirX = pdx / pdist;
+        dirY = pdy / pdist;
+      } else {
+        var arenaCx = _bounds.x + _bounds.w / 2;
+        var arenaCy = _bounds.y + _bounds.h / 2;
+        var ax = arenaCx - player.x, ay = arenaCy - player.y;
+        var amag = Math.sqrt(ax*ax + ay*ay) || 1;
+        dirX = ax / amag;
+        dirY = ay / amag;
+      }
+      cx = player.x + dirX * insideThreshold;
+      cy = player.y + dirY * insideThreshold;
+    }
+  }
+
+  // RULE 2 — clamp wall center to arena bounds so the full circle fits.
+  cx = Math.max(_bounds.x + maxR, Math.min(_bounds.x + _bounds.w - maxR, cx));
+  cy = Math.max(_bounds.y + maxR, Math.min(_bounds.y + _bounds.h - maxR, cy));
+
+  // Wall HP per S015 unified gray economy: HP = getGrayWallHp(cls, tier)
+  // = pips × 2. Per-class differentiation via 1.25 sig affinity (BK/BS).
+  var hp = Math.max(1, Math.round(getGrayWallHp(player.cls, tier) * wcritMult));
+  var containedIds = [];
+  entities.forEach(function(g, i) {
+    if (Math.hypot(g.x-cx, g.y-cy) < maxR) containedIds.push(i);
+  });
+  grayWalls.push({
+    x: cx, y: cy,
+    r: 10, maxR: maxR,
+    hp: hp, hpMax: hp,
+    expanding: true,
+    alpha: 1, pulse: 0,
+    containedIds: containedIds,
+    // v0.16.39 — owner class stamp. Used for class-specific wall-death
+    // reactions (e.g. Blocksmith wallDeathArmorRegen — when a BS-owned
+    // wall HP hits zero, BS gains +1 armor pip). Other classes' walls
+    // (currently only player.cls 'breaker' since BK shares 1.25 affinity)
+    // can declare similar reactions via their grayProfile.
+    ownerCls: player ? player.cls : null,
+  });
+  if (_currentCrit) {
+    spawnCritShockwave(cx, cy, '#CCCCCC', { r0: 12, maxR: maxR, thickness: 4, growth: 280 });
+    spawnCritFlourish(cx, cy, '#DDDDDD', 20);
+  }
+}
+
+function updateGrayWalls(dt) {
+  // v0.16.39 — Detect wall death (hp transition to 0) and fire owner-class
+  // reactions before the alpha filter removes faded walls. Today: only
+  // Blocksmith uses wallDeathArmorRegen (+1 armor pip when their wall dies).
+  // Other classes get no death reaction (their grayProfile.wallDeathArmorRegen
+  // is undefined). Marker `_deathFired` prevents double-firing as the wall
+  // alpha-fades away over multiple frames.
+  grayWalls.forEach(function(w) {
+    if (w.hp <= 0 && !w._deathFired) {
+      w._deathFired = true;
+      var ownerProf = (typeof getGrayProfile === 'function' && w.ownerCls)
+        ? getGrayProfile(w.ownerCls) : null;
+      if (ownerProf && ownerProf.wallDeathArmorRegen && player && player.cls === w.ownerCls) {
+        var aMax = (typeof getArmorMax === 'function') ? getArmorMax() : 99;
+        var regen = ownerProf.wallDeathArmorRegen;
+        var prev = player.armor || 0;
+        player.armor = Math.min(aMax, prev + regen);
+        var actual = player.armor - prev;
+        if (actual > 0) {
+          // Visual: small armor flourish at player + floating "+N 🛡" tag.
+          // Reuses the existing armor-pip vocabulary so the player reads
+          // it as "I just gained armor" without needing a new visual layer.
+          if (typeof showFloatingText === 'function') {
+            showFloatingText(player.x, player.y - 60, '+' + actual + ' 🛡', '#EF9F27', player);
+          }
+          if (typeof spawnCritFlourish === 'function') {
+            spawnCritFlourish(player.x, player.y, '#EF9F27', 8);
+          }
+        }
+      }
+    }
+  });
+  grayWalls = grayWalls.filter(function(w) { return w.alpha > 0.02; });
+  grayWalls.forEach(function(w) {
+    w.pulse = (w.pulse + dt * 2) % (Math.PI * 2);
+    // Expand to maxR
+    if (w.expanding) {
+      w.r += 200 * dt;
+      if (w.r >= w.maxR) { w.r = w.maxR; w.expanding = false; }
+    }
+    // Fade when dead
+    if (w.hp <= 0) {
+      w.alpha -= 1.5 * dt;
+      return;
+    }
+    // Block player from entering wall from outside. Previously this only
+    // fired when the player was in a narrow boundary band (w.r - player.r
+    // to w.r + player.r), which high-speed moves like Red Charge could
+    // skip over in a single frame. Now any frame where the player ends up
+    // inside the wall circle gets pushed to the outer edge. Walls cage
+    // entities only (containedIds); player is always blocked from outside.
+    // Player ALSO damages walls on sustained contact — same cooldown model
+    // as entity-bump so leaning is deliberate, not accidental. Player tick
+    // is faster (0.6s vs entity 2.0s outer-bump) because the player is the
+    // active agent: deliberately crashing into a wall is destructive intent,
+    // and this gives players a way to escape a containment wall in waves
+    // mode without needing an explicit demolish action.
+    if (player && w.hp > 0) {
+      var pdx = player.x - w.x, pdy = player.y - w.y;
+      var pdist = Math.sqrt(pdx*pdx+pdy*pdy) || 1;
+      if (w.isArc) {
+        // v0.16.49 — Arc wall collision for player (the OWNER, BS).
+        // BS starts at the arc center. Two fixes vs v0.16.46:
+        //   1. Collision band is now a NARROW ring around the arc edge
+        //      (within player.r of w.r), not "anywhere along cone direction
+        //      and farther than innerEdge." The old version pulled BS to
+        //      a point near the arc's center even when BS was far away
+        //      from the arc, as long as their angle-from-center was within
+        //      the cone.
+        //   2. BS bumping arc from INSIDE the arc radius gets a soft-block
+        //      (clamped to inner edge) but does NOT damage wall HP. Only
+        //      enemies hitting the arc from OUTSIDE damage it. The owner
+        //      shouldn't break their own wall by leaning on it.
+        // Open side of arc (outside cone) is fully passable.
+        var inCone = _pointInArc(w, player.x, player.y);
+        if (inCone) {
+          var innerEdgeArc = w.r - player.r;
+          var outerEdgeArc = w.r + player.r;
+          if (pdist >= innerEdgeArc && pdist <= outerEdgeArc) {
+            // BS is touching the arc segment. Determine side by checking
+            // whether they're pushing outward (was inside, now at edge)
+            // or were ever-outside (e.g. teleport/warp). Default treatment:
+            // soft-block. Use sign of (pdist - w.r) to pick which edge to
+            // clamp to. If BS center is inside w.r → clamp to innerEdge
+            // (no damage). If outside → clamp to outerEdge (no damage
+            // from owner; this rarely happens for BS but is symmetric).
+            var clampR = (pdist < w.r) ? innerEdgeArc : outerEdgeArc;
+            if (clampR > 0) {
+              player.x = w.x + (pdx/pdist) * clampR;
+              player.y = w.y + (pdy/pdist) * clampR;
+              var _wb = getRumbleBounds();
+              player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
+              player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
+            }
+            // No HP damage — owner doesn't break their own arc by leaning.
+          }
+        }
+        // Else (outside cone, or far from arc edge): freely passable.
+        w._playerCooldown = 0;
+      } else {
+        // Standard ring wall — player blocked from outside.
+        var pEdge = w.r + player.r;
+        if (pdist < pEdge) {
+          // Push player to wall edge along the wall→player vector
+          player.x = w.x + (pdx/pdist) * pEdge;
+          player.y = w.y + (pdy/pdist) * pEdge;
+          // Safety net: clamp to arena. Spawn-time rules should make this
+          // a no-op, but keep the clamp as a backstop in case of edge
+          // cases (multiple overlapping walls, etc.).
+          var _wb = getRumbleBounds();
+          player.x = Math.max(_wb.x + player.r, Math.min(_wb.x + _wb.w - player.r, player.x));
+          player.y = Math.max(_wb.y + player.r, Math.min(_wb.y + _wb.h - player.r, player.y));
+          // Tick wall hp on sustained contact
+          w._playerCooldown = (w._playerCooldown || 0) - dt;
+          if (w._playerCooldown <= 0) {
+            w._playerCooldown = 0.6;
+            w.hp = Math.max(0, w.hp - 1);
+            w.flashTimer = 0.15;
+          }
+        } else {
+          // Not in contact — let cooldown decay to 0 so re-contact feels responsive
+          w._playerCooldown = 0;
+        }
+      }
+    }
+
+    // Push contained entities back inside, damage wall on sustained contact.
+    // Also block non-contained entities from entering from outside.
+    if (!w._entityCooldowns) w._entityCooldowns = {};
+    entities.forEach(function(g, gi) {
+      var dx = g.x - w.x, dy = g.y - w.y;
+      var dist = Math.sqrt(dx*dx+dy*dy) || 1;
+      var isContained = w.containedIds && w.containedIds.indexOf(gi) >= 0;
+
+      // v0.16.49 — Arc wall collision branch (entities). Two changes
+      // vs v0.16.45:
+      //   1. Narrow collision band (around w.r ± g.r) instead of
+      //      "anywhere inside outer radius." Prevents teleporting
+      //      entities to outer edge when they happen to be inside
+      //      the arc radius for any other reason.
+      //   2. Damage to wall HP ONLY fires when entity is OUTSIDE the
+      //      arc (dist > w.r) approaching inward. Inside-arc soft-block
+      //      mirrors player behavior — only outside hits damage.
+      if (w.isArc) {
+        var innerBand = w.r - g.r;
+        var outerBand = w.r + g.r;
+        if (dist >= innerBand && dist <= outerBand && _pointInArc(w, g.x, g.y)) {
+          // Entity is touching the arc segment. Pick clamp side by
+          // whether they're outside or inside the arc radius.
+          var entClampR = (dist >= w.r) ? outerBand : Math.max(0, innerBand);
+          if (entClampR > 0) {
+            g.x = w.x + (dx/dist) * entClampR;
+            g.y = w.y + (dy/dist) * entClampR;
+          }
+          // Only damage wall when hit comes from outside the arc.
+          // Inside hits are soft-block with no HP loss (matching the
+          // player rule — leaning on the arc from inside doesn't
+          // destroy it).
+          if (dist >= w.r) {
+            w._entityCooldowns[gi] = (w._entityCooldowns[gi]||0) - dt;
+            if (w._entityCooldowns[gi] <= 0) {
+              w._entityCooldowns[gi] = 2.0;
+              w.hp = Math.max(0, w.hp - 1);
+              w.flashTimer = 0.15;
+            }
+          } else {
+            w._entityCooldowns[gi] = 0;
+          }
+        } else {
+          // Outside band entirely OR outside cone — pass freely.
+          w._entityCooldowns[gi] = 0;
+        }
+        return; // arc-wall branch done; skip ring-wall logic below
+      }
+
+      if (isContained) {
+        // Inside the cage — push toward center if beyond inner edge
+        var wallEdge = w.r - g.r;
+        if (dist > wallEdge && wallEdge > 0) {
+          g.x = w.x + (dx/dist) * wallEdge;
+          g.y = w.y + (dy/dist) * wallEdge;
+          w._entityCooldowns[gi] = (w._entityCooldowns[gi]||0) - dt;
+          if (w._entityCooldowns[gi] <= 0) {
+            w._entityCooldowns[gi] = 1.0;
+            w.hp = Math.max(0, w.hp - 1);
+            w.flashTimer = 0.15;
+          }
+        } else {
+          w._entityCooldowns[gi] = 0;
+        }
+      } else {
+        // Outside the cage — block entry. Push back if approaching the wall
+        // from the outer edge. Treat as a solid barrier: entity radius can't
+        // cross into the wall circle.
+        var outerEdge = w.r + g.r;
+        if (dist < outerEdge && dist > 0) {
+          g.x = w.x + (dx/dist) * outerEdge;
+          g.y = w.y + (dy/dist) * outerEdge;
+          // Tiny damage to wall on bump (much less than contained-scrape)
+          w._entityCooldowns[gi] = (w._entityCooldowns[gi]||0) - dt;
+          if (w._entityCooldowns[gi] <= 0) {
+            w._entityCooldowns[gi] = 2.0; // slower decay for outer bumps
+            w.hp = Math.max(0, w.hp - 1);
+            w.flashTimer = 0.15;
+          }
+        } else {
+          w._entityCooldowns[gi] = 0;
+        }
+      }
+    });
+  });
+}
+
+function drawGrayWalls() {
+  grayWalls.forEach(function(w) {
+    ctx.save();
+    var hpPct = w.hpMax > 0 ? w.hp / w.hpMax : 0;
+    var wallColor = hpPct > 0.5 ? '#AAAAAA' : hpPct > 0.25 ? '#888866' : '#AA6644';
+    ctx.globalAlpha = w.alpha * (w.hp <= 0 ? 1 : 0.7 + 0.15 * Math.sin(w.pulse));
+    ctx.shadowColor = wallColor;
+    ctx.shadowBlur = w.flashTimer > 0 ? 20 : 10;
+    ctx.strokeStyle = wallColor;
+    ctx.lineWidth = 4 + (w.hp <= 0 ? 0 : 2 * (1 - hpPct));
+    ctx.setLineDash([8, 6]);
+    if (w.isArc) {
+      // v0.16.47 — Arc wall: draw wedge segment with HEAVIER profile
+      // than ring walls. Per Forge design, arc walls are "taller"
+      // structures (vertical barriers) while ring walls are short
+      // containment fences. Mechanically: arc walls block projectiles,
+      // rings don't. Visually: arc walls render with a thicker primary
+      // stroke + a secondary inner highlight stroke to suggest depth.
+      var startA = w.arcAngle - w.arcSpan / 2;
+      var endA = w.arcAngle + w.arcSpan / 2;
+      // Primary stroke (thicker than rings — reads as "taller")
+      var arcLineWidth = 7 + (w.hp <= 0 ? 0 : 2 * (1 - hpPct));
+      ctx.lineWidth = arcLineWidth;
+      ctx.beginPath();
+      ctx.arc(w.x, w.y, w.r, startA, endA);
+      ctx.stroke();
+      // Inner highlight — slim bright line inside the primary stroke,
+      // suggesting the top edge of a vertical barrier catching light.
+      ctx.shadowBlur = 4;
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#E0E0E0';
+      ctx.setLineDash([]);  // solid, not dashed, for the highlight
+      ctx.beginPath();
+      ctx.arc(w.x, w.y, w.r, startA, endA);
+      ctx.stroke();
+      // Restore stroke vocabulary for HP bar / etc below
+      ctx.strokeStyle = wallColor;
+      ctx.setLineDash([8, 6]);
+    } else {
+      ctx.beginPath();
+      ctx.arc(w.x, w.y, w.r, 0, Math.PI*2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    // HP bar
+    if (w.hp > 0) {
+      var bw = 50, bh = 5;
+      ctx.globalAlpha = w.alpha;
+      ctx.shadowBlur = 0;
+      // For arc walls, place HP bar above the arc's midpoint (at the
+      // farthest point of the arc) instead of above the center, so it
+      // doesn't visually overlap the player sprite.
+      var barX, barY;
+      if (w.isArc) {
+        barX = w.x + Math.cos(w.arcAngle) * w.r;
+        barY = w.y + Math.sin(w.arcAngle) * w.r - 14;
+      } else {
+        barX = w.x;
+        barY = w.y - w.r - 14;
+      }
+      ctx.fillStyle = '#222'; ctx.fillRect(barX-bw/2, barY, bw, bh);
+      ctx.fillStyle = wallColor; ctx.fillRect(barX-bw/2, barY, bw*hpPct, bh);
+      ctx.strokeStyle = '#444'; ctx.lineWidth = 1;
+      ctx.strokeRect(barX-bw/2, barY, bw, bh);
+    }
+    // Segment ticks — only for ring walls. Arc walls skip the ticks
+    // (their geometry already reads as "wall fragment").
+    if (!w.isArc) {
+      var segs = 8;
+      ctx.strokeStyle = wallColor + '66'; ctx.lineWidth = 2; ctx.shadowBlur = 0;
+      for (var i=0; i<segs; i++) {
+        var a = (i/segs)*Math.PI*2;
+        ctx.beginPath();
+        ctx.moveTo(w.x+Math.cos(a)*(w.r-6), w.y+Math.sin(a)*(w.r-6));
+        ctx.lineTo(w.x+Math.cos(a)*(w.r+6), w.y+Math.sin(a)*(w.r+6));
+        ctx.stroke();
+      }
+    }
+    if (w.flashTimer > 0) w.flashTimer -= 0.016;
+    ctx.restore();
+  });
+}
+
+function updateArmorBursts(dt) {
+  armorBursts = armorBursts.filter(function(b) { return b.alpha > 0.02; });
+  armorBursts.forEach(function(b) { b.r += 60*dt; b.alpha -= 2.5*dt; });
+}
+
+function drawArmorBursts() {
+  armorBursts.forEach(function(b) {
+    ctx.save();
+    ctx.globalAlpha = b.alpha;
+    ctx.strokeStyle = '#AAAAAA'; ctx.shadowColor = '#AAAAAA'; ctx.shadowBlur = 12; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
+  });
+}
+
+
+// ═══════════════════════════════════════════════════
+// GREEN — Push Burst + Poison
+// ═══════════════════════════════════════════════════
+var greenBurst = null;
+
+function startGreenBurst(ox, oy) {
+  var x = (ox !== undefined) ? ox : player.x;
+  var y = (oy !== undefined) ? oy : player.y;
+  var fx = _fx('green', 1);
+  if (!fx) return;
+  var BURST_R = clampRadiusToArena(fx.radiusPx);
+  if (greenBurst && !greenBurst.done) {
+    greenBurst._poisonedIds = []; // allow re-poison on reuse
+    greenBurst._pushIds = [];     // allow re-push
+    return;
+  }
+  greenBurst = { r: 0, maxR: BURST_R, alpha: 1, done: false, _poisonedIds: [], _pushIds: [], ox: x, oy: y };
+  greenBurst._poisonMult = fx.stackDmg;
+  greenBurst._stacksApplied = fx.stacks;
+  greenBurst._castCount = 1;
+  // GREEN NECROSIS: tap crit also sets necrosis flag.
+  greenBurst._necrosis = !!_currentCrit;
+  // Tap (and release-on-bar) always anchors to the player — aura follows.
+  greenBurst._followPlayer = true;
+  if (_currentCrit) {
+    spawnCritShockwave(x, y, '#39d67a', { r0: 8, maxR: BURST_R, thickness: 3, growth: 320 });
+    spawnCritFlourish(x, y, '#1D9E75', 20);
+    spawnCritFlourish(x, y, '#7ce39a', 14);
+  }
+}
+
+function updateGreenBurst(dt) {
+  if (!greenBurst || greenBurst.done) return;
+  // Follow player: on-player casts re-anchor the burst origin to player.
+  // Drag-placed casts keep their original ox/oy so the ring expands from
+  // the drop point.
+  if (greenBurst._followPlayer && player) {
+    greenBurst.ox = player.x;
+    greenBurst.oy = player.y;
+  }
+  // Expansion speed: slowed from 600 to 360 px/s for more readable ring
+  // travel. Slow field duration inside the expanding burst is enforced by
+  // the greenSlowed refresh below; poison still applies once per entity.
+  greenBurst.r += 360 * dt;
+  greenBurst.alpha = Math.max(0, 1 - (greenBurst.r / greenBurst.maxR));
+
+  // Bubble spawns within the expanding ring — rate scales with current area
+  // so the field never looks thin. Each field-facing draw iterates the
+  // shared bubble pool; see updateGreenBubbles / drawGreenBubbles below.
+  _spawnGreenBubbles(
+    greenBurst.ox || player.x,
+    greenBurst.oy || player.y,
+    greenBurst.r,
+    dt,
+    0.6 // density multiplier
+  );
+
+  // Ring acts as solid wall — push all entities
+  entities.forEach(function(entity) {
+    var gox = greenBurst.ox||player.x, goy = greenBurst.oy||player.y;
+    var dx = entity.x - gox, dy = entity.y - goy;
+    var dist = Math.sqrt(dx*dx+dy*dy) || 1;
+    var gId = entities.indexOf(entity);
+    if (!greenBurst._pushIds) greenBurst._pushIds = [];
+
+    // SLOW: while inside the green zone, entities move at reduced speed
+    // (see greenSlowMult in updateEntity). Refreshed every frame they're
+    // inside; decays after leaving.
+    if (dist < greenBurst.maxR) {
+      entity.greenSlowed = true;
+      entity.greenSlowTimer = 0.25; // refresh window; decays in updateEntity
+    }
+
+    // PUSH: when the expanding ring reaches an entity for the first time,
+    // fling them outward from the burst center. Duration stays 0.4s — the
+    // distance knob is what varies. Prior tuning (60px) felt limp; doubled
+    // to 120px base. Crit adds another 60% of that for a meaningful "kicks
+    // like a truck" feel on necrosis bursts.
+    var pushTriggerRadius = entity.r + 4; // ring "reaches" entity
+    if (greenBurst.r >= dist - pushTriggerRadius && greenBurst._pushIds.indexOf(gId) < 0) {
+      var nx = dx/dist, ny = dy/dist;
+      var basePushDist = 120;
+      var critBonus = greenBurst._necrosis ? 1.6 : 1.0;
+      var nudgeDist = scaleDist(basePushDist * critBonus);
+      var pushVel = nudgeDist / 0.4; // distance / duration
+      entity.bounceVx = nx * pushVel;
+      entity.bounceVy = ny * pushVel;
+      entity.bounceTimer = 0.4;
+      entity.state = 'bounce';
+      greenBurst._pushIds.push(gId);
+    }
+
+    // Poison when ring passes — per-burst tracking so stacking always works
+    var distCheck = Math.hypot(entity.x - gox, entity.y - goy);
+    if (greenBurst.r >= distCheck - entity.r) {
+      if (!greenBurst._poisonedIds) greenBurst._poisonedIds = [];
+      if (greenBurst._poisonedIds.indexOf(gId) < 0) {
+        entity.poisoned = true;
+        // Duration extends by 1s per brick committed to the cast.
+        // Tap = 4s, 2-brick = 5s, 5-brick = 8s, 10-brick = 13s.
+        var castCount = greenBurst._castCount || 1;
+        var castDuration = 3 + castCount;
+        entity.poisonTimer = castDuration;
+        entity.poisonDuration = castDuration; // remember initial for display
+        // GREEN NECROSIS: poison from crit burst doesn't decay (permanent until cleanse/death).
+        if (greenBurst._necrosis) {
+          entity.poisonNoDecay = true;
+        }
+        // Linear stack: new applications ADD to existing stack count, so
+        // rapid tap-casting genuinely stacks the DoT. Previous behavior
+        // (Math.max) capped first tap at 1 and rejected subsequent taps —
+        // effectively single-stack poison. Cap at 10 to prevent runaway on
+        // high-count overloads combined with tap spam.
+        var mult = greenBurst._poisonMult || 1;
+        var newStack = Math.max(1, Math.ceil(mult));
+        entity.poisonStack = Math.min(10, (entity.poisonStack || 0) + newStack);
+        entity.poisonTick = entity.poisonTick || 0;
+        greenBurst._poisonedIds.push(gId);
+      }
+    }
+  });
+
+  if (greenBurst.r >= greenBurst.maxR * 1.1) {
+    // Burst completes → drop a slow-aura afterimage at the burst perimeter.
+    // Any entity that ENTERS (or is inside) during this window gets slowed.
+    // Duration: 1.5s base + 0.5s per cast tier (greenBurst._castCount).
+    // The afterimage also adds HALF-stack poison to entities that weren't
+    // already poisoned by this burst — catches mobs that wander in after
+    // the ring passes. Per-field _poisonedIds prevents re-poison from the
+    // same afterimage on the same entity.
+    var tier = Math.max(1, greenBurst._castCount || 1);
+    var auraDur = 1.5 + 0.5 * tier;
+    greenSlowAuras.push({
+      x: greenBurst.ox || player.x,
+      y: greenBurst.oy || player.y,
+      r: greenBurst.maxR,
+      timer: auraDur,
+      duration: auraDur,
+      pulse: 0,
+      // Field poison: half of the burst's stack count, same cast duration.
+      poisonMult: (greenBurst._poisonMult || 1) * 0.5,
+      poisonDuration: 3 + (greenBurst._castCount || 1),
+      necrosis: !!greenBurst._necrosis,
+      // Inherit the burst's poison tracker so entities already hit by the
+      // blast aren't poisoned again by the field on the same cast. Field
+      // only catches newcomers that wandered in after the ring passed.
+      _poisonedIds: (greenBurst._poisonedIds || []).slice(),
+      // Inherit follow flag — on-player casts keep the afterimage glued to
+      // the player as they move. Drag-placed casts stay planted.
+      followPlayer: !!greenBurst._followPlayer,
+    });
+    greenBurst.done = true;
+  }
+}
+
+// Afterimage slow fields dropped when a green burst completes. Entities
+// inside get refreshed greenSlowed while the field is alive. Purely a lag
+// mechanic — does NOT damage or poison on its own.
+var greenSlowAuras = [];
+
+function updateGreenSlowAuras(dt) {
+  greenSlowAuras = greenSlowAuras.filter(function(a) { return a.timer > 0; });
+  greenSlowAuras.forEach(function(a) {
+    a.timer -= dt;
+    a.pulse = (a.pulse + dt * 2) % (Math.PI * 2);
+    var pct = Math.max(0, a.timer / a.duration);
+    // Follow player: on-player casts re-anchor the aura to the player each
+    // frame. Drag-placed casts keep their original x/y.
+    if (a.followPlayer && player) {
+      a.x = player.x;
+      a.y = player.y;
+    }
+    // Bubbles spawn inside the afterimage, density fading with remaining
+    // duration so the field visibly dies down instead of cutting off.
+    _spawnGreenBubbles(a.x, a.y, a.r, dt, 0.35 * pct);
+    entities.forEach(function(ent) {
+      if (ent.hp <= 0) return;
+      var d = Math.hypot(ent.x - a.x, ent.y - a.y);
+      if (d < a.r) {
+        ent.greenSlowed = true;
+        ent.greenSlowTimer = 0.25;
+        // Field poison: apply half-stack on first contact with this
+        // afterimage. Per-aura tracking (_poisonedIds) means each field
+        // poisons a given entity at most once, so standing in an old field
+        // is a slow + bleed-out (existing poison ticks) rather than a
+        // runaway stack farm. New burst = new field = new poison chance.
+        if (a.poisonMult) {
+          var eId = entities.indexOf(ent);
+          if (a._poisonedIds.indexOf(eId) < 0) {
+            a._poisonedIds.push(eId);
+            var fieldStack = Math.max(1, Math.ceil(a.poisonMult));
+            ent.poisoned = true;
+            ent.poisonTimer = a.poisonDuration || 4;
+            ent.poisonDuration = a.poisonDuration || 4;
+            if (a.necrosis) ent.poisonNoDecay = true;
+            ent.poisonStack = Math.min(10, (ent.poisonStack || 0) + fieldStack);
+            ent.poisonTick = ent.poisonTick || 0;
+            // Field-poison signal: shows the stack count applied by this
+            // afterimage contact. Distinct from blast poison (which fires
+            // at ring-pass) — this only surfaces when the field catches
+            // a newcomer. Reads as "N ☠" on the entity's heal-damage left
+            // lane since it's a status-building event, not damage.
+            showFloatingText(ent.x, ent.y - 40, fieldStack + ' ☠', '#1D9E75', ent);
+          }
+        }
+      }
+    });
+  });
+}
+
+function drawGreenSlowAuras() {
+  if (!ctx) return;
+  greenSlowAuras.forEach(function(a) {
+    var pct = Math.max(0, Math.min(1, a.timer / a.duration));
+    // Pulse as unsigned oscillation so it never drives alpha negative (which
+    // was the source of the end-of-duration flicker: sin() going to -0.04
+    // cancelled the 0.14*pct fill term once pct approached zero). abs() +
+    // pct gate keep the pulse bounded strictly >= 0.
+    var pulse = Math.abs(Math.sin(a.pulse)) * 0.04 * pct;
+    ctx.save();
+    // Dim pulsing fill — visual language: "afterimage"
+    ctx.globalAlpha = Math.max(0, 0.14 * pct + pulse);
+    ctx.fillStyle = '#1D9E75';
+    ctx.beginPath(); ctx.arc(a.x, a.y, a.r, 0, Math.PI*2); ctx.fill();
+    // Dim background ring (full circumference) — shows the aura's extent.
+    ctx.globalAlpha = Math.max(0, 0.18 * pct);
+    ctx.strokeStyle = '#39d67a';
+    ctx.shadowColor = '#1D9E75'; ctx.shadowBlur = 10;
+    ctx.setLineDash([6, 10]);
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(a.x, a.y, a.r, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    // Timer arc overlaid on the outer edge — sweeps from 12 o'clock and
+    // shrinks as the aura decays. Matches the yellow-aura pattern so the
+    // visual vocabulary is consistent across colors.
+    ctx.globalAlpha = Math.max(0, 0.7 * pct);
+    ctx.strokeStyle = '#7ce39a';
+    ctx.lineWidth = 3;
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, a.r, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * pct);
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
+function updateEntityPoison(g, dt) {
+  if (!g.poisoned) return;
+  // GREEN NECROSIS: poisonNoDecay keeps the timer from running out.
+  // Ticks still happen at their normal cadence; they just never stop.
+  if (!g.poisonNoDecay) {
+    g.poisonTimer -= dt;
+    if (g.poisonTimer <= 0) { g.poisoned = false; g.poisonTick = 0; g.poisonStack = 0; return; }
+  }
+  g.poisonTick = (g.poisonTick||0) + dt;
+  if (g.poisonTick >= 1.0) {
+    g.poisonTick -= 1.0;
+    var poisonDmg = g.poisonStack || 1;
+    var pRes = damageEntity(g, poisonDmg, false, 'green');
+    g.flashTimer = 0.08;
+    showDamageNumber(g.x, g.y-30, pRes.applied, '#1D9E75', pRes.tier, g.x, g.y, '☠', pRes.witherBoost, g, 'green');
+  }
+}
+
+// ── GREEN — Bubble ambient particles ──────────────
+// Small bubbles spawn from random points inside any green field (both the
+// expanding burst and the afterimage aura). Each zigzags upward via a sine
+// oscillation on vx with short vertical bounces, shrinks slightly as it
+// rises, and bursts at a random life expiry into a tiny puff. Bubbles are
+// purely decorative — no damage, no collision.
+var greenBubbles = [];
+var _greenBubbleAccum = 0; // fractional spawns carry across frames
+
+function _spawnGreenBubbles(cx, cy, radius, dt, density) {
+  if (radius < 8 || density <= 0) return;
+  // Spawn rate proportional to area and density knob. Tripled from baseline
+  // (0.00025 → 0.00075) for a more carbonated field that reads at a glance.
+  var rate = (radius * radius) * 0.00075 * density;
+  _greenBubbleAccum += rate * dt;
+  while (_greenBubbleAccum >= 1) {
+    _greenBubbleAccum -= 1;
+    // Uniform sampling inside circle (sqrt for even distribution)
+    var ang = Math.random() * Math.PI * 2;
+    var dist = Math.sqrt(Math.random()) * radius;
+    var bx = cx + Math.cos(ang) * dist;
+    var by = cy + Math.sin(ang) * dist;
+    // All small. Mixed sizes: 1.2–3.4 px.
+    var r = 1.2 + Math.random() * 2.2;
+    // Lifespan: random 0.4–1.6s so bursts are staggered, not synchronized.
+    var life = 0.4 + Math.random() * 1.2;
+    greenBubbles.push({
+      x: bx, y: by,
+      vx: 0, vy: -(14 + Math.random() * 20), // gentle rise
+      r: r,
+      life: life, maxLife: life,
+      phase: Math.random() * Math.PI * 2, // per-bubble phase offset for zigzag
+      amp: 18 + Math.random() * 22,        // horizontal zigzag amplitude (px/s)
+      freq: 8 + Math.random() * 6,         // zigzag frequency (tight bounces)
+      // Clip-to-field: remember owning center + radius so bubbles don't wander
+      // outside the field shape when it's small or asymmetric.
+      cx: cx, cy: cy, owningR: radius,
+    });
+  }
+}
+
+function updateGreenBubbles(dt) {
+  if (!greenBubbles.length) return;
+  var alive = [];
+  for (var i = 0; i < greenBubbles.length; i++) {
+    var b = greenBubbles[i];
+    b.life -= dt;
+    if (b.life <= 0) {
+      // Pop — emit 3-5 micro-particles spreading outward. Uses the shared
+      // purpleParticles pool (despite the name, it's the generic particle bin).
+      var puffs = 3 + Math.floor(Math.random() * 3);
+      for (var pi = 0; pi < puffs; pi++) {
+        var pa = Math.random() * Math.PI * 2;
+        var ps = 20 + Math.random() * 35;
+        purpleParticles.push({
+          x: b.x, y: b.y,
+          vx: Math.cos(pa) * ps, vy: Math.sin(pa) * ps - 10,
+          r: Math.max(0.6, b.r * 0.5),
+          alpha: 0.7, color: '#7ce39a',
+        });
+      }
+      continue; // drop bubble
+    }
+    // Tight zigzag: sine-wave horizontal velocity, small vertical bounce.
+    // phase advances fast (freq) to give the "tight bounces" feel.
+    b.phase += dt * b.freq;
+    b.vx = Math.sin(b.phase) * b.amp;
+    // Vertical bounce: brief upward nudge every ~half cycle.
+    var bounce = Math.sin(b.phase * 2) * 6;
+    b.x += b.vx * dt;
+    b.y += (b.vy - bounce) * dt;
+    // Shrink slightly as it rises toward pop.
+    var pct = b.life / b.maxLife;
+    b.drawR = b.r * (0.6 + 0.4 * pct);
+    b.alpha = 0.55 * pct + 0.2;
+    alive.push(b);
+  }
+  greenBubbles = alive;
+}
+
+function drawGreenBubbles() {
+  if (!ctx || !greenBubbles.length) return;
+  for (var i = 0; i < greenBubbles.length; i++) {
+    var b = greenBubbles[i];
+    ctx.save();
+    ctx.globalAlpha = b.alpha;
+    // Bubble body — translucent green
+    ctx.fillStyle = '#1D9E75';
+    ctx.shadowColor = '#7ce39a'; ctx.shadowBlur = 4;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.drawR || b.r, 0, Math.PI * 2); ctx.fill();
+    // Highlight dot — small bright spot top-left for "bubble" read
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = b.alpha * 0.85;
+    ctx.fillStyle = '#c8f5d9';
+    var hr = Math.max(0.5, (b.drawR || b.r) * 0.35);
+    ctx.beginPath(); ctx.arc(b.x - (b.drawR||b.r)*0.3, b.y - (b.drawR||b.r)*0.3, hr, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawGreenBurst() {
+  if (!greenBurst || greenBurst.done) return;
+  ctx.save();
+  // Outer ring
+  ctx.globalAlpha = greenBurst.alpha * 0.9;
+  ctx.strokeStyle = '#1D9E75';
+  ctx.shadowColor = '#1D9E75'; ctx.shadowBlur = 24;
+  ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.arc(greenBurst.ox||player.x, greenBurst.oy||player.y, greenBurst.r, 0, Math.PI*2); ctx.stroke();
+  // Inner fill
+  ctx.globalAlpha = greenBurst.alpha * 0.12;
+  ctx.fillStyle = '#1D9E75';
+  ctx.beginPath(); ctx.arc(greenBurst.ox||player.x, greenBurst.oy||player.y, greenBurst.r, 0, Math.PI*2); ctx.fill();
+  // Max range indicator ring (shows full reach)
+  ctx.globalAlpha = 0.2;
+  ctx.setLineDash([8, 8]);
+  ctx.strokeStyle = '#1D9E75';
+  ctx.lineWidth = 2; ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.arc(greenBurst.ox||player.x, greenBurst.oy||player.y, greenBurst.maxR, 0, Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════
+// PURPLE — Full Rumble Burst
+// ═══════════════════════════════════════════════════
+var purpleBursts = [];
+
+function startPurpleBurst(ox, oy) {
+  var x = (ox !== undefined) ? ox : player.x;
+  var y = (oy !== undefined) ? oy : player.y;
+  var fx = _fx('purple', 1);
+  if (!fx) return;
+  var maxR = clampRadiusToArena(fx.radiusPx);
+  purpleBursts.push({ r: 0, maxR: maxR, alpha: 1, done: false, hit: false, ox: x, oy: y, dmg: fx.dmg, isCrit: _currentCrit, purpleTier: 1 });
+  if (_currentCrit) {
+    spawnCritShockwave(x, y, '#7B2FBE', { r0: 12, maxR: maxR, thickness: 4, growth: 340 });
+    spawnCritFlourish(x, y, '#9B6FD4', 22);
+    spawnCritFlourish(x, y, '#CC99FF', 14);
+  }
+}
+
+// Class-driven teleport-and-dual-blast purple cast. Reads the cast profile
+// from characters.js (CHARACTERS[cls].purpleProfile via getPurpleProfile).
+// Currently FW signature only — other classes have no purpleProfile and
+// dispatch to the standard burst path. Tap-cast (no drag) is unchanged
+// regardless of class; this only fires on drag-and-drop.
+//
+// Per design doc §2.3 (FW PURPLE: teleport on tap/drag target, dual blast
+// at each end). Sequencing per locked S015 spec (data lives in
+// characters.js purpleProfile):
+//   t=0      origin blast fires + departure pulse + alpha 1→0
+//   t=fadeOutMs               player invisible, particles in transit
+//   t=fadeOutMs+transitMs     teleport + alpha 0→1 + target blast + arrival pulse
+//   t=...+fadeInMs+arrivalInvulnMs   sequence ends
+// Invuln applies for the entire event (depart + transit + arrive).
+function doTeleportPurple(profile, targetX, targetY, count, isCrit) {
+  if (!player || !profile) return;
+  var bounds = getRumbleBounds();
+  var tx = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, targetX));
+  var ty = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, targetY));
+  // Origin blast fires immediately at t=0 — this is the "light off" beat.
+  var fxO = _fx('purple', count);
+  if (fxO) {
+    var maxRO = clampRadiusToArena(fxO.radiusPx * profile.originScale);
+    var dmgO = Math.max(1, Math.round((fxO.dmg || 0) * profile.originScale));
+    purpleBursts.push({ r:0, maxR:maxRO, alpha:1, done:false, hit:false, ox:player.x, oy:player.y, dmg:dmgO, isCrit:isCrit, purpleTier:count });
+    if (isCrit) {
+      spawnCritShockwave(player.x, player.y, '#7B2FBE', { r0: 10, maxR: maxRO, thickness: 3, growth: 320 });
+      spawnCritFlourish(player.x, player.y, '#9B6FD4', 18);
+    }
+  }
+  // Initialize warp state. updateWarp() drives the phase machine every
+  // frame from here. Target blast fires when phase transitions to fadeIn.
+  player.warpState = {
+    profile: profile,
+    count: count,
+    isCrit: isCrit,
+    startTs: performance.now(),
+    originX: player.x,
+    originY: player.y,
+    targetX: tx,
+    targetY: ty,
+    phase: 'fadeOut',
+    targetBlastFired: false,
+  };
+  if (typeof showFloatingText === 'function') {
+    showFloatingText(player.x, player.y - 40, '◆ WARP', '#9B6FD4', player);
+  }
+}
+
+// Warp particle trail — purple sparks drifting from origin toward target
+// during the fadeOut + transit phases. Lightweight render; cleared on
+// rumble end alongside other particle systems.
+var warpTrails = [];
+
+// Phase machine for player.warpState. Called once per frame from the main
+// update loop. Drives alpha, position snap, target blast spawn, particle
+// emission. When sequence completes (arrival invuln expires), clears
+// player.warpState back to null.
+function updateWarp(dt) {
+  if (!player || !player.warpState) return;
+  var w = player.warpState;
+  var p = w.profile;
+  var elapsed = performance.now() - w.startTs;
+  var fadeOutEnd = p.fadeOutMs;
+  var transitEnd = fadeOutEnd + p.transitMs;
+  var fadeInEnd  = transitEnd + p.fadeInMs;
+  var totalEnd   = fadeInEnd + p.arrivalInvulnMs;
+
+  // Phase update
+  if (elapsed < fadeOutEnd) {
+    w.phase = 'fadeOut';
+  } else if (elapsed < transitEnd) {
+    w.phase = 'transit';
+  } else if (elapsed < fadeInEnd) {
+    if (w.phase !== 'fadeIn') {
+      // Phase entry: snap player to target + spawn target blast.
+      player.x = w.targetX;
+      player.y = w.targetY;
+      var fxT = _fx('purple', w.count);
+      if (fxT) {
+        var maxRT = clampRadiusToArena(fxT.radiusPx * p.targetScale);
+        var dmgT = Math.max(1, Math.round((fxT.dmg || 0) * p.targetScale));
+        purpleBursts.push({ r:0, maxR:maxRT, alpha:1, done:false, hit:false, ox:w.targetX, oy:w.targetY, dmg:dmgT, isCrit:w.isCrit, purpleTier:w.count });
+        if (w.isCrit) {
+          spawnCritShockwave(w.targetX, w.targetY, '#7B2FBE', { r0: 14, maxR: maxRT, thickness: 4, growth: 380 });
+          spawnCritFlourish(w.targetX, w.targetY, '#9B6FD4', 26);
+          spawnCritFlourish(w.targetX, w.targetY, '#CC99FF', 16);
+        }
+      }
+      w.targetBlastFired = true;
+    }
+    w.phase = 'fadeIn';
+  } else if (elapsed < totalEnd) {
+    w.phase = 'arrivalInvuln';
+  } else {
+    // Sequence complete — clear state.
+    player.warpState = null;
+    return;
+  }
+
+  // Particle emission during fadeOut + transit. Sparks drift origin→target.
+  if ((w.phase === 'fadeOut' || w.phase === 'transit') && p.trailDensity > 0) {
+    var dx = w.targetX - w.originX, dy = w.targetY - w.originY;
+    var dist = Math.hypot(dx, dy);
+    if (dist > 1) {
+      // Progress along path matches elapsed time so particles "lead" the warp.
+      var progress = Math.min(1, elapsed / transitEnd);
+      var spawnX = w.originX + dx * progress;
+      var spawnY = w.originY + dy * progress;
+      for (var i = 0; i < p.trailDensity; i++) {
+        var jitter = (Math.random() - 0.5) * 14;
+        var perpX = -dy / dist, perpY = dx / dist;
+        warpTrails.push({
+          x: spawnX + perpX * jitter,
+          y: spawnY + perpY * jitter,
+          vx: (dx / dist) * (40 + Math.random() * 30) + (Math.random() - 0.5) * 20,
+          vy: (dy / dist) * (40 + Math.random() * 30) + (Math.random() - 0.5) * 20,
+          life: 0.4 + Math.random() * 0.2,
+          age: 0,
+          r: 1.5 + Math.random() * 1.5,
+        });
+      }
+    }
+  }
+}
+
+function updateWarpTrails(dt) {
+  for (var i = warpTrails.length - 1; i >= 0; i--) {
+    var t = warpTrails[i];
+    t.age += dt;
+    t.x += t.vx * dt;
+    t.y += t.vy * dt;
+    t.vx *= 0.92;
+    t.vy *= 0.92;
+    if (t.age >= t.life) warpTrails.splice(i, 1);
+  }
+}
+
+function drawWarpTrails() {
+  if (!warpTrails.length) return;
+  ctx.save();
+  for (var i = 0; i < warpTrails.length; i++) {
+    var t = warpTrails[i];
+    var a = 1 - (t.age / t.life);
+    ctx.globalAlpha = a * 0.85;
+    ctx.fillStyle = '#9B6FD4';
+    ctx.shadowColor = '#9B6FD4';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Helpers used by the player render block to apply warp visuals. Kept
+// separate so the main render block stays readable.
+//
+// getWarpAlpha — sprite alpha multiplier (1.0 normal, 0.0 mid-transit).
+// getWarpPulse — radiant glow strength (0..1, peaks at departure + arrival).
+function getWarpAlpha() {
+  if (!player || !player.warpState) return 1.0;
+  var w = player.warpState;
+  var p = w.profile;
+  var elapsed = performance.now() - w.startTs;
+  var fadeOutEnd = p.fadeOutMs;
+  var transitEnd = fadeOutEnd + p.transitMs;
+  var fadeInEnd  = transitEnd + p.fadeInMs;
+  if (elapsed < fadeOutEnd) {
+    return 1 - (elapsed / fadeOutEnd);              // 1 → 0
+  } else if (elapsed < transitEnd) {
+    return 0;                                        // invisible
+  } else if (elapsed < fadeInEnd) {
+    return (elapsed - transitEnd) / p.fadeInMs;     // 0 → 1
+  }
+  return 1.0;                                        // arrivalInvuln onward
+}
+
+function getWarpPulse() {
+  if (!player || !player.warpState) return 0;
+  var w = player.warpState;
+  var p = w.profile;
+  var elapsed = performance.now() - w.startTs;
+  var fadeOutEnd = p.fadeOutMs;
+  var transitEnd = fadeOutEnd + p.transitMs;
+  var fadeInEnd  = transitEnd + p.fadeInMs;
+  var totalEnd   = fadeInEnd + p.arrivalInvulnMs;
+  // Departure pulse: ramp up during fadeOut (peaks at departure)
+  if (elapsed < fadeOutEnd) {
+    return elapsed / fadeOutEnd;                    // 0 → 1
+  }
+  // Transit: pulse off (player is gone)
+  if (elapsed < transitEnd) {
+    return 0;
+  }
+  // Arrival pulse: ramps up during fadeIn, fades out across arrivalInvuln
+  if (elapsed < fadeInEnd) {
+    return (elapsed - transitEnd) / p.fadeInMs;     // 0 → 1
+  }
+  if (elapsed < totalEnd) {
+    return 1 - ((elapsed - fadeInEnd) / p.arrivalInvulnMs); // 1 → 0
+  }
+  return 0;
+}
+
+var purpleParticles = [];  // shared across all bursts
+
+function updatePurpleBursts(dt) {
+  purpleBursts.forEach(function(purpleBurst) {
+  if (purpleBurst.done) return;
+  purpleBurst.r += 400 * dt;
+  purpleBurst.alpha = Math.max(0, 1 - purpleBurst.r/purpleBurst.maxR);
+  // Spawn particles along expanding ring
+  var circumference = 2 * Math.PI * purpleBurst.r;
+  var count = Math.min(4, Math.floor(circumference / 30));
+  for (var i = 0; i < count; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    purpleParticles.push({
+      x: purpleBurst.ox + Math.cos(angle) * purpleBurst.r,
+      y: purpleBurst.oy + Math.sin(angle) * purpleBurst.r,
+      vx: Math.cos(angle) * (20 + Math.random()*30),
+      vy: Math.sin(angle) * (20 + Math.random()*30),
+      r: 2 + Math.random() * 3,
+      alpha: 0.8 + Math.random() * 0.2,
+      color: Math.random() > 0.5 ? '#9B6FD4' : '#ffffff',
+    });
+  }
+  // Hit entity — per-burst tracking so back-to-back bursts each deal damage
+  if (!purpleBurst._hitIds) purpleBurst._hitIds = [];
+  entities.forEach(function(entity) {
+    var gId = entities.indexOf(entity);
+    if (purpleBurst._hitIds.indexOf(gId) >= 0) return;
+    var dist = Math.hypot(entity.x-purpleBurst.ox, entity.y-purpleBurst.oy);
+    if (purpleBurst.r >= dist) {
+      var pbRemote = Math.hypot(purpleBurst.ox-player.x, purpleBurst.oy-player.y) > 20;
+      var purpleDmg = purpleBurst.dmg || Math.max(1, Math.ceil(3 * (purpleBurst.dmgMult||1)));
+      var prevHp = entity.hp;
+      var puRes = damageEntity(entity, purpleDmg, !pbRemote, 'purple'); entity.flashTimer = 0.2;
+      var actualDmg = prevHp - entity.hp; // actual damage dealt (may be less if entity low HP)
+      showDamageNumber(entity.x, entity.y-30, actualDmg, '#7B2FBE', puRes.tier, entity.x, entity.y, undefined, puRes.witherBoost, entity, 'purple');
+
+      // PURPLE SILENCE: crit bursts silence entities for 2s (can't attack).
+      if (purpleBurst.isCrit) {
+        entity.silencedTimer = 2.0;
+      }
+      purpleBurst._hitIds.push(gId);
+      // Purple lifesteal: heal player for 1/3 of damage dealt (rounded up).
+      // Routes through applyDrainHeal so HP fills in over a window with the
+      // pulsing purple aura — the inverse of bleed. Multiple hits during a
+      // burst compound into a single drain (toHp extended). Overheal cap,
+      // bleed-rescue routing, stats accounting, and the overheal floater
+      // are all handled inside applyDrainHeal / updateDrain.
+      var healAmt = Math.ceil(actualDmg / 3);
+      if (healAmt > 0) applyDrainHeal(healAmt);
+    }
+  });
+  if (purpleBurst.r >= purpleBurst.maxR) purpleBurst.done = true;
+  });
+  purpleBursts = purpleBursts.filter(function(p) { return !p.done; });
+}
+
+function updatePurpleParticles(dt) {
+  purpleParticles = purpleParticles.filter(function(p) { return p.alpha > 0.05; });
+  purpleParticles.forEach(function(p) {
+    if (p.isFizzle) {
+      // Erratic "dink" fizzle: fast decay + random velocity perturbation
+      // per frame → reads as a twitchy metallic particle burst, not smooth
+      // drift. Gravity droop pulls embers down as they die.
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      // Random jitter on velocity each frame — this is what makes it erratic
+      var j = (p.jitter || 80) * dt;
+      p.vx += (Math.random() - 0.5) * j * 2;
+      p.vy += (Math.random() - 0.5) * j * 2;
+      // Minimal friction — we want particles to keep their erratic motion
+      p.vx *= 0.97;
+      p.vy *= 0.97;
+      p.vy += (p.droop || 30) * dt;       // droop downward while fizzling
+      p.alpha -= p.fadeRate * 60 * dt;
+    } else if (p.isRed) {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.95; p.vy *= 0.95;
+      p.alpha -= 1.2 * dt;
+    } else if (p.fadeRate !== undefined) {
+      // Per-particle fade (non-fizzle) — honor supplied rate
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.94; p.vy *= 0.94;
+      p.alpha -= p.fadeRate * 60 * dt;
+    } else {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.92; p.vy *= 0.92;
+      p.alpha -= 1.8 * dt;
+    }
+  });
+}
+
+function drawPurpleBursts() {
+  purpleBursts.forEach(function(purpleBurst) {
+  if (purpleBurst.done) return;
+  ctx.save();
+  ctx.globalAlpha = purpleBurst.alpha * 0.6;
+  ctx.strokeStyle = '#9B6FD4';
+  ctx.shadowColor = '#7B2FBE'; ctx.shadowBlur = 20;
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(purpleBurst.ox, purpleBurst.oy, purpleBurst.r, 0, Math.PI*2); ctx.stroke();
+  ctx.restore();
+  });
+  // Particles
+  purpleParticles.forEach(function(p) {
+    ctx.save();
+    ctx.globalAlpha = p.alpha;
+    ctx.fillStyle = p.color;
+    // Per-particle shadow color (for fizzle sparks) or default purple bloom
+    ctx.shadowColor = p.shadowColor || '#7B2FBE';
+    ctx.shadowBlur = 8 * p.alpha;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  });
+}
+
+function startBlackEffect(ox, oy) {
+  var x = (ox !== undefined) ? ox : player.x;
+  var y = (oy !== undefined) ? oy : player.y;
+  var fx = _fx('black', 1);
+  if (!fx) return;
+  var crit = !!_currentCrit;
+  var radius = clampRadiusToArena(fx.radiusPx);
+  if (blackEffect) {
+    // Existing effect: take the larger of new and current radius (effects
+    // expand to encompass new casts, never shrink). Refresh timer.
+    blackEffect.RADIUS = Math.max(blackEffect.RADIUS, radius);
+    blackEffect.timer = blackEffect.DURATION;
+    blackEffect.ox = (blackEffect.ox + x) / 2;
+    blackEffect.oy = (blackEffect.oy + y) / 2;
+    if (crit) blackEffect.isCrit = true;
+  } else {
+    blackEffect = { timer: fx.duration, DURATION: fx.duration, tickTimer: 0, TICK: 0.5, alpha: 0,
+      FADE_IN: 0.8, FADE_OUT: 0.8, ox: x, oy: y, RADIUS: radius, tickDmg: fx.dmg, isCrit: crit };
+  }
+  if (crit) {
+    spawnCritShockwave(x, y, '#552288', { r0: 10, maxR: blackEffect.RADIUS, thickness: 4, growth: 260 });
+    spawnCritShockwave(x, y, '#BB88FF', { r0: 14, maxR: blackEffect.RADIUS * 0.8, thickness: 2, growth: 220 });
+    spawnCritFlourish(x, y, '#7744AA', 22);
+    spawnCritFlourish(x, y, '#333333', 16);
+  }
+  entities.forEach(function(g) {
+    if (Math.hypot(g.x-x, g.y-y) < blackEffect.RADIUS) { g.attackSlowed = true; g.attackSlowTimer = 3.0; }
+  });
+}
+
+function updateBlackEffect(dt) {
+  if (!blackEffect) return;
+  blackEffect.timer -= dt;
+  var elapsed = blackEffect.DURATION - blackEffect.timer;
+  // Smooth linear fade in, hold, fade out
+  var fadeIn = blackEffect.FADE_IN, fadeOut = blackEffect.FADE_OUT;
+  var hold = blackEffect.DURATION - fadeIn - fadeOut;
+  if (elapsed < fadeIn) {
+    blackEffect.alpha = (elapsed / fadeIn) * 0.7;
+  } else if (elapsed < fadeIn + hold) {
+    blackEffect.alpha = 0.7;
+  } else {
+    var outProgress = (elapsed - fadeIn - hold) / fadeOut;
+    blackEffect.alpha = Math.max(0, (1 - outProgress) * 0.7);
+  }
+  // Pull entities toward origin + damage ticks
+  // BLACK SINGULARITY: crit doubles pull speed and tick damage.
+  // Per S015 v0.15.10: pull strength is tier-scaled at cast time
+  // (stored on blackEffect.pullStrength: 50 px/s @ T1 → 220 px/s @ T10).
+  // Crit doubles whatever the current strength is.
+  var singularity = !!blackEffect.isCrit;
+  var pullMult = singularity ? 2.0 : 1.0;
+  var tickDmgMult = singularity ? 2.0 : 1.0;
+  var basePull = blackEffect.pullStrength || 220; // legacy fallback
+  entities.forEach(function(g) {
+    var dx = blackEffect.ox - g.x, dy = blackEffect.oy - g.y;
+    var dist = Math.sqrt(dx*dx+dy*dy);
+    if (dist < blackEffect.RADIUS && dist > 4) {
+      var pullStr = basePull * dt * pullMult;
+      g.x += (dx/dist) * pullStr;
+      g.y += (dy/dist) * pullStr;
+    }
+  });
+  // Damage tick every TICK seconds. Accumulate damage per entity and only
+  // display a floating number every DISPLAY_INTERVAL seconds so players can
+  // read the impact instead of seeing a spam of small ticks.
+  blackEffect.tickTimer += dt;
+  blackEffect.displayTimer = (blackEffect.displayTimer || 0) + dt;
+  var DISPLAY_INTERVAL = 1.5;
+  if (blackEffect.tickTimer >= blackEffect.TICK) {
+    blackEffect.tickTimer -= blackEffect.TICK;
+    entities.forEach(function(entity) {
+      var dist = Math.hypot(entity.x-blackEffect.ox, entity.y-blackEffect.oy);
+      if (dist < blackEffect.RADIUS) {
+        var beRemote = Math.hypot(blackEffect.ox-player.x, blackEffect.oy-player.y) > 20;
+        var beTick = Math.max(1, Math.round((blackEffect.tickDmg || 1) * tickDmgMult));
+        var beRes = damageEntity(entity, beTick, !beRemote, 'black'); entity.flashTimer=0.08;
+        // Accumulate displayed damage on the entity. Use applied (post-resist)
+        // so the flush total reflects what the target actually took.
+        entity._blackAccumDmg = (entity._blackAccumDmg || 0) + beRes.applied;
+        // Also track worst-tier observed this accumulation window so the
+        // flushed number styles correctly (resist/weak/etc).
+        var tierRank = { IMMUNE: 0, RESIST: 1, NEUTRAL: 2, VULN: 3, WEAK: 4 };
+        var curRank = tierRank[entity._blackAccumTier || 'NEUTRAL'];
+        if (tierRank[beRes.tier] > curRank) entity._blackAccumTier = beRes.tier;
+        if (!entity._blackAccumTier) entity._blackAccumTier = beRes.tier;
+        // Track max wither boost observed this window so the flush scales
+        // correctly for withered targets. Otherwise black accum misses the
+        // wither visual signal even though the damage math already amplifies.
+        if ((beRes.witherBoost || 0) > (entity._blackAccumWither || 0)) {
+          entity._blackAccumWither = beRes.witherBoost;
+        }
+      }
+    });
+  }
+  // Flush accumulated damage display every DISPLAY_INTERVAL seconds.
+  // Uses the worst-tier-observed-this-window so a dense zone of resist hits
+  // shows as resist style, a weak target shows as weak style, etc.
+  if (blackEffect.displayTimer >= DISPLAY_INTERVAL) {
+    blackEffect.displayTimer -= DISPLAY_INTERVAL;
+    entities.forEach(function(entity) {
+      if (entity._blackAccumDmg && entity._blackAccumDmg > 0) {
+        showDamageNumber(entity.x, entity.y-25, entity._blackAccumDmg,
+          '#888888', entity._blackAccumTier || 'NEUTRAL', entity.x, entity.y, undefined, entity._blackAccumWither || 0, entity, 'black');
+        entity._blackAccumDmg = 0;
+        entity._blackAccumTier = null;
+        entity._blackAccumWither = 0;
+      }
+    });
+  }
+  if (blackEffect && blackEffect.timer <= 0) {
+    var _ox = blackEffect.ox, _oy = blackEffect.oy, _r = blackEffect.RADIUS;
+    blackEffect = null;
+    entities.forEach(function(g) {
+      g.attackSlowed=false; g.attackSlowTimer=0;
+      if (Math.hypot(g.x-_ox, g.y-_oy) < _r) { g.slowed=true; g.slowTimer=5.0; }
+      // Flush any pending black accum damage text so players see final total
+      if (g._blackAccumDmg && g._blackAccumDmg > 0) {
+        showDamageNumber(g.x, g.y-25, g._blackAccumDmg,
+          '#888888', g._blackAccumTier || 'NEUTRAL', g.x, g.y, undefined, g._blackAccumWither || 0, g, 'black');
+        g._blackAccumDmg = 0;
+        g._blackAccumTier = null;
+        g._blackAccumWither = 0;
+      }
+    });
+  }
+}
+
+function drawBlackEffect(bounds) {
+  if (!blackEffect) return;
+  var ox = blackEffect.ox, oy = blackEffect.oy, r = blackEffect.RADIUS;
+  ctx.save();
+  // Radial dark zone centered on origin
+  var grad = ctx.createRadialGradient(ox, oy, r*0.1, ox, oy, r);
+  grad.addColorStop(0, 'rgba(0,0,0,' + (blackEffect.alpha * 0.85) + ')');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(bounds.x, bounds.y, bounds.w, bounds.h);
+  // Edge ring that doubles as duration indicator.
+  // Dim full ring in back, bright arc draining clockwise as timer runs out.
+  var bePct = blackEffect.timer / (blackEffect.DURATION || 3);
+  bePct = Math.max(0, Math.min(1, bePct));
+  ctx.setLineDash([]);
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = blackEffect.alpha * 0.2;
+  ctx.beginPath(); ctx.arc(ox, oy, r, 0, Math.PI*2); ctx.stroke();
+  // Timer arc (foreground bright)
+  ctx.globalAlpha = blackEffect.alpha * 0.7;
+  ctx.strokeStyle = '#BB88FF';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(ox, oy, r, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * bePct);
+  ctx.stroke();
+  // Pull indicator — small inward arrows
+  ctx.globalAlpha = blackEffect.alpha * 0.3;
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1.5;
+  for (var i=0; i<8; i++) {
+    var a = (i/8)*Math.PI*2;
+    var ax = ox + Math.cos(a)*r*0.7, ay = oy + Math.sin(a)*r*0.7;
+    var bx = ox + Math.cos(a)*r*0.5, by = oy + Math.sin(a)*r*0.5;
+    ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+
+
+
+
+
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  var scale = getDisplayScale();
+  if (player) {
+    player.r = Math.round(22 * scale);
+    var bounds = getRumbleBounds();
+    player.x = Math.max(bounds.x + player.r, Math.min(bounds.x + bounds.w - player.r, player.x));
+    player.y = Math.max(bounds.y + player.r, Math.min(bounds.y + bounds.h - player.r, player.y));
+  }
+  if (entities && entities.length) {
+    entities.forEach(function(g) {
+      g.r = Math.round(18 * scale);
+      g.AGGRO_RANGE = Math.round(200 * scale);
+      g.DEAGGRO_RANGE = Math.round(320 * scale);
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// START / END
+// ═══════════════════════════════════════════════════
+// Internal — called by Rumble.start(config). config = { cls, hp, hpMax, armor, bricks }.
+// All presentation-layer decisions (hiding overlays, showing victory screens)
+// are left to the host page via emit('...') events.
+function _internalStart(config) {
+  cfg = config || {};
+  // Re-size canvas here — the host page typically makes the rumble container
+  // visible just before calling start(). If init() was called while the
+  // container was display:none, the canvas may have picked up stale
+  // dimensions. Calling resize() here guarantees we render at the current
+  // viewport size.
+  resize();
+
+  // ── Engine instance (v0.16.60) ──
+  // Create canonical engine. v0.16.60: skeleton only — doesn't drive
+  // simulation yet. Future pushes (v0.16.61+) progressively move
+  // damage/cast/tick logic into the engine. For now, engine just
+  // exists as a stable target for migration.
+  if (typeof RumbleEngine !== 'undefined' && RumbleEngine.createRumbleEngine) {
+    var bounds = getRumbleBounds();
+    _engine = RumbleEngine.createRumbleEngine({
+      arenaW: bounds.w, arenaH: bounds.h,
+    });
+    _engine.start();
+    // ── v0.16.61: Register damage handler. Engine's applyDamage
+    // delegates to a small adapter that unpacks opts._aggro for
+    // _applyDamageInternal's legacy 5-arg signature. The 20 scattered
+    // callsites throughout rumble.js now route through engine,
+    // giving us:
+    //   - single choke point for all damage application
+    //   - 'damage' / 'death' event emission for FX subscribers
+    //   - foundation for server-authoritative damage in v0.16.63
+    _engine.registerDamageHandler(function (entity, dmg, source, opts) {
+      var aggro = (opts && opts._aggro !== undefined) ? opts._aggro : undefined;
+      return _applyDamageInternal(entity, dmg, aggro, source, opts);
+    });
+    // ── v0.16.62: Register cast handlers. Engine's applyCast
+    // dispatches to these. v0.16.62 wires ONE cast (white_overload)
+    // as proof of pattern; v0.16.63 extends to remaining 10.
+    // Cast event shape: { cast, count, ox, oy, isCrit, ts }.
+    // Handler returns whatever value makes sense for that cast
+    // (often null — most casts just produce side effects).
+    _engine.registerCastHandler('white_overload', function (playerId, castEvent) {
+      // Adapter: cast event shape → fireOverloadWhite signature.
+      // ox/oy may be undefined (tap mode); pass through as-is.
+      fireOverloadWhite(castEvent.count, castEvent.ox, castEvent.oy);
+      return null;
+    });
+  }
+
+  var cls = cfg.cls || 'breaker';
+  player = makePlayer(cls);
+
+  // Seed HP/armor/gold from config if provided (else class default from makePlayer).
+  if (typeof cfg.hp === 'number')      player.hp = cfg.hp;
+  if (typeof cfg.hpMax === 'number')   player.hpMax = cfg.hpMax;
+  if (typeof cfg.armor === 'number')   player.armor = cfg.armor;
+  if (typeof cfg.gold === 'number')    player.gold = cfg.gold;
+
+  // Seed bricks based on mode.
+  // Spec mode: brickMax = inventory ceiling; bricks = starting charges.
+  //   S013 spec change: bricks and brickMax can differ at rumble start.
+  //   Rumble receives partial board charge state; regen ticks bricks
+  //   toward brickMax as before. If cfg.brickMax absent, fall back to
+  //   cfg.bricks (old behavior, treat starting charges as ceiling).
+  //   As players earn bricks via fragments/fusion, inventory grows and so
+  //   does available rumble capacity.
+  // Sandbox mode: keeps makePlayer's random 1-10 per color.
+  // Waves mode: same treatment as spec — kit is the inventory ceiling.
+  // Coop mode (v0.16.65): same treatment as waves — canonical kit is the
+  //   ceiling, not random sandbox values. Fixes "party mode starts with
+  //   random brick depths/amounts" — coop was falling through to the
+  //   sandbox else branch which only set player.bricks, leaving
+  //   player.brickMax at whatever makePlayer randomized.
+  if (cfg.mode === 'spec' || cfg.mode === 'waves' || cfg.mode === 'coop') {
+    var rates = BRICK_ECONOMY.refreshRates;
+    Object.keys(player.bricks).forEach(function(c) {
+      var tier = brickTier(cls, c);
+      var ceiling = (cfg.brickMax && cfg.brickMax[c] != null) ? cfg.brickMax[c]
+                    : ((cfg.bricks && cfg.bricks[c]) || 0);
+      var startCharges = (cfg.bricks && cfg.bricks[c] != null) ? cfg.bricks[c] : ceiling;
+      // Invariant: charges <= ceiling
+      if (startCharges > ceiling) startCharges = ceiling;
+      player.brickMax[c] = ceiling;
+      player.bricks[c] = startCharges;
+      // Stagger initial refresh clocks per color so bricks don't all
+      // refresh synchronously mid-battle.
+      player.brickRecharge[c] = Math.random() * rates[tier];
+    });
+  } else if (cfg.bricks && typeof cfg.bricks === 'object') {
+    // Sandbox with custom bricks: apply the provided counts, keep makePlayer's maxes
+    Object.keys(player.bricks).forEach(function(c) {
+      player.bricks[c] = cfg.bricks[c] || 0;
+    });
+  }
+
+  // PHASE B — clear any lingering status effects from a previous battle
+  // (poison/slow/daze/confuse/weaken). Defensive: makePlayer seeds them
+  // fresh, but clearStatuses is the canonical reset.
+  clearStatuses();
+  player.overloadCount = 0;
+  _currentCrit = false;
+  _wasRevivedThisFight = false;
+  _lastReviveWasCheese = false;
+  critFlash = null;
+  critBanners = [];
+  critShockwaves = [];
+  witherBolts = [];
+  _critStats = { total: 0, crits: 0, perColor: {} };
+  _battleStats = {
+    startedAt: performance.now(),
+    endedAt: 0,
+    damageDealt: 0,
+    damageTaken: 0,
+    armorAbsorbed: 0,
+    bricksUsed: {},
+    bricksGained: {},
+    goldGained: 0,
+    cheeseEaten: 0,
+    enemiesKilled: [],
+    critsLanded: 0,
+    overloadsFired: 0,
+    hpLow: (typeof cfg.hp === 'number') ? cfg.hp : (player.hpMax || 10),
+    // v4: single-hit highlights for victory screen
+    biggestDamageDealt: 0,
+    biggestDamageTaken: 0,
+    biggestHealPlayer: 0,
+    biggestHealEntity: 0,
+    totalHealed: 0,
+    totalEntityHeal: 0,
+    // Active-combat accumulator (see top-of-file definition)
+    activeCombatMs: 0,
+    _lastDamageAt: 0,
+    // Damage attribution
+    damageByColor: {},
+    damageByTarget: {},
+    // Heal attribution (mirrors damageByColor for white audit ratios)
+    healedByColor: {},
+    // Audit diagnostic: snapshot of the most recent overload fire.
+    // Captured by fireOverload(), resolved lazily by getDebugInfo().
+    // Used by rumble_test overload-audit panel for expected-vs-actual
+    // damage comparison. No gameplay effect.
+    lastOverload: null,
+  };
+
+  timerLeft = RUMBLE_DURATION;
+  running = true;
+  _startedAt = performance.now();
+  renderBrickBar();
+
+  // v0.16.34: FW Formwright buff — 2× brick refresh speed for first 10s
+  // (from blue-event success). Server sends refreshBoost = { multiplier,
+  // durationMs }; we stash the expiry time and playerRefreshMult() checks
+  // it on every tick.
+  // v0.16.36: cinematic upgraded to match other classes — banner + flourish,
+  // 1s delayed. Was small floating text. Now FW gets the same visual moment
+  // every other class gets, when conditions warrant.
+  var _rb = cfg.refreshBoost;
+  if (_rb && typeof _rb.multiplier === 'number' && _rb.durationMs > 0) {
+    player.refreshBoost = {
+      multiplier: _rb.multiplier,
+      endsAt: performance.now() + _rb.durationMs,
+    };
+    setTimeout(function() {
+      if (!player || player.hp <= 0) return;
+      if (typeof spawnCritBanner === 'function') {
+        spawnCritBanner(player.x, player.y - 50, '⚡ RHYTHM SHIFT', '#4db8ff');
+      }
+      if (typeof spawnCritFlourish === 'function') {
+        spawnCritFlourish(player.x, player.y, '#4db8ff', 18);
+      }
+    }, 1000);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // PRE-RUMBLE PASSIVES (per design doc §2.5)
+  // ─────────────────────────────────────────────────────────────
+  // CLASS PASSIVES — v0.16.34 unified dispatcher.
+  // Every class gets a passive applied at rumble start. No activation,
+  // no input — just felt immediately. Replaces the 6-class hardcoded
+  // switch (was breaker/snapstep/blocksmith/fixer/wild_one each in own
+  // if-block) with a single declarative dispatcher reading
+  // CHARACTERS[cls].rumblePassive. Adding a passive variant = add a
+  // case to the dispatcher + populate the field for that class.
+  //
+  // FW intentionally has no rumble-start passive (refreshBoost is
+  // event-conditional, separate system via nextRumbleBuff).
+  //
+  // BK gray death-save state is reset here too — universal across all
+  // classes (BK is the only one with deathSave today, but other classes
+  // could earn it via fusion later, so the reset is class-agnostic).
+  // ─────────────────────────────────────────────────────────────
+  if (player) {
+    player.deathSaveUsed = false;
+    player.deathSave = null;
+  }
+  applyRumblePassive();
+
+  // v4: Apply queued poison from failed green/black board events.
+  // Each stack adds a poison tick; the duration is 6s (standard arsenal poison).
+  // Server already decremented queuedPoisonBattles for this battle.
+  var _qpStacks = Math.max(0, parseInt(cfg.queuedPoisonStacks || 0));
+  if (_qpStacks > 0) {
+    applyStatus('poison', { stacks: _qpStacks, duration: 6.0, dmgPerTick: 1 });
+    if (typeof showFloatingText === 'function') {
+      showFloatingText(player.x, player.y - 30, 'POISONED (' + _qpStacks + ')', '#88dd44');
+    }
+  }
+
+  // Spawn entities after player is placed. cfg.entityCount (default 1) lets
+  // the host page request multiple entities for scaling tests.
+  var bounds = getRumbleBounds();
+  entities = [];
+  enemyProjectiles = [];
+  droppedBricks = [];
+  var count = Math.max(0, Math.min(10, cfg.entityCount != null ? cfg.entityCount : 1));
+  for (var si = 0; si < count; si++) {
+    // Spread entities around a circle so they don't all spawn stacked.
+    var angleOffset = count > 1 ? (si / count) * Math.PI * 2 : 0;
+    entities.push(makeEntity(bounds, angleOffset, cfg.entityType));
+  }
+  // PHASE D — pack_flank signature. For each entity with this signature,
+  // roll 30% to spawn a FLANKING TWIN mirrored across the player's position.
+  // The twin is a full, independent entity — same stats, same arsenal,
+  // same AI — just pre-positioned to force the player to face two sides.
+  var _packAdds = [];
+  entities.forEach(function(g) {
+    if (g.signature !== 'pack_flank') return;
+    if (Math.random() >= 0.30) return;
+    var twin = makeEntity(bounds, Math.random() * Math.PI * 2, g.type);
+    // Mirror twin across player so player is between the two.
+    twin.x = 2 * player.x - g.x;
+    twin.y = 2 * player.y - g.y;
+    // Clamp back into arena if mirror put it out of bounds.
+    twin.x = Math.max(bounds.x + twin.r, Math.min(bounds.x + bounds.w - twin.r, twin.x));
+    twin.y = Math.max(bounds.y + twin.r, Math.min(bounds.y + bounds.h - twin.r, twin.y));
+    twin._isPackTwin = true;   // flag for future tuning / debug
+    _packAdds.push(twin);
+  });
+  for (var pi = 0; pi < _packAdds.length; pi++) entities.push(_packAdds[pi]);
+
+  // v0.16.34 — Generic post-spawn passive application. Reads
+  // player._pendingEnemyDebuff (set by applyRumblePassive when the
+  // class has firstEnemyDebuff kind), applies to entities[0]. Replaces
+  // the hardcoded Wild One-specific "Blight Mark" block. Future classes
+  // with debuff-on-first-enemy passives extend by adding their kind/effect
+  // to characters.js — no engine touch needed here.
+  applyPendingEnemyDebuff();
+  // Apply resistance overrides from host (e.g. rumble_test dialer).
+  // cfg.entityResistances is a flat color→multiplier map keyed by brick color
+  // (red/blue/green/etc). Each entity's resistances object takes these as
+  // per-color overrides, which take priority over family defaults in
+  // resistMult(). Missing values default to 1.0 (neutral).
+  if (cfg.entityResistances) {
+    entities.forEach(function(g) {
+      g.resistances = Object.assign(g.resistances || {}, cfg.entityResistances);
+    });
+  }
+
+  // Reset all effects, visual arrays, and carry-over state. Any array or
+  // singleton that could persist between battles needs to be cleared here —
+  // otherwise a fresh battle starts with leftover corpses, floating text, or
+  // mid-flight projectiles from the previous fight.
+  blueBolts = []; blueFieldFlashes = []; traps = []; armorBursts = []; grayWalls = []; orangeAura = null; bleeds = []; warpTrails = [];
+  greenBurst = null; greenDragActive = false; greenDragPos = null; purpleBursts = []; purpleParticles = []; greenSlowAuras = []; greenBubbles = []; _greenBubbleAccum = 0;
+  blackEffect = null; playerSparkles = []; entityRespawnPending = false; playerRegen = null;
+  yellowAura = null; whiteFields = [];
+  brickAction = null; dashCooldown = 0; dragTarget = null; dashEntity = null; overloadState = null;
+  // Carry-over hazards: bodies, floating damage numbers, in-flight bolts.
+  deadEntities = [];
+  floatingTexts = [];
+  enemyProjectiles = [];
+  // PHASE C — reset arena hazards (poison puddles, thorn shards).
+  poisonPuddles = [];
+  thornShards = [];
+  // PHASE E — reset arcing projectiles
+  boulders = [];
+  // v0.16.39 — reset reactive shrapnel
+  shrapnelPieces = [];
+  // v0.16.51 — reset SS pierce trails
+  redDashTrails = [];
+  // Remove any leftover DOM overlays (exit card, victory screen) from a
+  // previous battle that didn't tear down cleanly.
+  var stale;
+  stale = document.getElementById('rumble-victory-screen'); if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
+  stale = document.getElementById('rumble-exit-overlay');   if (stale) stale.classList.remove('visible');
+  stale = document.getElementById('bq-vic-styles');         if (stale) stale.remove();
+  // Also clear the body scroll-lock class from any stale victory state.
+  document.body.classList.remove('bq-vic-active');
+
+  lastTs = performance.now();
+  updateHUD();
+  rafId = requestAnimationFrame(loop);
+
+  _tickInterval = setInterval(function() {
+    if (running) emit('tick', _computeState());
+  }, 500);
+
+  emit('start', { cls: cls, mode: cfg.mode || 'sandbox' });
+}
+
+var entityRespawnPending = false;
+
+function triggerVictory() {
+  if (!running || entityRespawnPending) return;
+
+  // Guard: if any entity has a pending bone-rise queued (skeleton small-hit
+  // death → will revive this frame), don't declare victory. The rise
+  // happens in the dead-entity sweep AFTER callers have already hit 0 HP,
+  // so we could easily declare victory one frame too early.
+  var bonePending = entities.some(function(g) {
+    return g._boneRiseQueued && !g._boneRisen;
+  });
+  if (bonePending) return;
+
+  // Drop loot for every entity that just died but hasn't been processed yet.
+  // This handles multi-entity kills on the same frame (e.g. black AoE
+  // finishing off a cluster). Each entity drops at most once via the
+  // _lootDropped flag.
+  entities.forEach(function(g) {
+    if (g.hp <= 0 && !g._lootDropped) {
+      g._lootDropped = true;
+      spawnLootFromEntity(g);
+      if (_battleStats) _battleStats.enemiesKilled.push(g.type);
+      showFloatingText(g.x, g.y - 60, 'FELLED!', '#F5D000');
+      emit('enemyKilled', { type: g.type });
+    }
+  });
+
+  // Check remaining living entities.
+  var livingCount = entities.filter(function(g) { return g.hp > 0; }).length;
+  if (livingCount > 0) return; // more kills pending; don't end/respawn yet
+
+  // All dead. Behavior split by mode:
+  //   • spec mode (real battle from board) → wait for player to collect all
+  //     loot, THEN emit 'victory' and end. Victory screen shows stats.
+  //   • sandbox mode (rumble_test) → respawn a fresh batch after a delay.
+  if (cfg && cfg.mode === 'spec') {
+    entityRespawnPending = true;
+    _battleStats.endedAt = performance.now();
+    // v4: Fight is won — clear any lingering DoTs (poison, etc.) so the
+    // player doesn't get dragged into the revive minigame while waiting
+    // for loot collection. Heals/regen remain active.
+    if (typeof clearStatuses === 'function') clearStatuses();
+    // S013.7: Clear lingering combat effects that outlive entity death.
+    // Gray walls in particular render an HP bar and read as "still a target",
+    // holding up visual resolution even though they block no gameplay. Same
+    // for orange aura, bleeds (their targets are gone), poison puddles, etc.
+    grayWalls = [];
+    if (typeof orangeAura !== 'undefined') orangeAura = null;
+    bleeds = [];
+    if (typeof poisonPuddles !== 'undefined') poisonPuddles = [];
+    if (typeof greenBurst !== 'undefined') greenBurst = null;
+    // 0.14.3: Also clear traps. They spawn during combat, stay visible after
+    // their hold timer, and otherwise persist past victory because nothing
+    // between here and the next battle's start-reset removes them. Visual
+    // clutter with no functional purpose post-combat.
+    traps = [];
+    var victoryDeadline = performance.now() + 5000;
+    // Victory always follows a 2s grace period after the last loot pickup
+    // (or after vacuum sweep, whichever comes first). The victory overlay
+    // itself fades in over 1s after that. Consistent flow, no exceptions —
+    // loot-zero fights still get the beat because it reads as "the dust
+    // settling" before the scoreboard appears.
+    var VICTORY_GRACE_MS = 2000;
+    var waitLoot = function() {
+      if (!running) { entityRespawnPending = false; return; }
+      var now = performance.now();
+      if (droppedBricks.length === 0) {
+        setTimeout(function() {
+          if (!running) return;
+          _showVictoryScreen();
+          entityRespawnPending = false;
+        }, VICTORY_GRACE_MS);
+        return;
+      }
+      if (now >= victoryDeadline) {
+        _autoVacuumLoot();
+        setTimeout(function() {
+          if (!running) return;
+          _showVictoryScreen();
+          entityRespawnPending = false;
+        }, VICTORY_GRACE_MS);
+        return;
+      }
+      setTimeout(waitLoot, 200);
+    };
+    setTimeout(waitLoot, 800); // brief delay after FELLED before we start waiting
+  } else if (cfg && cfg.suppressRespawn) {
+    // Waves mode (or any host that wants to manage spawns externally) —
+    // skip auto-respawn. Host polls entity count and spawns next wave
+    // via Rumble.spawnEntity().
+    return;
+  } else {
+    // Sandbox mode — respawn
+    entityRespawnPending = true;
+    setTimeout(function() {
+      if (!running) { entityRespawnPending = false; return; }
+      var bounds = getRumbleBounds();
+      var count = Math.max(1, Math.min(10, (cfg && cfg.entityCount) || 1));
+      for (var si = 0; si < count; si++) {
+        var angleOffset = count > 1 ? (si / count) * Math.PI * 2 : 0;
+        // Respawn uses the same entityType config (so 'random' rerolls, a
+        // locked type repeats the same enemy, etc).
+        var ent = makeEntity(bounds, angleOffset, cfg && cfg.entityType);
+        // Re-apply dialer resistances if configured.
+        if (cfg && cfg.entityResistances) {
+          ent.resistances = Object.assign(ent.resistances || {}, cfg.entityResistances);
+        }
+        entities.push(ent);
+      }
+      entityRespawnPending = false;
+    }, 2000);
+  }
+}
+
+function respawnPlayer() {
+  if (!running) return;
+  if (_revivePaused) return; // already in minigame
+  // v4: Player hit 0 HP. Show defeat overlay + revive minigame. Battle state is
+  // preserved; `_revivePaused` gates gameplay updates while the overlay is up.
+  _revivePaused = true;
+  showFloatingText(player.x, player.y - 60, 'DEFEATED', '#d44', player);
+  player.iframes = 999;  // invulnerable during minigame
+  // Attempt 0 = first try (full speed). Attempt 1 = retry at 80% speed.
+  _startReviveMinigame(0);
+}
+
+// ── REVIVE MINIGAME STATE ──
+var _reviveState = null;
+
+// S013.5: CPR blip pool. Single words or 1-3 word phrases that fade in/out
+// every 5 taps during the revive minigame. Mix: encouragement (you got this)
+// / unsteadiness (is this working?) / mild dad humor. Concise to keep the
+// player's eye on the heart, not the text.
+var _CPR_BLIPS = [
+  // encouragement
+  'Push!',
+  'Almost!',
+  "Don't stop",
+  'Breathe!',
+  'Stay with me',
+  'Come back',
+  'You got this',
+  // unsteadiness / brink
+  'Flickering...',
+  'Wait\u2014',
+  'Maybe?',
+  'Not yet',
+  'Hang on',
+  // dad-joke style
+  'Heart-y effort!',
+  'A-beating we go',
+  'Pump it, friend',
+];
+
+// S013.6: LAST CHANCE (retry) blip pool — dire, desperate tone.
+// Dad jokes removed. These play during the second/final revive attempt
+// where failure = actual defeat. Whisper-of-doom feel.
+var _CPR_BLIPS_DIRE = [
+  'Fading...',
+  'Almost gone',
+  'Slipping',
+  'Please',
+  'Not here',
+  'Too far',
+  'Hold on',
+  'One more',
+  "Don't go",
+  'Come on',
+  'Barely',
+  'Still here?',
+  'Harder',
+  'Stay',
+  'Now',
+];
+
+function _pickCPRBlip(usedSet, isRetry) {
+  // No-repeat within a revive session. When every blip has been used, clear
+  // the set so we can cycle through again (rare — 15 blips vs 4 per session).
+  // On retry (LAST CHANCE), pull from the DIRE pool — dad jokes replaced
+  // with desperate, whispered urgency.
+  var sourcePool = isRetry ? _CPR_BLIPS_DIRE : _CPR_BLIPS;
+  var pool = sourcePool.filter(function(b) { return !usedSet[b]; });
+  if (!pool.length) {
+    // Exhausted — clear and restart
+    Object.keys(usedSet).forEach(function(k) { delete usedSet[k]; });
+    pool = sourcePool.slice();
+  }
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function _fireCPRBlip() {
+  if (!_reviveState) return;
+  var stack = document.getElementById('revive-heart-stack');
+  if (!stack) return;
+  if (!_reviveState.usedBlips) _reviveState.usedBlips = {};
+  var blip = _pickCPRBlip(_reviveState.usedBlips, _reviveState.isRetry);
+  _reviveState.usedBlips[blip] = true;
+  _reviveState.lastBlip = blip;
+
+  // Pick a random position around/over the heart. Avoid repeating the
+  // same quadrant as the previous blip to spread them out.
+  // Quadrants (relative to heart center): 0=top-left, 1=top-right,
+  // 2=bottom-right, 3=bottom-left. Also allow 4=overlapping center.
+  var quads = [0, 1, 2, 3, 4];
+  if (_reviveState.lastBlipQuad != null) {
+    quads = quads.filter(function(q) { return q !== _reviveState.lastBlipQuad; });
+  }
+  var quad = quads[Math.floor(Math.random() * quads.length)];
+  _reviveState.lastBlipQuad = quad;
+
+  // Offsets in percentage of stack dimensions. Rough clusters per quadrant
+  // with a bit of jitter so consecutive blips don't land at identical coords.
+  var jitter = function() { return (Math.random() - 0.5) * 14; };
+  var offsets = {
+    0: { x: -32 + jitter(), y: -28 + jitter() },
+    1: { x:  32 + jitter(), y: -28 + jitter() },
+    2: { x:  30 + jitter(), y:  22 + jitter() },
+    3: { x: -30 + jitter(), y:  22 + jitter() },
+    4: { x:  0  + jitter(), y:   0 + jitter() },
+  };
+  var pos = offsets[quad];
+
+  // Drift direction — slightly upward with some lateral bias based on quadrant
+  var driftX = (quad === 0 || quad === 3) ? -6 : (quad === 1 || quad === 2) ? 6 : 0;
+  var driftY = -18; // always drift up a bit
+
+  // Build the blip element and append to the heart stack
+  var el = document.createElement('div');
+  el.className = 'revive-cpr-blip';
+  el.textContent = blip;
+  var isRetry = !!_reviveState.isRetry;
+  // Retry gets a more ragged, dying-breath typography: bolder weight,
+  // wider letter-spacing, slight tracking shake, and a bone-white color
+  // (matches the heart outline). Normal gets the warm CPR italic look.
+  var fontStyle = isRetry
+    ? 'font-family:Georgia,\'Times New Roman\',serif;font-style:italic;font-weight:900;font-size:clamp(16px,4.6vw,22px);letter-spacing:.14em;'
+    : 'font-family:\'Crimson Pro\',Georgia,serif;font-style:italic;font-weight:600;font-size:clamp(14px,3.8vw,19px);letter-spacing:.04em;';
+  var colorStyle = isRetry
+    ? 'color:#e8dcc0;text-shadow:0 0 14px rgba(0,0,0,0.95), 0 0 22px rgba(232,220,192,0.5), 0 2px 5px rgba(0,0,0,0.95);'
+    : 'color:#fff;text-shadow:0 0 10px #000, 0 0 18px rgba(220,80,80,0.8), 0 1px 3px rgba(0,0,0,0.9);';
+  el.style.cssText =
+      'position:absolute;'
+    + 'left:calc(50% + ' + pos.x.toFixed(1) + '%);'
+    + 'top:calc(50% + ' + pos.y.toFixed(1) + '%);'
+    + 'transform:translate(-50%,-50%);'
+    + fontStyle
+    + colorStyle
+    + 'opacity:0;pointer-events:none;white-space:nowrap;'
+    + 'z-index:3;';
+  stack.appendChild(el);
+
+  // Animate: fade in, drift up, fade out, remove.
+  // Retry blips hang longer and fade more slowly — desperate pacing.
+  var holdMs   = isRetry ? 2200 : 650;    // time on screen at full opacity
+  var fadeMs   = isRetry ? 1500 : 400;    // fade-out duration
+  var driftMs  = isRetry ? 3200 : 1100;   // total transform duration
+  var removeMs = holdMs + fadeMs + 100;
+
+  requestAnimationFrame(function() {
+    el.style.transition = 'opacity 0.2s ease-out, transform ' + driftMs + 'ms ease-out';
+    el.style.opacity = '1';
+    el.style.transform = 'translate(-50%,-50%) translate(' + driftX + 'px,' + driftY + 'px)';
+  });
+  setTimeout(function() {
+    el.style.transition = 'opacity ' + fadeMs + 'ms ease-in';
+    el.style.opacity = '0';
+  }, holdMs);
+  setTimeout(function() {
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }, removeMs);
+}
+
+function _startReviveMinigame(attemptIdx) {
+  // attemptIdx: 0 = first attempt, 1 = retry at reduced difficulty
+  var isRetry = attemptIdx > 0;
+  var windowMs = isRetry ? 6000 / 0.8 : 6000;   // retry window is 80% speed → 7500ms
+  var targetTaps = 20;
+  _reviveState = {
+    attempt: attemptIdx,
+    startedAt: performance.now(),
+    endsAt: performance.now() + windowMs,
+    windowMs: windowMs,
+    tapsNeeded: targetTaps,
+    taps: 0,
+    isRetry: isRetry,
+    tickId: null,
+    lastBlipAtTap: 0,    // last tap count at which a blip fired
+    lastBlip: null,      // last blip text (prevents immediate repeat)
+    usedBlips: {},       // S013.6: session-level used-blip set (no repeats)
+    lastBlipQuad: null,  // last quadrant used for positioning
+    blipFadeTimer: null, // handle for the fade-out timeout
+    pathLength: 0,       // measured on overlay mount (SVG path.getTotalLength)
+  };
+  _showReviveOverlay();
+  // Poll every 100ms to update UI + check time
+  _reviveState.tickId = setInterval(_reviveTick, 100);
+}
+
+function _reviveTick() {
+  if (!_reviveState) return;
+  var now = performance.now();
+  var pct = Math.min(1, (now - _reviveState.startedAt) / _reviveState.windowMs);
+  var tapPct = Math.min(1, _reviveState.taps / _reviveState.tapsNeeded);
+
+  // Inner heart grows with taps; pulse accelerates as life returns.
+  // S013.6: inner is SVG <g> — scale applies via SVG transform attribute
+  // (not CSS), which resolves in viewBox coordinates reliably.
+  var innerG = document.getElementById('revive-heart-inner-g');
+  if (innerG) {
+    var innerScale = 0.2 + 0.8 * tapPct;
+    innerG.setAttribute('transform', 'scale(' + innerScale.toFixed(3) + ')');
+    var pulseSpeed = Math.max(0.3, 1.0 - 0.7 * tapPct); // seconds per cycle
+    innerG.style.animationDuration = pulseSpeed.toFixed(2) + 's';
+  }
+
+  // S013.5: Outer heart SVG outline drains from full perimeter to empty.
+  // At t=0, strokeDashoffset=0 → full outline drawn. At t=windowMs,
+  // strokeDashoffset=pathLength → outline fully erased. Shape stays the
+  // same size throughout; only the visible stroke segment changes.
+  var pathEl = document.getElementById('revive-heart-outer-path');
+  if (pathEl) {
+    // Lazy-init: measure path length on first tick (SVG must be mounted).
+    if (!_reviveState.pathLength) {
+      try {
+        _reviveState.pathLength = pathEl.getTotalLength();
+        pathEl.style.strokeDasharray = _reviveState.pathLength;
+        pathEl.style.strokeDashoffset = 0;
+      } catch (e) {
+        _reviveState.pathLength = 50;
+        pathEl.style.strokeDasharray = 50;
+        pathEl.style.strokeDashoffset = 0;
+      }
+    }
+    // Drain: offset grows from 0 to full length as pct goes 0 → 1
+    pathEl.style.strokeDashoffset = (_reviveState.pathLength * pct).toFixed(2);
+  }
+
+  // CPR blip frequency. Normal first attempt: every 5 taps (5,10,15,20).
+  // LAST CHANCE retry: every 3 taps (more frequent, desperate pacing matches
+  // the dire flavor pool).
+  var blipInterval = _reviveState.isRetry ? 3 : 5;
+  var blipThreshold = Math.floor(_reviveState.taps / blipInterval);
+  var lastBlipThreshold = Math.floor((_reviveState.lastBlipAtTap || 0) / blipInterval);
+  if (_reviveState.taps > 0 && blipThreshold > lastBlipThreshold) {
+    _reviveState.lastBlipAtTap = _reviveState.taps;
+    _fireCPRBlip();
+  }
+
+  // Success?
+  if (_reviveState.taps >= _reviveState.tapsNeeded) {
+    _resolveRevive(true);
+    return;
+  }
+  // Time out?
+  if (now >= _reviveState.endsAt) {
+    if (!_reviveState.isRetry) {
+      _offerReviveRetry();
+    } else {
+      _resolveRevive(false);
+    }
+  }
+}
+
+function _reviveTapHandler(e) {
+  if (!_reviveState) return;
+  if (e && e.preventDefault) e.preventDefault();
+  _reviveState.taps++;
+  // S013.3: CPR feel — inner heart gives a quick extra squeeze on tap.
+  // Overall scale is driven by _reviveTick; this is a brief filter impulse on top.
+  var innerG = document.getElementById('revive-heart-inner-g');
+  if (innerG) {
+    innerG.classList.remove('revive-tap-impulse');
+    void innerG.offsetWidth; // restart animation
+    innerG.classList.add('revive-tap-impulse');
+  }
+}
+
+function _showReviveOverlay() {
+  var root = document.getElementById('rumble-root') || document.body;
+  var existing = document.getElementById('revive-overlay');
+  if (existing) existing.remove();
+
+  var isRetry = _reviveState.isRetry;
+  var titleColor = isRetry ? '#ff884d' : '#d44';
+  var title = isRetry ? 'LAST CHANCE' : 'DEFEATED';
+  var subtitle = isRetry ? 'Tap fast — final attempt' : 'Tap rapidly to revive!';
+
+  // S013.3: Two-heart design.
+  //   outer: faint heart at baseline — represents time remaining, shrinks inward
+  //   inner: small red beating heart — represents life returning, grows with taps
+  // Revive succeeds when taps fill the inner heart (scale 1.0).
+  // Revive fails when the time-driven outer scale reaches 0.2 before taps catch up.
+  // Entire overlay is the tap target (huge area) — no small button to miss.
+  // Tap counter removed — the visual (inner catching outer) IS the progress indicator.
+  // Centered layout reads equally well in portrait and landscape.
+
+  // Color helpers: convert hex shorthand (#d44) to rgba() for alpha safety.
+  // The earlier implementation did `titleColor + '44'` which produces an
+  // invalid 5-char color (e.g. '#d4444') for 3-digit hex inputs — browsers
+  // silently fall back to transparent, so the outer heart was invisible.
+  var tcRgba = function(alpha) {
+    // Parse #d44 or #dd4444 into rgba
+    var h = titleColor.replace('#','');
+    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+    var r = parseInt(h.substr(0,2),16);
+    var g = parseInt(h.substr(2,2),16);
+    var b = parseInt(h.substr(4,2),16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+  };
+
+  // Two-heart stack — landscape-friendly sizing (uses min of vw and vh).
+  // Outer = SVG heart path with stroke-dasharray drain (timer). The outline
+  // erases from the bottom cusp around the perimeter as time runs out.
+  // Inner = Unicode ❤ that grows with taps and pulses like a beating heart.
+  // The SVG path starts at the bottom cusp (0, 8) and traces counterclockwise
+  // up the right lobe, across the top, down the left lobe, back to cusp.
+  // This gives us a natural "drain from the bottom" when we animate
+  // stroke-dashoffset from 0 upward — the outline retreats from its own
+  // starting point.
+  //
+  // Heart SVG path — canonical shape matching a classic heart silhouette.
+  // Path geometry: width 22 (x:[-11,11]), height 18 (y:[-9,9]), centered
+  // on origin. Lobes flat-rounded at top with deep dip. Sharp bottom cusp.
+  // viewBox is -13 -13 26 26 for small padding around the heart.
+  //
+  // Path traces: cusp → left side up → left lobe over top to dip → right
+  // lobe over top → right side down to cusp. Drain starts at the cusp
+  // so outline erases from the bottom first.
+  var heartPath = 'M 0 9 '
+               + 'C 0 9, -11 3, -11 -2 '    // left side: cusp up to shoulder
+               + 'C -11 -7, -8 -9, -5 -9 '  // left lobe outer curve to peak
+               + 'C -2 -9, 0 -7, 0 -5 '     // left lobe to top dip
+               + 'C 0 -7, 2 -9, 5 -9 '      // right lobe from dip to peak
+               + 'C 8 -9, 11 -7, 11 -2 '    // right lobe outer curve
+               + 'C 11 3, 0 9, 0 9 Z';      // right side back down to cusp
+
+  var heartStackHtml =
+        '<div id="revive-heart-stack" style="position:relative;width:min(260px,60vmin);height:min(260px,60vmin);overflow:visible;'
+      +   'display:flex;align-items:center;justify-content:center;">'
+      // Outer heart — SVG outline, bone white at whisper-thin stroke.
+      // Acts as a timer: starts at full perimeter, drains to zero as time
+      // runs out. stroke-width 0.3 (in 22-unit viewBox ≈ 3.5px actual).
+      +   '<svg id="revive-heart-outer-svg" viewBox="-13 -13 26 26" '
+      +     'style="position:absolute;top:50%;left:50%;'
+      +     'transform:translate(-50%,-50%);'
+      +     'width:min(260px,60vmin);height:min(260px,60vmin);'
+      +     'pointer-events:none;'
+      +     'overflow:visible;">'
+      +     '<path id="revive-heart-outer-path" d="' + heartPath + '" '
+      +       'fill="none" '
+      +       'stroke="#e8dcc0" '
+      +       'stroke-width="0.1" '
+      +       'stroke-linejoin="round" '
+      +       'style="filter:drop-shadow(0 0 1.2px rgba(0,0,0,0.95));'
+      +       'transition:stroke-dashoffset 0.1s linear;" />'
+      +   '</svg>'
+      // Inner heart — SVG filled shape, same path as outer. Grows with taps
+      // via SVG native transform attribute on the <g> wrapper. Using the
+      // SVG transform attribute (not CSS) because it resolves in viewBox
+      // coordinates reliably across browsers — CSS transform-origin on
+      // SVG <g> behaves inconsistently.
+      +   '<svg id="revive-heart-inner-svg" viewBox="-13 -13 26 26" '
+      +     'style="position:absolute;top:50%;left:50%;'
+      +     'transform:translate(-50%,-50%);'
+      +     'width:min(260px,60vmin);height:min(260px,60vmin);'
+      +     'pointer-events:none;'
+      +     'overflow:visible;z-index:2;">'
+      +     '<g id="revive-heart-inner-g" transform="scale(0.2)" '
+      +       'style="animation:reviveInnerPulse 1s ease-in-out infinite;">'
+      +       '<path d="' + heartPath + '" '
+      +         'fill="' + titleColor + '" '
+      +         'style="filter:drop-shadow(0 0 3px ' + titleColor + ');" />'
+      +     '</g>'
+      +   '</svg>'
+      // CPR blips are spawned dynamically at random positions by
+      // _fireCPRBlip (every 5 taps). They float, fade, and self-remove.
+      + '</div>';
+
+  var html =
+    '<div id="revive-overlay" style="position:absolute;top:0;left:0;right:0;bottom:0;'
+      + 'background:rgba(10,0,0,0.88);display:flex;flex-direction:column;align-items:center;justify-content:center;'
+      + 'z-index:250;padding:20px;pointer-events:auto;font-family:\'Cinzel\',serif;'
+      + 'touch-action:manipulation;user-select:none;-webkit-user-select:none;cursor:pointer;">'
+      // Title
+      + '<div style="font-size:clamp(22px,6vw,38px);font-weight:700;color:' + titleColor
+      +   ';letter-spacing:.15em;text-shadow:0 0 20px ' + titleColor + ';margin-bottom:4px;text-align:center;">'
+      +   title + '</div>'
+      + '<div style="font-size:clamp(12px,3vw,15px);color:#ddd;margin-bottom:16px;font-family:\'Crimson Pro\',serif;font-style:italic;text-align:center;">'
+      +   subtitle + '</div>'
+      + heartStackHtml
+      // Style: inner pulse + tap impulse (layered)
+      + '<style>'
+      +   '@keyframes reviveInnerPulse { 0%,100% { filter:drop-shadow(0 0 4px ' + titleColor + '); }'
+      +     ' 50% { filter:drop-shadow(0 0 8px ' + titleColor + ') brightness(1.15); } }'
+      +   '.revive-tap-impulse { animation: reviveTapBurst 0.18s ease-out; }'
+      +   '@keyframes reviveTapBurst { 0% { filter:drop-shadow(0 0 12px #fff) brightness(1.6); }'
+      +     ' 100% { filter:drop-shadow(0 0 4px ' + titleColor + ') brightness(1); } }'
+      + '</style>'
+    + '</div>';
+
+  var wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  var node = wrapper.firstChild;
+  root.appendChild(node);
+
+  var overlay = document.getElementById('revive-overlay');
+  var heartStack = document.getElementById('revive-heart-stack');
+  if (overlay && heartStack) {
+    // Tap target is constrained to the heart stack — focuses input on the
+    // visual focal point, no longer counts taps on subtitle/empty space.
+    // Overlay still catches stray clicks so they don't leak to the canvas.
+    heartStack.style.cursor = 'pointer';
+    heartStack.style.touchAction = 'manipulation';
+    heartStack.addEventListener('pointerdown', _reviveTapHandler);
+    overlay.addEventListener('click', function(e) { e.preventDefault(); e.stopPropagation(); });
+  }
+}
+
+function _offerReviveRetry() {
+  // Time expired on first attempt — swap to retry mode
+  if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
+  _startReviveMinigame(1);
+}
+
+// S013.3: Revive tracking state.
+//   _wasRevivedThisFight = true after any successful revive this rumble
+//   (drives the REVIVED flavor pool on victory).
+//   player.reviveCount = stacking counter for loot-drop penalty. Heart-revive
+//   increments; cheese-revive resets to 0 (cheese revive is the "clean save").
+//   Loot mult = max(0.1, 1.0 - 0.1 * player.reviveCount).
+var _wasRevivedThisFight = false;
+var _lastReviveWasCheese = false;
+
+function _resolveRevive(success) {
+  if (!_reviveState) return;
+  if (_reviveState.tickId) clearInterval(_reviveState.tickId);
+  var overlay = document.getElementById('revive-overlay');
+  if (overlay) overlay.remove();
+  _reviveState = null;
+
+  if (success) {
+    // Restore player
+    var hadCheese = (player.cheese || 0) > 0;
+    if (hadCheese) {
+      player.cheese -= 1;
+      player.hp = player.hpMax;
+      // Cheese revive is a clean save — resets the stacking loot penalty.
+      player.reviveCount = 0;
+      _lastReviveWasCheese = true;
+      showFloatingText(player.x, player.y - 50, '🧀 REVIVED', '#FFD96A', player);
+      // Cheese-specific flavor float
+      var cFlavor = _pickCheeseReviveFlavor();
+      showFloatingText(player.x, player.y - 80, cFlavor, '#FFD96A', player);
+    } else {
+      player.hp = Math.max(1, Math.floor(player.hpMax * 0.5));
+      // Heart-tap revive stacks the loot penalty (-10% per revive, floor 10%).
+      player.reviveCount = (player.reviveCount || 0) + 1;
+      _lastReviveWasCheese = false;
+      showFloatingText(player.x, player.y - 50, 'REVIVED', '#9adb9a', player);
+    }
+    _wasRevivedThisFight = true;
+    player.iframes = 2.5;
+    clearStatuses();
+    _revivePaused = false;
+  } else {
+    // True defeat — end battle
+    _revivePaused = false;
+    _internalEnd('defeat');
+  }
+}
+
+// Internal — called by Rumble.forceEnd or via in-combat end conditions.
+// Emits 'victory' | 'defeat' | 'timeout' | 'quit' | <custom> events.
+// Battle-end flavor lines. Picked by performance tier.
+var _VICTORY_FLAVORS = {
+  FLAWLESS: [
+    'Not a scratch. The enemy never had a chance.',
+    'Masterful. They fell before they could raise a hand.',
+    'A perfect dance of blade and brick.',
+  ],
+  DOMINANT: [
+    'A clean victory. The path ahead opens.',
+    'Bloodied but unshaken — they knew who was in charge.',
+    'Decisive. The woods grow quieter.',
+  ],
+  SURVIVED: [
+    'That was closer than expected. Take a breath.',
+    'You live to fight on — but the road ahead will test you.',
+    'The threat is past. Your wounds will tell the story later.',
+  ],
+  LIMPING: [
+    'A miracle, nothing less. You should not have survived.',
+    'You stagger forward, leaving a trail of blood behind you.',
+    'The fight is won. Whether you will live is another question.',
+  ],
+  // Revived mid-fight (heart-tap) and went on to win. Flavor acknowledges
+  // the near-death comeback.
+  REVIVED: [
+    'You were gone. You came back. The enemy is worse off.',
+    'Your heart started again, and you started swinging.',
+    'Resurrected by sheer stubbornness — and vengeance.',
+    'The darkness almost took you. You took the enemy instead.',
+    'A second breath, a second chance, and one more kill.',
+    'You woke up angry. It showed.',
+    'The fall gave you clarity. The getting-up gave you fury.',
+    'You were half-ghost when the killing blow landed. The other half was plenty.',
+  ],
+};
+
+// Cheese saved you at the edge of death. Flavor leans warm, almost silly,
+// because cheese is a warm-silly resource. The fight continues.
+var _CHEESE_REVIVE_FLAVORS = [
+  'A crumb of cheese, a full heart. That is how the old stories go.',
+  'You bit down. The cheese bit back — into your chest, straight to the soul.',
+  'The cheese remembered you. It always does.',
+  'Rinded and ready. You rise from the floor mid-chew.',
+  'A small mercy in a dairy shape. You live.',
+  'Cheese is not magic. But it is close enough today.',
+];
+
+// Any event that grants or discovers cheese. Kept CONCISE — 1-3 word phrases
+// so the text reads cleanly as a rumble floater. A few 5-word dad jokes mixed
+// in because cheese is inherently silly. Rendered larger than damage text.
+var _CHEESE_EVENT_FLAVORS = [
+  // Concise
+  'Cheesy!',
+  'Fresh wheel!',
+  'Big find.',
+  'Dairy won.',
+  'Gouda day.',
+  'Mmm...',
+  'Smell that?',
+  'Well aged.',
+  'Creamy!',
+  'Rind of joy.',
+  'Hole-y moly.',
+  'Cheese dreams.',
+  // Dad-joke tier
+  'A grate discovery.',
+  'That is nacho cheese.',
+  'You brie-long here.',
+  'Cheddar believe it.',
+  'Feta late than never.',
+];
+
+function _pickFlavor(tierLabel, opts) {
+  // opts.revived: was the player revived mid-fight via heart-tap?
+  if (opts && opts.revived) {
+    var rPool = _VICTORY_FLAVORS.REVIVED;
+    return rPool[Math.floor(Math.random() * rPool.length)];
+  }
+  var pool = _VICTORY_FLAVORS[tierLabel] || _VICTORY_FLAVORS.SURVIVED;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function _pickCheeseReviveFlavor() {
+  return _CHEESE_REVIVE_FLAVORS[Math.floor(Math.random() * _CHEESE_REVIVE_FLAVORS.length)];
+}
+
+function _pickCheeseEventFlavor() {
+  return _CHEESE_EVENT_FLAVORS[Math.floor(Math.random() * _CHEESE_EVENT_FLAVORS.length)];
+}
+
+// Auto-vacuum any remaining loot onto the player. Used when the safety
+// timeout hits and there are still dropped bricks on the ground — sweep
+// them all up so the player doesn't miss loot just because they didn't
+// walk over every coin.
+function _autoVacuumLoot() {
+  if (!player || !droppedBricks || droppedBricks.length === 0) return;
+  droppedBricks.forEach(function(p) {
+    if (p.done) return;
+    if (p.kind === 'cheese') {
+      // S013.6: vacuum cheese mirrors normal pickup — adds to inventory,
+      // not direct hpMax buff. Cheese is a tradeable consumable in v4.
+      player.cheese = (player.cheese || 0) + 1;
+      if (_battleStats) _battleStats.cheeseEaten++;
+      if (_battleStats) {
+        if (!_battleStats.bricksGained) _battleStats.bricksGained = {};
+        _battleStats.bricksGained.cheese = (_battleStats.bricksGained.cheese || 0) + 1;
+      }
+    } else if (p.kind === 'gold') {
+      var amt = p.amount || 1;
+      player.gold = (player.gold || 0) + amt;
+      if (_battleStats) _battleStats.goldGained += amt;
+    } else {
+      // S013.6: vacuum bricks grow ceiling + charges (matches normal pickup).
+      player.bricks[p.color] = (player.bricks[p.color] || 0) + 1;
+      player.brickMax[p.color] = (player.brickMax[p.color] || 0) + 1;
+      if (_battleStats) _addBrickStat(_battleStats.bricksGained, p.color, 1);
+    }
+    p.done = true;
+  });
+  droppedBricks = droppedBricks.filter(function(p) { return !p.done; });
+  showFloatingText(player.x, player.y - 70, 'AUTO-COLLECT', '#F5D000', player);
+}
+
+// Performance tier based on HP remaining + damage taken profile.
+// Used by victory screen as a narrative banner AND (future) by server-side
+// HP regen scaling per NOTES thread "HP regeneration philosophy".
+function _perfTier() {
+  if (!player || !_battleStats) return { label: 'SURVIVED', color: '#888', regen: 1 };
+  var hpPct = player.hp / (player.hpMax || 10);
+  var tookNoDamage = _battleStats.damageTaken === 0;
+  if (tookNoDamage)       return { label: 'FLAWLESS',  color: '#F5D000', regen: 6 };
+  if (hpPct >= 0.75)      return { label: 'DOMINANT',  color: '#5DE05D', regen: 3 };
+  if (hpPct >= 0.40)      return { label: 'SURVIVED',  color: '#A8A8A8', regen: 1 };
+  return                         { label: 'LIMPING',   color: '#E24B4A', regen: 0 };
+}
+
+// Compute the favorite (most-used) brick color. Returns { color, count } or null.
+function _favoriteMove() {
+  if (!_battleStats || !_battleStats.bricksUsed) return null;
+  var best = null, bestCount = 0;
+  Object.keys(_battleStats.bricksUsed).forEach(function(c) {
+    var n = _battleStats.bricksUsed[c];
+    if (n > bestCount) { bestCount = n; best = c; }
+  });
+  return best ? { color: best, count: bestCount } : null;
+}
+
+// S013.1: Victory card brick refill helpers.
+// During the victory overlay, player.bricks ticks up rapidly (via the
+// _victoryRefillActive boost). These helpers render a live pip row in the
+// card and poll it every 80ms so players see charges filling in.
+var _victoryRefillInterval = null;
+
+// Build initial pip DOM. One wrapper div per color that needs refilling.
+// Each wrapper holds individual pip spans. Subsequent updates MUTATE these
+// nodes in place (see _updateVictoryPips) so CSS transitions can run when
+// a color tops off and fades out.
+//
+// Returns empty string if no colors are currently refilling (all full).
+function _renderVictoryPipsInitial() {
+  if (!player || !player.bricks || !player.brickMax) return '';
+  var ALL = ['red','blue','green','white','gray','purple','yellow','orange','black'];
+  var out = '';
+  ALL.forEach(function(c) {
+    var max = player.brickMax[c] || 0;
+    if (max <= 0) return;                          // didn't bring this color
+    var cur = Math.min(max, player.bricks[c] || 0);
+    if (cur >= max) return;                        // already full — skip entirely
+    var bg = BRICK_COLORS[c] || '#555';
+    out += '<span class="vic-pip-group" data-color="' + c + '" data-state="refilling" '
+      +    'style="display:inline-flex;gap:3px;margin-right:6px;'
+      +    'transition:opacity 600ms ease-out, transform 600ms ease-out;">';
+    for (var i = 0; i < max; i++) {
+      var lit = i < cur;
+      out += '<span data-pip-idx="' + i + '" style="display:inline-block;width:10px;height:10px;border-radius:2px;'
+        + (lit
+          ? 'background:' + bg + ';box-shadow:0 0 4px ' + bg + ';'
+          : 'background:#1a1a1a;border:1px solid ' + bg + 'aa;box-sizing:border-box;')
+        + '"></span>';
+    }
+    out += '</span>';
+  });
+  return out;
+}
+
+// Mutate existing pip DOM in place. For each color group wrapper:
+//   - update individual pip spans' lit/unlit state to match current charges
+//   - when the color tops off, flip data-state="filled" (CSS fades opacity)
+//   - after fade completes, remove the wrapper from DOM
+function _updateVictoryPips() {
+  if (!player || !player.bricks || !player.brickMax) return;
+  var container = document.getElementById('rumble-victory-pips');
+  if (!container) return;
+  var groups = container.querySelectorAll('.vic-pip-group');
+  groups.forEach(function(group) {
+    var c = group.getAttribute('data-color');
+    var state = group.getAttribute('data-state');
+    if (state === 'filled') return;                // already fading; CSS owns it
+    var max = player.brickMax[c] || 0;
+    var cur = Math.min(max, player.bricks[c] || 0);
+    var bg = BRICK_COLORS[c] || '#555';
+    // Update pip lit states
+    var pips = group.querySelectorAll('[data-pip-idx]');
+    pips.forEach(function(pip, i) {
+      var lit = i < cur;
+      // Avoid re-styling unless changed (prevents layout thrash + lets CSS settle)
+      var isLit = pip.style.background && pip.style.background !== 'rgb(26, 26, 26)';
+      if (lit && !isLit) {
+        pip.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:2px;'
+          + 'background:' + bg + ';box-shadow:0 0 4px ' + bg + ';';
+      } else if (!lit && isLit) {
+        pip.style.cssText = 'display:inline-block;width:10px;height:10px;border-radius:2px;'
+          + 'background:#1a1a1a;border:1px solid ' + bg + 'aa;box-sizing:border-box;';
+      }
+    });
+    // If now full, mark for fade-out
+    if (cur >= max) {
+      group.setAttribute('data-state', 'filled');
+      group.style.opacity = '0';
+      group.style.transform = 'scale(0.85)';
+      // Remove from layout after fade completes (700ms = 600ms transition + buffer)
+      setTimeout(function() {
+        if (group.parentNode) group.parentNode.removeChild(group);
+      }, 700);
+    }
+  });
+  // If no groups are still refilling, fade out the entire REFILLING wrapper
+  // (label + container together). Counts only refilling groups; "filled" groups
+  // are mid-fade and don't count. Once wrapper is fully faded, removed from DOM
+  // so empty grid rows don't leave layout gaps.
+  var refillingCount = container.querySelectorAll('.vic-pip-group:not([data-state="filled"])').length;
+  if (refillingCount === 0) {
+    var wrapper = document.getElementById('rumble-victory-refill');
+    if (wrapper && wrapper.getAttribute('data-state') !== 'done') {
+      wrapper.setAttribute('data-state', 'done');
+      // Wait until the last pip group's fade animation finishes (700ms),
+      // then start the wrapper fade. Total: pip-fade (700) + wrapper-fade (600) = ~1.3s
+      setTimeout(function() {
+        if (!wrapper.parentNode) return;
+        wrapper.style.opacity = '0';
+        setTimeout(function() {
+          if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+        }, 650);
+      }, 700);
+    }
+  }
+}
+
+function _startVictoryRefillLoop() {
+  if (_victoryRefillInterval) clearInterval(_victoryRefillInterval);
+  _victoryRefillInterval = setInterval(function() {
+    // Element may be briefly missing during card cross-fade (DOM swap).
+    // Don't kill the loop — just skip this tick. Loop is only stopped by
+    // _stopVictoryRefillLoop when victory ends.
+    var el = document.getElementById('rumble-victory-pips');
+    if (!el) return;
+    _updateVictoryPips();
+  }, 80);
+}
+
+function _stopVictoryRefillLoop() {
+  if (_victoryRefillInterval) { clearInterval(_victoryRefillInterval); _victoryRefillInterval = null; }
+}
+
+// Build + inject the victory overlay. Called after all loot is collected
+// (or safety-timeout expires). Click "Continue" button to dismiss → triggers
+// _internalEnd('victory'). Has a 1-second pointer-events guard so the same
+// click that killed the enemy doesn't also dismiss the overlay.
+function _showVictoryScreen() {
+  if (!player || !_battleStats) {
+    console.warn('[BQ-RUMBLE] _showVictoryScreen bailing — missing player or _battleStats');
+    _internalEnd('victory'); return;
+  }
+  // S013.1: kick off the post-victory brick refill boost. Existing regen
+  // tick in the update loop runs at 20× speed until _internalEnd clears
+  // the flag (when player finishes the victory flow). Pips animate during
+  // both cards; they're only VISIBLE on card 2 but the fill continues
+  // through card 1 so the bar is further along when card 2 appears.
+  _victoryRefillActive = true;
+  _startVictoryRefillLoop();
+
+  var durMs = Math.max(1, _battleStats.endedAt - _battleStats.startedAt);
+  var durSec = Math.round(durMs / 1000);
+  var mm = Math.floor(durSec / 60), ss = durSec % 60;
+  var timeStr = mm + ':' + (ss < 10 ? '0' : '') + ss;
+  var dps = Math.round(_battleStats.damageDealt / (durMs / 1000) * 10) / 10;
+  var tier = _perfTier();
+  var fav = _favoriteMove();
+  var flavor = _pickFlavor(tier.label, { revived: _wasRevivedThisFight });
+
+  // Bricks-gained summary (filter to only actual brick-color keys — cheese
+  // is tracked separately to avoid double-rendering; same dedup pattern as
+  // the DM v4 DmResultBlock).
+  var gainedLines = Object.keys(_battleStats.bricksGained).filter(function(c) {
+    return BRICK_COLORS[c];
+  }).map(function(c) {
+    return '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:' + (BRICK_COLORS[c]||'#555') + '33;border:1px solid ' + (BRICK_COLORS[c]||'#555') + '88;font-size:11px;">'
+      + '<span style="width:10px;height:10px;border-radius:2px;background:' + (BRICK_COLORS[c]||'#555') + ';margin-right:6px;"></span>'
+      + '+' + _battleStats.bricksGained[c] + ' ' + c
+      + '</span>';
+  }).join('');
+  if (_battleStats.cheeseEaten > 0) {
+    gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5C80033;border:1px solid #F5C800;font-size:11px;">🧀 +' + _battleStats.cheeseEaten + '</span>';
+  }
+  if (_battleStats.goldGained > 0) {
+    gainedLines += '<span style="display:inline-flex;align-items:center;margin:0 6px 4px 0;padding:3px 8px;border-radius:6px;background:#F5D00033;border:1px solid #F5D000;font-size:11px;">🪙 +' + _battleStats.goldGained + '</span>';
+  }
+  if (!gainedLines) gainedLines = '<span style="color:#888;font-size:11px;font-style:italic;">No loot gained</span>';
+
+  var favLine = fav
+    ? '<span style="color:' + (BRICK_COLORS[fav.color]||'#fff') + ';font-weight:700;">' + fav.color + '</span> brick × ' + fav.count
+    : '<span style="color:#888;font-style:italic;">—</span>';
+
+  // ── Shared CSS block for both cards ──
+  // Responsive approach: aspect-ratio-based layout (wide vs tall),
+  // vmin-scaled sizing so content "exhales when it can, contracts when needed".
+  // No overflow scroll — content is sized to fit the viewport at any dimension.
+  //
+  // Cards size to CONTENT, not to available space. A short stats card doesn't
+  // stretch; a long stats card gets its cells, never overflows. Grid gap
+  // provides breathing room between zones, not empty card interiors.
+  var sharedCss =
+    '<style>'
+    +   '@keyframes bqVictoryFadeIn  { from { opacity: 0; } to { opacity: 1; } }'
+    +   '@keyframes bqVictoryFadeOut { from { opacity: 1; } to { opacity: 0; } }'
+    +   '.bq-vic-backdrop {'
+    +     ' position:absolute;top:0;left:0;right:0;bottom:0;'
+    +     ' background:rgba(8,8,14,.97);'
+    +     ' display:flex;flex-direction:column;align-items:center;justify-content:center;'
+    +     ' z-index:200;box-sizing:border-box;'
+    +     ' font-family:\'Cinzel\',serif;'
+    +     ' opacity:0;animation:bqVictoryFadeIn .6s ease-out forwards;'
+    +     ' overflow:hidden;'
+    +   '}'
+    +   '.bq-vic-backdrop.fading-out { animation:bqVictoryFadeOut .3s ease-in forwards; }'
+    +   '.bq-vic-card {'
+    +     ' width:min(92vw, 480px) !important;'
+    +     ' max-height:96% !important;'
+    +     ' display:flex !important;flex-direction:column !important;align-items:center !important;'
+    +     ' padding:clamp(14px, 3vmin, 28px) clamp(16px, 3.5vmin, 32px) !important;'
+    +     ' gap:clamp(10px, 2.2vmin, 20px) !important;'
+    +     ' pointer-events:auto;'
+    +     ' overflow:hidden !important;'
+    +     ' box-sizing:border-box !important;'
+    +   '}'
+    +   '.bq-vic-card::-webkit-scrollbar { display:none; width:0; height:0; }'
+    +   'body.bq-vic-active, body.bq-vic-active html { overflow:hidden !important; }'
+    +   'body.bq-vic-active::-webkit-scrollbar { display:none; width:0; height:0; }'
+    +   '.bq-vic-btn {'
+    +     ' padding:clamp(10px, 2.2vmin, 14px) clamp(28px, 6.5vmin, 46px);'
+    +     ' font-size:clamp(12px, 2.4vmin, 15px);'
+    +     ' font-family:\'Cinzel\',serif;letter-spacing:.14em;font-weight:700;'
+    +     ' border-radius:10px;cursor:pointer;border:2px solid;'
+    +     ' min-width:clamp(150px, 28vmin, 200px);'
+    +   '}'
+    +   '.vic-zone-wrap {'
+    +     ' display:flex;flex-direction:column;align-items:center;'
+    +     ' gap:clamp(4px, 1vmin, 8px);'
+    +     ' text-align:center;'
+    +   '}'
+    +   '.vic-zone-label {'
+    +     ' font-size:clamp(9px, 1.7vmin, 11px) !important;'
+    +     ' letter-spacing:.2em;color:#888;'
+    +     ' font-family:ui-sans-serif,system-ui !important;'
+    +     ' font-weight:500;'
+    +   '}'
+    +   '.vic-zone-body {'
+    +     ' background:#15151e;border:1px solid #2a2a3e;border-radius:12px;'
+    +     ' padding:clamp(12px, 2.6vmin, 20px) clamp(14px, 3vmin, 24px);'
+    +     ' font-family:ui-sans-serif,system-ui;'
+    +     ' box-sizing:border-box;'
+    +   '}'
+    +   '@media (min-aspect-ratio: 1/1) {'
+    +     '.bq-vic-card.card-moment {'
+    +       ' width:min(88vw, 720px) !important;'
+    +     '}'
+    +     '.bq-vic-card.card-rewards {'
+    +       ' width:fit-content; max-width:96vw;'
+    +       ' display:grid;'
+    +       ' grid-template-columns:auto auto;'
+    +       ' grid-template-areas:"stats rewards" "refill refill" "claim claim";'
+    +       ' justify-content:center; align-items:center; justify-items:center;'
+    +       ' gap:clamp(10px, 2vmin, 18px) clamp(18px, 4vmin, 32px);'
+    +     '}'
+    +     '.bq-vic-card.card-rewards .vic-stats-wrap   { grid-area:stats;   }'
+    +     '.bq-vic-card.card-rewards .vic-rewards-wrap { grid-area:rewards; }'
+    +     '.bq-vic-card.card-rewards .vic-refill-wrap  { grid-area:refill;  }'
+    +     '.bq-vic-card.card-rewards .vic-claim-zone   { grid-area:claim; margin-top:clamp(2px,1vmin,8px); }'
+    +   '}'
+    + '</style>';
+
+  // ── Card 1 HTML: THE MOMENT ──
+  function buildCardMoment() {
+    var refillHtml = _renderVictoryPipsInitial();
+    var refillBlock = refillHtml
+      ? ('<div id="rumble-victory-refill" style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:clamp(4px,1.5vmin,10px);transition:opacity 600ms ease-out;">'
+         + '<span style="font-size:clamp(9px,1.7vmin,11px);color:#666;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">REFILLING</span>'
+         + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;">' + refillHtml + '</div>'
+         + '</div>')
+      : '';
+    return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
+      + '<div class="bq-vic-card card-moment">'
+        + '<div style="font-size:clamp(10px,2.2vmin,14px);letter-spacing:.25em;color:' + tier.color + ';font-family:\'Cinzel\',serif;">⚔ VICTORY ⚔</div>'
+        + '<div style="font-size:clamp(26px,7vmin,56px);font-weight:700;color:' + tier.color + ';letter-spacing:.06em;text-shadow:0 0 22px ' + tier.color + ';text-align:center;line-height:1.1;font-family:\'Cinzel\',serif;">' + tier.label + '</div>'
+        + '<div style="font-family:\'Crimson Pro\',serif;font-style:italic;font-size:clamp(13px,2.8vmin,19px);color:#d8d8d8;text-align:center;max-width:94%;line-height:1.5;">"' + flavor + '"</div>'
+        + '<div style="font-family:ui-sans-serif,system-ui;text-align:center;color:#aaa;display:flex;flex-direction:column;align-items:center;gap:4px;">'
+          + '<span style="font-size:clamp(9px,1.9vmin,12px);color:#888;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">FAVORITE MOVE</span>'
+          + '<span style="font-size:clamp(13px,2.6vmin,16px);font-family:ui-sans-serif,system-ui;">' + favLine + '</span>'
+        + '</div>'
+        + refillBlock
+        + '<button id="bq-vic-btn-continue" class="bq-vic-btn" style="'
+        + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
+        + 'border-color:' + tier.color + ';color:#000;'
+        + 'box-shadow:0 4px 20px ' + tier.color + '66;'
+        + 'margin-top:clamp(4px,1.5vmin,12px);'
+        + '">CONTINUE →</button>'
+      + '</div>'
+      + sharedCss
+      + '</div>';
+  }
+
+  // ── Card 2 HTML: THE NUMBERS ──
+  function buildCardRewards() {
+    // Stats grid cells
+    var cells = [];
+    cells.push({ label: 'TIME', value: timeStr, color: '#eee', mono: true });
+    cells.push({ label: 'HP',   value: player.hp + '/' + player.hpMax, color: '#eee' });
+    if (_battleStats.damageDealt > 0) cells.push({ label: 'DMG DEALT', value: _battleStats.damageDealt, color: '#E24B4A' });
+    if (_battleStats.damageTaken > 0) cells.push({ label: 'DMG TAKEN', value: _battleStats.damageTaken, color: '#D4537E' });
+    if (_battleStats.biggestDamageDealt > 0) cells.push({ label: 'HIGHEST HIT', value: _battleStats.biggestDamageDealt, color: '#F57C00' });
+    if (_battleStats.biggestDamageTaken > 0) cells.push({ label: 'BIGGEST HIT TAKEN', value: _battleStats.biggestDamageTaken, color: '#D4537E' });
+    if (_battleStats.totalHealed > 0) cells.push({ label: 'HP HEALED', value: _battleStats.totalHealed, color: '#9adb9a' });
+    if (_battleStats.biggestHealPlayer > 0) cells.push({ label: 'BIGGEST HEAL', value: _battleStats.biggestHealPlayer, color: '#9adb9a' });
+    if (_battleStats.totalEntityHeal > 0) cells.push({ label: 'ENEMY HEALED', value: _battleStats.totalEntityHeal, color: '#B586D6' });
+    if (_battleStats.biggestHealEntity > 0) cells.push({ label: 'BIGGEST ENEMY HEAL', value: _battleStats.biggestHealEntity, color: '#B586D6' });
+    if (_battleStats.damageDealt > 0) cells.push({ label: 'DPS', value: dps, color: '#F5D000' });
+    if (_battleStats.critsLanded > 0) cells.push({ label: 'CRITS', value: _battleStats.critsLanded, color: '#F57C00' });
+    if (_battleStats.overloadsFired > 0) cells.push({ label: 'OVERLOADS', value: _battleStats.overloadsFired, color: '#7B2FBE' });
+    if (_battleStats.armorAbsorbed > 0) cells.push({ label: 'ARMOR ABSORBED', value: _battleStats.armorAbsorbed, color: '#AAA' });
+    if (player && (player.reviveCount || 0) > 0) {
+      var effPenalty = Math.min(90, 10 * player.reviveCount);
+      cells.push({ label: 'REVIVES (−' + effPenalty + '% LOOT)', value: player.reviveCount, color: '#e8dcc0' });
+    }
+    var rows = cells.map(function(c) {
+      var monoStyle = c.mono ? 'font-family:ui-monospace,monospace;' : '';
+      return '<div><div style="font-size:clamp(8px,1.6vmin,9px);letter-spacing:.12em;color:#888;margin-bottom:2px;">' + c.label + '</div>'
+           + '<div style="font-size:clamp(12px,3vmin,18px);color:' + c.color + ';' + monoStyle + '">' + c.value + '</div></div>';
+    }).join('');
+
+    var refillHtml = _renderVictoryPipsInitial();
+    var refillBlock = refillHtml
+      ? ('<div id="rumble-victory-refill" class="vic-zone-wrap vic-refill-wrap" style="display:flex;flex-direction:column;align-items:center;gap:6px;transition:opacity 600ms ease-out;">'
+         + '<span style="font-size:clamp(9px,1.7vmin,11px);color:#666;letter-spacing:.18em;font-family:ui-sans-serif,system-ui;">REFILLING</span>'
+         + '<div id="rumble-victory-pips" style="display:flex;flex-wrap:wrap;justify-content:center;">' + refillHtml + '</div>'
+         + '</div>')
+      : '';
+
+    return '<div class="bq-vic-backdrop" id="bq-vic-backdrop">'
+      + '<div class="bq-vic-card card-rewards">'
+        // Stats zone — label + body, content-sized
+        + '<div class="vic-zone-wrap vic-stats-wrap">'
+          + '<div class="vic-zone-label" style="font-size:clamp(10px,1.9vmin,12px);letter-spacing:.22em;color:#888;font-family:ui-sans-serif,system-ui;font-weight:500;">COMBAT</div>'
+          + '<div class="vic-zone-body" style="display:grid;grid-template-columns:auto auto;gap:clamp(6px,1.6vmin,12px) clamp(16px,3.6vmin,28px);">'
+            + rows
+          + '</div>'
+        + '</div>'
+        // Rewards zone — pure loot content (gold/cheese/bricks gained, felled list)
+        + '<div class="vic-zone-wrap vic-rewards-wrap">'
+          + '<div class="vic-zone-label" style="font-size:clamp(10px,1.9vmin,12px);letter-spacing:.22em;color:#888;font-family:ui-sans-serif,system-ui;font-weight:500;">REWARDS</div>'
+          + '<div class="vic-zone-body" style="display:flex;flex-direction:column;align-items:center;gap:clamp(6px,1.8vmin,12px);min-width:clamp(180px,32vmin,260px);">'
+            + '<div style="text-align:center;line-height:1.7;">' + gainedLines + '</div>'
+            + (_battleStats.enemiesKilled.length
+              ? '<div style="font-size:clamp(9px,1.8vmin,11px);color:#666;text-align:center;font-style:italic;">Felled: ' + _battleStats.enemiesKilled.join(', ') + '</div>'
+              : '')
+          + '</div>'
+        + '</div>'
+        // Refill zone — own row below stats|rewards. Only included when refilling.
+        + refillBlock
+        // Claim button
+        + '<div class="vic-claim-zone" style="display:flex;justify-content:center;">'
+          + '<button id="bq-vic-btn-claim" class="bq-vic-btn" style="'
+          + 'background:linear-gradient(180deg,' + tier.color + ' 0%,' + tier.color + 'cc 100%);'
+          + 'border-color:' + tier.color + ';color:#000;'
+          + 'box-shadow:0 4px 20px ' + tier.color + '66;'
+          + '">CLAIM →</button>'
+        + '</div>'
+      + '</div>'
+      + sharedCss
+      + '</div>';
+  }
+
+  // ── Render + state machine ──
+  var root = document.getElementById('rumble-root') || document.body;
+  var existing = document.getElementById('rumble-victory-screen');
+  if (existing) existing.remove();
+  // Inject CSS into <head> — guarantees rules are active regardless of
+  // where card DOM is injected. Previous runs replace their own style node.
+  var oldStyleNode = document.getElementById('bq-vic-styles');
+  if (oldStyleNode) oldStyleNode.remove();
+  var styleNode = document.createElement('style');
+  styleNode.id = 'bq-vic-styles';
+  styleNode.textContent = sharedCss.replace(/^<style>/, '').replace(/<\/style>$/, '');
+  document.head.appendChild(styleNode);
+
+  var wrapper = document.createElement('div');
+  wrapper.id = 'rumble-victory-screen';
+  root.appendChild(wrapper);
+  // Body flag — suppresses viewport-level scrollbars while victory is up.
+  // The backdrop covers everything, so no ambient scroll should peek through.
+  document.body.classList.add('bq-vic-active');
+
+  var dismissed = false;
+  var dismiss = function() {
+    if (dismissed) return;
+    dismissed = true;
+    if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+    var s = document.getElementById('bq-vic-styles');
+    if (s) s.remove();
+    document.body.classList.remove('bq-vic-active');
+    _internalEnd('victory');
+  };
+
+  function showCard(step) {
+    wrapper.innerHTML = (step === 'moment') ? buildCardMoment() : buildCardRewards();
+    // Wire buttons for this card
+    if (step === 'moment') {
+      var btnC = document.getElementById('bq-vic-btn-continue');
+      if (btnC) {
+        btnC.addEventListener('click', function() {
+          // Cross-fade to card 2 — trigger fadeout, swap after animation
+          var bd = document.getElementById('bq-vic-backdrop');
+          if (bd) bd.classList.add('fading-out');
+          setTimeout(function() { showCard('rewards'); }, 280);
+        });
+        btnC.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+      }
+    } else {
+      var btnX = document.getElementById('bq-vic-btn-claim');
+      if (btnX) {
+        btnX.addEventListener('click', dismiss);
+        btnX.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+      }
+    }
+    // Wire the debug overlay toggle
+    _wireVictoryDebug();
+  }
+  showCard('moment');
+
+  // 60s absolute safety fallback in case buttons never get tapped.
+  setTimeout(dismiss, 60000);
+}
+
+
+// Debug overlay — a tiny 🔍 button in the top-right of the victory screen.
+// Tapping it outlines all victory elements in colored borders and shows a
+// floating readout of their computed styles + dimensions. Useful for
+// diagnosing layout issues on mobile where devtools aren't available.
+// Tap again to toggle off.
+function _wireVictoryDebug() {
+  // Inject the debug button if it doesn't exist yet in this card's DOM
+  var bd = document.getElementById('bq-vic-backdrop');
+  if (!bd) return;
+  var existing = bd.querySelector('.bq-vic-debug-btn');
+  if (!existing) {
+    var btn = document.createElement('button');
+    btn.className = 'bq-vic-debug-btn';
+    btn.textContent = '🔍';
+    btn.style.cssText = 'position:absolute;top:8px;right:8px;width:32px;height:32px;'
+      + 'border-radius:50%;border:1px solid #333;background:#1a1a24;color:#888;'
+      + 'font-size:14px;cursor:pointer;z-index:210;padding:0;line-height:1;'
+      + 'display:flex;align-items:center;justify-content:center;';
+    btn.addEventListener('click', _toggleVictoryDebug);
+    btn.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+    bd.appendChild(btn);
+  }
+  // If debug was active before card swap, re-apply to the new DOM
+  if (window._bqVicDebugActive) {
+    _applyVictoryDebug();
+  }
+}
+
+function _toggleVictoryDebug() {
+  window._bqVicDebugActive = !window._bqVicDebugActive;
+  if (window._bqVicDebugActive) {
+    _applyVictoryDebug();
+  } else {
+    _removeVictoryDebug();
+  }
+}
+
+function _applyVictoryDebug() {
+  var bd = document.getElementById('bq-vic-backdrop');
+  if (!bd) return;
+
+  // Outline every victory element
+  var outlineRules = [
+    { sel: '.bq-vic-card',        color: '#ff3b3b', label: 'CARD' },
+    { sel: '.vic-zone-wrap',      color: '#3bff3b', label: 'ZONE-WRAP' },
+    { sel: '.vic-zone-label',     color: '#3bbcff', label: 'LABEL' },
+    { sel: '.vic-zone-body',      color: '#ffbc3b', label: 'BODY' },
+    { sel: '.vic-claim-zone',     color: '#bc3bff', label: 'CLAIM-ZONE' },
+  ];
+  outlineRules.forEach(function(r) {
+    var nodes = bd.querySelectorAll(r.sel);
+    nodes.forEach(function(n) {
+      n.setAttribute('data-bq-vicdbg-prev-outline', n.style.outline || '');
+      n.style.outline = '2px dashed ' + r.color;
+      n.style.outlineOffset = '-2px';
+    });
+  });
+
+  // Build a readout panel
+  var readout = document.createElement('div');
+  readout.id = 'bq-vic-debug-readout';
+  readout.style.cssText = 'position:absolute;top:48px;right:8px;max-width:min(340px,60vw);'
+    + 'background:#0a0a0a;border:1px solid #333;border-radius:6px;padding:8px;'
+    + 'font-family:ui-monospace,monospace;font-size:10px;line-height:1.4;'
+    + 'color:#ccc;z-index:210;max-height:80vh;overflow-y:auto;'
+    + 'scrollbar-width:thin;';
+
+  var vw = window.innerWidth;
+  var vh = window.innerHeight;
+  var vmin = Math.min(vw, vh);
+  var aspect = (vw / vh).toFixed(2);
+  var lines = [];
+  lines.push('<div style="color:#ffbc3b;font-weight:bold;">VIEWPORT</div>');
+  lines.push('  w=' + vw + 'px h=' + vh + 'px');
+  lines.push('  vmin=' + vmin + 'px aspect=' + aspect);
+  lines.push('  media min-aspect-ratio:1/1 → ' + (vw >= vh ? '<span style="color:#3bff3b">FIRES</span>' : '<span style="color:#ff3b3b">BLOCKED</span>'));
+  lines.push('');
+
+  outlineRules.forEach(function(r) {
+    var nodes = bd.querySelectorAll(r.sel);
+    if (nodes.length === 0) return;
+    lines.push('<div style="color:' + r.color + ';font-weight:bold;">' + r.label + ' (' + r.sel + ') × ' + nodes.length + '</div>');
+    nodes.forEach(function(n, i) {
+      var cs = window.getComputedStyle(n);
+      var rect = n.getBoundingClientRect();
+      var text = (n.textContent || '').substring(0, 20).replace(/\s+/g, ' ').trim();
+      lines.push('  [' + i + '] "' + text + '"');
+      lines.push('      box: ' + Math.round(rect.width) + '×' + Math.round(rect.height)
+        + ' at (' + Math.round(rect.left) + ',' + Math.round(rect.top) + ')');
+      lines.push('      font: ' + cs.fontSize + ' ' + cs.fontFamily.split(',')[0].replace(/["']/g, ''));
+      lines.push('      display:' + cs.display + ' width:' + cs.width);
+    });
+    lines.push('');
+  });
+  readout.innerHTML = lines.join('<br>');
+  bd.appendChild(readout);
+}
+
+function _removeVictoryDebug() {
+  var bd = document.getElementById('bq-vic-backdrop');
+  if (!bd) return;
+  // Restore outlines
+  var nodes = bd.querySelectorAll('[data-bq-vicdbg-prev-outline]');
+  nodes.forEach(function(n) {
+    var prev = n.getAttribute('data-bq-vicdbg-prev-outline');
+    n.style.outline = prev;
+    n.style.outlineOffset = '';
+    n.removeAttribute('data-bq-vicdbg-prev-outline');
+  });
+  // Remove readout
+  var r = document.getElementById('bq-vic-debug-readout');
+  if (r) r.parentNode.removeChild(r);
+}
+
+
+// Internal — called by Rumble.forceEnd, _showVictoryScreen dismissal, or
+// any terminal in-combat condition. Emits 'end' always, plus a reason-specific
+// event ('victory' | 'defeat' | 'timeout' | 'quit').
+function _internalEnd(reason) {
+  running = false;
+  _victoryRefillActive = false;
+  _stopVictoryRefillLoop();
+  // Cancel any in-flight warp so player is at a deterministic position
+  // when the next battle starts. If teleport hadn't completed, snap to
+  // target so the screen matches "where the player intended to be".
+  if (player && player.warpState) {
+    player.x = player.warpState.targetX;
+    player.y = player.warpState.targetY;
+    player.warpState = null;
+  }
+  warpTrails = [];
+  // Cancel any in-flight death save sequence — clears global freeze so
+  // the next battle isn't paused, and clears the per-rumble usage flag.
+  if (player) {
+    player.deathSave = null;
+    // Note: deathSaveUsed is reset at rumble START, not END — leaving
+    // it set here is harmless and ensures it's always reset before play.
+  }
+  _globalFreeze = false;
+  // v4: tear down revive minigame if still active
+  if (_reviveState && _reviveState.tickId) clearInterval(_reviveState.tickId);
+  _reviveState = null;
+  _revivePaused = false;
+  // Clear bleed-out screen tint if still showing
+  var bleedOverlay = document.getElementById('rumble-bleed-overlay');
+  if (bleedOverlay) {
+    bleedOverlay.style.transition = 'opacity 600ms ease-out';
+    bleedOverlay.style.opacity = '0';
+  }
+  var reviveOverlay = document.getElementById('revive-overlay');
+  if (reviveOverlay && reviveOverlay.parentNode) reviveOverlay.parentNode.removeChild(reviveOverlay);
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  emit('end', { reason: reason });
+  if (reason === 'timeout')       emit('timeout');
+  else if (reason === 'victory')  emit('victory');
+  else if (reason === 'defeat')   emit('defeat');
+  else                            emit('quit', { reason: reason });
+}
+
+// Module-private state helpers
+var _startedAt = 0;
+var _tickInterval = null;
+
+function _computeState() {
+  if (!player) return null;
+  var first = null;
+  for (var i = 0; i < entities.length; i++) { if (entities[i].hp > 0) { first = entities[i]; break; } }
+  return {
+    playerCls:   player.cls,
+    playerHp:    player.hp,
+    playerHpMax: player.hpMax,
+    playerArmor: player.armor || 0,
+    playerGold:  player.gold || 0,
+    playerCheese: player.cheese || 0,
+    playerBricks: Object.assign({}, player.bricks),
+    playerBrickMax: Object.assign({}, player.brickMax || {}),
+    // v0.16.56 — position included for multiplayer state push.
+    // No-op for single-player consumers; coop client reads these
+    // and forwards to server via rumble_player_state.
+    playerX:     player.x,
+    playerY:     player.y,
+    // v0.16.58 — Normalized position (0-1) relative to arena bounds.
+    // Mobile and desktop have different canvas sizes, so raw x/y
+    // don't translate across devices. Coop client sends nx/ny over
+    // the wire; recipient maps back to local arena bounds at render.
+    // UNITY: arena is shared as logical 0-1 space, not pixel space.
+    playerNX:    (function() {
+                   var b = getRumbleBounds();
+                   return b.w > 0 ? (player.x - b.x) / b.w : 0;
+                 })(),
+    playerNY:    (function() {
+                   var b = getRumbleBounds();
+                   return b.h > 0 ? (player.y - b.y) / b.h : 0;
+                 })(),
+    enemyHp:     first ? first.hp : 0,
+    enemyHpMax:  first ? first.hpMax : 0,
+    elapsed:     _startedAt ? (performance.now() - _startedAt) / 1000 : 0,
+    status:      running ? (player.hp > 0 ? 'active' : 'downed') : 'idle',
+    mode:        (cfg && cfg.mode) || 'sandbox',
+    overloadCount: player.overloadCount || 0,
+    reviveCount:   player.reviveCount || 0,    // S013.6: heart-revives this run (drives loot penalty)
+    battleStats: _battleStats ? {
+      damageDealt:    _battleStats.damageDealt || 0,
+      damageTaken:    _battleStats.damageTaken || 0,
+      armorAbsorbed:  _battleStats.armorAbsorbed || 0,
+      bricksUsed:     Object.assign({}, _battleStats.bricksUsed || {}),
+      bricksGained:   Object.assign({}, _battleStats.bricksGained || {}),
+      goldGained:     _battleStats.goldGained || 0,
+      cheeseEaten:    _battleStats.cheeseEaten || 0,
+      critsLanded:    _battleStats.critsLanded || 0,
+      overloadsFired: _battleStats.overloadsFired || 0,
+      hpLow:          _battleStats.hpLow === 9999 ? (player.hpMax||0) : _battleStats.hpLow,
+      enemiesKilled:  (_battleStats.enemiesKilled || []).slice(),
+      activeCombatMs: _battleStats.activeCombatMs || 0,
+      damageByColor:  Object.assign({}, _battleStats.damageByColor || {}),
+      damageByTarget: Object.assign({}, _battleStats.damageByTarget || {}),
+      // v4 single-hit highlights
+      biggestDamageDealt: _battleStats.biggestDamageDealt || 0,
+      biggestDamageTaken: _battleStats.biggestDamageTaken || 0,
+      biggestHealPlayer:  _battleStats.biggestHealPlayer || 0,
+      biggestHealEntity:  _battleStats.biggestHealEntity || 0,
+      totalHealed:        _battleStats.totalHealed || 0,
+      totalEntityHeal:    _battleStats.totalEntityHeal || 0,
+    } : null,
+  };
+}
+
+// ═══════════════════════════════════════════════════
+// INIT / TEARDOWN (private — called by public API)
+// ═══════════════════════════════════════════════════
+var _eventHandler = null;
+var _cleanupFns = [];
+var _initialized = false;
+
+function emit(type, data) {
+  if (_eventHandler) { try { _eventHandler(type, data || {}); } catch(e) { console.error('[Rumble] listener error:', e); } }
+}
+
+function _internalInit(options) {
+  if (_initialized) return;
+  options = options || {};
+  _eventHandler = options.onEvent || null;
+
+  canvas = document.getElementById('rumble-canvas');
+  if (!canvas) {
+    console.error('[Rumble] init failed: #rumble-canvas not found');
+    return;
+  }
+  ctx = canvas.getContext('2d');
+  resize();
+
+  var resizeHandler = function() { resize(); };
+  window.addEventListener('resize', resizeHandler);
+  _cleanupFns.push(function() { window.removeEventListener('resize', resizeHandler); });
+
+  var cvDown = function(e) { onPointerDown(e); };
+  var cvMove = function(e) { onPointerMove(e); };
+  var cvUp   = function(e) { onPointerUp(e); };
+  canvas.addEventListener('mousedown',  cvDown, { passive:false });
+  canvas.addEventListener('mousemove',  cvMove, { passive:false });
+  canvas.addEventListener('mouseup',    cvUp);
+  canvas.addEventListener('touchstart', cvDown, { passive:false });
+  canvas.addEventListener('touchmove',  cvMove, { passive:false });
+  canvas.addEventListener('touchend',   cvUp);
+  _cleanupFns.push(function() {
+    canvas.removeEventListener('mousedown',  cvDown);
+    canvas.removeEventListener('mousemove',  cvMove);
+    canvas.removeEventListener('mouseup',    cvUp);
+    canvas.removeEventListener('touchstart', cvDown);
+    canvas.removeEventListener('touchmove',  cvMove);
+    canvas.removeEventListener('touchend',   cvUp);
+  });
+
+  _initialized = true;
+  draw(); // idle frame
+  emit('ready');
+}
+
+function _internalTeardown() {
+  if (!_initialized) return;
+  running = false;
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+  _cleanupFns.forEach(function(fn) { try { fn(); } catch(e){} });
+  _cleanupFns = [];
+  _eventHandler = null;
+  _initialized = false;
+  player = null;
+  entities = [];
+  // ── Engine cleanup (v0.16.60) ──
+  if (_engine && _engine.stop) { try { _engine.stop(); } catch(e){} }
+  _engine = null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// INLINE-EVENT BRIDGE
+// ═══════════════════════════════════════════════════════════════════════
+// The brick bar uses onpointerdown="onBrickDown(...)" inline-event attributes
+// because that's how the original code was written. Inline-event attributes
+// are resolved against the GLOBAL scope, but our module-scope functions are
+// not on window. We bridge by exposing the needed handlers.
+window.onBrickDown = function(e, color) { return onBrickDown(e, color); };
+
+// ═══════════════════════════════════════════════════════════════════════
+// PUBLIC API
+// ═══════════════════════════════════════════════════════════════════════
+window.Rumble = {
+  // ── Lifecycle ──
+  init: function(options) { _internalInit(options); },
+  teardown: function() { _internalTeardown(); },
+
+  // ── Control ──
+  start: function(config) {
+    if (!_initialized) { console.warn('[Rumble] start() called before init()'); return; }
+    _internalStart(config);
+  },
+  setPauseState: function(paused) {
+    if (!player || !_initialized) return;
+    if (paused) {
+      if (running) { running = false; emit('pause'); }
+    } else {
+      if (!running) {
+        running = true;
+        lastTs = performance.now();
+        rafId = requestAnimationFrame(loop);
+        emit('resume');
+      }
+    }
+  },
+  forceEnd: function(reason) { _internalEnd(reason || 'quit'); },
+
+  // ── Queries ──
+  isActive: function() { return !!(running && player); },
+  getState: function() { return _computeState(); },
+  getConfig: function() { return cfg ? JSON.parse(JSON.stringify(cfg)) : null; },
+  getDebugInfo: function() {
+    // Lazy-resolve actualDamage and actualHeal on lastOverload during the
+    // 600ms window after fire. After that, freeze the values so the audit
+    // panel keeps showing the last result until the next overload.
+    var _lo = _battleStats && _battleStats.lastOverload;
+    if (_lo && !_lo.frozen) {
+      var dmgNow = (_battleStats.damageByColor && _battleStats.damageByColor[_lo.color]) || 0;
+      _lo.actualDamage = Math.max(0, dmgNow - _lo.dmgSnapshot);
+      var healNow = (_battleStats.healedByColor && _battleStats.healedByColor[_lo.color]) || 0;
+      _lo.actualHeal = Math.max(0, healNow - _lo.healSnapshot);
+      if (performance.now() - _lo.ts > 600) {
+        _lo.frozen = true;
+      }
+    }
+    return {
+      running: running,
+      hasPlayer: !!player,
+      entityCount: entities.length,
+      projectileCount: (blueBolts||[]).length,
+      trapCount: (traps||[]).length,
+      wallCount: (grayWalls||[]).length,
+      floatingTexts: (floatingTexts||[]).length,
+      // Most recent overload snapshot. null until first cast. After
+      // each cast, holds expected vs actual damage for ~600ms then
+      // frozen until the next cast overwrites. expected* are the SUM
+      // of all damage/heal paths so ratios reflect what the engine
+      // actually delivered. expDmg* / expHeal* component breakdown is
+      // available for transparent audit display.
+      lastOverload: _lo ? {
+        color: _lo.color,
+        tier: _lo.tier,
+        expectedDmg: _lo.expectedDmg,
+        expectedHeal: _lo.expectedHeal,
+        expectedRadius: _lo.expectedRadius,
+        // Component breakdown (audit transparency)
+        expDmgPrimary: _lo.expDmgPrimary,
+        expDmgBurst: _lo.expDmgBurst,
+        expDmgWither: _lo.expDmgWither,
+        expHealBurst: _lo.expHealBurst,
+        expHealTotal: _lo.expHealTotal,
+        entsInRadius: _lo.entsInRadius,
+        mult: _lo.mult,
+        tapMult: _lo.tapMult,
+        affMult: _lo.affMult,
+        curveMult: _lo.curveMult,
+        isCrit: _lo.isCrit,
+        actualDamage: _lo.actualDamage,
+        actualHeal: _lo.actualHeal || 0,
+        ageMs: performance.now() - _lo.ts,
+        frozen: _lo.frozen,
+        persistentFx: _lo.persistentFx,
+      } : null,
+      // Per-entity details — shown by waves-live-debug to identify what's
+      // hanging around when a wave doesn't advance. Keep it cheap; this gets
+      // polled every frame.
+      entitiesDetail: entities.map(function(g) {
+        return {
+          type: g.type,
+          hp: Math.round(g.hp || 0),
+          hpMax: g.hpMax || 0,
+          x: Math.round(g.x || 0),
+          y: Math.round(g.y || 0),
+          dead: !!g.dead,
+          burrowHidden: !!g._burrowHidden,
+          phaseFade: (g._phaseFadeTimer || 0) > 0,
+          splitDepth: g._splitDepth || 0,
+          deathSig: g.deathSignature || null,
+          aiState: g._burrowState || g.swingState || null,
+        };
+      }),
+    };
+  },
+
+  // Arena geometry, exposed for the rumble_test overload-audit panel
+  // so it can show the arena clamp size in the radius table — and so
+  // the panel anchor can map arena-internal pixel coords to viewport
+  // coords without duplicating the gutter/HUD constants.
+  getArenaInfo: function() {
+    if (typeof getRumbleBounds !== 'function') return null;
+    var b = getRumbleBounds();
+    if (!b) return null;
+    return {
+      x: b.x,
+      y: b.y,
+      w: b.w,
+      h: b.h,
+      halfMin: Math.min(b.w, b.h) / 2,
+      halfDiag: Math.sqrt(b.w*b.w + b.h*b.h) / 2,
+    };
+  },
+
+  // ── Multiplayer (v0.16.56, interp v0.16.59) ──
+  // Host page passes ally snapshots from server. Each: { id, cls,
+  // nx, ny, hp, hpMax, alive, spectating }. Coords are normalized
+  // (0-1). Receiving call updates the per-ally TARGET; the renderer
+  // interpolates currentNX/NY toward targetNX/NY each frame so motion
+  // is smooth even at 20Hz server tick rate. New allies snap on first
+  // sight (no lerp from (0,0) to first position). Allies absent from
+  // a snapshot are pruned after _MP_ALLY_GRACE_MS to handle blips.
+  setAllyState: function(allies) {
+    if (!Array.isArray(allies)) allies = [];
+    var now = (typeof performance !== 'undefined' && performance.now)
+              ? performance.now() : Date.now();
+    var seenIds = {};
+    for (var i = 0; i < allies.length; i++) {
+      var a = allies[i];
+      if (!a || !a.id) continue;
+      if (typeof a.nx !== 'number' || typeof a.ny !== 'number') continue;
+      seenIds[a.id] = true;
+      var rec = _mpAllyTargets[a.id];
+      if (!rec) {
+        // First time seeing this ally — snap currentNX/NY to target
+        // so they appear at the right place, not slide in from (0,0).
+        rec = {
+          id: a.id, cls: a.cls,
+          targetNX: a.nx, targetNY: a.ny,
+          currentNX: a.nx, currentNY: a.ny,
+          hp: a.hp, hpMax: a.hpMax,
+          alive: a.alive !== false, spectating: !!a.spectating,
+          lastSnapshotMs: now, lastSeenMs: now,
+        };
+        _mpAllyTargets[a.id] = rec;
+        _mpAllyOrder.push(a.id);
+      } else {
+        // Update target — currentNX/NY stays where it was, renderer
+        // will lerp it toward the new target over the next frames.
+        rec.cls = a.cls;
+        rec.targetNX = a.nx; rec.targetNY = a.ny;
+        rec.hp = a.hp; rec.hpMax = a.hpMax;
+        rec.alive = a.alive !== false; rec.spectating = !!a.spectating;
+        rec.lastSnapshotMs = now;
+        rec.lastSeenMs = now;
+      }
+    }
+    // Prune allies absent from this snapshot for too long. Short
+    // grace period absorbs blip-frames where one update is missing.
+    for (var oi = _mpAllyOrder.length - 1; oi >= 0; oi--) {
+      var oid = _mpAllyOrder[oi];
+      var orec = _mpAllyTargets[oid];
+      if (!orec) { _mpAllyOrder.splice(oi, 1); continue; }
+      if (!seenIds[oid] && (now - orec.lastSeenMs) > _MP_ALLY_GRACE_MS) {
+        delete _mpAllyTargets[oid];
+        _mpAllyOrder.splice(oi, 1);
+      }
+    }
+  },
+  // Returns current arena bounds in pixel space. Used by multiplayer
+  // host page to convert local player coords → normalized (0-1) for
+  // sending, and to convert received normalized ally coords back to
+  // local pixel space for render via setAllyState. Each client's
+  // bounds differ (viewport size); normalization is the bridge.
+  getArenaBounds: function() {
+    if (!_initialized) return null;
+    return getRumbleBounds();
+  },
+
+  // ── DM tools ──
+  injectBricks: function(delta) {
+    if (!player || !delta) return;
+    Object.keys(delta).forEach(function(c) {
+      if (typeof player.bricks[c] === 'number') {
+        player.bricks[c] = Math.max(0, player.bricks[c] + delta[c]);
+      }
+    });
+    renderBrickBar();
+  },
+  setPlayerHP: function(n) {
+    if (!player) return;
+    player.hp = Math.max(0, Math.min(player.hpMax, n|0));
+    updateHUD();
+    // v4: if the setter drops player to 0, trigger the defeat/revive minigame
+    if (player.hp <= 0 && running && !_revivePaused && typeof respawnPlayer === 'function') {
+      respawnPlayer();
+    }
+  },
+  setEnemyHP: function(n) {
+    var g = entities.find(function(x){ return x.hp > 0; });
+    if (!g) return;
+    g.hp = Math.max(0, Math.min(g.hpMax, n|0));
+  },
+  // Spawn a single entity into an active rumble. Used by waves mode in
+  // rumble_test for staged enemy reveals. Type defaults to cfg.entityType
+  // (which may be 'random'). Re-applies any dialer resistances. Returns
+  // the spawned entity reference, or null if rumble isn't running.
+  spawnEntity: function(type) {
+    if (!_initialized || !player) return null;
+    var bounds = getRumbleBounds();
+    // Spread angle around existing entities so new spawns don't all land
+    // in the same spot. Pseudo-random offset is fine for a dev tool.
+    var angleOffset = (entities.length / Math.max(1, entities.length + 1)) * Math.PI * 2
+                       + Math.random() * 0.5;
+    var ent = makeEntity(bounds, angleOffset, type || (cfg && cfg.entityType));
+    if (cfg && cfg.entityResistances) {
+      ent.resistances = Object.assign(ent.resistances || {}, cfg.entityResistances);
+    }
+    entities.push(ent);
+    return ent;
+  },
+  // Pause/unpause gameplay sim from a host page. While true, update(dt) is
+  // skipped — entities don't tick, damage doesn't apply, DoTs don't fire.
+  // draw() and HUD continue rendering so visuals stay accurate. Used by
+  // test harness when wave-victory or run-summary screens are showing.
+  setExternalPause: function(paused) {
+    _externalPause = !!paused;
+    // Clear the active-combat timestamp on unpause so the tracker doesn't
+    // count the pause window as engagement time.
+    if (!paused && _battleStats) {
+      _battleStats._lastDamageAt = 0;
+    }
+  },
+  // Instantly refill all brick charges to their max. Used between waves
+  // (waves mode skips the post-rumble refill loop). No animation; the
+  // brick bar just shows full pips next render.
+  refillBricks: function() {
+    if (!player || !player.bricks || !player.brickMax) return;
+    Object.keys(player.brickMax).forEach(function(c) {
+      player.bricks[c] = player.brickMax[c];
+    });
+    if (typeof renderBrickBar === 'function') renderBrickBar();
+  },
+  // ── Wave victory brick refill animation (v0.16.65) ──
+  // Mirrors board-rumble victory pattern. Wave victory screen shows
+  // a pip bar that animates filling up over the screen display
+  // duration. Called by rumble_test.html when showing/hiding the
+  // wave victory screen.
+  //
+  // Returns the initial pip HTML string for the host to inject into
+  // its victory screen template. Subsequent _updateVictoryPips ticks
+  // mutate that DOM in place.
+  startWaveVictoryRefill: function() {
+    _victoryRefillActive = true;
+    _startVictoryRefillLoop();
+    return _renderVictoryPipsInitial();
+  },
+  stopWaveVictoryRefill: function() {
+    _victoryRefillActive = false;
+    _stopVictoryRefillLoop();
+  },
+  // Eat all cheese in player inventory. Each wheel grants +1 max HP and
+  // +1 current HP (the simplified pre-0.17.0 cheese behavior). Returns
+  // the number of wheels consumed. Used by waves mode auto-consume; will
+  // be wired to the real cheese-eat UI when the cheese system ships.
+  eatAllCheese: function() {
+    if (!player) return 0;
+    var n = player.cheese || 0;
+    if (n <= 0) return 0;
+    player.cheese = 0;
+    player.hpMax += n;
+    player.hp += n;
+    showFloatingText(player.x, player.y - 70, '🧀 +' + n + ' HP MAX', '#FFD96A', player);
+    if (typeof updateHUD === 'function') updateHUD();
+    return n;
+  },
+};
+
+})(); // end IIFE
