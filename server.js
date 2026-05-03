@@ -964,15 +964,62 @@ wss.on('connection', (ws, req) => {
     // Frontend uses this to verify a code BEFORE asking the player
     // for their class pick. Lighter than the full join handshake.
     // Payload: { sessionId }
-    // Returns: { type: 'rumble_session_check', sessionId, exists, playerCount }
+    // Returns: { type: 'rumble_session_check', sessionId, exists,
+    //            playerCount, takenClasses }
+    // v0.16.66: takenClasses[] — class strings already chosen by
+    // other players. Joining client uses these to gray out class
+    // cards that are already in use (avoid duplicate-class collisions).
     if (type === 'rumble_session_check') {
       const sessionId = _normalizeRumbleCode((P || {}).sessionId);
       const sess = sessionId ? rumbleSessions[sessionId] : null;
+      let takenClasses = [];
+      if (sess) {
+        const seen = {};
+        Object.keys(sess.players).forEach((pid) => {
+          const cls = sess.players[pid] && sess.players[pid].cls;
+          if (cls && !seen[cls]) { seen[cls] = true; takenClasses.push(cls); }
+        });
+      }
       ws.send(JSON.stringify({
         type: 'rumble_session_check',
         sessionId: sessionId,
         exists: !!sess,
         playerCount: sess ? Object.keys(sess.players).length : 0,
+        takenClasses: takenClasses,
+      }));
+      return;
+    }
+
+    // List all active rumble sessions — for the browse-games UI.
+    // Returns { type: 'rumble_session_list', sessions: [...] }
+    // each session entry: { sessionId, playerCount, takenClasses,
+    //                       createdAt }
+    // Newest first (sorted by createdAt descending). Empty sessions
+    // (HOST created but never joined) are still listed — they're
+    // valid join targets until TTL cleans them up.
+    if (type === 'rumble_session_list') {
+      const ids = Object.keys(rumbleSessions);
+      const sessions = ids.map((id) => {
+        const sess = rumbleSessions[id];
+        const takenClasses = [];
+        const seen = {};
+        Object.keys(sess.players).forEach((pid) => {
+          const cls = sess.players[pid] && sess.players[pid].cls;
+          if (cls && !seen[cls]) { seen[cls] = true; takenClasses.push(cls); }
+        });
+        return {
+          sessionId: id,
+          playerCount: Object.keys(sess.players).length,
+          takenClasses: takenClasses,
+          createdAt: sess.createdAt || sess.startedAt,
+        };
+      });
+      // Sort newest first so the most recently created session appears
+      // at the top of the browse list.
+      sessions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      ws.send(JSON.stringify({
+        type: 'rumble_session_list',
+        sessions: sessions,
       }));
       return;
     }

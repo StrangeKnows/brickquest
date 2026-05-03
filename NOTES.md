@@ -9220,6 +9220,129 @@ this time).
 
 ---
 
+### v0.16.69 — Browse Games (active party listing)
+
+> "show active parties, click to join"
+
+Party Mode lobby gains a third option: BROWSE GAMES. Opens a
+scrollable list of every active session on the server, each
+showing code, player count, and class icons taken. Tap a card →
+joins that session. Auto-refreshes every 3 seconds.
+
+Lower-friction than typing a code. Code-typing still works
+(useful when a friend reads you a code over the phone) but
+discovery doesn't require knowing the code in advance.
+
+**Server change:**
+- New message: `rumble_session_list` → returns array of session
+  cards: `{ sessionId, playerCount, takenClasses, createdAt }`.
+- Sorted newest-first by `createdAt`.
+- Empty sessions (HOST created but never joined) are listed —
+  they're valid join targets until TTL cleans them up (60s).
+- Reuses existing session struct fields; no new server state.
+
+**Client change:**
+- New BROWSE button alongside HOST/JOIN in party panel.
+- Three buttons now share row: 🎲 HOST, 🔑 JOIN, 📋 BROWSE.
+- BROWSE click → opens list panel (replaces default row).
+- List panel: header row with title + ⟳ refresh + × cancel
+  buttons; scrollable list (max-height 280px).
+- Each card: code (gold monospace, large), player count, class
+  icons taken. Hover lifts card with purple glow.
+- Tap card → calls `partyJoinByCodeFromBrowse(code)` → pre-fills
+  code input → reuses existing `partyJoinByCode()` flow.
+- Auto-refresh every 3s while panel visible. Stopped on cancel,
+  on join, on mode switch.
+- Empty state: "No active games. Try HOST!"
+- Connection failed state: "Connection failed."
+
+**Per memory rule #14 (UNITY):**
+- Browse uses the SAME `_partyOpenLobbySocket` infrastructure
+  as HOST and JOIN — one-shot socket per request, no persistent
+  connection during browse.
+- Tap-to-join routes through the existing `partyJoinByCode()`
+  flow (just pre-populates the code input). No parallel join
+  logic.
+
+**Per memory rule #28 (unify-at-choke-point):** join logic has
+ONE entry (`partyJoinByCode`). Whether the user typed the code,
+tapped a browse card, or clicked the JOIN button after typing —
+all three paths converge at this function.
+
+**Per memory rule #19 (intuition over menus):** committed to the
+design without sub-questions:
+- 3-second auto-refresh (frequent enough to feel live, infrequent
+  enough not to spam server)
+- Empty sessions listed (real targets — host might be on a
+  loading screen waiting to pick class)
+- Class icons not full names (compact, visually scannable)
+- Newest-first ordering (recent activity is more likely live)
+
+**Privacy note (parking lot):** in a local-network deployment,
+all sessions being publicly listed is fine. If we ever go
+internet-public, we'd want a "private game" toggle on HOST that
+hides the session from `rumble_session_list`. Not a current
+concern.
+
+---
+
+**Files changed:** `server.js`, `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumble.js, rumbleEngine.js, characters.js,
+players-core.js.
+
+---
+
+**Test focus:**
+
+1. **Browse with no sessions:**
+   - PARTY MODE → BROWSE → "No active games. Try HOST!" appears
+2. **HOST one session, BROWSE from another device:**
+   - Device 1: PARTY MODE → HOST → get code (don't pick class yet)
+   - Device 2: PARTY MODE → BROWSE → see device 1's session card
+   - Card shows the 4-letter code, "0 players", "empty lobby"
+3. **Auto-refresh:**
+   - Device 2 keeps browse panel open
+   - Device 1 picks class on host
+   - Within 3s, device 2's card updates: "1 player" + class icon
+4. **Tap to join:**
+   - Device 2 taps card → switches to "Joined!" state with code
+     displayed (same as JOIN-by-code flow)
+   - Class grid unlocks; pick a class, enter arena
+5. **Multiple sessions:**
+   - Open 3 host devices, get 3 codes
+   - Browser device sees all 3 cards, newest first
+6. **Cancel browse:**
+   - × button returns to default state (HOST/JOIN/BROWSE row)
+
+If browse list is empty when a session SHOULD exist → server
+might not be tracking the session correctly, or the auto-refresh
+isn't firing. Console log on server side would show.
+
+---
+
+**Standards audit (rule #17 — push #10 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch — save.sh canonical
+- Rule #14 (UNITY): browse uses same lobby socket pattern as
+  HOST/JOIN. Tap-to-join routes through existing join flow.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: one socket pattern, one join flow, three entry
+    points (HOST/JOIN/BROWSE) all converge.
+  - ELEGANCE: ~30 LOC server (one handler, one sort), ~80 LOC
+    client (button + render + join hook). Shared CSS
+    vocabulary with existing party panel.
+  - EFFICIENCY: 3s auto-refresh = 20 requests/min/device. Cheap.
+    Sessions object iteration is O(n); typical n < 10.
+- Rule #19 (intuition over menus): committed to design choices
+  (refresh interval, empty state, ordering) without sub-questions.
+- Rule #28 (unify-at-choke-point): join logic has one entry —
+  three UI paths converge at `partyJoinByCode()`.
+- Rule #29 (bug-from-duplication): no parallel join code,
+  no parallel session-state tracking.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

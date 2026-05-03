@@ -226,6 +226,85 @@
     font-size:11px; color:#a090c0;
     font-style:italic;
   }
+  /* v0.16.68 — Browse Games list. Auto-refreshing party listing
+     with code, player count, taken classes. Tap card to join. */
+  .party-browse-header {
+    display:flex; align-items:center; gap:10px;
+    margin-top:8px;
+    padding:0 4px;
+  }
+  .party-browse-title {
+    flex:1;
+    font-size:11px; letter-spacing:.18em;
+    color:#9080b0; font-weight:600;
+  }
+  .party-btn-refresh {
+    background:#332244; border:1px solid #4a3475;
+    color:#a090c0;
+    border-radius:6px;
+    padding:6px 10px;
+    cursor:pointer; font-size:14px;
+    font-weight:600;
+    font-family:ui-sans-serif, system-ui, sans-serif;
+  }
+  .party-btn-refresh:hover { background:#443355; color:#e8e0ff; }
+  .party-browse-list {
+    margin-top:8px;
+    max-height:280px;
+    overflow-y:auto;
+    display:flex; flex-direction:column; gap:6px;
+  }
+  .party-browse-empty {
+    padding:24px 12px;
+    text-align:center;
+    color:#7060a0; font-style:italic;
+    font-size:12px;
+  }
+  .party-browse-card {
+    display:flex; align-items:center; gap:12px;
+    padding:10px 12px;
+    background:linear-gradient(180deg, #1c1230, #110a22);
+    border:1px solid #4a3475;
+    border-radius:8px;
+    cursor:pointer;
+    transition:transform .12s, border-color .15s, box-shadow .15s;
+    text-align:left;
+  }
+  .party-browse-card:hover {
+    transform:translateY(-1px);
+    border-color:#7755bb;
+    box-shadow:0 0 12px rgba(120,80,200,.3);
+  }
+  .party-browse-code {
+    font-size:22px; font-weight:700;
+    color:#FFD700;
+    font-family:ui-monospace, monospace;
+    letter-spacing:.2em;
+    min-width:90px;
+  }
+  .party-browse-meta {
+    flex:1;
+    display:flex; flex-direction:column; gap:3px;
+  }
+  .party-browse-count {
+    font-size:11px; color:#c0b0d0;
+    font-weight:600;
+    letter-spacing:.04em;
+  }
+  .party-browse-classes {
+    display:flex; gap:4px;
+    font-size:13px; line-height:1;
+    opacity:0.85;
+  }
+  .party-browse-empty-classes {
+    font-size:10px; color:#5050a0;
+    font-style:italic;
+  }
+  .party-browse-arrow {
+    color:#7755bb;
+    font-size:18px;
+    font-weight:600;
+  }
 
   /* ── CLASS CARDS ───────────────────────────────────────── */
   .class-grid {
@@ -258,6 +337,22 @@
     box-shadow:0 6px 20px -4px var(--cls-color-shadow, rgba(245,208,0,0.2));
   }
   .class-card:hover::before { opacity:1; height:3px; }
+  /* v0.16.66 — Taken: class already chosen by another player.
+     Card stays visible so player understands the roster, but
+     interaction is suppressed and card is dimmed. */
+  .class-card.taken {
+    cursor:not-allowed;
+    opacity:0.4;
+    pointer-events:none;
+    filter:grayscale(0.6);
+  }
+  .class-card.taken::before { opacity:0.2; }
+  .class-card .taken-label {
+    margin-top:4px;
+    font-size:9px; letter-spacing:.18em;
+    color:#cc6666; font-weight:700;
+    font-family:ui-sans-serif, system-ui, sans-serif;
+  }
   .class-card .icon {
     font-size:28px;
     line-height:1.1;
@@ -998,6 +1093,11 @@
         <div class="party-btn-label">JOIN GAME</div>
         <div class="party-btn-sub">Enter a code from a friend</div>
       </button>
+      <button class="party-btn party-browse" onclick="partyShowBrowse()">
+        <div class="party-btn-icon">📋</div>
+        <div class="party-btn-label">BROWSE GAMES</div>
+        <div class="party-btn-sub">See active parties to join</div>
+      </button>
     </div>
     <div id="party-join-form" class="party-row" style="display:none;">
       <input type="text" id="party-code-input" maxlength="4" placeholder="CODE"
@@ -1006,6 +1106,19 @@
              onkeydown="if(event.key==='Enter')partyJoinByCode()" />
       <button class="party-btn-go" onclick="partyJoinByCode()">JOIN</button>
       <button class="party-btn-cancel" onclick="partyCancelJoin()">×</button>
+    </div>
+    <!-- v0.16.68 — BROWSE GAMES list. Auto-refreshing list of active
+         sessions. Each card shows code, player count, classes
+         already taken. Tap card → joins. Refresh button + cancel. -->
+    <div id="party-browse" style="display:none;">
+      <div class="party-browse-header">
+        <span class="party-browse-title">ACTIVE PARTIES</span>
+        <button class="party-btn-refresh" onclick="partyRefreshBrowse()" title="Refresh">⟳</button>
+        <button class="party-btn-cancel" onclick="partyCancelBrowse()">×</button>
+      </div>
+      <div id="party-browse-list" class="party-browse-list">
+        <div class="party-browse-empty">Loading...</div>
+      </div>
     </div>
     <div id="party-status" class="party-status"></div>
     <div id="party-code-display" class="party-code-display" style="display:none;">
@@ -1187,6 +1300,10 @@ function renderClassGrid() {
   Object.keys(SPEC_CLASSES).forEach(function(cls) {
     var m = SPEC_CLASSES[cls];
     var theme = CLASS_THEME[cls] || '#F5D000';
+    // v0.16.66 — In coop mode, gray out classes already taken by
+    // other players in the joined session. Card stays visible
+    // but is non-interactive and dimmed.
+    var isTaken = (currentMode === 'coop') && _mpTakenClasses && _mpTakenClasses.indexOf(cls) >= 0;
     // Build pip-row representing the kit
     var pipsHtml = '';
     var kitLabel = '';
@@ -1211,14 +1328,18 @@ function renderClassGrid() {
       kitLabel = sigCount + ' ' + m.sig + ' · ' + secCount + ' ' + m.sec;
     }
     var shadow = theme + '55';  // 33% alpha hex suffix for shadow tint
-    html += '<div class="class-card" '
+    var clickHandler = isTaken ? '' : 'onclick="startTestRumble(\'' + cls + '\')"';
+    var takenCls = isTaken ? ' taken' : '';
+    var takenLabel = isTaken ? '<div class="taken-label">TAKEN</div>' : '';
+    html += '<div class="class-card' + takenCls + '" '
       +     'style="--cls-color:' + theme + ';--cls-color-shadow:' + shadow + ';" '
-      +     'onclick="startTestRumble(\'' + cls + '\')">'
+      +     clickHandler + '>'
       +   '<div class="icon">' + m.icon + '</div>'
       +   '<div class="name">' + m.name + '</div>'
       +   '<div class="hp-line"><span class="heart">♥</span>' + m.hp + ' HP</div>'
       +   '<div class="pip-row">' + pipsHtml + '</div>'
       +   '<div class="kit-label">' + kitLabel + '</div>'
+      +   takenLabel
       + '</div>';
   });
   grid.innerHTML = html;
@@ -2494,6 +2615,7 @@ Rumble.init({
 var _mpWS = null;
 var _mpSessionId = null;         // v0.16.64 — set by partyHost/partyJoinByCode
 var _mpSessionConfirmed = false; // true once server confirmed session via HOST or JOIN check
+var _mpTakenClasses = [];        // v0.16.66 — classes already chosen by other players in this session
 var _mpPlayerId = null;          // assigned at join (random per-tab)
 var _mpPushInterval = null;      // setInterval handle for state push
 var _mpAllyState = [];           // last-received ally array (excludes self)
@@ -2509,19 +2631,24 @@ function _mpGenPlayerId() {
 // gameplay state push.
 
 function partyResetUI() {
-  // Show default state (HOST + JOIN buttons), clear any code/status.
+  // Show default state (HOST + JOIN + BROWSE buttons), clear any code/status.
   var partyDefault = document.getElementById('party-default');
   var partyJoinForm = document.getElementById('party-join-form');
+  var partyBrowse = document.getElementById('party-browse');
   var partyStatus = document.getElementById('party-status');
   var partyCodeDisplay = document.getElementById('party-code-display');
   var partyCodeInput = document.getElementById('party-code-input');
   if (partyDefault) partyDefault.style.display = 'flex';
   if (partyJoinForm) partyJoinForm.style.display = 'none';
+  if (partyBrowse) partyBrowse.style.display = 'none';
   if (partyStatus) { partyStatus.textContent = ''; partyStatus.className = 'party-status'; }
   if (partyCodeDisplay) partyCodeDisplay.style.display = 'none';
   if (partyCodeInput) partyCodeInput.value = '';
   _mpSessionId = null;
   _mpSessionConfirmed = false;
+  _mpTakenClasses = [];
+  // v0.16.68 — Stop browse auto-refresh if it was running.
+  _partyStopBrowseRefresh();
   // Disable class grid until session is set
   _refreshClassGridForParty();
 }
@@ -2608,6 +2735,131 @@ function partyCancelJoin() {
   _setPartyStatus('', '');
 }
 
+// ─── BROWSE GAMES (v0.16.68) ──────────────────────────────────
+// List active sessions from server. Tap to join. Auto-refreshes
+// every 3s while panel is visible. Reuses lobby socket pattern
+// (one-shot open per request) — no persistent socket while browsing.
+
+var _partyBrowseRefreshInterval = null;
+// Class icon map for browse cards — small visual cue showing which
+// classes are taken. Mirrors SPEC_CLASSES icons but accessed by
+// strings since this list lives outside renderClassGrid scope.
+var _PARTY_CLASS_ICONS = {
+  breaker: '\u2694\uFE0F',
+  formwright: '\uD83D\uDD2E',
+  snapstep: '\uD83C\uDFC3',
+  blocksmith: '\uD83D\uDD27',
+  fixer: '\uD83D\uDC8A',
+  wild_one: '\uD83D\uDC3E',
+};
+
+function partyShowBrowse() {
+  var partyDefault = document.getElementById('party-default');
+  var partyBrowse = document.getElementById('party-browse');
+  if (partyDefault) partyDefault.style.display = 'none';
+  if (partyBrowse) partyBrowse.style.display = 'block';
+  _setPartyStatus('', '');
+  // Initial fetch + start refresh loop
+  partyRefreshBrowse();
+  _partyStartBrowseRefresh();
+}
+
+function partyCancelBrowse() {
+  var partyDefault = document.getElementById('party-default');
+  var partyBrowse = document.getElementById('party-browse');
+  if (partyDefault) partyDefault.style.display = 'flex';
+  if (partyBrowse) partyBrowse.style.display = 'none';
+  _setPartyStatus('', '');
+  _partyStopBrowseRefresh();
+}
+
+function _partyStartBrowseRefresh() {
+  _partyStopBrowseRefresh();
+  _partyBrowseRefreshInterval = setInterval(function() {
+    // Only refresh if panel is still visible (sanity guard against
+    // intervals leaking when DOM changes outside our control).
+    var partyBrowse = document.getElementById('party-browse');
+    if (!partyBrowse || partyBrowse.style.display === 'none') {
+      _partyStopBrowseRefresh();
+      return;
+    }
+    partyRefreshBrowse();
+  }, 3000);
+}
+
+function _partyStopBrowseRefresh() {
+  if (_partyBrowseRefreshInterval) {
+    clearInterval(_partyBrowseRefreshInterval);
+    _partyBrowseRefreshInterval = null;
+  }
+}
+
+function partyRefreshBrowse() {
+  var ws = _partyOpenLobbySocket(function(msg, sock) {
+    if (msg.type === 'rumble_session_list') {
+      _renderPartyBrowseList(msg.sessions || []);
+      try { sock.close(); } catch (e) {}
+    }
+  }, function() {
+    _renderPartyBrowseList(null);  // null → render error state
+  });
+  ws.onopen = function() {
+    ws.send(JSON.stringify({ type: 'rumble_session_list', payload: {} }));
+  };
+}
+
+function _renderPartyBrowseList(sessions) {
+  var list = document.getElementById('party-browse-list');
+  if (!list) return;
+  if (sessions === null) {
+    list.innerHTML = '<div class="party-browse-empty">Connection failed.</div>';
+    return;
+  }
+  if (sessions.length === 0) {
+    list.innerHTML = '<div class="party-browse-empty">No active games. Try HOST!</div>';
+    return;
+  }
+  var html = '';
+  sessions.forEach(function(sess) {
+    var classes = sess.takenClasses || [];
+    var classHtml;
+    if (classes.length === 0) {
+      classHtml = '<span class="party-browse-empty-classes">empty lobby</span>';
+    } else {
+      classHtml = classes.map(function(cls) {
+        return '<span title="' + cls + '">' + (_PARTY_CLASS_ICONS[cls] || '?') + '</span>';
+      }).join('');
+    }
+    var countLabel = sess.playerCount === 1 ? '1 player' : sess.playerCount + ' players';
+    // Card uses onclick to call partyJoinByCode with the code already
+    // populated. Reuses the join-by-code flow.
+    html += '<div class="party-browse-card" onclick="partyJoinByCodeFromBrowse(\'' + sess.sessionId + '\')">'
+      +     '<div class="party-browse-code">' + sess.sessionId + '</div>'
+      +     '<div class="party-browse-meta">'
+      +       '<div class="party-browse-count">' + countLabel + '</div>'
+      +       '<div class="party-browse-classes">' + classHtml + '</div>'
+      +     '</div>'
+      +     '<div class="party-browse-arrow">▸</div>'
+      +   '</div>';
+  });
+  list.innerHTML = html;
+}
+
+// Tap-to-join from browse list. Pre-fills the code and triggers
+// the same join flow as JOIN-by-code. Stops browse auto-refresh
+// since user has selected a target.
+function partyJoinByCodeFromBrowse(code) {
+  _partyStopBrowseRefresh();
+  // Hide browse panel, switch to a "joining..." state via the
+  // existing join flow.
+  var partyBrowse = document.getElementById('party-browse');
+  if (partyBrowse) partyBrowse.style.display = 'none';
+  // Pre-fill the input so partyJoinByCode can read it
+  var input = document.getElementById('party-code-input');
+  if (input) input.value = code;
+  partyJoinByCode();
+}
+
 function partyJoinByCode() {
   var input = document.getElementById('party-code-input');
   if (!input) return;
@@ -2622,6 +2874,8 @@ function partyJoinByCode() {
       if (msg.exists) {
         _mpSessionId = msg.sessionId;
         _mpSessionConfirmed = true;
+        // v0.16.66 — capture taken classes for grid graying
+        _mpTakenClasses = Array.isArray(msg.takenClasses) ? msg.takenClasses.slice() : [];
         // Show code prominently (so joiner also sees what they joined)
         var partyJoinForm = document.getElementById('party-join-form');
         var partyCodeDisplay = document.getElementById('party-code-display');
@@ -2630,6 +2884,8 @@ function partyJoinByCode() {
         if (partyCodeDisplay) partyCodeDisplay.style.display = 'block';
         if (partyCodeValue) partyCodeValue.textContent = msg.sessionId;
         _setPartyStatus('Joined! Pick a class to start. (' + msg.playerCount + ' player' + (msg.playerCount === 1 ? '' : 's') + ' waiting)', 'success');
+        // Re-render grid so taken classes show as disabled
+        renderClassGrid();
         _refreshClassGridForParty();
       } else {
         _setPartyStatus('No game with code "' + code + '" — check spelling', 'error');
