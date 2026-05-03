@@ -8160,6 +8160,155 @@ v0.16.60 foundation intact.
 
 ---
 
+### v0.16.62 — Cast dispatch foundation + white_overload proof
+
+> "meet in the middle"
+
+**Reading the call:** lay BOTH unification foundations (cast
+dispatch + FX subscriber pattern), but only fully migrate ONE cast
+as proof. Other 10 casts and FX migration extend in subsequent
+pushes once the pattern is validated.
+
+**Per memory rule #19 (intuition over menus):** I led with the
+specific scope based on the audit findings, rather than asking
+yet another sub-scope question. Cast dispatch infrastructure +
+white_overload migration is a clean push. FX subscriber
+infrastructure is too ambiguous to land cleanly given per-callsite
+visual variations (different hex colors, y-offsets, prefix icons).
+Punted FX migration to a future polish push.
+
+**What this push delivers:**
+
+1. **`rumbleEngine.js` — cast dispatch:**
+   - `applyCast(playerId, castEvent)` now has a real implementation
+     (not a stub). Looks up handler via `_castHandlers[castEvent.cast]`,
+     invokes it, emits `'cast'` event with full context.
+   - `registerCastHandler(castType, fn)` host-injection method.
+   - `_castHandlers` map at module scope (closure-private).
+   - Engine version bumped to `0.16.62`.
+
+2. **`rumble.js` — white_overload migration:**
+   - At engine init (in `_internalStart`), register
+     `'white_overload'` cast handler that calls `fireOverloadWhite`.
+   - In `fireOverload()` color dispatch, the white branch now
+     builds a cast event and routes through `_engine.applyCast()`.
+     Fallback to direct call if engine unavailable (init edge case).
+   - Cast event shape: `{ cast: 'white_overload', count, ox, oy, isCrit, ts }`.
+   - Other 10 colors (red, yellow, blue, orange, gray, green,
+     purple, black) keep direct calls to fireOverload* — v0.16.63
+     extends the dispatch pattern to all colors.
+
+**Why white as proof:**
+- Simplest cast logic (single function, no entity targeting)
+- Independent from damage choke point (heal-only, not damage-side)
+- Affects fewer code paths if migration introduces a bug
+
+**The pattern (replicated in v0.16.63):**
+```
+fireOverload() dispatch branch
+    → builds cast event { cast, count, ox, oy, isCrit, ts }
+    → engine.applyCast(playerId, castEvent)
+    → engine looks up handler in _castHandlers
+    → handler invokes the existing fireOverloadX function
+    → engine emits 'cast' event after
+```
+
+Same pattern as v0.16.61 damage handler injection. Engine is the
+choke point, host registers handlers, engine emits events.
+
+**Smoke test (in node):**
+```
+const E = require('./rumbleEngine.js');
+const eng = E.createRumbleEngine();
+eng.start();
+eng.registerCastHandler('white_overload', handler);
+eng.on('cast', logSubscriber);
+eng.applyCast('p1', { cast: 'white_overload', count: 3, ox: 100, oy: 200 });
+// → handler called with cast event
+// → 'cast' event emitted
+```
+
+Validated. Unknown cast types return null (no handler) but still
+emit cast event. Null cast events safely no-op.
+
+**What this push does NOT do:**
+
+- FX migration (damage number, flash, crit flourish migration to
+  subscribers). Audit revealed per-callsite visual variation
+  (different hex colors, y-offsets, prefix icons) — too risky for
+  one push without regression. Future polish push handles this.
+- Other 10 cast types (red, yellow, blue, orange, gray, green,
+  purple, black). v0.16.63 extends the dispatch pattern to all.
+- Coop wire-up. Cast events are now event-shaped (ready for wire),
+  but server.js doesn't receive them yet. v0.16.63 cuts coop over.
+
+---
+
+**Files changed:** `rumbleEngine.js`, `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, html files, characters.js, players-core.js.
+
+---
+
+**Test focus:**
+
+1. **Solo white overload casts** — should feel IDENTICAL. Tap heal,
+   drag heal, self-cast burst, drag-far field. All paths through
+   the white_overload handler.
+2. **Solo other casts** (red, blue, etc.) — unchanged, still
+   direct calls.
+3. **Tap white** (regular T1 heal) — uses `doWhiteHeal`, NOT
+   `fireOverloadWhite`. Untouched. Should work as before.
+4. **Coop** — still v0.16.59 architecture. White overload locally
+   routes through engine but has no remote effect yet.
+5. **Production rumble** — board game flow unchanged.
+
+If white overload feels different — wrong cast event shape,
+handler not registered, or fallback path not firing. Easy revert.
+If other colors feel different — should NOT happen, they didn't
+change at all.
+
+---
+
+**Risk surfaces:**
+
+- White overload is the ONLY cast through engine in v0.16.62.
+  If the test pattern fails, we know exactly where the bug is.
+- The `_currentCrit` flag is read at fireOverload() (host) and
+  passed through cast event as `isCrit`. fireOverloadWhite reads
+  `_currentCrit` again internally (since it's a top-level var the
+  function closes over). Both read the same flag, so they should
+  agree. v0.16.63 might want to deprecate the flag-based approach
+  in favor of explicit cast event field.
+- Cast event ts uses performance.now() if available, falls back to
+  Date.now(). Server uses Date.now() for snapshot timestamps; this
+  consistency is intentional for v0.16.63 latency math.
+
+---
+
+**Standards audit (rule #17 — push #3 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #14 (UNITY): cast dispatch architecture is now data-driven
+  (registerCastHandler call). Adding a new cast type doesn't touch
+  engine code. Same pattern as damage handler injection.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: dispatch table is the single source of truth for "what
+    happens when player casts X." Engine owns the dispatch.
+  - ELEGANCE: ~15 LOC engine method + ~15 LOC host registration.
+    Pattern proven, replicates trivially for next 10 casts.
+  - EFFICIENCY: lookup is O(1) hash. No conditional cascade.
+- Rule #19 (intuition over menus): committed to scope based on
+  audit findings. Did NOT ask "should I do FX too?" mid-push —
+  audit was clear FX migration needed its own push.
+- Rule #28 (unify-at-choke-point): engine.applyCast IS the cast
+  choke. Future cast types register, never fork.
+- Rule #29 (bug-from-duplication): dispatch table eliminates the
+  "did I add a handler in N places?" problem. Single registration
+  point, single emission point.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

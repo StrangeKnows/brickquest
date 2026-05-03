@@ -40,7 +40,7 @@
   // ─── Engine version ──────────────────────────────────────────────
   // Bumped per push. Helps verify both client and server load matching
   // engine versions when coop sessions start (v0.16.63+).
-  var ENGINE_VERSION = '0.16.61';
+  var ENGINE_VERSION = '0.16.62';
 
   // ─── Default config ──────────────────────────────────────────────
   // Host can override any of these via createRumbleEngine(config).
@@ -145,6 +145,12 @@
     // handler body into the engine itself, eliminating this hook.
     var _damageHandler = null;
 
+    // Host-injected cast handlers (v0.16.62). Map cast string →
+    // handler fn. engine.applyCast() looks up the handler and
+    // invokes it. Adding a new cast type = registerCastHandler call,
+    // never an engine code change. UNITY: dispatch is data-driven.
+    var _castHandlers = {};
+
     function _emit(eventName) {
       var subs = subscribers[eventName];
       if (!subs || subs.length === 0) return;
@@ -224,11 +230,41 @@
       },
 
       // ── Cast handling ──
-      // v0.16.60 stub. Cast events still inline in rumble.js for now.
-      // v0.16.62 introduces the canonical CAST_HANDLERS dispatch.
+      // CHOKE POINT for all player casts. v0.16.62: dispatch table
+      // architecture lands. Host (rumble.js) registers per-cast
+      // handlers via registerCastHandler('white_overload', fn). When
+      // a player input becomes a cast event, host calls
+      // engine.applyCast(playerId, castEvent) — engine looks up the
+      // registered handler and invokes it.
+      //
+      // Cast event shape:
+      //   { cast: 'white_overload', count: 3, ox: number, oy: number,
+      //     isCrit: bool, ts: number }
+      // (cast types and field names per per-handler convention. The
+      // cast string is the dispatch key.)
+      //
+      // EMITS: 'cast' event after handler returns. Subscribers see
+      //   every cast for analytics, FX, and (v0.16.63+) coop sync.
+      //
+      // v0.16.62 wires ONE cast (white_overload) through dispatch.
+      // Other 10 fireOverload* calls stay direct in rumble.js until
+      // v0.16.63 extends the pattern.
       applyCast: function (playerId, castEvent) {
-        // No-op until v0.16.62 cast unification.
-        _emit('cast', playerId, castEvent && castEvent.cast, castEvent);
+        if (!castEvent || !castEvent.cast) return null;
+        var handler = _castHandlers[castEvent.cast];
+        var result = null;
+        if (handler) {
+          result = handler(playerId, castEvent);
+        }
+        _emit('cast', playerId, castEvent.cast, castEvent, result);
+        return result;
+      },
+
+      // Host registers a cast handler. Multiple casts can share a
+      // handler (rare); a cast can have only one handler at a time.
+      // Re-registering replaces the previous handler.
+      registerCastHandler: function (castType, fn) {
+        _castHandlers[castType] = fn;
       },
 
       // ── Damage handling ──

@@ -1906,7 +1906,27 @@ function fireOverload(dragX, dragY, bricksUsed) {
   var oyP = _usePlayer ? player.y : dragY;
 
   if (color === 'red')    fireOverloadRed(count, oxP, oyP);
-  if (color === 'white')  fireOverloadWhite(count, ox, oy);  // needs raw undefined for tap detection
+  // v0.16.62 — white routes through engine.applyCast as proof of
+  // dispatch pattern. Other 10 colors stay direct until v0.16.63
+  // extends the pattern. White was chosen as proving ground because
+  // it's the simplest cast (single function, no entity targeting).
+  if (color === 'white') {
+    if (_engine && _engine.applyCast) {
+      _engine.applyCast('local', {
+        cast: 'white_overload',
+        count: count,
+        ox: ox, oy: oy,
+        isCrit: _currentCrit,
+        ts: (typeof performance !== 'undefined' && performance.now)
+            ? performance.now() : Date.now(),
+      });
+    } else {
+      // Fallback: pre-engine direct path. Should never hit during
+      // normal play (engine inits before any cast); safety net for
+      // edge cases (test harness, init failure).
+      fireOverloadWhite(count, ox, oy);
+    }
+  }
   if (color === 'yellow') fireOverloadYellow(count, oxP, oyP);
   if (color === 'blue')   fireOverloadBlue(count, oxP, oyP);
   if (color === 'orange') fireOverloadOrange(count, oxP, oyP);
@@ -10929,6 +10949,18 @@ function _internalStart(config) {
     _engine.registerDamageHandler(function (entity, dmg, source, opts) {
       var aggro = (opts && opts._aggro !== undefined) ? opts._aggro : undefined;
       return _applyDamageInternal(entity, dmg, aggro, source, opts);
+    });
+    // ── v0.16.62: Register cast handlers. Engine's applyCast
+    // dispatches to these. v0.16.62 wires ONE cast (white_overload)
+    // as proof of pattern; v0.16.63 extends to remaining 10.
+    // Cast event shape: { cast, count, ox, oy, isCrit, ts }.
+    // Handler returns whatever value makes sense for that cast
+    // (often null — most casts just produce side effects).
+    _engine.registerCastHandler('white_overload', function (playerId, castEvent) {
+      // Adapter: cast event shape → fireOverloadWhite signature.
+      // ox/oy may be undefined (tap mode); pass through as-is.
+      fireOverloadWhite(castEvent.count, castEvent.ox, castEvent.oy);
+      return null;
     });
   }
 
