@@ -7996,6 +7996,170 @@ broke something — easy revert (single commit).
 
 ---
 
+### v0.16.61 — Damage choke point (callsite-preserving)
+
+**The first migration push of S016 entity authority arc.** Damage
+application now flows through a single engine-side choke point.
+The 20 scattered `damageEntity()` callsites in rumble.js all route
+through `engine.applyDamage()` — without any callsite changes.
+
+**The elegant trick:** `damageEntity` STAYS as a function name. Its
+body is now a 6-line wrapper that calls `_engine.applyDamage()`,
+which in turn calls a host-injected adapter that calls
+`_applyDamageInternal()` (the renamed original). All callsites
+continue to call `damageEntity(...)` — no mass rename needed. The
+choke point is at the function BODY, not the function NAME.
+
+**Per memory rule #28 (unify-at-choke-point):** by routing through
+engine.applyDamage, we now have:
+- ONE place where damage gets applied (engine choke)
+- ONE place where 'damage' events emit (for FX subscribers)
+- ONE place where 'death' events emit (when result.killed=true)
+- Foundation for server-authoritative validation in v0.16.63
+
+**Per memory rule #29 (bug-from-duplication):** by NOT renaming
+the 20 callsites, we avoid 20 places where a future engineer
+might forget to update something. The wrapper is the single
+substitution point.
+
+**Implementation:**
+
+1. **`rumbleEngine.js` — new method:**
+   - `applyDamage(entity, dmg, source, opts)` — the choke point
+   - `registerDamageHandler(fn)` — host injection (rumble.js
+     registers its `_applyDamageInternal` adapter at start)
+   - Engine emits `'damage'` event after handler returns
+   - Engine emits `'death'` event if `result.killed` truthy
+   - Returns whatever the handler returned (null if no handler)
+
+2. **`rumble.js` — wrapper + rename:**
+   - `damageEntity(g, dmg, aggro, source, opts)` is now a wrapper:
+     - If engine available: route through `_engine.applyDamage()`
+     - Fallback: direct call to `_applyDamageInternal()`
+   - Original `damageEntity` body renamed to `_applyDamageInternal()`
+   - Function comment updated: "ALL callsites should now route
+     through `_engine.applyDamage()` — NOT this function directly"
+   - Return value extended with `killed: bool` so engine can emit
+     death events
+
+3. **`rumble.js` — engine handler registration:**
+   - In `_internalStart()`, after engine creation, register an
+     adapter that unpacks `opts._aggro` into the legacy 5-arg
+     signature of `_applyDamageInternal()`. Engine signature stays
+     clean (entity, dmg, source, opts); host adapts.
+
+4. **No callsite changes.** All 20 sites keep calling
+   `damageEntity(g, ...)` exactly as before. The wrapper handles
+   routing transparently.
+
+**Smoke test (in node):**
+
+```
+const E = require('./rumbleEngine.js');
+const eng = E.createRumbleEngine();
+eng.start();
+eng.registerDamageHandler(handler);
+eng.on('damage', fxHandler);
+eng.on('death', deathFxHandler);
+// damageEntity(g, dmg, source, opts) → engine.applyDamage()
+//   → registered handler → result returned
+//   → 'damage' event emitted with result
+//   → 'death' event emitted if result.killed
+```
+
+All 4 test patterns (g+dmg only, full args, pierce opts, lethal)
+returned correct results, fired correct events. Handler aggro
+unpacking validated.
+
+**What v0.16.61 does NOT do:**
+
+- FX (damage numbers, flash, crit visuals) still spawned INLINE
+  at each callsite. v0.16.62 strips inline FX and moves to event
+  subscribers.
+- Cast handlers (11 fireOverload* functions) still inline. v0.16.62
+  unifies cast dispatch.
+- Coop unchanged. v0.16.63 cuts over.
+- Damage POLICY logic (resistance, signature reactions, etc.) still
+  in `_applyDamageInternal` — host-side, not engine-side. v0.16.62+
+  may migrate logic INTO engine; for now injection keeps rumble.js
+  as logical owner.
+
+---
+
+**Files changed:** `rumbleEngine.js`, `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble_test.html, players.html,
+test_players.html, characters.js, players-core.js.
+
+---
+
+**Test focus:**
+
+1. **Solo sandbox** — should feel IDENTICAL to v0.16.60. Damage
+   applies the same, death triggers victory same, all visual
+   feedback (damage numbers, flash, etc.) unchanged.
+2. **Solo waves** — same.
+3. **Solo spec** — same.
+4. **Coop** — still works as v0.16.59 architecture.
+5. **Production rumble** — board game flow unchanged.
+6. **Console (optional):** set up a `damage` event listener:
+   ```
+   Rumble.getEngine && Rumble.getEngine().on('damage', console.log);
+   ```
+   Then play and watch damage events emit per hit. (Note:
+   `Rumble.getEngine` doesn't exist yet — could add as a debug
+   accessor in v0.16.62 if useful.)
+
+If anything feels different in solo play, the wrapper isn't
+routing correctly. Easy fallback: revert v0.16.61 commit, leaves
+v0.16.60 foundation intact.
+
+---
+
+**Risk surfaces:**
+
+- The wrapper assumes `_engine` is set when callsites fire. Falls
+  back to `_applyDamageInternal` directly if engine is null. This
+  preserves correctness even if engine init fails.
+- Adapter unpacks `opts._aggro` — if any callsite passed an opts
+  object that ALREADY had a property named `_aggro`, we'd collide.
+  Search confirms no callsite uses that name (v0.16.51 used
+  `piercing` for SS pierce; no other custom flags in opts).
+- Function hoisting: `damageEntity` and `_applyDamageInternal` both
+  hoist, so order of definition doesn't matter. Both available
+  immediately at script load.
+- If someone adds a NEW damage path in future code that calls
+  `_applyDamageInternal` directly instead of `damageEntity`, the
+  damage applies but engine's 'damage' event doesn't emit.
+  Comment on `_applyDamageInternal` flags this clearly. Future
+  v0.16.62+ migration will move logic into engine and eliminate
+  the back-door entirely.
+
+---
+
+**Standards audit (rule #17 — push #2 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #14 (UNITY): single damage choke point. Engine is sole
+  emit point for damage/death events. No parallel damage paths.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: 20 callsites → 1 engine entry. Single source of truth
+    for "did damage just happen" question.
+  - ELEGANCE: 6-line wrapper preserves callsite signature. Zero
+    callsite changes. Migration without disruption.
+  - EFFICIENCY: minimal indirection (1 extra function call per
+    damage event). Negligible cost. No double-execution.
+- Rule #28 (unify-at-choke-point): VINDICATED. The wrapper-at-name
+  pattern shows that choke unification is about behavior, not
+  syntax. 20 callsites still write `damageEntity(...)` — but they
+  all flow through one place now.
+- Rule #29 (bug-from-duplication): by KEEPING the function name
+  `damageEntity`, we don't introduce 20 sites to remember to
+  update. Single substitution at the function body — no
+  duplication of "did I update this site yet?" cognitive load.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -40,7 +40,7 @@
   // ─── Engine version ──────────────────────────────────────────────
   // Bumped per push. Helps verify both client and server load matching
   // engine versions when coop sessions start (v0.16.63+).
-  var ENGINE_VERSION = '0.16.60';
+  var ENGINE_VERSION = '0.16.61';
 
   // ─── Default config ──────────────────────────────────────────────
   // Host can override any of these via createRumbleEngine(config).
@@ -131,14 +131,19 @@
     // v0.16.60: subscriber surface ready but engine doesn't emit yet
     // (no logic moved in). v0.16.61 starts emitting from applyDamage.
     var subscribers = {
-      damage:    [],   // (entityId, dmg, source, opts, result)
-      death:     [],   // (entityId, killer)
+      damage:    [],   // (entity, dmg, source, opts, result)
+      death:     [],   // (entity, source)
       cast:      [],   // (playerId, castType, args)
       waveStart: [],   // (waveNum)
       waveClear: [],   // (waveNum)
       victory:   [],   // ()
       defeat:    [],   // ()
     };
+
+    // Host-injected damage handler (v0.16.61). Engine's applyDamage
+    // delegates to this. Future pushes (v0.16.62+) may migrate the
+    // handler body into the engine itself, eliminating this hook.
+    var _damageHandler = null;
 
     function _emit(eventName) {
       var subs = subscribers[eventName];
@@ -227,14 +232,43 @@
       },
 
       // ── Damage handling ──
-      // v0.16.60 stub. Damage paths still scattered across rumble.js.
-      // v0.16.61 routes the 21 callsites through this single entry.
-      // Returns: { applied, tier, witherBoost, killed }
-      applyDamage: function (entityId, dmg, source, opts) {
-        // No-op until v0.16.61 damage unification. Returns null so
-        // any test caller gets a clear "not implemented" signal
-        // rather than silently absorbing damage.
-        return null;
+      // CHOKE POINT for all damage application. v0.16.61: engine
+      // delegates to a host-injected internal handler (rumble.js
+      // registers `_applyDamageInternal` here). The 20 scattered
+      // callsites in rumble.js now route through this method —
+      // foundation for centralized damage policy (resistance,
+      // tier calc, death detect, FX events).
+      //
+      // Returns whatever the internal handler returns:
+      //   { applied, tier, witherBoost, killed }  (or null if no handler)
+      //
+      // EMITS: 'damage' event after handler returns, with full
+      //   context. Subscribers (FX layer) can spawn floaters etc.
+      //   without inlining at each callsite. v0.16.62 migrates FX
+      //   to subscribers; v0.16.62+ moves the internal handler
+      //   logic INTO the engine itself.
+      applyDamage: function (entity, dmg, source, opts) {
+        if (!_damageHandler) {
+          // No handler registered — engine.applyDamage is the choke
+          // point but rumble.js hasn't booted yet. Return null so
+          // any caller knows the damage didn't land.
+          return null;
+        }
+        var result = _damageHandler(entity, dmg, source, opts);
+        _emit('damage', entity, dmg, source, opts, result);
+        if (result && result.killed) {
+          _emit('death', entity, source);
+        }
+        return result;
+      },
+
+      // Host (rumble.js) registers the internal damage handler at
+      // start. Engine doesn't know damage internals (resistance
+      // tables, signature reactions, etc.) — host provides them.
+      // v0.16.62+ may migrate handler logic INTO engine; for now
+      // injection keeps rumble.js as logical owner.
+      registerDamageHandler: function (fn) {
+        _damageHandler = fn;
       },
 
       // ── Snapshot APIs ──

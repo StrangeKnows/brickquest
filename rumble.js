@@ -5402,14 +5402,45 @@ function resistTier(mult) {
 
 function vScale(tier) { return tier <= 1 ? 1.5 : 0.5; }
 
-// damageEntity(g, dmg, aggro, source)
+// damageEntity (v0.16.61): public wrapper that routes through the
+// engine choke point. ALL damage callsites should call this. It
+// delegates to _engine.applyDamage which:
+//   1. Calls _applyDamageInternal (host-injected handler)
+//   2. Emits 'damage' event after handler returns
+//   3. Emits 'death' event if result.killed
+// If engine isn't available (early init / test path), falls back
+// to direct internal call so damage still applies.
+function damageEntity(g, dmg, aggro, source, opts) {
+  if (_engine && _engine.applyDamage) {
+    // opts._aggro carries the aggro arg through (engine.applyDamage
+    // signature is (entity, dmg, source, opts), no aggro param).
+    var mergedOpts = opts || {};
+    if (aggro !== undefined && mergedOpts._aggro === undefined) {
+      mergedOpts._aggro = aggro;
+    }
+    return _engine.applyDamage(g, dmg, source, mergedOpts);
+  }
+  // Fallback: pre-engine direct path
+  return _applyDamageInternal(g, dmg, aggro, source, opts);
+}
+
+// damageEntity (renamed _applyDamageInternal in v0.16.61):
+//   This is the host-side damage policy. Engine's applyDamage delegates
+//   here via registerDamageHandler. ALL callsites should now route
+//   through _engine.applyDamage(g, dmg, source, opts) — NOT this
+//   function directly. The choke point gives us:
+//     - centralized damage policy (eventually moves into engine)
+//     - 'damage' / 'death' event emission for FX subscribers
+//     - foundation for server-authoritative validation (v0.16.63)
+//
 //   g: entity
 //   dmg: pre-resist incoming damage
 //   aggro: pass false to prevent aggro trigger (environmental damage)
 //   source: color string ('red', 'blue', ...) or family string ('physical'),
 //           or null/undefined for untyped (bypasses resistance)
-// Returns { applied, tier } so caller can render a floater matching result.
-function damageEntity(g, dmg, aggro, source, opts) {
+// Returns { applied, tier, witherBoost, killed } so caller can render
+// a floater matching result.
+function _applyDamageInternal(g, dmg, aggro, source, opts) {
   // v0.16.51 — opts param for damage variants. Currently supports:
   //   { piercing: true } — SS pierce-dash hits. Front-shield reduction
   //     softens from 50% to 25% (pierce is designed to pass through
@@ -5591,10 +5622,11 @@ function damageEntity(g, dmg, aggro, source, opts) {
   // sites — those were a UNITY violation (same concern, distributed
   // implementation). Adding a new damage source no longer requires
   // remembering to manually trigger victory.
-  if (g.hp <= 0 && typeof triggerVictory === 'function') {
+  var _killed = (g.hp <= 0);
+  if (_killed && typeof triggerVictory === 'function') {
     triggerVictory();
   }
-  return { applied: finalDmg, tier: resistTier(rMult), source: source, witherBoost: _witherBoost };
+  return { applied: finalDmg, tier: resistTier(rMult), source: source, witherBoost: _witherBoost, killed: _killed };
 }
 
 // ═══════════════════════════════════════════════════
@@ -10886,6 +10918,18 @@ function _internalStart(config) {
       arenaW: bounds.w, arenaH: bounds.h,
     });
     _engine.start();
+    // ── v0.16.61: Register damage handler. Engine's applyDamage
+    // delegates to a small adapter that unpacks opts._aggro for
+    // _applyDamageInternal's legacy 5-arg signature. The 20 scattered
+    // callsites throughout rumble.js now route through engine,
+    // giving us:
+    //   - single choke point for all damage application
+    //   - 'damage' / 'death' event emission for FX subscribers
+    //   - foundation for server-authoritative damage in v0.16.63
+    _engine.registerDamageHandler(function (entity, dmg, source, opts) {
+      var aggro = (opts && opts._aggro !== undefined) ? opts._aggro : undefined;
+      return _applyDamageInternal(entity, dmg, aggro, source, opts);
+    });
   }
 
   var cls = cfg.cls || 'breaker';
