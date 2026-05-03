@@ -7846,6 +7846,156 @@ v0.16.60+ becomes entity authority (separate handoff scan).
 
 ---
 
+### v0.16.60 — Engine extraction (foundation, zero behavior change)
+
+> "lets ride!"
+>
+> Locked: server-authoritative entity state, single engine for both
+> solo and coop, full unification + dead-code pruning during
+> migration, push count driven by elegance not pre-committed,
+> rumbleEngine.js at repo root.
+
+**S016 ENTITY AUTHORITY ARC OPENS.** Per ENTITY_AUTHORITY_PROPOSAL.md
+delivered last turn. v0.16.60 is the foundation push: skeleton +
+state ownership only. ZERO observable behavior change.
+
+**The big architecture call (locked this push):**
+> Solo and coop both run the SAME engine. Solo runs it in-process
+> in the browser. Coop will run it on server.js (v0.16.63 cutover).
+> The bridge is the only difference between modes.
+
+This eliminates dual-path drift by design (memory rule #29 — when
+bug is caused by duplicated logic, fix the duplication). Bug fixes
+apply once. Behavior tunes once. Tests run once.
+
+**What this push delivers:**
+
+1. **NEW FILE: `rumbleEngine.js`** — canonical engine module:
+   - Self-contained IIFE, exports via `module.exports` (node) AND
+     `window.RumbleEngine` (browser). Same code both environments.
+   - No DOM/canvas/performance dependencies — pure JS.
+   - `createRumbleEngine(config)` factory.
+   - Public API surface: `start`, `stop`, `addPlayer`, `removePlayer`,
+     `tick`, `applyCast`, `applyDamage`, `getSnapshot`,
+     `getRenderState`, `on`, `off`, `setArenaBounds`, `getArenaBounds`.
+   - Canonical state object (entities, players, projectiles, walls,
+     traps, DoT zones, wave, status). All initialized empty.
+   - Event subscription system for FX hookup (subscribers get
+     events from applyDamage, applyCast — populated in v0.16.61+).
+   - Stable API surface — future pushes ADD methods, never break
+     existing ones.
+
+2. **rumble.js engine handle:**
+   - New top-level `_engine` slot near other multiplayer state.
+   - `_internalStart()` creates engine instance with arena bounds.
+   - `_internalTeardown()` stops engine on cleanup.
+   - rumble.js still owns simulation logic for v0.16.60 — engine
+     just exists as a stable target for migration. v0.16.61
+     starts moving damage paths into it.
+
+3. **server.js engine require:**
+   - `const RumbleEngine = require('./rumbleEngine.js')` at top.
+   - Validates cross-environment compatibility — if engine code
+     can't load in node, parse error surfaces at server boot
+     (not at v0.16.63 cutover when it's harder to debug).
+   - Server doesn't instantiate engine yet (v0.16.63 owns that).
+
+4. **HTML script loads:**
+   - `rumble_test.html`, `players.html`, `test_players.html` all
+     load `rumbleEngine.js` BEFORE `rumble.js` (so global is
+     available at module-init time).
+
+**What this push does NOT do:**
+
+- Update logic still in rumble.js (`updateEntity`, etc.)
+- Damage paths still scattered (21 callsites, each calling
+  `damageEntity` directly)
+- Cast handlers still inline (11 fireOverload* functions)
+- Coop mode unchanged — multiplayer still uses v0.16.59 architecture
+  (player position broadcast only, no entity sync)
+
+These are deliberately deferred. v0.16.61 introduces the damage
+choke point. v0.16.62 unifies cast dispatch. v0.16.63 cuts coop
+over to server-side engine. v0.16.64 final UNITY pass.
+
+**Validation criterion:** solo play feels IDENTICAL to v0.16.59.
+Same goblins, same casts, same damage, same FX. Engine just
+exists alongside, ready for migration.
+
+---
+
+**Files changed:** `rumbleEngine.js` (NEW), `rumble.js`, `server.js`,
+`rumble_test.html`, `players.html`, `test_players.html`, `NOTES.md`.
+
+UNTOUCHED behavior surface: characters.js, players-core.js,
+dm_screen.html, boardFx.
+
+---
+
+**Test focus:**
+
+1. **Restart server.** New module dependency.
+2. **Load rumble_test.html in browser.** Verify console:
+   - No errors
+   - `[Rumble] ready`
+   - `RumbleEngine` global exists (open console: type `RumbleEngine`)
+3. **Solo sandbox mode** — pick a class, play. Should feel IDENTICAL
+   to v0.16.59. Same goblins, same combat, same flow.
+4. **Solo waves mode** — same, identical to v0.16.59.
+5. **Solo spec mode** — same, identical to v0.16.59.
+6. **Coop mode** — still works as v0.16.59 (allies visible, no
+   entity sync, smooth interpolation). Engine creates on each
+   client but doesn't drive sim yet.
+7. **Production rumble (board game)** — players.html, board flow
+   into rumble. Should be unchanged.
+8. **Console verification:**
+   - In rumble: `Rumble.getState()` returns flat state as before
+   - Engine present: `RumbleEngine.ENGINE_VERSION === '0.16.60'`
+
+If anything feels different in solo play, the engine instantiation
+broke something — easy revert (single commit).
+
+---
+
+**Risk surfaces:**
+
+- Engine instantiation at start could fail if `RumbleEngine` global
+  not loaded (script tag missing). All three HTML files updated; if
+  any was missed, the `typeof RumbleEngine !== 'undefined'` guard
+  in `_internalStart` keeps things working without engine.
+- Server-side `require('./rumbleEngine.js')` will throw at boot if
+  engine has parse error. Caught by `node -c` in delivery validation.
+- Engine cleanup in teardown protected by try/catch — won't break
+  rumble shutdown if engine state is weird.
+
+---
+
+**Standards audit (rule #17 — push #1 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #14 (UNITY): single engine module, single API surface,
+  same code in browser AND node. No parallel paths.
+- Rule #15 (handoff hygiene): full ENTITY_AUTHORITY_PROPOSAL.md
+  delivered before any code. Architecture locked before build.
+- Rule #11 (data/runtime/UI):
+  - Data: characters.js (untouched, host-injected to engine)
+  - Runtime: rumbleEngine.js (NEW canonical home)
+  - UI: rumble.js (slimmed progressively in subsequent pushes)
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: same engine code in both environments. No drift possible.
+  - ELEGANCE: minimal surface — 13 public methods. Each subsequent
+    push ADDS, never restructures. Skeleton is final shape.
+  - EFFICIENCY: engine state IS canonical. v0.16.60 has zero
+    runtime cost (no logic moved in yet); v0.16.61+ migrates work
+    into it without doubling the simulation.
+- Rule #28 (unify-at-choke-point): API surface IS the choke point.
+  applyDamage IS the damage choke (v0.16.61 makes it real).
+  applyCast IS the cast choke (v0.16.62 makes it real).
+- Rule #29 (bug-from-duplication): the dual-path risk is avoided
+  BY DESIGN. Solo+coop both will use the same engine code.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

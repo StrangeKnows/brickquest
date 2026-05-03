@@ -27,6 +27,14 @@ const { SPACES, ZONES, GATE_SPACES, GATE_RULES, BRICK_COLORS, BRICK_NAMES, LANDI
 // class in mkPlayer calls.
 const { CHARACTERS, computeHeal, affinityMult, baseHeal } = require('./characters.js');
 
+// ── Engine (v0.16.60) ────────────────────────────────────────
+// Canonical rumble engine. v0.16.60 ships skeleton — server requires
+// it to verify cross-environment compatibility (engine must run in
+// both browser and node). Server doesn't instantiate engine until
+// v0.16.63 coop cutover. Imported here so any parse errors surface
+// at server boot, not later.
+const RumbleEngine = require('./rumbleEngine.js');
+
 // Family palette per doc §2.1 Per-Color Role Matrix — 3 brick colors per
 // expression family. Called at rumble-event initiate so each encounter rolls
 // fresh; same goblin can show red one time, gray the next, orange after that.

@@ -487,6 +487,15 @@ var _mpAllyOrder = [];         // render order (insertion order, stable across f
 var _MP_ALLY_GRACE_MS = 1500;  // prune ally if no snapshot for this long
 var _lastDrawAlliesMs = 0;     // perf.now of last drawAllies call (for time-based interp)
 
+// ── Canonical engine handle (v0.16.60) ────────────────────
+// Created in _internalStart via window.RumbleEngine.createRumbleEngine.
+// v0.16.60 ships skeleton only — engine doesn't run logic yet, but
+// exists alongside rumble.js's existing state. v0.16.61+ migrates
+// damage/cast/tick logic INTO the engine; rumble.js progressively
+// becomes view+input layer. v0.16.63 cuts coop over to server-side
+// engine; solo continues running engine in-process.
+var _engine = null;
+
 // Touch/drag state
 var dragActive = false;
 var dragTarget = null;
@@ -10865,6 +10874,20 @@ function _internalStart(config) {
   // dimensions. Calling resize() here guarantees we render at the current
   // viewport size.
   resize();
+
+  // ── Engine instance (v0.16.60) ──
+  // Create canonical engine. v0.16.60: skeleton only — doesn't drive
+  // simulation yet. Future pushes (v0.16.61+) progressively move
+  // damage/cast/tick logic into the engine. For now, engine just
+  // exists as a stable target for migration.
+  if (typeof RumbleEngine !== 'undefined' && RumbleEngine.createRumbleEngine) {
+    var bounds = getRumbleBounds();
+    _engine = RumbleEngine.createRumbleEngine({
+      arenaW: bounds.w, arenaH: bounds.h,
+    });
+    _engine.start();
+  }
+
   var cls = cfg.cls || 'breaker';
   player = makePlayer(cls);
 
@@ -12530,6 +12553,9 @@ function _internalTeardown() {
   _initialized = false;
   player = null;
   entities = [];
+  // ── Engine cleanup (v0.16.60) ──
+  if (_engine && _engine.stop) { try { _engine.stop(); } catch(e){} }
+  _engine = null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
