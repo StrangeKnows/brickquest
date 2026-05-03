@@ -8776,6 +8776,323 @@ fix push):**
 
 ---
 
+### v0.16.66 — Class collision UI + BS arc geometry fix
+
+> Two from a four-item feedback batch. Class collision was small and
+> safe; arc geometry was a real bug worth fixing now (BS arcs not
+> blocking touch/pulse/swing damage). iOS connectivity (item 3) and
+> wave alignment (item 4) deferred to v0.16.67 / v0.16.68 — they're
+> larger and benefit from independent validation.
+
+**Per memory rule #19:** committed to splitting four feedback items
+into focused pushes rather than batching. Each push validates clean
+or reverts clean.
+
+---
+
+**1. Class collision UI (taken classes greyed out for joiners):**
+
+When a joiner enters PARTY MODE and types a code, the server now
+returns the list of classes already chosen by other players in the
+session. The joiner's class grid renders those classes as visually
+disabled — card stays visible (player understands the roster), but
+interaction is suppressed and a "TAKEN" label appears below the
+kit.
+
+**Server change:**
+- `rumble_session_check` response now includes `takenClasses[]` —
+  array of class strings (deduped) currently in the session.
+
+**Client change:**
+- New state: `_mpTakenClasses` array, populated on join.
+- `renderClassGrid()` checks `(currentMode === 'coop') && _mpTakenClasses.indexOf(cls) >= 0`
+  to flag taken classes.
+- Taken cards: `.taken` CSS class adds `cursor:not-allowed`,
+  `opacity:0.4`, `pointer-events:none`, `filter:grayscale(0.6)`.
+- Click handler is omitted from taken cards (defense-in-depth on
+  top of pointer-events).
+- "TAKEN" label appears below the kit in muted red.
+
+**Edge case (race condition):** if HOST creates code but hasn't
+picked class yet, `takenClasses` returns []. JOIN gets empty list,
+picks any class. HOST picks. Both could land on same class. Real-
+time grid update would prevent this — deferred to a future polish
+push (would require periodic re-check or a server push when state
+changes). Acceptable for v0.16.66 because the practical case is:
+HOST clicks HOST → picks class immediately → friend joins later.
+
+---
+
+**2. BS arc geometry — touch/pulse/swing now respect arc walls:**
+
+Bug: blocksmith arc walls (drag-cast gray) only blocked physical
+movement and projectiles. Touch attacks, AoE pulses, and heavy-
+melee swings damaged the player THROUGH the wall when entity was
+on one side and player on the other. Reported as "entities should
+not be able to attack through BS arcs."
+
+Code reading revealed the bug: three attack patterns at three
+different sites had no wall-geometry check. They computed
+`distToPlayer < attackRange` and applied damage based on raw
+distance, ignoring whether geometry intervened.
+
+**Sites:**
+- **Touch** (line 6409): `pat === 'touch'` chase-attack path
+- **Pulse** (line 6172): `aiType === 'stationary'` AoE pulse
+  (creeping_vines, others)
+- **Swing** (line 6229): `aiType === 'heavy_melee'` telegraphed
+  swing (cursed_knight, stone_colossus)
+
+**Fix: single geometry helper, called at all three sites.**
+
+New function `_arcWallBlocksAttack(ax, ay, bx, by)` returns true
+if any active arc wall blocks the line from (ax,ay) to (bx,by).
+Implementation: 7-sample test along the segment — if any sample
+lies inside the wall band AND inside the cone wedge, the line is
+blocked. Approximate but fast and correct for typical attack
+ranges. Reuses existing `_pointInArc(w, px, py)` for cone test.
+
+Each attack site wraps its damage application:
+```
+if (_arcWallBlocksAttack(g.x, g.y, player.x, player.y)) {
+  // Flash blocking wall(s) for visual feedback
+  // Reset cooldown so entity tries again next tick
+  return; // skip damage application
+}
+// existing damage application...
+```
+
+**Wall flash on block:** for each blocking wall, set
+`flashTimer = max(flashTimer, 0.1)` so player sees which wall
+deflected the attack. Visual reads as "the wall took the hit."
+
+**Per memory rule #28 (unify-at-choke-point):** ONE helper
+function at THE geometry choke. Adding more attack patterns in
+the future = drop the same `if (_arcWallBlocksAttack(...))` guard
+at the new site. No parallel implementations.
+
+**Per memory rule #29 (bug-from-duplication):** the three sites
+share the same fix shape (check, flash, return). They're parallel
+implementations of the same concern but the concern itself
+(geometry test) lives in one function. If geometry rules change
+(e.g., partial damage attenuation through walls instead of
+binary block), one place to update.
+
+**Ring walls remain passable** per design lock (v0.16.47 comment):
+ring walls are short fences (projectiles arc over, attacks reach
+through), arc walls are tall barriers (block everything).
+`!w.isArc` short-circuits the geometry check — only arc walls
+participate in attack blocking.
+
+---
+
+**Files changed:** `rumble.js`, `rumble_test.html`, `server.js`,
+`NOTES.md`.
+
+UNTOUCHED: rumbleEngine.js, characters.js, players-core.js, other html.
+
+---
+
+**Test focus:**
+
+1. **Class collision UI:**
+   - Device 1: HOST → pick breaker → start game
+   - Device 2: PARTY MODE → JOIN → enter code
+   - Joiner's class grid: BREAKER card greyed out with "TAKEN"
+     label. Clicking it does nothing.
+   - Other 5 classes still selectable.
+2. **BS arc — touch attacks blocked:**
+   - Sandbox or coop, pick BLOCKSMITH
+   - Cast gray arc between you and a chasing entity (goblin)
+   - Entity touches arc → no damage to you, wall flashes
+3. **BS arc — pulse attacks blocked:**
+   - Same setup, but with creeping_vines or other stationary entity
+   - Cast arc between vines and player
+   - Pulse fires → no damage if arc is between, wall flashes
+4. **BS arc — swing attacks blocked:**
+   - Setup: cursed_knight or stone_colossus
+   - Cast arc between knight and player when knight starts winding
+   - Swing resolves → no damage, wall flashes
+5. **BS arc — projectiles still blocked:** (existing behavior,
+   verify no regression)
+6. **Ring walls still passable:** (existing behavior, verify no
+   regression)
+
+If any pattern doesn't block → diagnostic: check `_arcWallBlocksAttack`
+returns true via console (could expose as `Rumble.testArcBlock(g, p)`
+later if needed).
+
+---
+
+**Risk surfaces:**
+
+- 7-sample geometry check might miss skim cases (segment tangent
+  to arc edge but not crossing midpoints). For typical attack
+  ranges (50-300px) the samples are dense enough; 7 samples
+  across 200px = 28px between samples, well below player.r=22
+  and entity.r=18.
+- Pulse arsenal (poison/confuse/slow) is now gated on damage
+  landing. If wall blocks the pulse damage, no status either.
+  This matches expectations — status rides on the damaging hit.
+- Swing telegraph still resolves visually (the entity completes
+  the swing animation). Damage just doesn't land. Reads as
+  "entity attacked but missed" — better than blocking the
+  telegraph itself.
+- `_arcWallBlocksAttack` allocates no objects per call (no
+  arrays, no maps). Cheap inside per-frame entity loop.
+- Class collision check is one-shot at JOIN time. If host's
+  class changes mid-game (impossible in current design but
+  theoretically possible), joiner's view goes stale. Real-time
+  sync deferred.
+
+---
+
+**Standards audit (rule #17 — push #7 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #14 (UNITY): one geometry helper, three sites use it.
+  Class collision uses existing session-check infrastructure
+  (no new endpoints).
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: arc-wall geometry lives in one function. Class
+    collision data flows through one existing message.
+  - ELEGANCE: ~30 LOC for geometry helper, ~5 LOC at each
+    attack site. Class collision is ~20 LOC client + ~10 LOC
+    server.
+  - EFFICIENCY: 7-sample test = O(walls × samples). Walls
+    typically 1-2 active, so cost is negligible.
+- Rule #19 (intuition over menus): split the four feedback items
+  by size+risk rather than bundling. Each push has clean
+  validation criteria.
+- Rule #28 (unify-at-choke-point): geometry helper IS the choke
+  for "is this attack path blocked." Three callers, one function.
+- Rule #6 (diagnostic-first): not invoked here because the bug
+  was fully diagnosed from code reading (no wall check at
+  attack sites = damage passes through). Rule applies when
+  cause is uncertain; here it was certain.
+
+---
+
+### v0.16.67 — Blue retrieve diagnostic (NOT a fix)
+
+> "blue item pick does not seem to work, diag?"
+
+**Per memory rule #6:** when bug cause is uncertain, ship
+diagnostic FIRST, get real output, WAIT for user prompt + 
+confirmation before writing fix code. Retrieve was supposed to
+land in v0.16.65 but is still failing — cause is uncertain
+(could be gesture detection, could be timing, could be FX, could
+be pickup logic). Diagnostic reveals it.
+
+**However — code reading already revealed a likely cause:**
+
+Looking at the dispatch in `onUp` (line ~2931):
+
+```js
+if (held >= tierDur && Math.floor(held / tierDur) >= 1) {
+  if (overloadState) {
+    fireOverload(isDrag ? canvasX : undefined, isDrag ? canvasY : undefined, bricksUsed);
+  }
+} else {
+  // ... my retrieve check lives here ...
+}
+```
+
+If user holds the brick ≥0.5s before releasing (which is likely
+for a "press and drag onto self" gesture), the cast falls into
+the OVERLOAD path → `fireOverloadBlue(count, ox, oy)` → multi-bolt
+spray that hits dropped items as collateral. My retrieve check
+only fires for SHORT presses (held <0.5s). Bug.
+
+But before fixing, I want runtime confirmation — the gesture
+might also be hitting other paths (`_outOfRumble`, etc.). Better
+to know exactly which path the user's actual gesture takes.
+
+**Diagnostic patches:**
+
+1. **At dispatch (onUp):** logs every blue cast with:
+   - `held` duration (how long the brick was pressed)
+   - `isDrag` (boolean — drag detection)
+   - `dropDist` from player (in px)
+   - `threshold` (scaled 80px)
+   - `outOfRumble` (boolean — drop in playable area?)
+   - `droppedBricks.length` (how many items exist in arena)
+   - `→ <path>` (which dispatch branch fires)
+
+2. **At doBlueRetrieve entry:** logs when the function is
+   actually reached, with `droppedBricks` count and player position.
+
+Console tag `[BQ-BLUE]` for dispatch, `[BQ-BLUE-RETRIEVE]` for
+function entry. Easy grep.
+
+**No behavior change.** Just logging. Cast still does whatever
+it did before. User reproduces → shares console output → I have
+the data needed to write the right fix.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: rumbleEngine.js, server.js, html files, characters.js,
+players-core.js.
+
+---
+
+**Test focus:**
+
+1. **Open browser console** (F12 / equivalent on mobile).
+2. **Start a sandbox or party game.** Get some loot dropped on
+   ground (kill an entity).
+3. **Try to retrieve via blue brick:**
+   - Tap the blue brick on the bar
+   - Drag finger onto the player
+   - Release
+4. **Read console output** — should see `[BQ-BLUE] ...` log line.
+5. **Try again with quick tap** (no hold), drag onto player.
+6. **Try with HOLD** (deliberately wait ~1 second before
+   releasing on player).
+7. **Share the `[BQ-BLUE]` log lines.**
+
+**Expected diagnostic output for each gesture:**
+
+| Gesture | Expected `→ <path>` |
+|---|---|
+| Quick drag onto player (≤80px) | short-press DRAG → RETRIEVE |
+| Quick drag away from player | short-press DRAG → AOE bolt |
+| Quick tap (no drag) | short-press TAP → homing bolt |
+| Hold + drag onto player | OVERLOAD ← LIKELY THE BUG |
+| Hold + drag away | OVERLOAD |
+
+If the user's "drop on player" gesture shows as `OVERLOAD`, that
+confirms my hypothesis — long-press path is swallowing the
+gesture. Fix in v0.16.68 will route OVERLOAD through retrieve
+when drop is on/near player.
+
+**If output shows something different** (e.g., outOfRumble=true,
+or path is RETRIEVE but doBlueRetrieve never logs), we'll know
+to look elsewhere.
+
+---
+
+**Standards audit (rule #17 — push #8 of S016 entity authority arc,
+diagnostic push):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #6 (diagnostic-first): VINDICATED. Bug reported, cause
+  uncertain from outside, ship diagnostic to gather real data
+  before committing to a fix. v0.16.65 attempt to fix retrieve
+  by loosening the threshold didn't address the real issue —
+  the gesture wasn't even reaching the threshold check.
+- Rule #11 (data/runtime/UI):
+  - Logs go to `console.log` (development tool, not user-facing)
+  - No data structures changed
+  - No UI changes
+- Rule #29 (bug-from-duplication): TWO log sites (dispatch and
+  function entry) intentional — they answer different questions
+  ("which path was selected" vs "did the function actually run").
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

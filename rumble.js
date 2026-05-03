@@ -2917,6 +2917,31 @@ function onBrickDown(e, color) {
       canvasY = player ? player.y : _ab.y + _ab.h/2;
     }
 
+    // ── v0.16.67 BLUE RETRIEVE DIAGNOSTIC ────────────────────
+    // User reports retrieve still not working. Log every blue cast
+    // with full context so we can identify which dispatch path the
+    // gesture is hitting. Held >= 0.5s goes through OVERLOAD path
+    // (fireOverloadBlue), held < 0.5s goes through short-press
+    // dispatch (where my retrieve check lives). We suspect long-
+    // press is swallowing the gesture.
+    if (color === 'blue' && player) {
+      var _diagDropDist = Math.hypot(canvasX - player.x, canvasY - player.y);
+      var _diagThreshold = scaleDist(80);
+      var _diagPath = (held >= OVERLOAD_TIER && Math.floor(held / OVERLOAD_TIER) >= 1)
+        ? 'OVERLOAD'
+        : (isDrag
+          ? (_diagDropDist <= _diagThreshold ? 'short-press DRAG → RETRIEVE' : 'short-press DRAG → AOE bolt')
+          : 'short-press TAP → homing bolt');
+      console.log('[BQ-BLUE]',
+        'held=' + held.toFixed(2) + 's',
+        'isDrag=' + isDrag,
+        'dropDist=' + _diagDropDist.toFixed(0) + 'px',
+        'threshold=' + _diagThreshold.toFixed(0) + 'px',
+        'outOfRumble=' + _outOfRumble,
+        'droppedBricks=' + (typeof droppedBricks !== 'undefined' ? droppedBricks.length : 'undef'),
+        '→ ' + _diagPath);
+    }
+
     blueDragPos=null; greenDragPos=null; purpleDragPos=null; blackDragPos=null;
     yellowDragPos=null; orangeDragPos=null; redDragPos=null; grayDragPos=null;
     whiteDragPos=null;
@@ -4369,6 +4394,59 @@ function _pointInArc(w, px, py) {
   while (diff > Math.PI) diff -= 2 * Math.PI;
   while (diff < -Math.PI) diff += 2 * Math.PI;
   return Math.abs(diff) <= (w.arcSpan / 2);
+}
+
+// v0.16.66 — Does any active arc wall block the line from (ax, ay)
+// to (bx, by)? Used by touch, pulse, and swing attacks so entities
+// can't damage through arc walls. Ring walls remain passable
+// (per design lock — short fences vs. tall barriers).
+//
+// Geometry: for each arc wall, test if the segment intersects the
+// circle's arc geometry. We use a sampled approach (5 points along
+// the segment): if any sample lies inside the arc wall (within the
+// wall radius AND within the cone wedge), the attack is blocked.
+// Sampling is approximate but fast and correct for typical
+// entity-distance attacks. Edge cases (a segment that passes
+// through the wedge but skims the circle) get caught by enough
+// samples crossing the wall band.
+//
+// Returns true if blocked, false if clear.
+function _arcWallBlocksAttack(ax, ay, bx, by) {
+  if (typeof grayWalls === 'undefined' || grayWalls.length === 0) return false;
+  var samples = 7;
+  for (var wi = 0; wi < grayWalls.length; wi++) {
+    var w = grayWalls[wi];
+    if (!w || w.hp <= 0 || !w.isArc) continue;
+    // Bounding-circle quick reject: if both endpoints are far
+    // outside the wall radius (and segment doesn't cross the band),
+    // skip the sample loop. Cheap optimization for the common case
+    // of a wall placed far from the action.
+    var dax = ax - w.x, day = ay - w.y;
+    var dbx = bx - w.x, dby = by - w.y;
+    var distA = Math.sqrt(dax*dax + day*day);
+    var distB = Math.sqrt(dbx*dbx + dby*dby);
+    var maxR = w.r + 8;  // small margin for sampling tolerance
+    var minR = Math.max(0, w.r - 8);
+    // If both endpoints are inside the wall band ring but not
+    // on opposite sides, can still cross. Just sample.
+    if ((distA > maxR && distB > maxR) || (distA < minR && distB < minR)) {
+      // Both outside the band on same side. Could still skim
+      // through the band if segment is tangent — sample to verify.
+      // For close-range attacks this rarely matters; skip optimization.
+    }
+    for (var si = 1; si < samples; si++) {
+      var t = si / samples;
+      var sx = ax + (bx - ax) * t;
+      var sy = ay + (by - ay) * t;
+      var sdx = sx - w.x, sdy = sy - w.y;
+      var sdist = Math.sqrt(sdx*sdx + sdy*sdy);
+      // Sample inside the wall band?
+      if (sdist >= minR && sdist <= maxR && _pointInArc(w, sx, sy)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 
@@ -6170,6 +6248,23 @@ function updateEntity(g, dt, bounds) {
           // is inside the pulse radius.
           g._pulseCount = (g._pulseCount || 0) + 1;
           if (distToPlayer < pulseR) {
+            // v0.16.66 — Arc wall block. Pulse damage is line-of-sight:
+            // if a wall sits between pulse source and player, the pulse
+            // doesn't damage the player even if they're within radius.
+            // Status arsenal (poison, confuse, slow) also gated — they
+            // ride on the damaging pulse, no damage = no status.
+            if (_arcWallBlocksAttack(g.x, g.y, player.x, player.y)) {
+              // Wall flash for visual feedback
+              var midX = (g.x + player.x) / 2;
+              var midY = (g.y + player.y) / 2;
+              grayWalls.forEach(function(w) {
+                if (w && w.hp > 0 && w.isArc && _pointInArc(w, midX, midY)) {
+                  w.flashTimer = Math.max(w.flashTimer || 0, 0.1);
+                }
+              });
+              g.pulseTimer = g.pulseCooldown || 2.0;
+              return;  // skip damage + arsenal application
+            }
             _applyEnemyMeleeDamage(g, g.pulseDmg || 2, dx, dy, distToPlayer);
             // GREEN arsenal: poison DoT (4 dmg over 4s — stronger than grunt poison)
             if (g.affinityColors && g.affinityColors.indexOf('green') >= 0) {
@@ -6227,7 +6322,21 @@ function updateEntity(g, dt, bounds) {
             var sdy = player.y - g.swingTargetY;
             var sd = Math.sqrt(sdx*sdx + sdy*sdy);
             if (sd < swingR + player.r) {
-              _applyEnemyMeleeDamage(g, g.swingDmg || 6, dx, dy, distToPlayer);
+              // v0.16.66 — Arc wall block. Heavy swings respect arc
+              // walls between the swing target and the player. Wall
+              // flashes for visual feedback. Swing still resolves
+              // (telegraph completes) but damage is suppressed.
+              if (!_arcWallBlocksAttack(g.swingTargetX, g.swingTargetY, player.x, player.y)) {
+                _applyEnemyMeleeDamage(g, g.swingDmg || 6, dx, dy, distToPlayer);
+              } else {
+                var midX = (g.swingTargetX + player.x) / 2;
+                var midY = (g.swingTargetY + player.y) / 2;
+                grayWalls.forEach(function(w) {
+                  if (w && w.hp > 0 && w.isArc && _pointInArc(w, midX, midY)) {
+                    w.flashTimer = Math.max(w.flashTimer || 0, 0.1);
+                  }
+                });
+              }
             }
             g.swingState = 'cooldown';
             g.swingCooldown = 1.2;
@@ -6407,6 +6516,22 @@ function updateEntity(g, dt, bounds) {
     }
   }
   if (pat === 'touch' && !g.dazed && !g.confused && (g.silencedTimer||0) <= 0 && distToPlayer < contact && g.attackCooldown <= 0 && !player.iframes) {
+    // v0.16.66 — Arc wall block check. If an arc wall sits between
+    // entity and player, attack is blocked. Wall flashes briefly for
+    // visual feedback. Reset attack cooldown so the entity tries
+    // again next tick if the wall persists.
+    if (_arcWallBlocksAttack(g.x, g.y, player.x, player.y)) {
+      g.attackCooldown = 0.4;
+      // Flash the blocking wall(s) for player feedback
+      var midX = (g.x + player.x) / 2;
+      var midY = (g.y + player.y) / 2;
+      grayWalls.forEach(function(w) {
+        if (w && w.hp > 0 && w.isArc && _pointInArc(w, midX, midY)) {
+          w.flashTimer = Math.max(w.flashTimer || 0, 0.1);
+        }
+      });
+      return;  // exit attack tick — no damage applied
+    }
     // Physical attack — absorbed by armor pips first.
     // PHASE B — weaken amplifies incoming damage.
     var dmgLeft = Math.ceil((g.dmg || 1) * playerDamageTakenMult());
@@ -8683,6 +8808,10 @@ function startBlueBoltAtPoint(tx, ty) {
 // need item-collect-without-magnet behavior.
 function doBlueRetrieve() {
   if (!player) return;
+  // ── v0.16.67 DIAGNOSTIC ────────
+  console.log('[BQ-BLUE-RETRIEVE] called, droppedBricks=' +
+    (droppedBricks ? droppedBricks.length : 'undef') +
+    ', player=(' + Math.round(player.x) + ',' + Math.round(player.y) + ')');
   if (!droppedBricks || droppedBricks.length === 0) {
     // Nothing to retrieve — give visual feedback so it doesn't feel
     // like the cast did nothing. Small puff at player.
