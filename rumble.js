@@ -2941,13 +2941,17 @@ function onBrickDown(e, color) {
         player.brickRecharge[color] = player.brickRecharge[color] || 0;
         renderBrickBar();
         if (isDrag) {
-          // v0.16.63 — Drag-onto-player check: if drop point is within
-          // ~30px of player, this is a RETRIEVE gesture (teleport all
+          // v0.16.63 — Drag-onto-player check: if drop point is near
+          // the player, this is a RETRIEVE gesture (teleport all
           // dropped loot to inventory). Otherwise drag-far behavior
           // (bolt at drop point). Mirrors the self-cast pattern white
           // heal uses.
+          // v0.16.65 — Threshold loosened from 30 to 80 (scale-aware).
+          // 30px was tight against player radius (22) — only an 8px
+          // halo around player edge would trigger retrieve. 80px gives
+          // a generous "near me" zone that's discoverable.
           var _dropDist = Math.hypot(canvasX - player.x, canvasY - player.y);
-          if (_dropDist <= scaleDist(30)) {
+          if (_dropDist <= scaleDist(80)) {
             // Retrieve: teleport all dropped loot to inventory.
             doBlueRetrieve();
           } else {
@@ -8663,24 +8667,20 @@ function startBlueBoltAtPoint(tx, ty) {
   });
 }
 
-// ── BLUE RETRIEVE (v0.16.63) ──────────────────────────
+// ── BLUE RETRIEVE (v0.16.63, FX redesign v0.16.65) ─────
 // Drop blue brick onto player → teleport ALL dropped loot to inventory
-// with celebratory particle burst at each pickup point and convergence
-// shimmer at the player. Fits blue's identity (precision, ranged
-// effect, fast). Cost is the same single blue brick that paid for the
-// gesture — overload tiers don't extend behavior (T1 already retrieves
-// EVERYTHING; nothing more to scale).
+// with directional "reverse rain" particle FX flowing from items
+// toward player. Fits blue's identity (precision, ranged effect, fast).
 //
-// Flow per item:
-//   1. Spawn a 6-particle burst at item's current position (color
-//      keyed to item kind: brick→source color, gold→yellow, cheese→cream)
-//   2. Apply pickup effect to player (same logic as standard contact pickup)
-//   3. Mark item done so updateDroppedBricks cleans it up next frame
-// After loop: spawn small "party" sparkle burst at player.
+// FX (v0.16.65 — directional, not radial):
+//   For each item, spawn a stream of small particles AT item position
+//   moving TOWARD player. Like inverted rain — sparkles falling INWARD
+//   instead of outward. Tight spread, varied speeds → "tiny tiny
+//   fireworks pulled by gravity to the hero." Color-keyed to item.
 //
 // UNITY: pickup logic mirrors updateDroppedBricks contact branch
-// (line ~4778). Could refactor into a shared helper in v0.16.63+ if
-// other features need item-collect-without-magnet behavior.
+// (line ~4778). Could refactor into shared helper if other features
+// need item-collect-without-magnet behavior.
 function doBlueRetrieve() {
   if (!player) return;
   if (!droppedBricks || droppedBricks.length === 0) {
@@ -8693,29 +8693,58 @@ function doBlueRetrieve() {
     return;
   }
   var retrievedCount = 0;
+  var scale = (typeof getDisplayScale === 'function') ? getDisplayScale() : 1;
   for (var di = 0; di < droppedBricks.length; di++) {
     var p = droppedBricks[di];
     if (p.done) continue;
-    // Spawn a small particle burst at item's current position. Color
-    // keyed to item kind for legibility — player sees what they grabbed.
-    var burstColor;
+    // Color keyed to item kind for legibility — player sees what they grabbed.
+    var streamColor;
     if (p.kind === 'brick') {
-      burstColor = BRICK_COLORS[p.color] || '#FFFFFF';
+      streamColor = BRICK_COLORS[p.color] || '#FFFFFF';
     } else if (p.kind === 'cheese') {
-      burstColor = '#FFD96A';
+      streamColor = '#FFD96A';
     } else if (p.kind === 'gold') {
-      burstColor = '#F5D000';
+      streamColor = '#F5D000';
     } else {
-      burstColor = '#FFFFFF';
+      streamColor = '#FFFFFF';
     }
+    // Reverse-rain stream: spawn 8 small particles at item, each with
+    // velocity pointing toward player + randomized perpendicular offset.
+    // Particles fade as they travel (purpleParticles system handles
+    // alpha decay). Stagger speeds so the stream looks like falling
+    // sparkles, not a uniform spray.
+    var dx = player.x - p.x;
+    var dy = player.y - p.y;
+    var dist = Math.hypot(dx, dy) || 1;
+    var dirX = dx / dist, dirY = dy / dist;
+    // Perpendicular for spread (turn dir 90°)
+    var perpX = -dirY, perpY = dirX;
+    var streamCount = 8;
+    for (var si = 0; si < streamCount; si++) {
+      // Speed varies so particles don't all arrive simultaneously
+      var sp = (180 + Math.random() * 200) * scale;
+      // Small perpendicular offset for stream width
+      var spread = (Math.random() - 0.5) * 18 * scale;
+      var startX = p.x + perpX * spread * 0.3;
+      var startY = p.y + perpY * spread * 0.3;
+      // Slight perpendicular velocity component for natural-looking
+      // arc (not perfectly straight)
+      var perpV = (Math.random() - 0.5) * sp * 0.2;
+      purpleParticles.push({
+        x: startX, y: startY,
+        vx: dirX * sp + perpX * perpV,
+        vy: dirY * sp + perpY * perpV,
+        r: (1.5 + Math.random() * 2) * scale,
+        alpha: 0.95,
+        color: streamColor,
+      });
+    }
+    // Tiny accent burst at item (so player sees WHERE the stream
+    // started) — much smaller than the v0.16.63 burst
     if (typeof spawnCritFlourish === 'function') {
-      spawnCritFlourish(p.x, p.y, burstColor, 6);
-      // Secondary lighter shade for sparkle-pop quality
-      spawnCritFlourish(p.x, p.y, '#a0dfff', 3);
+      spawnCritFlourish(p.x, p.y, streamColor, 3);
     }
     // Apply pickup effect — mirrors updateDroppedBricks contact branch.
-    // Cheese, gold, brick all handled here so blue retrieve is a true
-    // teleport-to-inventory regardless of loot type.
     if (p.kind === 'cheese') {
       if (cfg && cfg.cheeseAutoApply) {
         player.hpMax += 1;
@@ -8743,11 +8772,10 @@ function doBlueRetrieve() {
     p.done = true;
     retrievedCount++;
   }
-  // Celebratory sparkle party at player — small but readable
-  if (retrievedCount > 0 && typeof spawnCritFlourish === 'function') {
-    spawnCritFlourish(player.x, player.y, '#4db8ff', 12);
-    spawnCritFlourish(player.x, player.y, '#a0dfff', 8);
-    spawnCritFlourish(player.x, player.y, '#FFFFFF', 4);
+  // Convergence flash at player — small bright pulse where streams arrive
+  if (retrievedCount > 0 && typeof spawnCritShockwave === 'function') {
+    spawnCritShockwave(player.x, player.y, '#4db8ff',
+      { r0: 4, maxR: 32 * scale, thickness: 2, growth: 180 });
   }
   // Refresh brick bar so retrieved bricks immediately show in HUD
   if (typeof renderBrickBar === 'function') renderBrickBar();
@@ -11084,7 +11112,12 @@ function _internalStart(config) {
   //   does available rumble capacity.
   // Sandbox mode: keeps makePlayer's random 1-10 per color.
   // Waves mode: same treatment as spec — kit is the inventory ceiling.
-  if (cfg.mode === 'spec' || cfg.mode === 'waves') {
+  // Coop mode (v0.16.65): same treatment as waves — canonical kit is the
+  //   ceiling, not random sandbox values. Fixes "party mode starts with
+  //   random brick depths/amounts" — coop was falling through to the
+  //   sandbox else branch which only set player.bricks, leaving
+  //   player.brickMax at whatever makePlayer randomized.
+  if (cfg.mode === 'spec' || cfg.mode === 'waves' || cfg.mode === 'coop') {
     var rates = BRICK_ECONOMY.refreshRates;
     Object.keys(player.bricks).forEach(function(c) {
       var tier = brickTier(cls, c);
@@ -12995,6 +13028,24 @@ window.Rumble = {
       player.bricks[c] = player.brickMax[c];
     });
     if (typeof renderBrickBar === 'function') renderBrickBar();
+  },
+  // ── Wave victory brick refill animation (v0.16.65) ──
+  // Mirrors board-rumble victory pattern. Wave victory screen shows
+  // a pip bar that animates filling up over the screen display
+  // duration. Called by rumble_test.html when showing/hiding the
+  // wave victory screen.
+  //
+  // Returns the initial pip HTML string for the host to inject into
+  // its victory screen template. Subsequent _updateVictoryPips ticks
+  // mutate that DOM in place.
+  startWaveVictoryRefill: function() {
+    _victoryRefillActive = true;
+    _startVictoryRefillLoop();
+    return _renderVictoryPipsInitial();
+  },
+  stopWaveVictoryRefill: function() {
+    _victoryRefillActive = false;
+    _stopVictoryRefillLoop();
   },
   // Eat all cheese in player inventory. Each wheel grants +1 max HP and
   // +1 current HP (the simplified pre-0.17.0 cheese behavior). Returns

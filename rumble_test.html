@@ -840,6 +840,23 @@
     margin:8px auto 0;
     flex-wrap:wrap; justify-content:center;
   }
+  /* v0.16.65 — Brick refill animation row, board-rumble victory pattern */
+  #wave-victory .wv-refill-row {
+    margin:6px auto 4px;
+    text-align:center;
+  }
+  #wave-victory .wv-refill-label {
+    font-size:9.5px; letter-spacing:.2em; color:#888;
+    font-family:ui-sans-serif, system-ui, sans-serif;
+    margin-bottom:6px; font-weight:600;
+  }
+  #wave-victory .wv-refill-pips {
+    display:inline-flex;
+    flex-wrap:wrap; justify-content:center;
+    gap:6px 4px;
+    max-width:520px;
+    line-height:1;
+  }
   #wave-victory .wv-btn {
     border-radius:10px;
     font-family:'Cinzel',serif;
@@ -1876,6 +1893,18 @@ function showWaveVictoryScreen(waveNum, theme, delta, infoAtClear) {
     +   '</div>'
 
     + '</div>'
+    // v0.16.65 — Brick pip refill animation. Mirrors board-rumble
+    // victory pattern. startWaveVictoryRefill returns initial pip
+    // HTML; subsequent updates mutate the DOM in place via the
+    // refill loop (started inside the API call).
+    + (function() {
+        var pipHtml = (Rumble.startWaveVictoryRefill && Rumble.startWaveVictoryRefill()) || '';
+        if (!pipHtml) return '';
+        return '<div class="wv-refill-row">'
+          +    '<div class="wv-refill-label">BRICKS REFILLING</div>'
+          +    '<div id="rumble-victory-pips" class="wv-refill-pips">' + pipHtml + '</div>'
+          + '</div>';
+      })()
     + '<div class="wv-actions">'
     +   '<button class="wv-btn wv-btn-primary" onclick="continueToNextWave()">CONTINUE ▸</button>'
     +   '<button class="wv-btn wv-btn-secondary" onclick="showRunSummaryFromWaveVictory()">ESC ▣</button>'
@@ -1892,6 +1921,8 @@ function showWaveVictoryScreen(waveNum, theme, delta, infoAtClear) {
 function hideWaveVictoryScreen() {
   var v = document.getElementById('wave-victory');
   if (v) v.classList.remove('visible');
+  // v0.16.65 — Stop refill loop when victory screen hides
+  if (Rumble.stopWaveVictoryRefill) Rumble.stopWaveVictoryRefill();
 }
 
 // State flag — was the wave-victory screen the thing under the run-summary?
@@ -1933,11 +1964,13 @@ function onWaveCleared() {
     });
   }
 
-  // Instant brick refill — full pips going into the next wave
-  if (Rumble.refillBricks) Rumble.refillBricks();
-
   // Snapshot raw debug info AT clear-time so the diagnostic footer is honest
   var infoAtClear = Rumble.getDebugInfo && Rumble.getDebugInfo();
+
+  // v0.16.65 — Don't insta-fill bricks here. Wave victory screen
+  // animates the refill via Rumble.startWaveVictoryRefill (board-
+  // rumble pattern). continueToNextWave() force-fills any remaining
+  // unfilled pips before the next wave spawns, so timing is safe.
 
   if (delta) {
     showWaveVictoryScreen(_waveState.currentWave, def.theme, delta, infoAtClear);
@@ -1949,6 +1982,11 @@ function onWaveCleared() {
 function continueToNextWave() {
   if (!_waveState.active) return;
   hideWaveVictoryScreen();
+  // v0.16.65 — Force-fill any remaining unfilled pips before the next
+  // wave spawns. Safety net: if player taps CONTINUE before the
+  // animation finishes filling all colors, they shouldn't enter the
+  // next wave with partial bricks.
+  if (Rumble.refillBricks) Rumble.refillBricks();
   _waveState.currentWave += 1;
   _waveState.advancing = false;
   captureWaveSnapshot();

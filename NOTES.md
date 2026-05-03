@@ -8604,6 +8604,178 @@ feature continuation):**
 
 ---
 
+### v0.16.65 — Four-bug fix push (blue retrieve, FX, wave refill, coop kits)
+
+> "blue item teleport does not seem to be working, when blue
+> touches items, the are treated same as collision with player.
+> not a radial particle party, like tiny tiny fireworks, like
+> backward rain.  add brick refill to wave end victory screen,
+> like board rumble victory screen. each class needs to start
+> coop with same starting kits as basic, not random color depths
+> and amounts"
+
+Four issues identified, all fixed in this push.
+
+---
+
+**1. Blue retrieve threshold loosened (was too tight to discover):**
+
+The drag-onto-self threshold was `scaleDist(30)` which, given
+player radius of 22px, only gave an 8-pixel halo around the
+player edge to trigger retrieve. Anywhere outside that halo,
+the cast fell through to "drag-far AoE bolt" — which was firing
+projectiles that hit dropped items as collision, looking like
+"items get treated same as collision with player."
+
+Fix: threshold loosened to `scaleDist(80)` — generous "near me"
+zone that's discoverable. The drag-far branch (>80px from player)
+still works for AoE bolt deployment as before. Three blue
+gestures remain distinct:
+- Tap (no drag) → homing bolt
+- Drag onto/near self (≤80px) → RETRIEVE
+- Drag far (>80px) → AoE bolt at drop
+
+---
+
+**2. FX redesigned: radial → directional reverse-rain:**
+
+User asked for "tiny tiny fireworks, like backward rain" instead
+of the v0.16.63 radial particle bursts. Replaced
+`spawnCritFlourish` calls per item with a directional particle
+stream:
+
+For each item:
+- Compute unit vector from item → player
+- Spawn 8 small particles AT item position
+- Each particle has velocity along the item→player vector
+- Add small perpendicular component for natural-looking arc
+- Spread particles slightly along perpendicular for stream width
+- Speed varies (180-380 px/s × scale) so particles arrive
+  staggered (not a uniform spray)
+- Color keyed to item kind (brick→source color, gold→yellow,
+  cheese→cream)
+- 3-particle accent burst at item so player sees stream origin
+- Convergence shockwave at player when streams arrive (small
+  bright pulse)
+
+Result: "tiny fireworks pulled by gravity to the hero" instead
+of confetti exploding outward. Movement reads as "items being
+sucked toward you" — matches blue's precision/fast identity.
+
+---
+
+**3. Wave victory brick refill animation:**
+
+Wave victory screen now shows animated brick pip refill — same
+pattern as board-rumble victory. Previously: `Rumble.refillBricks()`
+fired at wave clear, instantly filling bricks with no visual
+feedback. Now: refill animates over the time the victory screen
+is displayed.
+
+Implementation:
+- New API: `Rumble.startWaveVictoryRefill()` returns initial pip
+  HTML for host injection. Internally sets `_victoryRefillActive`
+  and starts the existing `_startVictoryRefillLoop` (used by
+  board victory).
+- New API: `Rumble.stopWaveVictoryRefill()` stops the loop and
+  clears the active flag.
+- Wave victory HTML now includes `<div id="rumble-victory-pips">`
+  populated with `_renderVictoryPipsInitial()` — pips for each
+  color showing current vs max charges.
+- `_startVictoryRefillLoop` ticks every 80ms calling
+  `_updateVictoryPips()` which mutates pip DOM in place. As
+  bricks fill via the 20× boost rate, pips light up; once a
+  color tops off, its group fades out (CSS transition).
+- `onWaveCleared` no longer instant-fills (lets animation work).
+- `continueToNextWave` force-fills as safety net (if player taps
+  CONTINUE before animation completes, next wave still starts
+  with full bricks).
+
+UNITY: reuses the existing victory pip system (`_startVictoryRefillLoop`,
+`_renderVictoryPipsInitial`, `_updateVictoryPips`) rather than
+building a parallel implementation. Memory rule #28 — the pip
+refill choke point is one place.
+
+CSS: new `.wv-refill-row`, `.wv-refill-label`, `.wv-refill-pips`
+rules. "BRICKS REFILLING" header in 9.5px gold, pips wrap at
+520px max width.
+
+---
+
+**4. Coop canonical kit (one-line fix):**
+
+Bug: coop mode players started with random brickMax values
+("random color depths and amounts"). Tracked to a missing
+condition in `_internalStart`:
+
+```
+if (cfg.mode === 'spec' || cfg.mode === 'waves') { ... canonical kit logic ... }
+```
+
+Coop wasn't in the list → fell through to else branch which
+only set `player.bricks` (the active charges) but not
+`player.brickMax` (the inventory ceiling). brickMax stayed at
+whatever `makePlayer(cls)` randomized at character creation.
+
+Fix: added `'coop'` to the mode check. Now coop, spec, and waves
+all use canonical class kit (sig × 2 + secondary × 1) as both
+starting charges AND inventory ceiling. Loot can grow the ceiling
+during play, but the start point is the canonical kit.
+
+Verified breaker:`{red:2, gray:1}`, formwright:`{blue:2, purple:1}`,
+etc. now show as expected in coop sessions.
+
+---
+
+**Files changed:** `rumble.js`, `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumbleEngine.js (no engine changes), server.js,
+characters.js, players-core.js, other html.
+
+---
+
+**Test focus:**
+
+1. **Blue retrieve discoverability:**
+   - Drop blue brick anywhere on/near player (within ~80px)
+   - Particles stream from each dropped item TOWARD player
+   - Items vanish, brick bar updates, +N ✦ floater
+2. **Blue retrieve far drop:** drop blue >80px from player →
+   AoE bolt at drop point as before
+3. **Blue tap:** no drag, fires homing bolt as before
+4. **Wave victory refill:**
+   - Clear a wave with partial bricks
+   - Wave victory screen shows pip refill animation
+   - Pips light up over a few seconds as bricks regenerate
+   - Tap CONTINUE → next wave starts with full bricks
+5. **Coop canonical kit:**
+   - HOST a Party Mode session, pick breaker
+   - Brick bar shows 2 red + 1 gray (no other colors)
+   - Same for joining: pick formwright, see 2 blue + 1 purple
+   - No random colors, no surprise charges
+
+---
+
+**Standards audit (rule #17 — push #6 of S016 entity authority arc,
+fix push):**
+
+- Rule #25 (version bump): patch `-v` ✓
+- Rule #14 (UNITY): reused existing victory pip system for wave
+  victory refill rather than parallel implementation. Single
+  `_startVictoryRefillLoop` drives both modes.
+- Rule #19 (intuition over menus): committed to specific fix
+  approach for each issue based on root-cause analysis (audit:
+  threshold tightness, FX direction request, missing mode in
+  `_internalStart` branch, missing pip system on wave victory).
+- Rule #28 (unify-at-choke-point): blue dispatch (tap/self/far),
+  brick seeding (one mode check covers spec/waves/coop), wave
+  refill (one pip system).
+- Rule #29 (bug-from-duplication): coop kit fix is a one-line
+  addition to existing condition rather than a parallel branch.
+  Wave refill reuses board victory's pip system.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
