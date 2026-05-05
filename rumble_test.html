@@ -3138,9 +3138,32 @@ function mpConnect(cls, m, onReady) {
   _mpWS = new WebSocket('ws://' + host + ':' + port + '?role=rumble_session');
   // v0.16.69 — Wrap with diagnostic instrumentation
   _wsDiagInstrument(_mpWS, 'session');
+  // v0.16.73 — Connection watchdog. iOS 26 has been observed leaving
+  // reconnect WebSockets in `connecting` state indefinitely (neither
+  // onopen nor onclose fires). The first connect typically succeeds;
+  // subsequent reopens after a 1006 close can hang. Force-close the
+  // socket if it doesn't reach `open` within 5 seconds, then directly
+  // schedule another reconnect (the force-close uses a 4xxx app code
+  // which the onclose handler doesn't classify as abnormal, so we
+  // can't rely on the normal abnormal-close → reconnect path here).
+  var watchdogWs = _mpWS;  // capture for closure (don't trip on later sockets)
+  var watchdogTimer = setTimeout(function() {
+    if (watchdogWs && watchdogWs.readyState !== 1 /* OPEN */) {
+      console.warn('[MP] Connection watchdog: socket stuck in readyState=' +
+        watchdogWs.readyState + ' for 5s — forcing close to retry');
+      try { watchdogWs.close(4000, 'watchdog timeout'); } catch (e) {}
+      // Directly schedule another reconnect attempt. The onclose may
+      // or may not fire after this close (iOS 26 sometimes silently
+      // drops both events on stuck sockets), so we don't rely on it.
+      if (_mpReconnect.intent === 'connect' && _mpReconnect.cls && _mpReconnect.meta) {
+        _mpScheduleReconnect();
+      }
+    }
+  }, 5000);
   _mpWS.onopen = function() {
-    // Successful connect — clear any pending reconnect and zero the
-    // attempt counter so future drops start backoff fresh.
+    // Successful connect — clear watchdog and any pending reconnect,
+    // and zero the attempt counter so future drops start backoff fresh.
+    clearTimeout(watchdogTimer);
     if (_mpReconnect.timer) { clearTimeout(_mpReconnect.timer); _mpReconnect.timer = null; }
     _mpReconnect.attempts = 0;
     // Send the join. Server records us in the session and starts
@@ -3210,6 +3233,9 @@ function mpConnect(cls, m, onReady) {
   _mpWS.onclose = function(evt) {
     var code = (evt && evt.code) || 0;
     console.log('[MP] Connection closed, code=' + code);
+    // v0.16.73 — Clear watchdog so it doesn't fire after this close.
+    // (If watchdog already fired and force-closed us, this is a no-op.)
+    clearTimeout(watchdogTimer);
     if (_mpPushInterval) { clearInterval(_mpPushInterval); _mpPushInterval = null; }
     _mpAllyState = [];
     if (typeof Rumble !== 'undefined' && Rumble.setAllyState) {

@@ -10223,6 +10223,132 @@ players-core.js.
 
 ---
 
+### v0.16.73 — Connection watchdog (iOS 26 stuck-connecting fix)
+
+> v0.16.72 diagnostic data:
+> - Image 1 (Mac joiner): `WS: open · ↑sent: 391 · ↓recv: 410 ·
+>   join.wave=2 jumps=1` — wave alignment WORKS when host has
+>   advanced before joiner arrives.
+> - Image 4 (iPad iOS 26): `WS: connecting · ↑sent: 4509 ·
+>   ↓recv: 4598 · last evt: 56.0s ago · close code: 1006 ·
+>   ↻ reconnects: 1 · join.wave=1 jumps=0`
+
+**Wave alignment confirmed working.** Image 1 proves the
+mechanism (Mac jumped from wave 1 → 2 cleanly). Earlier "joined
+wave 1" reports were just timing — host hadn't yet advanced at
+the moment of join.
+
+**Auto-reconnect partially working on iOS 26.** `↻ reconnects: 1`
+means one reconnect WAS scheduled and fired after a 1006 close.
+But the new socket entered `connecting` state and stayed there
+for 56 seconds without ever firing `onopen` OR `onclose`.
+
+**Hypothesis:** iOS 26 reopen behavior — first WebSocket
+typically succeeds on a page; subsequent reopens after a 1006
+close can hang in `connecting` indefinitely. The browser doesn't
+fire either resolution event, so `_mpScheduleReconnect` never
+gets re-triggered (it's gated on the close handler firing).
+
+**Fix: connection watchdog.**
+
+After creating each new WebSocket in `mpConnect`, start a 5-second
+watchdog. If `onopen` doesn't fire within 5s:
+1. Force-close the stuck socket (code 4000, app-defined "watchdog
+   timeout")
+2. Directly call `_mpScheduleReconnect()` — don't rely on
+   `onclose` firing (iOS 26 may swallow it)
+
+The next reconnect attempt creates a new socket with its own
+watchdog. If that also hangs, watchdog forces another retry.
+Backoff still applies (1s, 2s, 4s, 8s) so we don't spin tightly.
+
+The 4000 close code is in the application range (4000-4999) and
+intentionally NOT in the `isAbnormal` list — we're handling
+reconnect directly from the watchdog rather than going through
+the close handler. This keeps the close-code → reconnect logic
+clean (real abnormal closes only).
+
+**Also:** clear watchdog in `onclose` so it doesn't fire after
+a clean close. (The clean-close path goes through `mpDisconnect`
+→ `_mpWS.close(1000)` → `onclose` → watchdog cleared.)
+
+**Per memory rule #28 (unify-at-choke-point):** all reconnect
+paths still flow through `_mpScheduleReconnect`. The watchdog
+is just a new TRIGGER for that function, not parallel reconnect
+logic.
+
+**Per memory rule #29 (bug-from-duplication):** watchdog logic
+lives at ONE site (mpConnect). Each socket creation gets its own
+watchdog via closure capture. Per-socket lifetime, not global.
+
+---
+
+**Why I'm NOT extending isAbnormal to include code 4000:**
+
+The watchdog already handles its own retry. If we added 4000 to
+the abnormal-close list, the close handler would ALSO schedule a
+reconnect → double-schedule → bumps attempt counter twice per
+hang. The current shape: watchdog OR onclose triggers reconnect,
+never both for the same hang.
+
+---
+
+**Files changed:** `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumble.js, server.js, rumbleEngine.js.
+
+---
+
+**Test focus:**
+
+1. **iOS 26 long session:** PARTY MODE → JOIN → enter arena.
+   Play through wave clears. When the next 1006 hits (typically
+   after screen sleep or notification shade), watch overlay:
+   - Should see `↻ reconnects: 1` after the close
+   - State should briefly go `connecting` then return to `open`
+     within 5-10 seconds
+   - If it hangs `connecting` for 5s, console will show
+     `[MP] Connection watchdog: socket stuck in readyState=N for 5s`,
+     and a new attempt should fire (`↻ reconnects: 2`)
+2. **Verify clean disconnect doesn't trigger watchdog:** refresh
+   page during play. No watchdog warnings in console.
+3. **Verify wave alignment still works** (regression check from
+   v0.16.71): Mac/Android host advance to wave 2, joiner arrives,
+   should jump.
+4. **Repeat-reconnect tracking:** if a session has multiple drops,
+   `↻ reconnects: N` should increment each time. Counter doesn't
+   reset until page reload or explicit disconnect.
+
+---
+
+**Standards audit (rule #17 — push #15 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch — save.sh canonical
+- Rule #6 (diagnostic-first): VINDICATED. v0.16.72 diagnostic
+  pinpointed exact failure mode (`state: connecting · last evt:
+  56.0s ago · ↻ reconnects: 1`). Without it I'd have guessed
+  the fix wrong.
+- Rule #14 (UNITY): one watchdog per socket via closure capture.
+  Reconnect still routes through `_mpScheduleReconnect`.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: single retry path via `_mpScheduleReconnect`.
+  - ELEGANCE: ~15 LOC for watchdog, no new state, closure scoped.
+  - EFFICIENCY: setTimeout per connect, cleared on success or
+    close. Negligible.
+- Rule #19 (intuition over menus): committed to watchdog
+  approach (5s threshold, force-close + direct reschedule)
+  without sub-questions.
+- Rule #28 (unify-at-choke-point): reconnect choke remains
+  `_mpScheduleReconnect`. Watchdog is one of multiple TRIGGERS
+  for it (close-event + watchdog-timeout).
+- Rule #29 (bug-from-duplication): watchdog reconnect bypasses
+  the abnormal-close → schedule path on purpose. If I'd added
+  4000 to isAbnormal, both watchdog AND onclose would schedule
+  → double-reconnect. The intentional separation prevents
+  duplication.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
