@@ -2124,7 +2124,10 @@ function continueToNextWave() {
         type: 'rumble_wave_advance',
         payload: { newWave: _waveState.currentWave },
       }));
+      console.log('[MP] Sent wave_advance newWave=' + _waveState.currentWave);
     } catch (e) { /* socket may have just closed; reconnect will recover */ }
+  } else if (currentMode === 'coop') {
+    console.log('[MP] wave_advance NOT sent — _mpWS state=' + (_mpWS ? _mpWS.readyState : 'null'));
   }
 }
 
@@ -2137,9 +2140,17 @@ function continueToNextWave() {
 // Safe to call multiple times (idempotent on currentWave already
 // matching the target).
 function jumpToWave(targetWave) {
-  if (!_waveState.active) return;
-  if (targetWave <= _waveState.currentWave) return;  // already at or past
+  console.log('[MP] jumpToWave called with target=' + targetWave + ' current=' + _waveState.currentWave + ' active=' + _waveState.active);
+  if (!_waveState.active) {
+    console.log('[MP] jumpToWave aborted: _waveState.active=false');
+    return;
+  }
+  if (targetWave <= _waveState.currentWave) {
+    console.log('[MP] jumpToWave aborted: target ' + targetWave + ' <= current ' + _waveState.currentWave);
+    return;
+  }
   console.log('[MP] Jumping from wave ' + _waveState.currentWave + ' → ' + targetWave);
+  _wsDiag.jumps = (_wsDiag.jumps || 0) + 1;  // v0.16.72 — diag counter
   // Clear existing entities/projectiles/walls/loot. Engine has a
   // helper for this; if not exposed, we fall back to spawning fresh
   // wave on top (engine will dedupe naturally as cleared entities
@@ -2753,6 +2764,9 @@ var _wsDiag = {
   state: 'idle',  // idle | connecting | open | closed | error
   lastError: '',
   lastCloseCode: 0,
+  reconnects: 0,    // v0.16.72 — count of auto-reconnect attempts
+  jumps: 0,         // v0.16.72 — count of wave jumps via session_joined
+  lastJoinWave: 0,  // v0.16.72 — wave value from most recent session_joined ack
 };
 
 function _wsDiagOverlay() {
@@ -2797,6 +2811,9 @@ function _wsDiagOverlay() {
     '<div>last evt: ' + since + ' ago</div>' +
     (_wsDiag.lastError ? '<div style="color:#ff7755;">err: ' + _wsDiag.lastError + '</div>' : '') +
     (_wsDiag.lastCloseCode ? '<div style="color:#ff7755;">close code: ' + _wsDiag.lastCloseCode + '</div>' : '') +
+    // v0.16.72 — reconnect count + wave-jump info
+    (_wsDiag.reconnects > 0 ? '<div style="color:#FFD700;">↻ reconnects: ' + _wsDiag.reconnects + '</div>' : '') +
+    (_wsDiag.lastJoinWave > 0 ? '<div style="color:#7AE070;">join.wave=' + _wsDiag.lastJoinWave + ' jumps=' + _wsDiag.jumps + '</div>' : '') +
     '<div style="color:#7060a0;font-size:9px;margin-top:3px;">' + uaShort + '</div>';
 }
 
@@ -2865,8 +2882,12 @@ function _partyOpenLobbySocket(onMessage, onError) {
   var host = location.hostname;
   var port = location.port || 8080;
   var ws = new WebSocket('ws://' + host + ':' + port + '?role=rumble_lobby');
-  // v0.16.69 — Wrap with diagnostic instrumentation
-  _wsDiagInstrument(ws, 'lobby');
+  // v0.16.72 — Lobby sockets are NOT instrumented for the WS overlay.
+  // Browse auto-refresh opens a fresh lobby socket every 3s; if we
+  // wrapped it with _wsDiagInstrument, the overlay would constantly
+  // show the LATEST lobby socket's state (typically "connecting" at
+  // the moment of screenshot) instead of the live SESSION socket.
+  // Diagnostic value comes from the long-lived session socket only.
   ws.onmessage = function(evt) {
     var msg; try { msg = JSON.parse(evt.data); } catch (e) { return; }
     onMessage(msg, ws);
@@ -3169,6 +3190,10 @@ function mpConnect(cls, m, onReady) {
       }
     } else if (msg.type === 'rumble_session_joined') {
       console.log('[MP] Joined session', msg.sessionId, '— playerCount', msg.playerCount, '— wave', msg.wave);
+      // v0.16.72 — Diagnostic: capture wave from join ack so we can
+      // see if server is actually sending wave > 1, or if the bug is
+      // server not tracking wave correctly.
+      _wsDiag.lastJoinWave = (typeof msg.wave === 'number') ? msg.wave : 0;
       // v0.16.71 — If server reports session is past wave 1, jump to
       // catch up. New joiners shouldn't start at wave 1 while host is
       // on wave 5. Existing players (advancing locally) get this same
@@ -3224,6 +3249,7 @@ function _mpScheduleReconnect() {
   // Already a pending reconnect? Don't double-schedule.
   if (_mpReconnect.timer) return;
   _mpReconnect.attempts = (_mpReconnect.attempts || 0) + 1;
+  _wsDiag.reconnects = (_wsDiag.reconnects || 0) + 1;  // v0.16.72 — diag counter (counts every scheduled attempt)
   if (_mpReconnect.attempts > 6) {
     console.warn('[MP] Reconnect limit reached (6 attempts) — giving up.');
     _mpReconnect.intent = 'none';

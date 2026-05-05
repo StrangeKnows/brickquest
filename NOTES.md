@@ -10052,6 +10052,177 @@ UNTOUCHED: rumbleEngine.js, characters.js, players-core.js, other html.
 
 ---
 
+### v0.16.72 — Diag accuracy fix + wave alignment diagnostic
+
+> Test report from v0.16.71:
+> - "first screen is ios 26 tried to join game, joined wave 1
+>   instead of current"
+> - Image 1 (iPad iOS 26): WS overlay shows `state: connecting`,
+>   `↑sent: 28 (rumble_session_check)`, `↓recv: 84 (rumble_session_check)`,
+>   `last evt: 41.1s ago` — but joiner is in-game with allies
+>   visible
+> - Image 2 (Android): WS overlay shows `state: open`,
+>   `↑sent: 3235 (rumble_player_state)`, `↓recv: 3212 (rumble_session_state)`,
+>   healthy session
+> - Server log: code 1006 closes happening on Android + macOS too,
+>   not just iOS
+
+**Per memory rule #6 (diagnostic-first):** three concerns, one
+contained, two needing data:
+
+1. Diagnostic UI inaccuracy (FIX, not diag) — overlay shows
+   lobby socket state instead of session
+2. Wave alignment didn't fire (DIAG) — need to know if join.wave
+   was actually > 1
+3. Auto-reconnect status (DIAG) — code 1006 closes shouldn't be
+   visible-as-broken if reconnect is firing
+
+**Per memory rule #15 (handoff hygiene):** scanned `_wsDiag`,
+`_wsDiagInstrument`, `_partyOpenLobbySocket`, `mpConnect`,
+`session_joined` handler, `jumpToWave`, `_mpScheduleReconnect`
+to find the right insertion points before changing anything.
+
+---
+
+**Concern 1: Overlay was showing the wrong socket.**
+
+Root cause identified by reading `_wsDiagInstrument` calls:
+- `_partyOpenLobbySocket` instrumented EVERY lobby socket (line 2869)
+- `mpConnect` instruments the session socket (line 3119)
+- `_wsDiag` is single-state — last instrumented socket wins
+
+The BROWSE auto-refresh opens a fresh lobby socket every 3s.
+Each one instrumented → resets `_wsDiag.state` to `connecting`,
+then `open`, then `closed`. By the time the screenshot was taken,
+the latest lobby socket was caught mid-`connecting`. The
+long-lived session socket (which was healthy and streaming
+ally state) was invisible to the overlay.
+
+**Fix: stop instrumenting lobby sockets.** Diagnostic value
+comes from the long-lived session socket only. Lobby sockets
+are one-shot transactions — their state isn't useful to surface.
+
+```diff
+- _wsDiagInstrument(ws, 'lobby');  // every BROWSE refresh
++ // Lobby sockets are NOT instrumented (would constantly
++ // overwrite session state with stale lobby state).
+```
+
+After this fix, overlay reflects the SESSION socket lifecycle
+faithfully: connecting → open during in-game play, closed +
+reconnects on drops.
+
+---
+
+**Concern 2: Wave alignment didn't fire — diagnostic.**
+
+We don't know yet if:
+- (a) Server's `sess.wave` was wrong (still 1 when joiner came in)
+- (b) Server included wave in ack but client missed it
+- (c) Client read it but `jumpToWave` didn't fire (early return)
+- (d) `jumpToWave` fired but `clearArena` failed silently
+
+**Diagnostic added:**
+
+1. **`_wsDiag.lastJoinWave`** — captures wave from
+   `rumble_session_joined` ack. Surfaces in overlay as
+   `join.wave=N`.
+2. **`_wsDiag.jumps`** — bumps each time `jumpToWave` is called
+   (regardless of whether it succeeds). Surfaces as `jumps=M`.
+3. **Detailed console logs in `jumpToWave`:**
+   - Entry log shows target, current, active state
+   - Abort logs explain WHY the early return fired
+4. **Console log on `wave_advance` send** — host can confirm
+   the message is being broadcast on each CONTINUE.
+
+The overlay will show one of:
+- `join.wave=1 jumps=0` → server isn't advancing wave (concern a)
+- `join.wave=N jumps=0` → client received wave but skipped jump (c)
+- `join.wave=N jumps=M` → jumpToWave fired, but maybe
+  `clearArena` failed (d) — visible as wave-1 entities still
+  on screen
+- (no field shown) → client didn't even reach `session_joined`
+  handler
+
+---
+
+**Concern 3: Auto-reconnect visibility — diagnostic.**
+
+Server log showed code 1006 on Android + macOS too. Auto-reconnect
+should be handling these transparently, but we don't know if it's
+firing.
+
+**Diagnostic added:** `_wsDiag.reconnects` counter. Bumps every
+time `_mpScheduleReconnect` queues a reconnect attempt. Surfaces
+in overlay as `↻ reconnects: N` (only visible when N > 0, so it
+doesn't clutter the normal-state overlay).
+
+If overlay shows `↻ reconnects: 3`, auto-reconnect is firing.
+If WS state stays `closed` for long without the counter going
+up, reconnect logic isn't engaging.
+
+---
+
+**Files changed:** `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumble.js, rumbleEngine.js, server.js, characters.js,
+players-core.js.
+
+---
+
+**Test focus:**
+
+1. **Verify diagnostic accuracy fix:**
+   - Open BROWSE panel → wait 10+ seconds (multiple lobby
+     refresh cycles)
+   - Overlay should NOT keep flipping to `connecting`
+   - HOST or JOIN a session
+   - Overlay should show `state: open` and stay there
+2. **Test wave alignment with new diagnostic:**
+   - Device 1: HOST → pick class → CLEAR wave 1 → CONTINUE to wave 2
+   - Device 1 console: should see `[MP] Sent wave_advance newWave=2`
+   - Device 2: BROWSE → card should show "wave 2" inline
+   - Device 2: tap card → pick class → enter
+   - Device 2 console: `[MP] Joined session XXXX — wave 2`,
+     `[MP] jumpToWave called with target=2 current=1 active=true`,
+     `[MP] Jumping from wave 1 → 2`
+   - Device 2 overlay: should show `join.wave=2 jumps=1`
+3. **If wave alignment STILL fails after this push:** screenshot
+   the overlay + share console output. The diagnostic will
+   pinpoint which step failed.
+4. **Reconnect counter:** during an extended play session,
+   if a 1006 happens, overlay should show `↻ reconnects: N`
+   and recovery should happen within ~8s.
+
+---
+
+**Standards audit (rule #17 — push #14 of S016 entity authority arc):**
+
+- Rule #25 (version bump): patch — save.sh canonical
+- Rule #6 (diagnostic-first): VINDICATED again. v0.16.71 fix
+  was correct in principle but I have no way to know if it
+  worked from "joined wave 1 instead of current." Need data.
+- Rule #15 (handoff hygiene): scanned `_wsDiag` shape,
+  `_wsDiagInstrument` callers, `jumpToWave` flow, `mpConnect`
+  flow before adding diagnostic.
+- Rule #14 (UNITY): one `_wsDiag` state object holding all
+  counters. One overlay renderer for all fields.
+- Rule #18 (UNITY/ELEGANCE/EFFICIENCY):
+  - UNITY: `_wsDiag` covers state + counters + last-event in
+    one place.
+  - ELEGANCE: ~5 LOC fields added, ~10 LOC overlay rendering,
+    ~4 LOC counter bumps, ~6 LOC console diagnostic logs.
+  - EFFICIENCY: counters are integer increments, render is
+    string concat. Negligible.
+- Rule #28 (unify-at-choke-point): wave-jump diagnostic at
+  the choke (jumpToWave entry). Reconnect diagnostic at the
+  choke (`_mpScheduleReconnect` entry).
+- Rule #29 (bug-from-duplication): single instrumentation
+  helper. Lobby/session distinction now correct (only
+  long-lived session socket gets instrumented).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
