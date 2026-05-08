@@ -2111,6 +2111,15 @@ function continueToNextWave() {
   _waveState.currentWave += 1;
   _waveState.advancing = false;
   captureWaveSnapshot();
+  // v0.16.74 — Mirror clients don't spawn locally. They wait for
+  // host's broadcast which will reflect the new wave's entities.
+  // Host advances normally and broadcasts.
+  if (currentMode === 'coop' && !_mpIsEntityHost) {
+    // Mirror: just bump local wave display, host owns spawning
+    if (typeof updateWaveBadge === 'function') updateWaveBadge(_waveState.currentWave);
+    if (Rumble.setExternalPause) Rumble.setExternalPause(false);
+    return;
+  }
   spawnWave(_waveState.currentWave);
   // Resume sim after the new wave is spawned and ready
   if (Rumble.setExternalPause) Rumble.setExternalPause(false);
@@ -2667,6 +2676,23 @@ var _mpTakenClasses = [];        // v0.16.66 — classes already chosen by other
 var _mpPlayerId = null;          // assigned at join (random per-tab)
 var _mpPushInterval = null;      // setInterval handle for state push
 var _mpAllyState = [];           // last-received ally array (excludes self)
+// v0.16.74 — Path A entity mirror state.
+// _mpIsEntityHost: am I the canonical simulator for this session?
+//   Set from session_joined ack. Hosts run normal entity simulation
+//   AND broadcast entity state to server. Mirrors suppress local
+//   spawning and render server-broadcast entities instead.
+// _mpEntityHostId: the playerId of whoever is host (could be us).
+//   Mirrors use this to decide whether to send damage events
+//   (via server) or apply locally (we are host).
+var _mpIsEntityHost = false;
+var _mpEntityHostId = null;
+// v0.16.74 — Mirror role: host's broadcast entities override our local
+// entities for rendering. Updated each session_state tick.
+var _mpRemoteEntities = [];
+// v0.16.74 — Set true when coop mode start defers wave spawn until
+// session_joined identifies our role. Cleared when host spawns wave 1
+// or when mirror confirms it'll render host's broadcast instead.
+var _coopWaveSpawnPending = false;
 
 // ── Auto-reconnect state (post-v0.16.69) ──
 // iOS 26 diagnostic showed close code 1006 (abnormal) after the
@@ -3211,20 +3237,86 @@ function mpConnect(cls, m, onReady) {
       if (typeof Rumble !== 'undefined' && Rumble.setAllyState) {
         Rumble.setAllyState(allies);
       }
+      // v0.16.74 — Track host changes. If we were promoted (previous
+      // host disconnected), we now own simulation. If we were
+      // demoted (shouldn't happen in normal flow), suppress local
+      // simulation. The session_joined ack sets the initial value;
+      // session_state keeps it current as players come and go.
+      if (msg.entityHostId !== undefined) {
+        _mpEntityHostId = msg.entityHostId;
+        var wasHost = _mpIsEntityHost;
+        _mpIsEntityHost = (msg.entityHostId === _mpPlayerId);
+        if (!wasHost && _mpIsEntityHost) {
+          console.log('[MP] Promoted to entity host — starting local simulation');
+          // We're now the simulator. If we'd been suppressing local
+          // entities as a mirror, we'd need to re-spawn the current
+          // wave here. For now (mirror suppression isn't implemented
+          // in v0.16.74; mirrors still spawn locally but visualize
+          // host's entities), nothing to do.
+        }
+      }
+      // v0.16.74 — Mirror: render host's entities instead of local.
+      // Only mirrors use this; host's own entities array is canonical
+      // for them. The renderer reads from a global _mpRemoteEntities
+      // when set; rumble.js uses it to override draw if mirror role.
+      if (!_mpIsEntityHost && Array.isArray(msg.entities)) {
+        _mpRemoteEntities = msg.entities;
+        if (typeof Rumble !== 'undefined' && Rumble.setRemoteEntities) {
+          Rumble.setRemoteEntities(msg.entities);
+        }
+      }
     } else if (msg.type === 'rumble_session_joined') {
-      console.log('[MP] Joined session', msg.sessionId, '— playerCount', msg.playerCount, '— wave', msg.wave);
+      console.log('[MP] Joined session', msg.sessionId, '— playerCount', msg.playerCount,
+        '— wave', msg.wave, '— host?', msg.isEntityHost);
+      // v0.16.74 — Capture host status from join ack. First joiner
+      // becomes host; subsequent joiners are mirrors. Behavior diverges
+      // from this point: host simulates and broadcasts, mirrors render
+      // host's broadcast and forward damage events through server.
+      _mpIsEntityHost = !!msg.isEntityHost;
+      _mpEntityHostId = msg.entityHostId || _mpPlayerId;
+      // Tell engine our role so it skips local AI ticks on foreign
+      // entities (mirror) or runs them normally (host).
+      if (typeof Rumble !== 'undefined' && Rumble.setMirrorMode) {
+        Rumble.setMirrorMode(!_mpIsEntityHost);
+      }
+      // v0.16.74 — Spawn wave-1 if we're host AND coop deferred it.
+      // Mirrors don't spawn locally; they render host's broadcast.
+      if (_coopWaveSpawnPending) {
+        _coopWaveSpawnPending = false;
+        if (_mpIsEntityHost) {
+          spawnWave(1);
+        }
+        // (Mirror leaves entities[] empty until first session_state
+        // arrives with host's entities.)
+      }
       // v0.16.72 — Diagnostic: capture wave from join ack so we can
       // see if server is actually sending wave > 1, or if the bug is
       // server not tracking wave correctly.
       _wsDiag.lastJoinWave = (typeof msg.wave === 'number') ? msg.wave : 0;
       // v0.16.71 — If server reports session is past wave 1, jump to
-      // catch up. New joiners shouldn't start at wave 1 while host is
-      // on wave 5. Existing players (advancing locally) get this same
-      // event but jumpToWave is idempotent — no-op if already at/past.
-      if (typeof msg.wave === 'number' && msg.wave > 1) {
+      // catch up. Mirrors have empty entities[] until host broadcast
+      // arrives; jumpToWave is host-only (only host runs wave logic).
+      if (typeof msg.wave === 'number' && msg.wave > 1 && _mpIsEntityHost) {
         // Defer slightly to ensure Rumble.start has fully initialized
-        // and the wave 1 spawn is done before we clear it.
         setTimeout(function() { jumpToWave(msg.wave); }, 100);
+      } else if (typeof msg.wave === 'number' && msg.wave > 1 && !_mpIsEntityHost) {
+        // Mirror: just track the wave number locally so the HUD shows
+        // it. Entity state comes from host's broadcasts.
+        _waveState.currentWave = msg.wave;
+        if (typeof updateWaveBadge === 'function') updateWaveBadge(msg.wave);
+      }
+    } else if (msg.type === 'rumble_entity_damage_batch') {
+      // v0.16.74 — Server forwarded a batch of damage events from
+      // mirror clients. We're the host; apply each to our local
+      // entity. Resulting HP drops will propagate via our next
+      // entity broadcast. Events for entities we no longer have
+      // (already dead, ID mismatch) are silently ignored.
+      var events = (msg && Array.isArray(msg.events)) ? msg.events : [];
+      for (var ei = 0; ei < events.length; ei++) {
+        var ev = events[ei];
+        if (typeof Rumble !== 'undefined' && Rumble.applyRemoteDamage) {
+          Rumble.applyRemoteDamage(ev.entityId, ev.dmg, ev.color, ev.casterPlayerId);
+        }
       }
     } else if (msg.type === 'rumble_error') {
       console.warn('[MP] Server error:', msg.msg);
@@ -3325,6 +3417,20 @@ function mpStartPushLoop() {
         spectating: false,
       },
     }));
+    // v0.16.74 — If we're the entity host, also broadcast our entity
+    // snapshot. Mirrors will render these instead of their own
+    // simulation. We send the minimum fields renderers need; full
+    // entity records (with AI internals) stay local — mirror clients
+    // don't need to know swing-cooldowns or attack-patterns.
+    if (_mpIsEntityHost && Rumble.getEntitySnapshot) {
+      var ents = Rumble.getEntitySnapshot();
+      if (ents && ents.length >= 0) {
+        _mpWS.send(JSON.stringify({
+          type: 'rumble_entity_state',
+          payload: { entities: ents },
+        }));
+      }
+    }
   }, 50);
 }
 
@@ -3426,7 +3532,18 @@ function startTestRumble(cls) {
     _waveHistory = [];                  // fresh per-run history
     _runStartTime = performance.now();  // for elapsed-run-time display
     captureWaveSnapshot();
-    spawnWave(1);
+    // v0.16.74 — In coop mode, defer wave-1 spawn until session_joined
+    // ack tells us if we're the entity host. Hosts spawn locally and
+    // broadcast; mirrors render host's broadcasts instead of their
+    // own. If we spawned now, mirror's local IDs would collide with
+    // host's broadcast IDs. session_joined handler triggers
+    // _coopFirstWaveIfHost() once role is known.
+    if (isCoop) {
+      // Will spawn from session_joined handler based on role
+      _coopWaveSpawnPending = true;
+    } else {
+      spawnWave(1);
+    }
   } else {
     _waveState.active = false;
     hideWaveHud();

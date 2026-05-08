@@ -10349,6 +10349,240 @@ UNTOUCHED: rumble.js, server.js, rumbleEngine.js.
 
 ---
 
+### v0.16.74 — Path A entry: shared entity mirror (host-authoritative)
+
+> "lets do it! entities away"
+
+The big architectural step. Path B (v0.16.71) gave each player
+their own entity instances of the same wave. Path A delivers
+**shared monsters**: when host damages an entity, all clients
+see the HP drop. When mirror's bolt hits, host's entity takes
+damage and the result propagates back.
+
+**Architectural call: host-authoritative, not server-authoritative.**
+
+The locked v0.16.60 design said "server runs rumbleEngine.js."
+That's the right end-state but it's a multi-push migration
+(updateEntity is 623 lines, deeply tied to player/wall/projectile
+state in rumble.js). Going server-authoritative this push would
+have been 1500+ LOC of risky migration.
+
+**Interim shape:** the FIRST joiner is the entity host. Subsequent
+joiners are mirrors. Wire protocol is the same shape it'll be
+when server takes over (entity broadcasts, damage events from
+non-owners). Future pushes migrate the simulator to server,
+keeping the wire untouched.
+
+**Per memory rule #19:** committed to interim approach without
+asking "should we do this or wait for full server-auth?" — Path
+A's user-visible value (shared monsters) ships now, full migration
+is the next major arc.
+
+---
+
+**Server changes (`server.js`):**
+
+- `sess.entityHostId` — playerId of canonical simulator. First
+  joiner becomes host. On host disconnect, next-oldest player
+  is elected.
+- `sess.entities` — most recent entity snapshot from host.
+  Server relays in `rumble_session_state` broadcast.
+- `sess.pendingDamage` — queue of damage events from mirrors.
+  Forwarded to host once per broadcast tick as
+  `rumble_entity_damage_batch`.
+- New message handlers: `rumble_entity_state` (host pushes),
+  `rumble_entity_damage` (mirror pushes — server queues).
+- `rumble_session_joined` ack includes `isEntityHost` boolean
+  and `entityHostId` so client knows its role immediately.
+
+**Client changes (`rumble_test.html`):**
+
+- New state: `_mpIsEntityHost`, `_mpEntityHostId`,
+  `_mpRemoteEntities`, `_coopWaveSpawnPending`.
+- `session_joined` handler captures host status, calls
+  `Rumble.setMirrorMode(!isHost)`. If host, spawns wave 1
+  locally; if mirror, leaves entities empty until host
+  broadcast arrives.
+- `session_state` handler reads `entities` from broadcast and
+  feeds to `Rumble.setRemoteEntities(arr)` when mirror.
+- `session_state` handler also tracks host ID — if previous
+  host disconnects and we're elected, log promotion.
+- `entity_damage_batch` handler: host receives queued events,
+  calls `Rumble.applyRemoteDamage` for each.
+- Push loop: hosts also send `rumble_entity_state` at 10 Hz
+  alongside `rumble_player_state`.
+- `continueToNextWave`: mirrors skip local spawn, just bump
+  the displayed wave number. Host owns spawning.
+
+**Engine changes (`rumble.js`):**
+
+- New entity field `id` (format `e_N`), assigned in `makeEntity`
+  via `_nextEntityId++` counter. Reset on `_internalStart`.
+- New flag `_mirrorMode`. Toggled by `setMirrorMode`. Used to
+  gate two paths.
+- `updateEntity` early-returns if `_mirrorMode && g._foreign`.
+  Foreign entities don't tick local AI — host's simulation
+  owns them.
+- `damageEntity` redirects to wire if `_mirrorMode && g._foreign`.
+  Calls `Rumble.sendRemoteDamage(entityId, dmg, color)` to
+  fire-and-forget the wire event. Local mutation suppressed —
+  host's next broadcast overwrites anyway.
+- New public API:
+  - `getEntitySnapshot()` — host: serialize entities for wire.
+    Strips AI internals; keeps render-relevant fields plus
+    state flags (dazed, swing telegraph, deathTimer).
+  - `setRemoteEntities(arr)` — mirror: rebuild entities array
+    from host's broadcast. Preserves existing entries by ID
+    where possible (avoids transient FX flicker). Marks new
+    entries with `_foreign: true`.
+  - `applyRemoteDamage(id, dmg, color, casterPid)` — host:
+    find entity by ID, route through standard `damageEntity`.
+  - `sendRemoteDamage(id, dmg, color)` — mirror: send
+    `rumble_entity_damage` to server.
+  - `setMirrorMode(bool)` / `isMirrorMode()`.
+
+---
+
+**Per memory rule #28 (unify-at-choke-point):**
+- Damage path has ONE choke (`damageEntity`). Mirror gate sits
+  at top — branches between local mutation and wire event.
+- Entity rendering uses ONE array (`entities`). For host, it's
+  canonical; for mirror, it's host's broadcast painted in.
+  Renderer doesn't branch.
+
+**Per memory rule #29 (bug-from-duplication):**
+- One entity ID counter, reset once per session start.
+- One `setRemoteEntities` rebuild path. Doesn't duplicate the
+  host's `makeEntity` factory — mirror entries are deliberately
+  thin (no AI fields, no kit fields, no resistances) because
+  they don't need them.
+
+**Per memory rule #14 (UNITY):**
+- Host's behavior is unchanged from solo (entities tick locally,
+  damage applies locally). Coop is a transparent "mirror mode"
+  toggle for non-hosts.
+- Wire protocol matches the shape full server-auth will use,
+  so the next migration push doesn't touch the wire.
+
+---
+
+**What's intentionally NOT in this push:**
+
+- **Mirror player damage from host's entities.** Host's monster
+  swings at mirror's player → no damage propagates to mirror's
+  HP. Mirror's HP is still owned by the mirror client. Host
+  knows the position of mirror's player (via player_state
+  broadcast) but doesn't apply damage to it.
+
+  Workaround: damage is one-directional (mirror → host's
+  entities). Host's monsters can't attack mirror.
+
+  This is a follow-up — needs a damage-from-host wire event.
+
+- **FX over wire.** When mirror's bolt damages host's entity,
+  mirror sees the local bolt+impact (because mirror still
+  shoots locally). But if host damages a foreign entity that
+  mirror is rendering, mirror sees HP drop with no visual
+  effect (no projectile, no impact flash beyond the flashTimer
+  field that comes through in the snapshot). Acceptable
+  degraded experience.
+
+- **Walls, traps, projectiles, droppedBricks** stay local per
+  client. Each player has their own. Future pushes share these
+  too, but they're less visible than monsters.
+
+- **Server-authoritative simulation.** Per architectural lock,
+  this is the next major arc. v0.16.74 ships the wire shape;
+  future pushes migrate updateEntity to server.
+
+---
+
+**Files changed:** `server.js`, `rumble.js`, `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumbleEngine.js (will hold full simulator in future),
+characters.js, players-core.js.
+
+---
+
+**Test focus:**
+
+1. **Solo regression:**
+   - Start sandbox or waves run, no coop
+   - Entities should have `id: 'e_1'`, `'e_2'` etc. but otherwise
+     behave identically. No mirror mode active.
+2. **Host alone (1 player coop):**
+   - PARTY MODE → HOST → pick class
+   - Wave 1 spawns locally (we're host)
+   - Console: `Joined session XXXX — host? true`
+   - Plays normally, broadcasts entities.
+3. **Mirror joins host:**
+   - Device 1: HOST, pick class, see wave 1 entities
+   - Device 2: BROWSE → tap host's session → pick class
+   - Device 2 console: `Joined session XXXX — host? false`
+   - Device 2 should see device 1's entities (same monsters,
+     same positions proportional to arena), updating live
+   - Device 2 attacks: bolts hit entities, HP drops on BOTH devices
+4. **Host disconnects mid-session:**
+   - Three+ players, host refreshes their tab
+   - One of the remaining players gets promoted (next-oldest
+     in sess.players key order)
+   - Console: `[MP] Promoted to entity host — starting local simulation`
+   - Brief gap (~50ms) where mirrors render stale entities; new
+     host's first broadcast takes over.
+5. **Wave clears:**
+   - Host clears wave (kills all entities). Host's spawnWave(2) fires.
+   - Mirrors detect empty entities → wave-victory screen → CONTINUE
+     bumps mirror's local wave display. Host's wave-2 broadcast
+     populates mirror's entities.
+
+---
+
+**Risk surfaces:**
+
+- **Mirror entity count drift.** If host's broadcast is delayed
+  but mirror's `setRemoteEntities([])` runs, mirror's entities
+  go empty momentarily. Wave-clear detection might fire
+  spuriously. Mitigation: mirror's `continueToNextWave` no-ops
+  on local spawn anyway, and host's next broadcast restores
+  the entity list. Worst case: mirror sees a flash of the
+  victory screen.
+
+- **Damage event flood.** Mirror tap-fires bolts at 10 Hz; each
+  hit sends a `rumble_entity_damage` event. If mirror's bolts
+  have AoE, each damaged entity = one event. Server caps queue
+  at 100 events per tick — fine for normal play.
+
+- **ID collision across devices.** Host counts `e_1, e_2, ...`
+  Mirror also has its own counter (used only for solo paths;
+  in coop mirror's local makeEntity isn't called for foreign
+  entities). No collision in practice because mirror's entities
+  array is rebuilt from host's broadcast, not appended to.
+
+- **Promotion race.** If host disconnects AND simultaneously
+  another player's client is mid-broadcast of an entity_state,
+  server might forward stale events to a new host. Server
+  clears `sess.pendingDamage` on promotion to avoid this.
+
+---
+
+**Standards audit (rule #17 — push #16 of S016 entity authority arc):**
+
+- Rule #25: patch — save.sh canonical
+- Rule #14 (UNITY): one entity ID system. One mirror gate at
+  damageEntity choke.
+- Rule #15 (handoff hygiene): scanned ENTITY_AUTHORITY_PROPOSAL,
+  rumble.js entity scope, server session struct, before any
+  new code.
+- Rule #19 (intuition over menus): committed to interim
+  host-auth shape rather than asking "or full server-auth?"
+- Rule #28 (unify-at-choke-point): damage choke gates wire vs
+  local at single function. Entity render reads single array.
+- Rule #29: no parallel entity arrays. No parallel damage
+  paths. Mirror's foreign entities live in the same array
+  host's canonical entities live in (just marked `_foreign`).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
@@ -10356,6 +10590,154 @@ that don't fit a current chunk but should not be lost. Each entry includes
 the seed idea + initial design unpacking so future sessions can pick up
 without starting cold. When an idea is ready to build, move it to a chunk
 in the relevant build's roadmap section.
+
+### White cast redesign — fixer-as-anchor, others-as-pulse (logged S016 v0.16.74)
+
+**Seed:** Ross at v0.16.74 close:
+
+> "fixer - white aura on self, building white on drag cast; ovld tier
+> determines health of white field - can add to field to increase
+> radius and healing potential, each successful cast applies its
+> amount of ovld charge as health, figure out what the health per
+> second charged is, for each second filling ovld, how much health
+> is stored in a white field?. all other classes can cast on self
+> and on others in fixed range, single blast, no persisting field.
+> range increases on ovld. small range, tight range; what about
+> wild one?"
+
+**Two distinct behaviors split by class:**
+
+**FIXER (white sig):**
+- Self-aura on tap-cast. Aura is a **persisting field** anchored to fixer's position.
+- Drag-cast builds the field at the drop location (not following fixer).
+- **Overload tier determines field "health"** — total healing the field
+  can dispense before it dissipates. Effectively a HP pool the field
+  burns through as it heals nearby allies.
+- **Stacking is additive.** Cast white again at an existing field →
+  cast's overload-charge worth of health adds to the existing pool.
+  Field grows in radius proportionally as pool grows.
+- **The math question Ross is flagging:** what's HP/sec of overload
+  charge time? If overload tier 1 = 0.5s held, tier 2 = 1.0s, tier 3 = 1.5s
+  (current pattern), and a tier-1 cast = X health in field, what's X?
+  Need to playtest tune; could start with: tier 1 = 4 HP, tier 2 = 9 HP,
+  tier 3 = 16 HP (quadratic-ish reward for full charge).
+- Field heals all allies in radius at some HP/sec rate. Pool depletes
+  as allies regen. When pool hits 0, field dissipates with FX.
+
+**ALL OTHER CLASSES (white as secondary):**
+- **No persistent field.** Single-blast cast.
+- Self-targeting: tap-cast heals self.
+- Others-targeting: cast on ally within fixed range heals them.
+- **Range increases on overload tier** but stays small/tight even at
+  max tier (white is for "I'm right next to my buddy" not cross-arena).
+- One blast = instant heal for the cast's worth of HP. No DoT, no
+  field, no pool.
+
+**Wild One question:**
+- Wild One signature is currently set to deal damage based on remaining
+  HP / restore HP via cycle mechanics — its relationship to white is
+  thematic (it's already a "lives close to HP" class). If Wild One's
+  existing kit doesn't include white, applying the "small/tight range
+  blast on others" rule might be enough. Or Wild One gets a unique
+  white interaction — e.g., Wild One's cast heals based on its own
+  remaining HP (low HP → bigger heal, high HP → smaller). Worth
+  thinking about.
+- **Decision to defer:** answer depends on Wild One's overall identity
+  arc. For first build, treat Wild One like other non-fixer classes
+  (small range blast). Iterate later if that creates dissonance.
+
+**Why this is good design (Claude's read):**
+- Fixer becomes a true "anchor" support class — places fields, manages
+  HP pool, builds resource for the team. Distinct identity from "tap
+  to instant-heal" support.
+- Other classes get a small useful self/ally heal without diluting
+  fixer's specialty. Tight range encourages positioning.
+- Field stacking = depth without complexity. One mechanic (cast adds
+  to existing field) replaces what could have been multiple variants.
+- Aligns with the broader BrickQuest design ethos of "every color
+  behaves the same way everywhere" — white = healing, fixer just gets
+  the persistent-field variant of it.
+
+**Build scope estimate (when this lands):**
+- Medium. Two cast handlers (fixer-white-field-add vs other-white-blast).
+- Field state (`whiteFields[]` already exists in engine state per
+  v0.16.60 — empty array, ready to populate).
+- Tuning iteration on health-per-second.
+- Render: field is a soft white circle that pulses with remaining
+  HP pool. Smaller pool = smaller circle. Empty pool = dissipate
+  with sparkle FX.
+- Ally targeting needs world-space target picking (pointer drag onto
+  ally token within range). The "click on ally" UI doesn't exist yet
+  — would need a new input mode for white-on-others.
+
+**Roadmap fit:** post-S016 entity authority. Class-specific cast
+work fits naturally after the multiplayer foundation is fully solid
+(otherwise tuning fields-vs-blasts during multiplayer chaos is
+unnecessarily hard).
+
+**Black follows the same fixer-only-field rule (added S016 v0.16.74):**
+
+> "fixer black field as well, only fixer behavior with black, other
+> classes cannot create black fields, their ovld black drag needs
+> another behavior"
+
+Same architectural shape as white:
+
+- **FIXER + black:** persistent field. Mechanics TBD but parallel
+  to white — drag-cast to place, overload tier determines field
+  potency, stacking adds to existing field, field has finite
+  pool that depletes with use, dissipates when empty.
+- **OTHER CLASSES + black overload-drag:** the existing "ovld
+  black drag" cast needs a new non-field behavior. Currently
+  black drag-cast creates a poison puddle / DoT zone (varies by
+  implementation across colors); without the field option, what
+  does black overload drag DO for non-fixers?
+
+**Open design question for black:**
+What's the fixer field behavior in concept? Black is currently
+poison/DoT-zone color. Translating to a fixer field: maybe a
+"plague aura" that ticks DoT damage to enemies inside (and pool
+depletes per tick of damage dealt — symmetric to white's
+heal-on-deplete). Or black field as a "void zone" that slows /
+weakens enemies. Decide alongside the white build so both
+fields share the same engine plumbing (`blackFields[]` and
+`whiteFields[]` use the same field-pool struct).
+
+**Open design question for non-fixer black overload-drag:**
+Without the persistent-field option, ideas:
+- **Burst at point** (parallel to white-on-others-but-blast):
+  single-tick AoE damage at drop point, range scales with
+  overload tier. Tight footprint, no DoT.
+- **Linger small** (mini-DoT zone with hard time cap): a 2s
+  duration poison patch at drop point, no scaling, just a
+  consistent "I dropped a small DoT here." Fixed, predictable.
+- **Travel projectile** (parallel to red dash, but black): a
+  poison bolt that flies to the drop point and explodes on
+  contact, applying brief DoT to entities in radius.
+
+**Claude's intuition:** the "single burst at drop point" mirrors
+how non-fixer white works (single blast on cast). Symmetric
+design across colors:
+- Non-fixer white = single heal blast (tight range)
+- Non-fixer black = single damage blast (tight AoE at drop)
+- Fixer white = persistent heal field
+- Fixer black = persistent damage field
+
+That symmetry is the elegance hook. Each color has a "fixer
+variant" (persistent field) and a "non-fixer variant" (single
+blast). The blast is the universal default; the field is the
+specialty. Per memory rule #14 (UNITY): same color same way
+everywhere, with fixer as the deliberate variant.
+
+**Build scope (combined white+black):**
+Slightly larger than white-only because black field semantics
+need definition AND non-fixer black drag needs a new handler
+written. But the shared field plumbing means the second color
+costs less than the first — once `whiteFields[]` infrastructure
+is in, `blackFields[]` is mostly schema reuse with different
+on-tick behavior (heal vs damage).
+
+---
 
 ### Unified board FX system — particle/text vocabulary across all colors (logged S015 v0.15.25)
 

@@ -672,7 +672,26 @@ function _ensureRumbleSession(sessionId) {
       // NOT forced to advance — their currentWave is locally driven by
       // their own clears. Server's wave is "where new players should start."
       wave: 1,
-      // v0.16.57+ adds: entities, walls, projectiles, traps, status
+      // v0.16.74 — Path A entry: shared entity mirror.
+      // entityHostId: the playerId whose simulation is canonical for this
+      //   session. The first joiner becomes host. If host disconnects,
+      //   server picks the next-oldest player as new host.
+      // entities: most recent entity snapshot from the host. Server
+      //   relays this to other clients on every broadcast tick. Each
+      //   entity has a stable `id` field assigned by the host.
+      // pendingDamage: queue of damage events from non-host clients
+      //   waiting to be forwarded to the host on the next tick.
+      //
+      // This is interim architecture. The locked end-state (per
+      // v0.16.60) is server-authoritative simulation — server runs
+      // rumbleEngine.js and owns entities directly. v0.16.74 ships
+      // host-authoritative mirror to deliver shared monsters NOW;
+      // future pushes migrate updateEntity to server, keeping the
+      // wire protocol unchanged.
+      entityHostId: null,
+      entities: [],
+      pendingDamage: [],
+      // v0.16.57+ adds: walls, projectiles, traps, status
       startedAt: Date.now(),
       createdAt: Date.now(),        // v0.16.64 — for empty-session TTL cleanup
     };
@@ -683,11 +702,29 @@ function _ensureRumbleSession(sessionId) {
 function _broadcastRumbleSession(sessionId) {
   const sess = rumbleSessions[sessionId];
   if (!sess) return;
+  // v0.16.74 — Forward queued damage events to the host so they apply
+  // them to their local entities. Host's next entity broadcast will
+  // reflect the resulting HP changes.
+  if (sess.pendingDamage && sess.pendingDamage.length > 0 && sess.entityHostId) {
+    const hostWs = _findWsForPlayer(sess.entityHostId);
+    if (hostWs && hostWs.readyState === 1) {
+      hostWs.send(JSON.stringify({
+        type: 'rumble_entity_damage_batch',
+        events: sess.pendingDamage,
+      }));
+    }
+    sess.pendingDamage = [];
+  }
   const msg = JSON.stringify({
     type: 'rumble_session_state',
     sessionId: sessionId,
     players: sess.players,
     wave: sess.wave || 1,           // v0.16.71 — current session wave
+    // v0.16.74 — Shared entity mirror. Host's entities are the
+    // canonical state for the session. Mirrors render these instead
+    // of their own local entities.
+    entities: sess.entities || [],
+    entityHostId: sess.entityHostId || null,
     serverTs: Date.now(),
   });
   // Only send to clients registered for this session
@@ -696,6 +733,17 @@ function _broadcastRumbleSession(sessionId) {
     if (ws.readyState !== 1) return;
     ws.send(msg);
   });
+}
+
+// v0.16.74 — Find the active WebSocket for a given playerId. Used
+// by the broadcast loop to forward damage events to the host.
+// Returns null if the player isn't currently connected.
+function _findWsForPlayer(playerId) {
+  let foundWs = null;
+  rumbleClientSession.forEach((reg, ws) => {
+    if (reg.playerId === playerId) foundWs = ws;
+  });
+  return foundWs;
 }
 
 // Drop a player from a session and broadcast the change. Called on
@@ -707,11 +755,22 @@ function _removePlayerFromRumbleSession(ws, reason) {
   const sess = rumbleSessions[reg.sessionId];
   rumbleClientSession.delete(ws);
   if (!sess) return;
+  const wasHost = (sess.entityHostId === reg.playerId);
   delete sess.players[reg.playerId];
+  // v0.16.74 — Host re-election. If the leaving player was the entity
+  // host, pick the next remaining player as new host. Their next
+  // entity broadcast becomes canonical. Brief gap (~50ms) where
+  // mirrors render stale entities; new host takes over within one
+  // broadcast cycle.
+  if (wasHost) {
+    const remaining = Object.keys(sess.players);
+    sess.entityHostId = remaining.length > 0 ? remaining[0] : null;
+    // Clear pending damage events directed at the old host — they're
+    // stale references. New host will produce fresh entities.
+    sess.pendingDamage = [];
+  }
   // v0.16.56 — empty session cleanup. No entities to preserve yet, so
   // safe to drop the session struct entirely once last player leaves.
-  // (When v0.16.57 ships entity authority, this changes — sessions
-  // persist for waves regardless of player count.)
   if (Object.keys(sess.players).length === 0) {
     delete rumbleSessions[reg.sessionId];
   } else {
@@ -737,6 +796,12 @@ setInterval(() => {
       if (p && p.lastInputTs && (now - p.lastInputTs) > RUMBLE_PLAYER_TIMEOUT_MS) {
         delete sess.players[pid];
         dirty = true;
+        // v0.16.74 — If stale host, re-elect.
+        if (sess.entityHostId === pid) {
+          const remaining = Object.keys(sess.players);
+          sess.entityHostId = remaining.length > 0 ? remaining[0] : null;
+          sess.pendingDamage = [];
+        }
       }
     });
     _broadcastRumbleSession(sessionIds[i]);
@@ -990,12 +1055,26 @@ wss.on('connection', (ws, req) => {
         lastInputTs: Date.now(),
       };
       rumbleClientSession.set(ws, { sessionId, playerId });
+      // v0.16.74 — Entity host election. The first joiner becomes the
+      // canonical simulator. Subsequent joiners are mirrors that
+      // render the host's broadcast entities. If host disconnects,
+      // _removePlayerFromRumbleSession picks the next-oldest player
+      // as new host.
+      const isEntityHost = (sess.entityHostId === null);
+      if (isEntityHost) {
+        sess.entityHostId = playerId;
+      }
       // Acknowledge so client knows the join landed
       ws.send(JSON.stringify({
         type: 'rumble_session_joined',
         sessionId, playerId,
         playerCount: Object.keys(sess.players).length,
         wave: sess.wave || 1,         // v0.16.71 — joiner spawns at this wave
+        // v0.16.74 — Tells the client whether they're the entity host
+        // (simulate locally + broadcast) or a mirror (render-only,
+        // damage events go through server).
+        isEntityHost: isEntityHost,
+        entityHostId: sess.entityHostId,
       }));
       _broadcastRumbleSession(sessionId);
       return;
@@ -1097,6 +1176,63 @@ wss.on('connection', (ws, req) => {
         // value only when joining. But broadcasting keeps everyone
         // informed for UI purposes.
         _broadcastRumbleSession(reg.sessionId);
+      }
+      return;
+    }
+
+    // v0.16.74 — Path A entity mirror: host pushes entity state.
+    // Only the entity host's messages are accepted. Other players'
+    // entity_state messages are silently ignored.
+    //
+    // Payload: { entities: [...] } — full snapshot of host's entity
+    // array. We replace sess.entities wholesale (no delta encoding
+    // yet; protocol can be optimized later). Position uses nx/ny
+    // (0-1 normalized) so mirrors map to their own arena bounds.
+    //
+    // Sent at the same rate as rumble_player_state (10 Hz from the
+    // client push interval).
+    if (type === 'rumble_entity_state') {
+      const reg = rumbleClientSession.get(ws);
+      if (!reg) return;
+      const sess = rumbleSessions[reg.sessionId];
+      if (!sess) return;
+      // Only host's entity broadcasts are canonical. Reject from mirrors.
+      if (sess.entityHostId !== reg.playerId) return;
+      const ents = (P && Array.isArray(P.entities)) ? P.entities : null;
+      if (!ents) return;
+      sess.entities = ents;
+      return;
+    }
+
+    // v0.16.74 — Path A: a non-host client dealt damage to an entity.
+    // Server queues the event; next broadcast tick forwards it to the
+    // host as a batch. Host applies damage to its local entities;
+    // resulting HP changes propagate via the next entity_state.
+    //
+    // Payload: { entityId, dmg, color, casterPlayerId, ts }
+    // (dmg is raw damage; host computes resistances/tier locally.)
+    //
+    // If the sender IS the host, no relay needed — host applies
+    // damage to its own entity directly. We accept and discard.
+    if (type === 'rumble_entity_damage') {
+      const reg = rumbleClientSession.get(ws);
+      if (!reg) return;
+      const sess = rumbleSessions[reg.sessionId];
+      if (!sess) return;
+      if (sess.entityHostId === reg.playerId) return;  // host applies its own
+      if (!P || typeof P.entityId !== 'string' || typeof P.dmg !== 'number') return;
+      sess.pendingDamage = sess.pendingDamage || [];
+      // Cap queue to prevent abuse / runaway. 100 events between ticks
+      // would mean ~2000/sec from one client which is far above any
+      // legitimate cast volume.
+      if (sess.pendingDamage.length < 100) {
+        sess.pendingDamage.push({
+          entityId: P.entityId,
+          dmg: P.dmg,
+          color: P.color || 'unknown',
+          casterPlayerId: reg.playerId,
+          ts: P.ts || Date.now(),
+        });
       }
       return;
     }

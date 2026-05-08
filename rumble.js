@@ -461,6 +461,16 @@ var cfg = null; // last start(config) object
 var player = null;
 var entities = [];
 var deadEntities = [];
+// v0.16.74 — Stable entity ID counter. Bumped per makeEntity call.
+// Resets on Rumble.start (each session has its own ID space starting
+// from 1). Format: 'e_1', 'e_2', ... — kept simple since IDs are
+// scoped to a single session and never persisted.
+var _nextEntityId = 1;
+// v0.16.74 — Path A mirror mode flag. When true, local entity AI
+// updates skip _foreign entities (they're host's, rendered locally
+// but simulated remotely). Enabled by setRemoteEntities, disabled
+// when player promotes to host.
+var _mirrorMode = false;
 var pendingVictory = 0; // countdown to victory screen
 var rumble = {};
 var timerLeft = RUMBLE_DURATION;
@@ -5371,6 +5381,10 @@ function makeEntity(bounds, angleOffset, entityType) {
   var resolvedType = _resolveEntityType(entityType);
   var tpl = ENTITY_REGISTRY[resolvedType];
   return {
+    // v0.16.74 — Stable entity ID. Used by Path A coop to reference
+    // entities across the wire (damage events from mirror clients
+    // identify which entity they hit). Format: 'e_<counter>'.
+    id: 'e_' + (_nextEntityId++),
     x: gx, y: gy,
     spawnX: gx, spawnY: gy,
     // Core stats from template — apply scale for display parity.
@@ -5511,6 +5525,29 @@ function vScale(tier) { return tier <= 1 ? 1.5 : 0.5; }
 // If engine isn't available (early init / test path), falls back
 // to direct internal call so damage still applies.
 function damageEntity(g, dmg, aggro, source, opts) {
+  // v0.16.74 — Path A mirror gate. If we're in mirror mode AND the
+  // target is a foreign entity (host's), we don't apply damage
+  // locally — the host owns the canonical state. We send a wire
+  // event; server forwards to host; host applies; host's next entity
+  // broadcast reflects the new HP. Local mutation is suppressed
+  // because mirror's view is overwritten on the next tick anyway,
+  // and applying it locally creates flicker (mirror shows entity at
+  // 5 HP for one frame, then bounces to host's value).
+  if (_mirrorMode && g && g._foreign && g.id) {
+    // Caller may rely on damageEntity returning a result; for
+    // mirror-fired remote damage we don't have engine internals to
+    // compute applied/tier, so return a minimal result. FX layer
+    // sees damage event via wire when host applies (it'll arrive on
+    // next entity broadcast as HP delta — that drives the floater
+    // via existing flashTimer field).
+    if (window && window.Rumble && window.Rumble.sendRemoteDamage) {
+      window.Rumble.sendRemoteDamage(g.id, dmg, source);
+    }
+    // Null-safe minimal result — callers that branch on
+    // `result.killed` won't trigger death FX locally; they'll see
+    // it via the next broadcast when host's deathTimer field flips.
+    return { applied: dmg, tier: 'NEUTRAL', witherBoost: 0, killed: false };
+  }
   if (_engine && _engine.applyDamage) {
     // opts._aggro carries the aggro arg through (engine.applyDamage
     // signature is (entity, dmg, source, opts), no aggro param).
@@ -5906,6 +5943,19 @@ function applyReactionMovement(g, dt, bounds) {
 
 function updateEntity(g, dt, bounds) {
   if (!player) return;
+  // v0.16.74 — Mirror gate. Foreign entities (broadcast from host)
+  // don't tick locally — host's simulation owns them. We just
+  // render at the host-broadcast position. Skipping update means
+  // no AI moves, no attacks land from these entities locally;
+  // damage to/from them happens via the wire (mirror's casts send
+  // rumble_entity_damage; host's broadcasts of these entities show
+  // attacks-against-mirror via the player_state HP field).
+  //
+  // NOTE: in v0.16.74 entity-on-mirror-player damage isn't yet
+  // wired — host can damage its own player but not other clients'
+  // players. That's a follow-up. The minimum-viable Path A is
+  // shared monsters + mirror-on-host damage.
+  if (_mirrorMode && g._foreign) return;
 
   // PHASE A — reaction dispatcher runs FIRST so reactions can override AI.
   // Detects edges (new overload charges), picks from g.reactions policy,
@@ -11430,6 +11480,11 @@ function _internalStart(config) {
   entities = [];
   enemyProjectiles = [];
   droppedBricks = [];
+  // v0.16.74 — Reset entity ID counter so each new rumble session
+  // starts from 'e_1'. IDs are session-scoped; mirrors and host both
+  // count up from 1, but only host's IDs are canonical (mirrors
+  // receive host's entities via broadcast).
+  _nextEntityId = 1;
   var count = Math.max(0, Math.min(10, cfg.entityCount != null ? cfg.entityCount : 1));
   for (var si = 0; si < count; si++) {
     // Spread entities around a circle so they don't all spawn stacked.
@@ -13254,6 +13309,193 @@ window.Rumble = {
     if (typeof blueBolts !== 'undefined') blueBolts = [];
     // Crit shockwaves and floating text are cosmetic; let them
     // self-expire rather than abruptly wiping mid-render.
+  },
+
+  // ── v0.16.74 — Path A entity mirror APIs ──
+  // Three methods for cross-client entity sharing in coop:
+  //   getEntitySnapshot()  — host: serialize current entities for wire
+  //   setRemoteEntities()  — mirror: replace local entities with host's
+  //   applyRemoteDamage()  — host: apply damage event from a mirror
+  //
+  // Plus mirror-mode flag so simulation paths can suppress local AI
+  // when entities are foreign. Set via setMirrorMode(true|false).
+
+  // Serialize current entities into wire-format. Strips AI internals
+  // (swing-state-machine, attackCooldown, wanderTimer, etc.) — mirrors
+  // only need render-relevant fields. Includes nx/ny normalized so
+  // mirrors map to their own arena bounds.
+  getEntitySnapshot: function() {
+    if (!entities || !entities.length) return [];
+    var bounds = getRumbleBounds();
+    var W = bounds.w || 1, H = bounds.h || 1;
+    var out = [];
+    for (var i = 0; i < entities.length; i++) {
+      var g = entities[i];
+      if (!g || !g.id) continue;
+      out.push({
+        id: g.id,
+        type: g.type,
+        family: g.family,
+        nx: (g.x - bounds.x) / W,
+        ny: (g.y - bounds.y) / H,
+        r: g.r,
+        hp: g.hp,
+        hpMax: g.hpMax,
+        // Render-relevant flags
+        visColor: g.visColor,
+        visIcon: g.visIcon,
+        signature: g.signature,
+        flashTimer: g.flashTimer || 0,
+        markedTimer: g.markedTimer || 0,
+        dazed: !!g.dazed,
+        confused: !!g.confused,
+        silencedTimer: g.silencedTimer || 0,
+        // Heavy-melee swing telegraph reads
+        swingState: g.swingState || 'idle',
+        swingTimer: g.swingTimer || 0,
+        // Death animation read (drawEntity uses this for fade-out)
+        deathTimer: g.deathTimer || 0,
+      });
+    }
+    return out;
+  },
+
+  // Mirror only: replace the canonical entities array with foreign
+  // entries from host. Mirrors map nx/ny back to their own arena
+  // bounds so the same monster appears at the proportionally correct
+  // position regardless of canvas size. Also sets mirror mode so
+  // local AI updates don't fire on these foreign entities.
+  setRemoteEntities: function(remoteArr) {
+    if (!Array.isArray(remoteArr)) return;
+    _mirrorMode = true;
+    var bounds = getRumbleBounds();
+    var W = bounds.w || 1, H = bounds.h || 1;
+    // Build new array; preserve existing entries by ID where possible
+    // so transient render state (flashTimer animation tweens) isn't
+    // reset every tick. New entries are constructed from scratch.
+    var byId = {};
+    for (var i = 0; i < entities.length; i++) {
+      if (entities[i] && entities[i].id) byId[entities[i].id] = entities[i];
+    }
+    var nextEntities = [];
+    for (var ri = 0; ri < remoteArr.length; ri++) {
+      var rem = remoteArr[ri];
+      if (!rem || !rem.id) continue;
+      var existing = byId[rem.id];
+      if (existing) {
+        // Update fields in place
+        existing.x = bounds.x + rem.nx * W;
+        existing.y = bounds.y + rem.ny * H;
+        existing.r = rem.r;
+        existing.hp = rem.hp;
+        existing.hpMax = rem.hpMax;
+        existing.visColor = rem.visColor;
+        existing.visIcon = rem.visIcon;
+        existing.signature = rem.signature;
+        existing.flashTimer = rem.flashTimer || 0;
+        existing.markedTimer = rem.markedTimer || 0;
+        existing.dazed = !!rem.dazed;
+        existing.confused = !!rem.confused;
+        existing.silencedTimer = rem.silencedTimer || 0;
+        existing.swingState = rem.swingState || 'idle';
+        existing.swingTimer = rem.swingTimer || 0;
+        existing.deathTimer = rem.deathTimer || 0;
+        nextEntities.push(existing);
+      } else {
+        // New foreign entity
+        nextEntities.push({
+          _foreign: true,        // marker — local AI ticks skip these
+          id: rem.id,
+          type: rem.type,
+          family: rem.family,
+          x: bounds.x + rem.nx * W,
+          y: bounds.y + rem.ny * H,
+          r: rem.r,
+          hp: rem.hp,
+          hpMax: rem.hpMax,
+          visColor: rem.visColor,
+          visIcon: rem.visIcon,
+          signature: rem.signature,
+          flashTimer: rem.flashTimer || 0,
+          markedTimer: rem.markedTimer || 0,
+          dazed: !!rem.dazed,
+          confused: !!rem.confused,
+          silencedTimer: rem.silencedTimer || 0,
+          swingState: rem.swingState || 'idle',
+          swingTimer: rem.swingTimer || 0,
+          deathTimer: rem.deathTimer || 0,
+          // Default fields needed by other systems that touch entity
+          // arrays but won't fire AI on _foreign:
+          state: 'patrol',
+          aggroed: false,
+          attackPattern: 'touch',
+          ai: 'chase',
+        });
+      }
+    }
+    entities = nextEntities;
+  },
+
+  // Mirror-side damage broadcast hook. If a mirror's cast hits a
+  // foreign entity, the mirror's local damageEntity wrapper calls
+  // this BEFORE local mutation. The wire event is fire-and-forget:
+  // server queues, host applies, host's next entity broadcast
+  // reflects the HP change.
+  //
+  // Returns true if the wire event was sent (caller can skip local
+  // mutation), false if not in mirror mode (caller proceeds normally).
+  sendRemoteDamage: function(entityId, dmg, color) {
+    if (!_mirrorMode) return false;
+    if (typeof window === 'undefined' || !window._mpWS) return false;
+    if (window._mpWS.readyState !== 1) return false;
+    try {
+      window._mpWS.send(JSON.stringify({
+        type: 'rumble_entity_damage',
+        payload: {
+          entityId: entityId,
+          dmg: dmg,
+          color: color || 'unknown',
+          ts: Date.now(),
+        },
+      }));
+      return true;
+    } catch (e) { return false; }
+  },
+
+  // Host-side: a mirror's damage event arrived from server. Find the
+  // entity by ID and apply damage through the standard pipeline.
+  // Color string used for resistance lookup. casterPlayerId stored
+  // for logging / future analytics. Returns true if applied, false
+  // if entity not found or already dead.
+  applyRemoteDamage: function(entityId, dmg, color, casterPlayerId) {
+    if (!entities || !entities.length) return false;
+    for (var i = 0; i < entities.length; i++) {
+      var g = entities[i];
+      if (g && g.id === entityId && g.hp > 0) {
+        // Route through the standard damageEntity wrapper so engine
+        // events fire and damage policy (resistance, tier) applies
+        // consistently. The wrapper handles _engine.applyDamage
+        // delegation and the legacy fallback path.
+        if (typeof damageEntity === 'function') {
+          damageEntity(g, dmg, undefined, color || 'unknown');
+        } else {
+          g.hp = Math.max(0, g.hp - dmg);
+        }
+        return true;
+      }
+    }
+    return false;
+  },
+
+  // Mirror mode toggle. When true, local AI ticks (updateEntity loop)
+  // skip _foreign entities. When false (default = host or solo), all
+  // entities tick normally. Set automatically by setRemoteEntities;
+  // exposed here so tests / debug paths can flip the flag explicitly.
+  setMirrorMode: function(enabled) {
+    _mirrorMode = !!enabled;
+  },
+  isMirrorMode: function() {
+    return !!_mirrorMode;
   },
 };
 
