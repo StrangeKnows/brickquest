@@ -10583,6 +10583,99 @@ characters.js, players-core.js.
 
 ---
 
+### v0.16.75 — Wave-8 bug diagnostic
+
+> "ios ended up displaying wave 8 between 2 and 3"
+
+**Per memory rule #6 — diagnostic before guess.** Real bug
+with concrete evidence, but I have zero data on which step
+produced the rogue value. Three possible sources:
+
+1. Server's `sess.wave` got bumped to 8 by some client's
+   wave_advance message
+2. Mirror's session_state handler wrote a stale wave value
+3. continueToNextWave fired multiple times (event double-tap)
+
+Adding logs at every wave write site:
+
+- **server.js wave_advance handler** — logs ACCEPTED vs
+  rejected with from-player and current sess.wave context
+- **rumble_test.html continueToNextWave** — logs the
+  increment site with previous/new value + role context
+- **rumble_test.html jumpToWave** — logs the actual write
+- **rumble_test.html session_joined mirror branch** — logs
+  the wave-from-ack write
+- **rumble_test.html session_state divergence** — warns when
+  msg.wave differs from local by more than 1 (catches stale
+  broadcasts)
+
+**What the data will tell us:**
+- If rogue advance came from a client: which playerId, what
+  newWave value, when
+- If it came from a stale broadcast: divergence warning fires
+  with the gap
+- If continueToNextWave fired twice: increment log shows two
+  sequential bumps
+
+---
+
+**iOS 2-finger tap acknowledgment (NOT in this push):**
+
+User confirmed: "two finger tap is only way to select buttons
+on ios for BQ" — real platform UX bug, single-tap doesn't
+register. Cause already known from code: body has
+`touch-action: none`; only some buttons (mode-cards, party
+buttons) have `touch-action: manipulation` override. The
+wave-debug-icon at line 1488 has the canonical fix pattern
+(`touchend` + `preventDefault` to claim gesture). iOS 26
+appears stricter than older iOS — even `touch-action:
+manipulation` no longer reliably synthesizes click on every
+single tap.
+
+**Fix is a separate push (v0.16.76 candidate):** new helper
+`_bindTap(elem, action)` that wraps both `click` and
+`touchend` handlers, applied at every binding site. ~30
+conversion sites. Per rule #6, separating the iOS fix from
+this diagnostic push so wave-8 data isn't muddled by tap
+behavior changes.
+
+---
+
+**Files changed:** `server.js`, `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: rumble.js, rumbleEngine.js, characters.js.
+
+---
+
+**Test focus:**
+
+1. Reproduce wave-8-between-2-and-3 condition. Watch console
+   on ALL devices simultaneously. The `[WAVE-DIAG]` lines
+   tell us which device wrote the rogue value.
+2. If reproduced: screenshot/copy console logs from each
+   device. Look for either:
+   - `[WAVE-DIAG] advance request newWave=8 → ACCEPTED` on
+     server (a client SAID wave should be 8)
+   - `[WAVE-DIAG] session_state wave divergence: msg.wave=8
+     local=2` on iOS (stale broadcast received)
+   - `[WAVE-DIAG] continueToNextWave incremented 2 → 8` on
+     any client (multi-fire bug)
+
+---
+
+**Standards audit (rule #17 — push #17 of S016 entity authority arc):**
+
+- Rule #6 (diagnostic-first): VINDICATED yet again. Wave-8
+  could have 3 different root causes; speculative fix would
+  be coin-flip. Logs cost ~15 LOC; data is priceless.
+- Rule #14 (UNITY): all diagnostic lines use `[WAVE-DIAG]`
+  prefix so console grep is easy.
+- Rule #25 (version bump): patch
+- Rule #28 (unify-at-choke-point): logs at the actual write
+  sites, not at every read. One log per write, no duplicates.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

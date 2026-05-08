@@ -2108,7 +2108,13 @@ function continueToNextWave() {
   // animation finishes filling all colors, they shouldn't enter the
   // next wave with partial bricks.
   if (Rumble.refillBricks) Rumble.refillBricks();
+  // v0.16.75 — Wave-8-bug diagnostic. Log the increment site so we
+  // can trace whether wave is being bumped multiple times per click,
+  // or jumping ahead due to stale state.
+  var _prevWave = _waveState.currentWave;
   _waveState.currentWave += 1;
+  console.log('[WAVE-DIAG] continueToNextWave incremented ' + _prevWave + ' → ' + _waveState.currentWave +
+    ' (mode=' + currentMode + ' isHost=' + _mpIsEntityHost + ')');
   _waveState.advancing = false;
   captureWaveSnapshot();
   // v0.16.74 — Mirror clients don't spawn locally. They wait for
@@ -2160,6 +2166,9 @@ function jumpToWave(targetWave) {
   }
   console.log('[MP] Jumping from wave ' + _waveState.currentWave + ' → ' + targetWave);
   _wsDiag.jumps = (_wsDiag.jumps || 0) + 1;  // v0.16.72 — diag counter
+  // v0.16.75 — Wave-8-bug diagnostic. Trace which call site is
+  // setting wave to what value, so we can identify rogue updates.
+  console.log('[WAVE-DIAG] jumpToWave write ' + _waveState.currentWave + ' → ' + targetWave);
   // Clear existing entities/projectiles/walls/loot. Engine has a
   // helper for this; if not exposed, we fall back to spawning fresh
   // wave on top (engine will dedupe naturally as cleared entities
@@ -3265,6 +3274,18 @@ function mpConnect(cls, m, onReady) {
           Rumble.setRemoteEntities(msg.entities);
         }
       }
+      // v0.16.75 — Wave-8 diagnostic. If session_state arrives with a
+      // wave field that differs from our local _waveState.currentWave
+      // by more than 1, log it. The wave-8-between-2-and-3 bug
+      // suggests a stale or rogue value is being broadcast — this
+      // catches it at the receive site.
+      if (typeof msg.wave === 'number' && _waveState && _waveState.active) {
+        var localW = _waveState.currentWave || 0;
+        if (Math.abs(msg.wave - localW) > 1) {
+          console.warn('[WAVE-DIAG] session_state wave divergence: msg.wave=' +
+            msg.wave + ' local=' + localW + ' isHost=' + _mpIsEntityHost);
+        }
+      }
     } else if (msg.type === 'rumble_session_joined') {
       console.log('[MP] Joined session', msg.sessionId, '— playerCount', msg.playerCount,
         '— wave', msg.wave, '— host?', msg.isEntityHost);
@@ -3302,6 +3323,9 @@ function mpConnect(cls, m, onReady) {
       } else if (typeof msg.wave === 'number' && msg.wave > 1 && !_mpIsEntityHost) {
         // Mirror: just track the wave number locally so the HUD shows
         // it. Entity state comes from host's broadcasts.
+        // v0.16.75 — Wave-8 diagnostic
+        console.log('[WAVE-DIAG] mirror session_joined wave write ' +
+          _waveState.currentWave + ' → ' + msg.wave);
         _waveState.currentWave = msg.wave;
         if (typeof updateWaveBadge === 'function') updateWaveBadge(msg.wave);
       }

@@ -1169,12 +1169,16 @@ wss.on('connection', (ws, req) => {
       const sess = rumbleSessions[reg.sessionId];
       if (!sess) return;
       const newWave = (P && typeof P.newWave === 'number') ? P.newWave : 0;
+      // v0.16.75 — Wave-8-bug diagnostic. Log every accepted advance
+      // so we can trace where stale/rogue values originate. If a
+      // client sends newWave=8 while server is at 2, this log will
+      // show it; we can then track WHY that client thought wave was 8.
+      console.log('[WAVE-DIAG] advance request session=' + reg.sessionId +
+        ' fromPlayer=' + reg.playerId + ' newWave=' + newWave +
+        ' currentSessWave=' + (sess.wave || 1) +
+        ' → ' + (newWave > (sess.wave || 1) ? 'ACCEPTED' : 'rejected (not greater)'));
       if (newWave > (sess.wave || 1)) {
         sess.wave = newWave;
-        // Broadcast so any spectators / dashboards see the update.
-        // Live players don't fast-forward (Path B); they read this
-        // value only when joining. But broadcasting keeps everyone
-        // informed for UI purposes.
         _broadcastRumbleSession(reg.sessionId);
       }
       return;
