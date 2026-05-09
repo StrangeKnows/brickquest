@@ -1424,6 +1424,14 @@ var _waveState = {
 
 // Spawn the entities for wave n (1-indexed). Shows the banner + badge.
 function spawnWave(n) {
+  // v0.16.77 — Flip active=true here so the wave-clear detector
+  // doesn't trigger before the first spawn happens. Idempotent —
+  // safe to call repeatedly during wave progression. The original
+  // wave-init code (in startTestRumble) used to set active=true
+  // unconditionally, which caused a race where coop deferred-spawn
+  // saw active=true with entities=[] and spuriously reported "wave
+  // cleared" on session start.
+  _waveState.active = true;
   var def = (n <= WAVE_DEFS.length) ? WAVE_DEFS[n - 1] : generateRandomWave(n);
   // Cycle through type list to fill count
   for (var i = 0; i < def.count; i++) {
@@ -3295,6 +3303,15 @@ function mpConnect(cls, m, onReady) {
         if (typeof Rumble !== 'undefined' && Rumble.setRemoteEntities) {
           Rumble.setRemoteEntities(msg.entities);
         }
+        // v0.16.77 — Flip active=true on first non-empty broadcast.
+        // Mirrors don't call spawnWave (which is what flips it for
+        // the host path) — they wait for host's broadcast. Without
+        // this, mirror's wave-clear detector never fires (gated on
+        // active) and CONTINUE button stays inactive after host's
+        // wave clears.
+        if (msg.entities.length > 0 && !_waveState.active && _waveState.currentWave > 0) {
+          _waveState.active = true;
+        }
       }
       // v0.16.75 — Wave-8 diagnostic. If session_state arrives with a
       // wave field that differs from our local _waveState.currentWave
@@ -3580,7 +3597,18 @@ function startTestRumble(cls) {
 
   // Initialize waves OR coop mode (both use staged wave spawns)
   if (useStagedWaves) {
-    _waveState.active = true;
+    // v0.16.77 — `_waveState.active` is the gate that the wave-clear
+    // detector reads. Setting it true BEFORE entities spawn (as we
+    // did in v0.16.74-76) caused the fallback detector at line 1754
+    // to fire onWaveCleared immediately on coop start: active=true,
+    // entities=[], advancing=false → "wave cleared in 0.0s" victory
+    // screen pops up before player ever sees the arena.
+    //
+    // Fix: leave active=false until spawn happens. Solo path spawns
+    // synchronously below. Coop host spawns from session_joined ack.
+    // Coop mirror flips active=true on first remote entities arrival.
+    // spawnWave() itself flips active=true at its top.
+    _waveState.active = false;
     _waveState.currentWave = 1;
     _waveState.advancing = false;
     _waveHistory = [];                  // fresh per-run history
@@ -3596,6 +3624,7 @@ function startTestRumble(cls) {
       // Will spawn from session_joined handler based on role
       _coopWaveSpawnPending = true;
     } else {
+      // Solo path — spawn now; spawnWave flips active=true
       spawnWave(1);
     }
   } else {

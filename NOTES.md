@@ -10782,6 +10782,79 @@ UNTOUCHED: server.js, rumble.js, rumbleEngine.js.
 
 ---
 
+### v0.16.77 — Spurious wave-clear on coop start (regression from v0.16.74)
+
+> Screenshot: "WAVE CLEARED · WAVE 1 · BASELINE" appears
+> immediately on coop host start, blocking gameplay.
+
+**Root cause: ordering bug in v0.16.74 deferred-spawn logic.**
+
+v0.16.74 deferred wave-1 spawn until `session_joined` arrived
+(needed because mirror IDs would otherwise collide with host's).
+But it kept `_waveState.active = true` set BEFORE the spawn.
+Result: wave-clear fallback detector at line 1754
+(`active && !advancing && entityCount === 0`) fired immediately
+on every coop start — entities array was empty, active was true,
+victory screen popped up before session_joined could spawn wave 1.
+
+**Fix:** keep `_waveState.active = false` until spawn happens.
+`spawnWave()` flips it to true at its top (idempotent for
+subsequent waves). Mirror flips it on first non-empty entity
+broadcast (mirrors never call spawnWave directly).
+
+**Per memory rule #15 (handoff hygiene):** caught this by
+tracing my own v0.16.74 ordering. The flag's semantic should
+be "we are mid-wave-run" not "we are configured for waves" —
+v0.16.74 violated that without me noticing.
+
+**Per memory rule #14 (UNITY):** spawnWave is now the single
+choke point for "wave starts" — it owns flipping active=true.
+Mirror has its parallel choke (first remote entity broadcast).
+Two paths, same semantic, no duplication.
+
+---
+
+**Files changed:** `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, rumbleEngine.js.
+
+---
+
+**Test focus:**
+
+1. Coop HOST → pick class → arena should appear with wave-1
+   entities, no spurious wave-clear screen.
+2. Coop HOST + mirror joins later → both see entities
+   normally, both can advance through waves.
+3. Solo waves run → still works, no regression.
+4. Real wave clears (kill all entities) → victory screen
+   appears as expected.
+
+---
+
+**Standards audit (push #19 of S016 entity authority arc):**
+
+Quick observation logged for myself: I keep finding bugs by
+re-reading my own comments in older code. The v0.16.74
+deferred-spawn comment described WHAT was deferred but didn't
+flag that `_waveState.active` was being set BEFORE the spawn —
+which is exactly the kind of ordering detail that comments
+should call out. Pattern noted; if this comes up again I'll
+formalize as a memory rule about commenting state-flag
+ordering near deferred-execution paths.
+
+- Rule #6: known-bug fix (not speculative). Screenshot showed
+  exactly the spurious-clear screen; trace was clean.
+- Rule #14: spawnWave owns the active=true flip. Mirror has
+  parallel choke. No duplication.
+- Rule #15 (handoff hygiene): re-traced v0.16.74 ordering,
+  found my own oversight.
+- Rule #19: committed to "active=false until spawn" without
+  alternatives menu.
+- Rule #25: patch.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
