@@ -10936,6 +10936,68 @@ pipeline as solo/host damage. The only divergence is the
 
 ---
 
+### v0.16.79 — Mirror entity collision (Path A polish)
+
+> "collisions between mirror and entity? does not seem like
+> entity can sense mirror players"
+
+**Adding mirror collision.** Without it, mirrors walk through
+entities — entities are ghost-like to them. With v0.16.78
+splash damage, mirrors near a swung-at entity take damage but
+walk through. This push makes mirrors physical to host's
+simulation: entities push back when a mirror collides with them.
+
+**Targeting AI is unchanged.** Entities still chase host's
+`player`. Mirror is an obstacle, not a target. Per-target
+chase (where entities pick nearest player including mirrors)
+is a bigger arc — touches every AI branch in the 623-line
+`updateEntity`. v0.16.79 ships the cheap polish; targeting
+ships later.
+
+**Touch damage to mirrors is also deferred.** The contact-attack
+path at line 6669 has rich state (gray-wall absorption,
+per-player iframes, armor pips, arsenal triggers, bounce-back).
+Replicating that for mirror needs round-tripping armor/iframe
+state through wire. Combined with v0.16.78 melee splash, the
+gap is small — entities that swing at host already splash
+nearby mirrors. Pure-touch entities (goblins) won't damage
+mirrors yet; they'll just bump.
+
+**Implementation:** extend the existing player-collision loop
+in rumble.js. After pushing against host's `player`, iterate
+`_mpAllyTargets` and push against any mirror in collision
+range. Skip on mirror clients (`_mirrorMode` check) — their
+entities are foreign and don't simulate.
+
+**Per memory rule #28 (unify-at-choke-point):** collision
+extends the existing entity-vs-player loop, not a parallel
+system.
+
+**Per memory rule #14 (UNITY):** same push physics for host
+and mirrors. Only difference: mirrors don't have a real `r`
+field on the wire (allies carry nx/ny but not radius), so we
+use a constant `allyR = 12` matching default player radius.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble_test.html.
+
+---
+
+**Test focus:**
+
+1. Mac HOST + Android MIRROR. Mirror walks INTO an entity →
+   should bump and stop, not pass through. Entity gets pushed.
+2. Mac's view: same physical bump visible (host's broadcast
+   reflects the post-push entity position).
+3. Combine with v0.16.78: mirror near host's swung-at entity
+   takes splash damage + can't walk through.
+4. Solo regression: collision against `player` unchanged.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

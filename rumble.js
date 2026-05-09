@@ -954,6 +954,39 @@ function update(dt) {
         entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
       }
     }
+    // v0.16.79 — Path A coop: entities also collide with mirror players.
+    // Without this, mirrors walk through entities (since entities only
+    // know about host's `player`). This makes mirrors physical to host's
+    // simulation. Mirror's own client renders entities at host-broadcast
+    // positions, which now reflect the push from mirror collisions too.
+    //
+    // Targeting AI is NOT changed here — entities still chase host's
+    // player. Mirrors are obstacles, not targets. Per-target chase is
+    // a future arc.
+    //
+    // Skip on mirror clients (their entities are _foreign and don't tick).
+    if (!_mirrorMode && _mpAllyOrder && _mpAllyOrder.length > 0) {
+      var W = bounds.w || 1, H = bounds.h || 1;
+      var allyR = 12;  // approximate; ally records don't carry r
+      for (var ai = 0; ai < _mpAllyOrder.length; ai++) {
+        var aid = _mpAllyOrder[ai];
+        var ally = _mpAllyTargets[aid];
+        if (!ally || !ally.alive || ally.spectating) continue;
+        var ax = bounds.x + ally.currentNX * W;
+        var ay = bounds.y + ally.currentNY * H;
+        var adx = ax - entity.x, ady = ay - entity.y;
+        var adist = Math.sqrt(adx*adx + ady*ady);
+        var aMinDist = allyR + entity.r;
+        if (adist < aMinDist && adist > 0) {
+          var apush = aMinDist - adist;
+          var anx = adx / adist, any = ady / adist;
+          entity.x -= anx * apush;
+          entity.y -= any * apush;
+          entity.x = Math.max(bounds.x+entity.r, Math.min(bounds.x+bounds.w-entity.r, entity.x));
+          entity.y = Math.max(bounds.y+entity.r, Math.min(bounds.y+bounds.h-entity.r, entity.y));
+        }
+      }
+    }
   });
 
   // Entity
