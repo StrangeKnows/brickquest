@@ -10998,6 +10998,69 @@ UNTOUCHED: server.js, rumble_test.html.
 
 ---
 
+### v0.16.80 — Touch damage to mirrors (Path A combat parity)
+
+> "no damage on touch collision between mirror and host entity"
+
+Mirror walks into a goblin → bumps but doesn't take damage.
+Solo: walking into a goblin = touch damage. This push closes
+that gap.
+
+**Implementation:** new block in `updateEntity` after the
+existing host-touch-damage path. For `pat === 'touch'`
+entities with cooldown ready, find the closest mirror in
+contact range and send `rumble_player_damage` wire event
+(reusing the v0.16.78 channel). Set entity bounce-back away
+from mirror, set cooldown.
+
+**Cooldown is shared.** Host's touch path runs first; if it
+consumes cooldown, mirror block skips. If host wasn't in range
+(or had iframes / arc wall blocked / etc.), mirror block can
+attack. Per memory rule #14 (UNITY): same cooldown gates both
+target paths, no double-fire.
+
+**Mirror handles damage application.** Wire payload is raw
+damage; mirror's `applyRemoteEnemyDamage` (added v0.16.78)
+routes through `_applyEnemyMeleeDamage` so iframes, armor
+absorb, weakness multiplier, arsenal triggers all fire on the
+mirror's local state.
+
+**What's deferred (host doesn't know mirror's local state):**
+- Arc walls — mirror's gray walls don't block host's entities
+  yet. Mirror walks into a host entity even if mirror's arc
+  wall is between them.
+- Weakness multiplier — host computes `g.dmg` raw; mirror's
+  weakness state isn't replicated to host yet.
+- _battleStats accounting for damage taken (host owns its own
+  stats; mirror tracks own client-side).
+- Per-mirror shrapnel (Blocksmith reactive armor) — not yet.
+
+These are follow-ups when full bidirectional state replication
+ships.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble_test.html.
+
+---
+
+**Test focus:**
+
+1. Mirror walks into a goblin (or any touch-attacker) →
+   should take damage on contact, see HP drop + damage floater.
+2. Goblin bounces back off mirror after touch (same
+   feel as solo).
+3. Host out of range, entity walks toward host through mirror
+   → mirror gets touched as entity passes through collision
+   range.
+4. Solo regression: walking into goblin still works the same.
+5. Multiple mirrors clustered → entity attacks the closest
+   one, not all of them simultaneously (cooldown gates).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

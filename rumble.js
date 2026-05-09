@@ -6714,6 +6714,80 @@ function updateEntity(g, dt, bounds) {
     if (player.hp <= 0 && !player.bleedOut) respawnPlayer();
   }
 
+  // v0.16.80 — Path A: touch damage to mirrors. Host's entity didn't
+  // attack host this tick (host out of range, had iframes, or arc wall
+  // blocked). If a mirror is in contact range and the entity's
+  // cooldown is still ready, the entity attacks the closest mirror.
+  //
+  // Limitations vs host touch damage:
+  //   - Skips arc-wall block check (mirror's walls live on mirror's
+  //     client; host doesn't know about them yet — own item)
+  //   - Skips weakness multiplier (host doesn't know mirror's status)
+  //   - Skips host's armor/shrapnel (mirror handles armor on receive
+  //     via _applyEnemyMeleeDamage)
+  //   - Skips _battleStats accounting (those are host's stats; mirror
+  //     tracks its own client-side)
+  //   - Skips arsenalOnTouch (mirror's arsenal triggers locally on
+  //     receive via _applyEnemyMeleeDamage)
+  // What we DO own: bounce direction (toward away-from-mirror), entity
+  // attack cooldown, flash. Same gates as host-touch (not dazed/confused/
+  // silenced, cooldown ready, pat === 'touch').
+  if (pat === 'touch' && !_mirrorMode && !g.dazed && !g.confused
+      && (g.silencedTimer||0) <= 0 && g.attackCooldown <= 0
+      && _mpAllyOrder && _mpAllyOrder.length > 0
+      && typeof window !== 'undefined' && window._mpWS && window._mpWS.readyState === 1) {
+    var _tBounds = getRumbleBounds();
+    var _tW = _tBounds.w || 1, _tH = _tBounds.h || 1;
+    var _tAllyR = 12;
+    var _tContact = g.r + _tAllyR;
+    var _tNearest = null;
+    var _tNearestDist = Infinity;
+    var _tNearestDx = 0, _tNearestDy = 0;
+    for (var _ti = 0; _ti < _mpAllyOrder.length; _ti++) {
+      var _tAid = _mpAllyOrder[_ti];
+      var _tAlly = _mpAllyTargets[_tAid];
+      if (!_tAlly || !_tAlly.alive || _tAlly.spectating) continue;
+      var _tAx = _tBounds.x + _tAlly.currentNX * _tW;
+      var _tAy = _tBounds.y + _tAlly.currentNY * _tH;
+      var _tAdx = _tAx - g.x, _tAdy = _tAy - g.y;
+      var _tAdist = Math.sqrt(_tAdx*_tAdx + _tAdy*_tAdy);
+      if (_tAdist < _tContact && _tAdist < _tNearestDist) {
+        _tNearest = _tAlly;
+        _tNearestDist = _tAdist;
+        _tNearestDx = _tAdx;
+        _tNearestDy = _tAdy;
+      }
+    }
+    if (_tNearest) {
+      // Send raw damage event — mirror applies armor/iframes/etc. on
+      // receive through its local _applyEnemyMeleeDamage pipeline.
+      try {
+        window._mpWS.send(JSON.stringify({
+          type: 'rumble_player_damage',
+          payload: {
+            targetPlayerId: _tNearest.id,
+            dmg: g.dmg || 1,
+            sourceType: g.type || 'enemy',
+          },
+        }));
+      } catch (e) { /* socket race; mirror's iframes still gate next tick */ }
+      // Bounce entity back from contact (away from the mirror).
+      if (_tNearestDist > 0) {
+        var _tBnx = -_tNearestDx / _tNearestDist;
+        var _tBny = -_tNearestDy / _tNearestDist;
+        g.bounceVx = _tBnx * 320;
+        g.bounceVy = _tBny * 320;
+        g.bounceTimer = 0.5;
+        g.state = 'bounce';
+      }
+      // Attack cooldown matches host-touch path (slow-aware).
+      var _tIsSlowed = g.attackSlowed || g.attackDebuff > 0
+        || g.slowed || g.greenSlowed || g.whiteFieldSlowed;
+      g.attackCooldown = _tIsSlowed ? 2.4 : 1.2;
+      g.flashTimer = 0.2;
+    }
+  }
+
   // Player iframes
   if (player.iframes > 0) {
     player.iframes = Math.max(0, player.iframes - dt);
