@@ -3255,13 +3255,35 @@ function mpConnect(cls, m, onReady) {
         _mpEntityHostId = msg.entityHostId;
         var wasHost = _mpIsEntityHost;
         _mpIsEntityHost = (msg.entityHostId === _mpPlayerId);
-        if (!wasHost && _mpIsEntityHost) {
-          console.log('[MP] Promoted to entity host — starting local simulation');
-          // We're now the simulator. If we'd been suppressing local
-          // entities as a mirror, we'd need to re-spawn the current
-          // wave here. For now (mirror suppression isn't implemented
-          // in v0.16.74; mirrors still spawn locally but visualize
-          // host's entities), nothing to do.
+        if (wasHost !== _mpIsEntityHost) {
+          // v0.16.76 — Role transitioned mid-session via session_state.
+          // Update engine's mirror flag to match. (session_joined handles
+          // the initial role set; this path catches mid-session changes
+          // from host disconnect → re-election.)
+          if (typeof Rumble !== 'undefined' && Rumble.setMirrorMode) {
+            Rumble.setMirrorMode(!_mpIsEntityHost);
+          }
+          console.log('[ROLE-DIAG] session_state role transition: ' +
+            (wasHost ? 'HOST' : 'MIRROR') + ' → ' +
+            (_mpIsEntityHost ? 'HOST' : 'MIRROR') +
+            ' (entityHostId=' + _mpEntityHostId + ')');
+          if (!wasHost && _mpIsEntityHost) {
+            // Promoted from mirror to host. Our local entities array
+            // contains _foreign entries from being a mirror. Clear
+            // them — they're host's old data and we shouldn't broadcast
+            // them as our canonical state. Local entity simulation
+            // resumes from here. The next wave clear will trigger
+            // continueToNextWave normally.
+            //
+            // NOTE: this means a brief gap where the new host has no
+            // entities until they're re-spawned. Trade-off vs
+            // broadcasting stale foreign data. Per memory rule #14
+            // (UNITY) — clean state over partial state.
+            console.log('[ROLE-DIAG] Promoted to host — clearing foreign entities, resuming local sim');
+            if (typeof Rumble !== 'undefined' && Rumble.clearArena) {
+              Rumble.clearArena();
+            }
+          }
         }
       }
       // v0.16.74 — Mirror: render host's entities instead of local.
@@ -3289,12 +3311,20 @@ function mpConnect(cls, m, onReady) {
     } else if (msg.type === 'rumble_session_joined') {
       console.log('[MP] Joined session', msg.sessionId, '— playerCount', msg.playerCount,
         '— wave', msg.wave, '— host?', msg.isEntityHost);
+      // v0.16.76 — Role transition log on session_joined (covers
+      // initial join AND reconnect after a drop). If reconnecting,
+      // the previous role may differ from the new role (host went
+      // away during disconnect, was re-elected).
+      var prevRole = _mpIsEntityHost ? 'HOST' : 'MIRROR';
       // v0.16.74 — Capture host status from join ack. First joiner
       // becomes host; subsequent joiners are mirrors. Behavior diverges
       // from this point: host simulates and broadcasts, mirrors render
       // host's broadcast and forward damage events through server.
       _mpIsEntityHost = !!msg.isEntityHost;
       _mpEntityHostId = msg.entityHostId || _mpPlayerId;
+      var newRole = _mpIsEntityHost ? 'HOST' : 'MIRROR';
+      console.log('[ROLE-DIAG] session_joined role: ' + prevRole + ' → ' + newRole +
+        ' (entityHostId=' + _mpEntityHostId + ' myPid=' + _mpPlayerId + ')');
       // Tell engine our role so it skips local AI ticks on foreign
       // entities (mirror) or runs them normally (host).
       if (typeof Rumble !== 'undefined' && Rumble.setMirrorMode) {

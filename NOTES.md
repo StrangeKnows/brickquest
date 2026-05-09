@@ -10676,6 +10676,112 @@ UNTOUCHED: rumble.js, rumbleEngine.js, characters.js.
 
 ---
 
+### v0.16.76 — Promotion path fix + role transition diagnostic
+
+> "now it was the non host device, skipped from 2 to 3 then joined 2"
+
+**Per memory rule #6 — diagnostic + targeted fix.** Server log
+proved wave-8 was never sent. Real bug is rejoin/promotion
+path:
+
+Server log shows iOS connected first → became host → advanced
+to wave 3 → dropped (1006) → reconnected. Mac was promoted to
+host while iOS was gone. iOS rejoined as mirror.
+
+Reading the v0.16.74 promotion code revealed two bugs:
+
+**Bug 1: `setMirrorMode` not called on promotion via
+session_state.** The flag flip only happened on session_joined.
+If session_state caught the role change first (faster than
+session_joined ack), the flag stayed stale. Result: a
+just-promoted host kept `_mirrorMode=true`, suppressing local
+AI on its own canonical entities.
+
+**Bug 2: Stale comment.** Line 3260 comment claimed "mirror
+suppression isn't implemented in v0.16.74" — but it WAS
+implemented. The comment was leftover from an earlier draft
+and misled my own audit.
+
+**Bug 3 (architectural, partial fix):** When a player promotes
+from mirror → host, their local `entities` array contains
+`_foreign: true` entries from the previous host. These entries
+are stale and shouldn't be broadcast as the new host's
+canonical state. Fix: `clearArena()` on promotion. Trade-off:
+brief entity gap during promotion vs broadcasting stale data.
+Per memory rule #14 (UNITY) — clean state over partial.
+
+---
+
+**Diagnostic added: `[ROLE-DIAG]` lines.**
+
+Two new log sites:
+- `session_joined` ack — logs PREV → NEW role with entityHostId
+  + own playerId. Catches initial joins AND reconnects.
+- `session_state` mid-session role transition — logs the
+  promotion/demotion with reason.
+
+If wave-2-instead-of-wave-3 reproduces, these logs will show:
+- What role was iOS assigned on rejoin?
+- Was the role transition logged?
+- Did mirror_mode flip correctly?
+
+**Per memory rule #28 (unify-at-choke-point):** ROLE-DIAG
+prefix matches WAVE-DIAG style for greppable logs. Both write
+to console at every transition.
+
+---
+
+**What this push does NOT do:**
+
+- Doesn't address ID collision between previous-host's local
+  entities and new-host's broadcast IDs (both count from e_1).
+  If iOS was host → dropped → Mac promoted → iOS rejoined as
+  mirror, iOS's local entities (e_1, e_2, e_3) collide with
+  Mac's broadcast entities (e_1, e_2, e_3). The clearArena on
+  promotion fixes the new-host side but the rejoining-as-mirror
+  side might still see ID overlap.
+- Doesn't ship a fix for the wave bounce (yet). Need more
+  data after this diagnostic lands. The fix may be: on
+  reconnect-as-mirror, clear local entities AND let
+  `setRemoteEntities` rebuild from scratch.
+- iOS 2-finger tap fix still pending.
+
+---
+
+**Files changed:** `rumble_test.html`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble.js, rumbleEngine.js.
+
+---
+
+**Test focus:**
+
+1. Reproduce the rejoin scenario from this turn. Watch for
+   `[ROLE-DIAG]` lines in console. Confirm:
+   - iOS shows: `session_joined role: HOST → MIRROR` on rejoin
+   - Mac shows: `session_state role transition: MIRROR → HOST`
+     when iOS dropped (or `session_joined role: MIRROR → HOST`
+     if Mac reconnected too)
+2. After rejoin, what does iOS HUD show for wave?
+3. Are entities visible on iOS post-rejoin (mirror role)?
+4. Does Mac broadcast non-empty entities post-promotion?
+
+---
+
+**Standards audit (rule #17 — push #18 of S016 entity authority arc):**
+
+- Rule #6: targeted fix on known issue (stale comment +
+  missing flag flip), diagnostic on remaining unknowns
+- Rule #14: clean state on promotion via clearArena
+- Rule #15 (handoff hygiene): re-read v0.16.74 code carefully
+  before writing fixes; caught the stale comment
+- Rule #19: committed to clearArena tradeoff without sub-questions
+- Rule #25: patch
+- Rule #28: ROLE-DIAG prefix matches WAVE-DIAG, single console
+  channel for diagnostic data
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
@@ -10829,6 +10935,34 @@ written. But the shared field plumbing means the second color
 costs less than the first — once `whiteFields[]` infrastructure
 is in, `blackFields[]` is mostly schema reuse with different
 on-tick behavior (heal vs damage).
+
+**White and wither — remove caps (logged S016 v0.16.75):**
+
+> "white should not have a cap [n]or wither"
+
+Two caps Ross flagged for removal in the white/black build:
+
+1. **White heal cap at hpMax** (current at `doWhiteHeal` line 8076-77:
+   `cap = Math.max(player.hpMax, player.hp); player.hp = Math.min(cap, ...)`).
+   Ross wants white heal to overheal beyond hpMax. Open
+   question: is overheal infinite, or a temporary buff that
+   decays? If decaying, what's the rate? If it's persistent
+   shield-like overheal, that's a meaningful balance shift —
+   white-stacked players become very tanky.
+2. **Wither stack cap MAX_WITHER_STACKS=5** (rumble.js line 7032).
+   Ross wants no upper limit on stacks. Currently wither
+   amplifies subsequent damage exponentially-ish; uncapped
+   stacks could mean a heavily-withered boss takes catastrophic
+   damage from any tap-fire. Open question: is uncapped just
+   "you can keep applying" with diminishing returns past 5,
+   or is the damage curve also uncapped? The damage formula
+   needs review at the same time as the cap.
+
+**Shared theme:** white and black/wither are the
+"investment-pays-off" colors. Caps at 5 and at hpMax limit how
+much the investment can compound. Removing caps changes the
+risk/reward curve significantly — worth tuning during the
+white+black build, not as a one-off change.
 
 ---
 
