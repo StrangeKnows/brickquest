@@ -11061,6 +11061,96 @@ UNTOUCHED: server.js, rumble_test.html.
 
 ---
 
+### v0.16.81 — Per-target chase AI (Path A targeting parity)
+
+> "there was some damage received from entity to mirror; could
+> only get this to trigger once after repeatedly running mirror
+> into entity; per target chase next?"
+
+**Diagnosis (per memory rule #6):** "once-only damage" was
+correct behavior under v0.16.80 architecture — entity touched
+mirror once, bounced away, then chased back to host (its only
+target), never returning. The fix isn't iframes or cooldowns;
+it's targeting.
+
+**Per-target chase:** entities now pick a target = nearest
+player among {host, alive mirrors}. Move toward target. Aggro
+state transitions on target distance, not host distance.
+
+**Scope: chase movement + aggro state only.**
+
+Other AI patterns (ranged, pulse, heavy_melee, teleport,
+true_burrow) still target host this push. They use the original
+`distToPlayer` / `dx` / `dy` variables which still resolve to
+host. Migrating those is per-AI-branch follow-up. Most common
+entities (goblin, skeleton, knight) use plain chase, so the
+user-felt impact is wide.
+
+**Implementation:** at the top of `updateEntity`, after computing
+`distToPlayer`, also compute `targetX/Y/Dx/Dy/Dist` — the closest
+of host's player and any alive mirror. Defaults to host's
+values (so existing host-only AI still works). Only the chase
+movement block (line ~6586) and aggro state transitions
+(line ~6126) read from target variables.
+
+**Per memory rule #14 (UNITY):** target-resolution lives at one
+choke (top of updateEntity). All AI branches that want target-
+based behavior read from it. Migrating other branches is just
+swapping `distToPlayer` → `targetDist` in those branches'
+calculations.
+
+**Per memory rule #29 (bug-from-duplication):** no parallel AI
+loops, no parallel state machines. One target resolver, one
+state machine, scope-extended via shared variable substitution.
+
+---
+
+**What this fixes for users:**
+
+- Mirror walks past entity → entity aggros, chases mirror
+- Mirror takes touch damage repeatedly (entity stays in range)
+- Mirror near host but closer → entity chases mirror first
+- Aggro range works for mirrors (entities patrol, then engage
+  when mirror approaches)
+
+**What's still NOT here:**
+
+- Ranged attackers still aim at host (slingers don't shoot
+  mirrors)
+- Pulse entities still pulse-damage host only
+- Heavy melee swing still telegraphs at host
+- Teleport entities still teleport near host
+- Boss / signature AIs (true_burrow, pack_flank) still target
+  host
+- Per-mirror weakness/armor not replicated to host
+
+These are follow-up arcs, each per AI branch.
+
+---
+
+**Files changed:** `rumble.js`, `NOTES.md`.
+
+UNTOUCHED: server.js, rumble_test.html.
+
+---
+
+**Test focus:**
+
+1. Mirror alone in arena, host idle far away → goblins should
+   chase mirror, bump into mirror, deal touch damage repeatedly.
+2. Both host and mirror near goblin → goblin chases whichever
+   is closer.
+3. Mirror runs past entity that was chasing host → entity
+   should pivot toward mirror briefly, then back to host as
+   mirror passes.
+4. Solo regression: chase behavior unchanged when no mirrors
+   present.
+5. Wave 2+ entities with mixed AI (knights, slingers) →
+   knights chase mirror, slingers still aim at host
+   (pre-migration).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

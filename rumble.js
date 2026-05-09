@@ -6122,11 +6122,47 @@ function updateEntity(g, dt, bounds) {
   var dy = player.y - g.y;
   var distToPlayer = Math.sqrt(dx*dx + dy*dy);
 
+  // v0.16.81 — Path A per-target chase. Pick nearest player among
+  // {host, alive mirrors}. Used by chase movement and aggro state
+  // transitions so entities can pursue the closest player, not just
+  // host. Other AI patterns (ranged, pulse, heavy_melee, teleport)
+  // still target host this push — they use distToPlayer / dx / dy
+  // directly. Migrating those is a follow-up.
+  //
+  // Targeting policy: nearest player (recomputed every tick). No
+  // sticky/aggro yet — entity smoothly switches to whoever is
+  // closest. This means a mirror running past an entity that's
+  // chasing host will steal aggro briefly. Works for v1.
+  //
+  // Skipped on mirror clients (entities are foreign, don't tick AI).
+  var targetX = player.x, targetY = player.y;
+  var targetDx = dx, targetDy = dy, targetDist = distToPlayer;
+  if (!_mirrorMode && _mpAllyOrder && _mpAllyOrder.length > 0) {
+    var _tgBounds = bounds;
+    var _tgW = _tgBounds.w || 1, _tgH = _tgBounds.h || 1;
+    for (var _tgi = 0; _tgi < _mpAllyOrder.length; _tgi++) {
+      var _tgAid = _mpAllyOrder[_tgi];
+      var _tgAlly = _mpAllyTargets[_tgAid];
+      if (!_tgAlly || !_tgAlly.alive || _tgAlly.spectating) continue;
+      var _tgAx = _tgBounds.x + _tgAlly.currentNX * _tgW;
+      var _tgAy = _tgBounds.y + _tgAlly.currentNY * _tgH;
+      var _tgAdx = _tgAx - g.x, _tgAdy = _tgAy - g.y;
+      var _tgAdist = Math.sqrt(_tgAdx*_tgAdx + _tgAdy*_tgAdy);
+      if (_tgAdist < targetDist) {
+        targetX = _tgAx; targetY = _tgAy;
+        targetDx = _tgAdx; targetDy = _tgAdy;
+        targetDist = _tgAdist;
+      }
+    }
+  }
+
   // ── State transitions ──
   if (g.state !== 'bounce') {
-    if (!g.aggroed && distToPlayer < g.AGGRO_RANGE) {
+    // v0.16.81 — Aggro uses targetDist so an entity can be aggro'd
+    // by the nearest player (host or mirror), not just host.
+    if (!g.aggroed && targetDist < g.AGGRO_RANGE) {
       g.aggroed = true;
-    } else if (g.aggroed && distToPlayer > g.DEAGGRO_RANGE) {
+    } else if (g.aggroed && targetDist > g.DEAGGRO_RANGE) {
       g.aggroed = false;
     }
     g.state = g.aggroed ? 'chase' : 'patrol';
@@ -6583,9 +6619,13 @@ function updateEntity(g, dt, bounds) {
           }
         } else {
           // Plain chase (goblin, skeleton, knight).
-          if (distToPlayer > 2) {
-            g.x += (dx/distToPlayer) * effSpeed * dt;
-            g.y += (dy/distToPlayer) * effSpeed * dt;
+          // v0.16.81 — Move toward `target` (nearest player among
+          // host + mirrors) instead of `player` directly. In solo,
+          // target IS player. In coop, can be mirror if mirror is
+          // closer.
+          if (targetDist > 2) {
+            g.x += (targetDx/targetDist) * effSpeed * dt;
+            g.y += (targetDy/targetDist) * effSpeed * dt;
           }
         }
       }
