@@ -4740,6 +4740,68 @@ function _applyEnemyMeleeDamage(g, dmg, dx, dy, dist) {
   // PHASE C — arsenal triggers on every successful enemy hit on player.
   applyArsenalOnTouch(g, dx, dy, dist);
   if (player.hp <= 0 && !player.bleedOut && typeof respawnPlayer === 'function') respawnPlayer();
+  // v0.16.78 — Path A coop: also damage any MIRROR allies within
+  // melee range of this attack. Currently host's entity AI targets
+  // host's `player` only; this helper extends the damage so a
+  // monster swinging at the host that happens to also be near a
+  // mirror player splashes onto them too. Combat becomes
+  // bidirectional — mirrors can be hurt by entities they're near.
+  // Note: monster TARGETING is still host-only (entities chase
+  // host's player). Full per-target AI is a future arc.
+  _damageMirrorsInMeleeRange(g, dmg);
+}
+
+// v0.16.78 — Splash damage to mirror allies within an entity's
+// melee range. Iterates `_mpAllyTargets` (set by Rumble.setAllyState
+// from session_state broadcasts), converts each ally's normalized
+// position to pixel coords, and sends a wire event for any mirror
+// inside `g.r + ally.r + tolerance`.
+//
+// Wire event payload: { targetPlayerId, dmg, sourceType }
+//   - server forwards to the target's session ws
+//   - mirror's handler applies to local player.hp
+//
+// Range: entity radius + 18px tolerance + assumed ally radius 12.
+// Same generous tolerance the entity uses for its own swings.
+function _damageMirrorsInMeleeRange(g, dmg) {
+  if (typeof window === 'undefined' || !window._mpWS) return;
+  if (window._mpWS.readyState !== 1) return;
+  // Only host broadcasts splash damage. Mirrors (where this function
+  // would also run if our local _applyEnemyMeleeDamage was called via
+  // applyRemoteEnemyDamage) are guarded by checking _mirrorMode.
+  if (_mirrorMode) return;
+  if (!_mpAllyTargets || !_mpAllyOrder || _mpAllyOrder.length === 0) return;
+  var ex = (g && typeof g.x === 'number') ? g.x : null;
+  var ey = (g && typeof g.y === 'number') ? g.y : null;
+  // Synthetic source (no real entity) — applyRemoteEnemyDamage on
+  // host would also hit here in theory, but host never receives
+  // remote enemy damage messages (server filters them by host).
+  // Belt-and-suspenders: bail if no position.
+  if (ex === null || ey === null) return;
+  var bounds = getRumbleBounds();
+  var W = bounds.w || 1, H = bounds.h || 1;
+  var range = (g.r || 14) + 12 + 18;  // entity r + ally r + tolerance
+  var rangeSq = range * range;
+  for (var i = 0; i < _mpAllyOrder.length; i++) {
+    var aid = _mpAllyOrder[i];
+    var ally = _mpAllyTargets[aid];
+    if (!ally || !ally.alive || ally.spectating) continue;
+    var ax = bounds.x + ally.currentNX * W;
+    var ay = bounds.y + ally.currentNY * H;
+    var dx = ax - ex, dy = ay - ey;
+    if (dx*dx + dy*dy > rangeSq) continue;
+    // In range — send damage event to this mirror.
+    try {
+      window._mpWS.send(JSON.stringify({
+        type: 'rumble_player_damage',
+        payload: {
+          targetPlayerId: ally.id,
+          dmg: dmg,
+          sourceType: (g && g.type) || 'enemy',
+        },
+      }));
+    } catch (e) { /* socket race; mirror will reconnect, damage lost is OK */ }
+  }
 }
 
 // ═══════════════════════════════════════════════════
@@ -13496,6 +13558,22 @@ window.Rumble = {
   },
   isMirrorMode: function() {
     return !!_mirrorMode;
+  },
+
+  // v0.16.78 — Mirror-side: host's entity damaged us. Server forwarded
+  // the event; mirror calls this to apply damage through the standard
+  // pipeline (iframes, armor absorb, weakness mult, arsenal triggers).
+  // The recursion guard prevents the splash-damage broadcaster from
+  // re-firing — our local damage has no entity context (g is null),
+  // and the splash function checks for that.
+  applyRemoteEnemyDamage: function(dmg, sourceType) {
+    if (!player) return;
+    // Pass null for g so _applyEnemyMeleeDamage's own splash call
+    // bails out (sees ex===null, returns). dx/dy/dist are unknown
+    // since we don't have the entity here; pass zeros.
+    if (typeof _applyEnemyMeleeDamage === 'function') {
+      _applyEnemyMeleeDamage({ type: sourceType || 'enemy' }, dmg, 0, 0, 0);
+    }
   },
 };
 

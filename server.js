@@ -1241,6 +1241,38 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
+    // v0.16.78 — Path A coop: host damaging a mirror player. Host's
+    // entity AI computed that an attack splash hit a mirror; host
+    // sends this event to relay damage to that specific mirror.
+    // Server validates sender is the entity host (mirrors can't
+    // grief other mirrors via this channel) and forwards to the
+    // target's ws if connected.
+    //
+    // Payload: { targetPlayerId, dmg, sourceType }
+    if (type === 'rumble_player_damage') {
+      const reg = rumbleClientSession.get(ws);
+      if (!reg) return;
+      const sess = rumbleSessions[reg.sessionId];
+      if (!sess) return;
+      // Only accept from entity host. Prevents mirrors from
+      // synthesizing damage events for each other.
+      if (sess.entityHostId !== reg.playerId) return;
+      if (!P || typeof P.targetPlayerId !== 'string' || typeof P.dmg !== 'number') return;
+      // Don't relay back to host (host's own damage applies locally).
+      if (P.targetPlayerId === reg.playerId) return;
+      const targetWs = _findWsForPlayer(P.targetPlayerId);
+      if (targetWs && targetWs.readyState === 1) {
+        targetWs.send(JSON.stringify({
+          type: 'rumble_player_damage',
+          payload: {
+            dmg: P.dmg,
+            sourceType: P.sourceType || 'enemy',
+          },
+        }));
+      }
+      return;
+    }
+
     if (type === 'rumble_player_state') {
       // Payload: { nx, ny, hp, hpMax, armor, bricks, alive, spectating }
       // Client tick — update server's record of this player's state.

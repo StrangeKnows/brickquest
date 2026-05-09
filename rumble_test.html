@@ -3389,6 +3389,16 @@ function mpConnect(cls, m, onReady) {
           Rumble.applyRemoteDamage(ev.entityId, ev.dmg, ev.color, ev.casterPlayerId);
         }
       }
+    } else if (msg.type === 'rumble_player_damage') {
+      // v0.16.78 — Host's entity damaged us. Apply to local player HP
+      // through engine's existing damage-to-player path so iframes,
+      // armor absorb, weakness multiplier, and arsenal triggers all
+      // fire correctly. Same wire shape as host→server (server just
+      // forwarded), payload = { dmg, sourceType }.
+      var P = msg.payload || msg;
+      if (typeof Rumble !== 'undefined' && Rumble.applyRemoteEnemyDamage) {
+        Rumble.applyRemoteEnemyDamage(P.dmg || 1, P.sourceType || 'enemy');
+      }
     } else if (msg.type === 'rumble_error') {
       console.warn('[MP] Server error:', msg.msg);
     }

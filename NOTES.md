@@ -10855,6 +10855,87 @@ ordering near deferred-execution paths.
 
 ---
 
+### v0.16.78 — Path A bidirectional damage (host's monsters → mirrors)
+
+> "android player able to damage entities, not targeted by entities"
+> "lets continue tieng everything together"
+
+**Closing the coop combat asymmetry.** v0.16.74 shipped one-way
+damage (mirror → host's entities). This push closes the loop:
+host's entities can now hurt mirror players in melee range.
+
+**Scope: melee splash, not per-target AI.** Host's entities
+still chase host's `player` — entity targeting AI is unchanged.
+But when an entity's swing/attack lands on host, any mirror
+player within melee range (`g.r + ally.r + 18px tolerance`)
+also takes damage. Per memory rule #19: shippable interim shape
+that uses the SAME wire protocol full per-target AI will use.
+
+**Architecture:**
+
+- New helper `_damageMirrorsInMeleeRange(g, dmg)` in rumble.js
+- Called from `_applyEnemyMeleeDamage` after local damage applies
+- Iterates `_mpAllyTargets` (already populated by setAllyState),
+  computes pixel distance from entity to each mirror, sends
+  `rumble_player_damage` wire event for any in range
+- Host-only: guarded by `_mirrorMode` check (mirror's local
+  `_applyEnemyMeleeDamage` from the receive path doesn't echo)
+
+**Wire shape:**
+
+- Host → server: `{ type: 'rumble_player_damage', payload:
+  { targetPlayerId, dmg, sourceType } }`
+- Server: validates sender is `entityHostId`, forwards to target
+  ws via `_findWsForPlayer`. Mirrors can't synthesize damage
+  events for each other (anti-grief).
+- Server → mirror: same shape minus targetPlayerId
+- Mirror: `Rumble.applyRemoteEnemyDamage(dmg, sourceType)`
+  routes through standard `_applyEnemyMeleeDamage` (iframes,
+  armor absorb, weakness mult, arsenal triggers all fire).
+
+**Per memory rule #28 (unify-at-choke-point):** damage to
+player goes through one engine function (`_applyEnemyMeleeDamage`)
+for both host's local damage and mirror's wire-received damage.
+The mirror-mode flag distinguishes "broadcast splash" vs "apply
+already-received damage" so there's no recursion.
+
+**Per memory rule #29 (bug-from-duplication):** no parallel
+damage paths. Mirror's incoming damage uses the same engine
+pipeline as solo/host damage. The only divergence is the
+`_damageMirrorsInMeleeRange` broadcaster, which is host-only.
+
+---
+
+**What's still NOT in this push:**
+
+- **Projectile damage to mirrors.** Helper only fires from melee
+  attacks (`_applyEnemyMeleeDamage`). Enemy projectiles (boulder
+  hits, spit attacks) don't yet splash-damage mirrors. Follow-up.
+- **Per-target entity AI.** Entities still chase host's player
+  exclusively. A mirror standing alone won't be approached.
+  Major refactor of `updateEntity` movement/aim code.
+- **Cast/projectile FX over wire** (still deferred).
+- **iOS 2-finger tap fix** (still deferred).
+
+---
+
+**Files changed:** `server.js`, `rumble.js`, `rumble_test.html`, `NOTES.md`.
+
+**Test focus:**
+
+1. Mac HOST + Android MIRROR coop. Mirror walks INTO host's
+   entity (close enough for melee). Mirror's HP should drop on
+   the next entity attack. Damage floats and HP bar reflect
+   the hit.
+2. Mac's view: entity attacks normally, host damage works as
+   today (no regression).
+3. If three players (host + 2 mirrors) and entity hits both
+   mirrors in same swing, both should take damage.
+4. Server log: should see no spurious `rumble_player_damage`
+   events from mirrors (server rejects non-host senders).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
