@@ -241,8 +241,11 @@ var ENTITY_REGISTRY = {
     // Tuning:
     //   shieldTurnRate lower  → easier to flank (bigger backstab window)
     //   shieldTurnRate higher → shield tracks aggressively, no flank
-    //   Math.PI ≈ 180°/sec — sprint-strafing can flank; walking can't.
-    shieldTurnRate: Math.PI,        // rad/sec — 180°/sec
+    //   v0.16.83 tuning pass: EXAGGERATED slow rate for visible testing.
+    //     Math.PI / 6 = 30°/sec = 12 seconds for a full rotation.
+    //     Reduce to Math.PI / 2 (90°/sec) or Math.PI (180°/sec) once
+    //     the mechanic is verified visible and the feel is dialed in.
+    shieldTurnRate: Math.PI / 6,    // rad/sec — 30°/sec (exaggerated for testing)
     shieldArcDeg: 120,              // shield covers ±60° from facing
     shieldBlockPct: 0.5,            // frontal hits take 50% damage
     shieldPierceBlockPct: 0.25,     // piercing frontal hits take 75% (weaker block)
