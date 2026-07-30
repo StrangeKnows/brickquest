@@ -5902,9 +5902,15 @@ function updateEntity(g, dt, bounds) {
       // First tick — snap.
       g.shieldFacingX = _dnX;
       g.shieldFacingY = _dnY;
-    } else if (g.swingState !== 'winding' && g.swingState !== 'cooldown') {
+    } else if (g.swingState !== 'winding' && g.swingState !== 'cooldown'
+               && g._sentinelState !== 'charging') {
       // Compute angular difference; rotate at most turnRate * dt.
       // Turn rate comes from schema — tuning happens in bestiary.js, not here.
+      // Freeze conditions:
+      //   - swingState winding/cooldown → knight committed to a swing
+      //   - sentinelState charging      → knight committed to a charge
+      // In both frozen cases, whatever shieldFacingX/Y was last stored
+      // stays — damage-check and render read the stored value directly.
       var _turnRate = (typeof g.shieldTurnRate === 'number') ? g.shieldTurnRate : Math.PI;
       var _cur = Math.atan2(g.shieldFacingY, g.shieldFacingX);
       var _des = Math.atan2(_dnY, _dnX);
@@ -5918,8 +5924,8 @@ function updateEntity(g, dt, bounds) {
       g.shieldFacingX = Math.cos(_new);
       g.shieldFacingY = Math.sin(_new);
     }
-    // (Wind-up/cooldown: shield facing frozen. swingTargetX/Y takes over
-    // in the damage-check + render blocks via the swingState branch.)
+    // (Frozen state: shield facing stays put — swing wind-up/cooldown OR
+    // sentinel charge. Damage-check and render both read stored value.)
   }
 
   // ── State transitions ──
@@ -6325,6 +6331,110 @@ function updateEntity(g, dt, bounds) {
             }
             g._blackOrbTimer = 4.5;   // every 4.5s
           }
+        }
+      } else if (aiType === 'sentinel') {
+        // v0.16.84 — Sentinel AI. Cursed knight and similar shield-carriers.
+        // Design: knight holds position when player is in standoff range,
+        // watches for player stillness, then commits to a charge at the
+        // last-known player position. Shield rotation is fully visible
+        // during standoff because the knight isn't chasing — the vector
+        // knight→player actually changes direction as the player moves
+        // around the knight.
+        //
+        // Schema fields (all read from bestiary.js — this code is
+        // entity-agnostic; any entity given ai: 'sentinel' plus these
+        // fields will behave the same way):
+        //   standoffRange          — engage distance (chase far, hold near)
+        //   chargeTriggerDelay     — sec of player stillness before charging
+        //   chargeSpeed            — pixels/sec during charge (usually 2x base)
+        //   chargeMaxDuration      — sec before giving up on a charge
+        //   playerStillThreshold   — pixels/sec below which player is "still"
+        //
+        // Sub-state (on entity, not schema):
+        //   g._sentinelState = 'standoff' | 'charging'
+        //   g._playerStillTimer — accumulated stillness in seconds
+        //   g._prevPlayerX/Y     — for velocity computation
+        //   g._chargeTimer       — remaining sec on active charge
+        //   g._chargeTargetX/Y   — snapshot of player pos at charge start
+        var _stdOff      = g.standoffRange       || 220;
+        var _chgDelay    = g.chargeTriggerDelay  || 1.2;
+        var _chgSpeed    = g.chargeSpeed         || 320;
+        var _chgMax      = g.chargeMaxDuration   || 1.8;
+        var _stillThresh = g.playerStillThreshold || 60;
+
+        if (!g._sentinelState) g._sentinelState = 'standoff';
+
+        // Compute player velocity for stillness detection.
+        if (typeof g._prevPlayerX !== 'number') {
+          g._prevPlayerX = player.x;
+          g._prevPlayerY = player.y;
+        }
+        var _spdx = player.x - g._prevPlayerX;
+        var _spdy = player.y - g._prevPlayerY;
+        var _pSpdSq = dt > 0 ? (_spdx*_spdx + _spdy*_spdy) / (dt*dt) : 0;
+        var _playerStill = _pSpdSq < _stillThresh * _stillThresh;
+        g._prevPlayerX = player.x;
+        g._prevPlayerY = player.y;
+
+        if (g._sentinelState === 'standoff') {
+          // Standoff: knight holds position. Shield rotation (top of
+          // updateEntity) continues to track player smoothly. Player
+          // circling the knight tightly WILL open the flank because
+          // rotation is bounded by shieldTurnRate.
+          //
+          // If player is outside standoff range, close in a bit — but
+          // don't full-chase; sentinel isn't a chaser. Slow approach so
+          // player can lead the knight into arena hazards.
+          if (distToPlayer > _stdOff) {
+            g.x += (dx/distToPlayer) * effSpeed * 0.4 * dt;
+            g.y += (dy/distToPlayer) * effSpeed * 0.4 * dt;
+            // Reset still-timer while closing — no charging until in range.
+            g._playerStillTimer = 0;
+          } else {
+            // In range. Watch player stillness.
+            if (_playerStill) {
+              g._playerStillTimer = (g._playerStillTimer || 0) + dt;
+            } else {
+              g._playerStillTimer = 0;
+            }
+            if (g._playerStillTimer >= _chgDelay) {
+              // Commit! Snapshot player position; enter charge.
+              g._sentinelState = 'charging';
+              g._chargeTimer = _chgMax;
+              g._chargeTargetX = player.x;
+              g._chargeTargetY = player.y;
+              g._playerStillTimer = 0;
+            }
+          }
+        } else if (g._sentinelState === 'charging') {
+          // Charge. Shield rotation is frozen (gate added in the shield-
+          // rotation block). Knight rushes at frozen target position.
+          // Existing touch-attack + bounce mechanic handles the contact.
+          g._chargeTimer -= dt;
+          var _cdx = g._chargeTargetX - g.x;
+          var _cdy = g._chargeTargetY - g.y;
+          var _cdist = Math.hypot(_cdx, _cdy);
+          if (_cdist > 2) {
+            g.x += (_cdx/_cdist) * _chgSpeed * dt;
+            g.y += (_cdy/_cdist) * _chgSpeed * dt;
+          }
+          // End charge on timeout OR arrival. Bounce-on-contact is handled
+          // by the touch-attack code, which sets state='bounce'; when
+          // bounce ends, we'll be back in this branch — reset to standoff.
+          if (g._chargeTimer <= 0 || _cdist < 5) {
+            g._sentinelState = 'standoff';
+            g._playerStillTimer = 0;
+          }
+        }
+
+        // If knight is currently bouncing (touch contact during charge),
+        // treat that as charge-terminated and go back to standoff on
+        // resume. This runs when bounce ends and state flips back to
+        // chase — the sentinel branch runs again with state='charging',
+        // and we reset.
+        if (g.state === 'bounce' && g._sentinelState === 'charging') {
+          g._sentinelState = 'standoff';
+          g._playerStillTimer = 0;
         }
       } else {
         // Default: chase (goblin/skeleton/wolf/knight legacy behavior).

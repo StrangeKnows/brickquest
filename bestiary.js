@@ -223,8 +223,25 @@ var ENTITY_REGISTRY = {
     hp: 30, hpMax: 30, speed: 160, r: 20,
     family: 'physical',
     resistances: _familyResist('physical'),
-    ai: 'chase', attackPattern: 'telegraph_swing',
+    // v0.16.84 — Sentinel AI. Knight holds position (standoff) when player
+    // is in range, watches for player stillness, then charges. Shield
+    // rotation (see shieldTurnRate) is visible during standoff because
+    // the knight isn't chasing you — vectors change direction as you
+    // move around it. Full-chase behavior would defeat the shield.
+    //
+    // Sentinel schema (all read by rumble.js — no hardcoded values):
+    //   standoffRange         — hold at this distance; approach slowly if farther
+    //   chargeTriggerDelay    — sec of player stillness → charge
+    //   chargeSpeed           — pixels/sec during charge (typically 2x base)
+    //   chargeMaxDuration     — sec before giving up on a charge
+    //   playerStillThreshold  — pixels/sec below which player is "still"
+    ai: 'sentinel', attackPattern: 'telegraph_swing',
     swingTelegraph: 0.45, swingDmg: 4, swingRadius: 50,
+    standoffRange: 220,
+    chargeTriggerDelay: 1.2,
+    chargeSpeed: 320,
+    chargeMaxDuration: 1.8,
+    playerStillThreshold: 60,
     color: '#4a4a6a', icon: '⚔️',
     loot: [
       { color: 'red',    chance: 0.30, min: 1, max: 1 },
@@ -243,8 +260,9 @@ var ENTITY_REGISTRY = {
     //   shieldTurnRate higher → shield tracks aggressively, no flank
     //   v0.16.83 tuning pass: EXAGGERATED slow rate for visible testing.
     //     Math.PI / 6 = 30°/sec = 12 seconds for a full rotation.
-    //     Reduce to Math.PI / 2 (90°/sec) or Math.PI (180°/sec) once
-    //     the mechanic is verified visible and the feel is dialed in.
+    //     With sentinel AI (v0.16.84), rotation is finally visible
+    //     because knight isn't constantly moving to face player. Circle
+    //     the standoff knight tightly to see the flank window.
     shieldTurnRate: Math.PI / 6,    // rad/sec — 30°/sec (exaggerated for testing)
     shieldArcDeg: 120,              // shield covers ±60° from facing
     shieldBlockPct: 0.5,            // frontal hits take 50% damage

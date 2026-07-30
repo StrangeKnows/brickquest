@@ -11304,6 +11304,135 @@ dm_screen.html.
 
 ---
 
+### v0.16.83 — Shield turn rate exaggerated for testing
+
+Tuning-only patch. `shieldTurnRate` on cursed_knight bumped
+from `Math.PI` (180/sec) down to `Math.PI / 6` (30/sec, 12s
+per full rotation). Purpose: rule out "rotation is happening
+but too fast to see." Ross reported still not visible after
+this bump, which pointed to the real cause — not tuning, but
+AI. Cursed_knight's chase-behavior meant knight-to-player
+vector barely rotates during play, so the shield never needs
+to catch up. Led directly to v0.16.84.
+
+---
+
+### v0.16.84 — Sentinel AI for cursed_knight
+
+> "perhaps we need to give the knight different ai, standing
+> still for a time then charging when player stands still for
+> a time, then there could be a patrol phase when player is
+> out of range."
+
+**Root cause diagnosis (per rule #6):** shield rotation was
+working the whole time. Slow-rotation wasn't visible because
+chase-AI moves the knight in the same direction as the player
+almost constantly, so the vector from knight to player never
+changes direction much. No need for shield to rotate → looks
+instant even at absurdly slow rates.
+
+**Fix the AI, not the shield rate.** Give the knight moments
+of stillness where shield rotation actually matters — and,
+as a bonus, put the previously-dead `telegraph_swing`
+attackPattern back into a real behavior arc.
+
+**Also fixes a latent bug.** Cursed knight had
+`attackPattern: 'telegraph_swing'` for months, but the
+telegraph_swing mechanic is only implemented in the
+`heavy_melee` AI branch. Since knight was `ai: 'chase'`, the
+swing telegraph never fired. Sentinel AI puts committed-action
+behavior back into the knight's fight loop.
+
+---
+
+**New AI: sentinel.**
+
+State machine on `g._sentinelState`:
+
+- **standoff** — knight holds position. Shield rotates
+  toward target at `shieldTurnRate` (schema). Watches player
+  velocity; if player is still for `chargeTriggerDelay`
+  seconds, commits to a charge.
+- **charging** — knight rushes at snapshot player position
+  at `chargeSpeed`. Shield is frozen (rotation gate excludes
+  charging state). Ends on: timeout (`chargeMaxDuration`),
+  arrival at target, or bounce from touch contact.
+
+Approach behavior: if player is farther than `standoffRange`,
+knight closes at 40% base speed (slow follow, not full chase).
+Once in range, standoff kicks in. Still-timer resets while
+closing.
+
+**Schema fields on cursed_knight (bestiary.js):**
+
+    ai: 'sentinel',
+    standoffRange: 220,
+    chargeTriggerDelay: 1.2,
+    chargeSpeed: 320,
+    chargeMaxDuration: 1.8,
+    playerStillThreshold: 60,
+
+**Runtime code (rumble.js):**
+
+- New AI branch `aiType === 'sentinel'` in the dispatcher.
+  All parameters read from schema; runtime is entity-agnostic
+  (any entity with `ai: 'sentinel'` + these fields behaves
+  the same way).
+- Shield rotation gate extended to freeze during charge.
+  Same `g.shieldFacingX/Y` storage used — no new fields
+  needed for damage-check or render, they just read the
+  frozen value.
+
+**Per memory rule #14 (UNITY):** AI parameters live in
+bestiary.js as data. Adding a new sentinel-style entity is
+a data-only edit. Runtime code is behavior-only.
+
+**Per memory rule #28 (unify-at-choke-point):** shield facing
+storage (`g.shieldFacingX/Y`) is the single source read by
+damage-check + render. Multiple freeze conditions (swing
+wind-up, sentinel charge) all funnel through the same
+"don't update the storage" mechanism.
+
+**Per memory rule #19:** committed to sentinel scope rather
+than menu of AI options. Standoff + charge; swing telegraph
+inside standoff/contact deferred as separate tuning pass.
+
+---
+
+**What this push does NOT do:**
+
+- Sentinel doesn't yet FIRE the telegraph swing. The knight's
+  contact damage during charge routes through existing touch-
+  attack code. Adding the `swing wind-up → strike → cooldown`
+  sequence during standoff (or as an alternative to charge)
+  is its own tuning pass.
+- No changes to other AI types. Only cursed_knight moves to
+  sentinel. Other shield-carriers or variants can be created
+  by adding new bestiary entries with `ai: 'sentinel'`.
+
+---
+
+**Files changed:** `bestiary.js`, `rumble.js`, `NOTES.md`.
+
+**Test focus:**
+
+1. **Standoff visible:** approach cursed_knight in sandbox
+   mode. Knight should stop at ~220px range and hold. Shield
+   should now track your movement smoothly (rotation visible).
+2. **Circle-strafe flank:** run tightly around the standing
+   knight. Shield should visibly TRAIL behind your position
+   at 30 deg/sec. Hit the flank/rear for full damage.
+3. **Stand still → get charged:** stop moving for ~1.2 sec.
+   Knight commits, charges at your last position. Shield
+   locks in that direction during charge — flank window if
+   you dodge sideways.
+4. **Bounce reset:** knight collides with you during charge,
+   bounces, then returns to standoff (not another charge).
+5. **Aggro range unchanged:** step far enough away — knight
+   patrols/de-aggros normally.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
