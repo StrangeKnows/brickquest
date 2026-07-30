@@ -5084,289 +5084,14 @@ function drawDroppedBricks() {
 }
 
 // ═══════════════════════════════════════════════════
-//  ENTITY REGISTRY — content library for all creature types
+//  ENTITY REGISTRY — see bestiary.js
 // ═══════════════════════════════════════════════════
-// Every creature that can appear in the rumble is defined here. The game.js
-// ENTITY_TYPES/ENTITY_META arrays must stay in sync with the keys below.
-// Loot tables use shape: { kind?, color?, chance, min, max }
-//   kind: 'brick' (default) | 'cheese' | 'gold'
-//   color: required for 'brick', ignored for 'cheese'/'gold'
-//   chance: 0-1, rolled independently per entry on entity death
-//   min/max: for 'brick' = count; for 'gold' = amount-per-coin; 'cheese' always 1
-// Each entity's `family` drives its resistance profile via _familyResist().
-// AI behavior (`ai` field) drives the update-loop dispatcher:
-//   chase        — run at player, touch to damage (default legacy behavior)
-//   ranged_kite  — back away to kiteDistance, fire ranged projectiles
-//   stationary   — doesn't move; periodic AoE pulse around itself
-//   heavy_melee  — chase then telegraph a wind-up swing, AoE damage
-//   teleport     — chase + periodic blink to near player
-var ENTITY_REGISTRY = {
-  // ── Tier 1 grunts ──────────────────────────────────────────────────
-  goblin: {
-    hp: 12, hpMax: 12, speed: 180, r: 16,
-    family: 'physical',
-    resistances: _familyResist('physical'),
-    ai: 'chase', attackPattern: 'touch',
-    color: '#8b5a2b', icon: '👺',
-    // Rare-ish drops — most goblin kills yield nothing; occasionally a
-    // green or red chip falls. Gold is the most common drop.
-    loot: [
-      { color: 'green', chance: 0.05, min: 1, max: 1 },
-      { color: 'red',   chance: 0.10, min: 1, max: 1 },
-      { kind: 'gold',   chance: 1.00, min: 1, max: 1 },
-      { kind: 'cheese', chance: 0.15, min: 1, max: 1 },
-    ],
-    // PHASE A — intelligence fields
-    affinityColors: ['red', 'green'],
-    signature: 'pack_flank',        // implemented in Phase E
-    reactions: {
-      green: 'close_fast',          // interrupt player AoE charge
-      red:   'backstep',            // avoid knockback AoE
-    },
-    reactionCooldown: 7,
-    arsenalCooldown: 5,             // headbutt (Phase C)
-  },
-  skeleton: {
-    hp: 16, hpMax: 16, speed: 140, r: 17,
-    family: 'physical',
-    resistances: _familyResist('physical'),
-    ai: 'chase', attackPattern: 'touch',
-    dmg: 3,
-    color: '#dcdcdc', icon: '💀',
-    loot: [
-      { color: 'gray',  chance: 0.07, min: 1, max: 1 },
-      { color: 'white', chance: 0.03, min: 1, max: 1 },
-      { kind: 'gold',   chance: 1.00, min: 1, max: 1 },
-    ],
-    // PHASE A
-    affinityColors: ['gray', 'white'],
-    signature: 'bone_rise',         // Phase E: revive once at 40% HP if small-hit kill
-    reactions: {
-      gray:  'shield_up',           // add more armor
-      white: 'close_fast',          // don't let player heal
-    },
-    reactionCooldown: 8,
-    arsenalCooldown: 5,             // gray armor refresh (Phase C)
-  },
-  // ── Tier 1 ranged / special ────────────────────────────────────────
-  slinger: {
-    hp: 10, hpMax: 10, speed: 160, r: 14,
-    family: 'physical',
-    resistances: _familyResist('physical'),
-    ai: 'ranged_kite', attackPattern: 'ranged',
-    kiteDistance: 260, rangedCooldown: 1.5, rangedDmg: 2,
-    color: '#a4682a', icon: '🏹',
-    loot: [
-      { color: 'orange', chance: 0.05, min: 1, max: 1 },
-      { color: 'yellow', chance: 0.10, min: 1, max: 1 },
-      { kind: 'gold',    chance: 1.00, min: 1, max: 1 },
-      { kind: 'cheese',  chance: 0.25, min: 1, max: 1 },
-    ],
-    // PHASE A
-    affinityColors: ['orange', 'yellow'],
-    signature: 'burst_fire',        // Phase D: 3 rocks in sequence
-    reactions: {
-      red:   'backstep',
-      blue:  'evade',
-      green: 'backstep',
-    },
-    reactionCooldown: 5,
-  },
-  shadow_wolf: {
-    hp: 14, hpMax: 14, speed: 240, r: 18,
-    family: 'ethereal',
-    resistances: _familyResist('ethereal'),
-    ai: 'chase', attackPattern: 'touch',
-    color: '#3d2e5a', icon: '🐺',
-    loot: [
-      { color: 'purple', chance: 0.05, min: 1, max: 1 },
-      { color: 'blue',   chance: 0.10, min: 1, max: 1 },
-      { kind: 'gold',    chance: 0.30, min: 1, max: 3 },
-    ],
-    // PHASE A
-    affinityColors: ['purple', 'blue'],
-    signature: 'leap_lunge',        // Phase E
-    reactions: {
-      red:    'interrupt_swing',    // swift peck before swing
-      yellow: 'close_fast',         // interrupt daze cast
-      green:  'backstep',
-    },
-    reactionCooldown: 5,
-  },
-  creeping_vines: {
-    hp: 25, hpMax: 25, speed: 0, r: 20,
-    family: 'malady',
-    resistances: _familyResist('malady'),
-    ai: 'stationary', attackPattern: 'pulse',
-    pulseCooldown: 2.0, pulseRadius: 90, pulseDmg: 2,
-    color: '#2d5c2e', icon: '🌿',
-    loot: [
-      { color: 'green',  chance: 0.15, min: 1, max: 2 },
-      { color: 'yellow', chance: 0.10, min: 1, max: 1 },
-      { kind: 'gold',    chance: 0.30, min: 1, max: 1 },
-    ],
-    // PHASE A — stationary, no movement reactions
-    affinityColors: ['green', 'yellow'],
-    signature: 'root_pulse',        // Phase D: pulse applies 0.7s slow
-    reactions: {
-      // stationary; no physical reactions. Arsenal-side fires early on charge.
-    },
-    reactionCooldown: 3,
-  },
-  // ── Tier 2 heavy ───────────────────────────────────────────────────
-  // Elites drop a bit more reliably. Cheese starts appearing here as a
-  // rare bonus (permanent +1 max HP on pickup).
-  // ── Tier 1.5 splitter — bridge between grunts and elites ─────────
-  rot_grub: {
-    hp: 20, hpMax: 20, speed: 150, r: 16,
-    family: 'malady',
-    resistances: _familyResist('malady'),
-    ai: 'chase', attackPattern: 'touch',
-    color: '#7a5a2a', icon: '🪱',
-    loot: [
-      { color: 'green',  chance: 0.12, min: 1, max: 2 },
-      { color: 'black',  chance: 0.08, min: 1, max: 1 },
-      { kind: 'gold',    chance: 1.00, min: 1, max: 2 },
-      { kind: 'cheese',  chance: 0.10, min: 1, max: 1 },
-    ],
-    // PHASE E — mitosis_split primary (2-level recursion: 1 → 2 → 4 grubs).
-    // Teaches the split mechanic before blight_worm boss fight.
-    affinityColors: ['green', 'black'],
-    signature: 'mitosis_split',
-    splitMaxDepth: 2,
-    reactions: {
-      red:   'backstep',
-    },
-    reactionCooldown: 6,
-  },
-  stone_troll: {
-    hp: 40, hpMax: 40, speed: 110, r: 24,
-    family: 'physical',
-    resistances: _familyResist('physical'),
-    ai: 'heavy_melee', attackPattern: 'telegraph_swing',
-    swingTelegraph: 0.6, swingDmg: 6, swingRadius: 60,
-    color: '#6f6f6f', icon: '🪨',
-    loot: [
-      { color: 'gray',   chance: 0.15, min: 1, max: 2 },
-      { color: 'orange', chance: 0.10, min: 1, max: 1 },
-      { color: 'red',    chance: 0.12, min: 1, max: 1 },
-      { kind: 'gold',    chance: 0.60, min: 1, max: 3 },
-      { kind: 'cheese',  chance: 0.08, min: 1, max: 1 },
-    ],
-    // PHASE A
-    affinityColors: ['gray', 'orange', 'red'],
-    signature: 'boulder_toss',      // Phase E
-    reactions: {
-      blue:   'close_fast',
-      green:  'close_fast',
-      white:  'close_fast',
-    },
-    reactionCooldown: 4,
-  },
-  cursed_knight: {
-    hp: 30, hpMax: 30, speed: 160, r: 20,
-    family: 'physical',
-    resistances: _familyResist('physical'),
-    ai: 'chase', attackPattern: 'telegraph_swing',
-    swingTelegraph: 0.45, swingDmg: 4, swingRadius: 50,
-    color: '#4a4a6a', icon: '⚔️',
-    loot: [
-      { color: 'red',    chance: 0.30, min: 1, max: 1 },
-      { color: 'purple', chance: 0.10, min: 1, max: 1 },
-      { color: 'gray',   chance: 0.15, min: 1, max: 1 },
-      { kind: 'gold',    chance: 0.60, min: 1, max: 5 },
-      { kind: 'cheese',  chance: 0.17, min: 1, max: 1 },
-    ],
-    // PHASE A
-    affinityColors: ['red', 'purple', 'gray'],
-    signature: 'front_shield',      // Phase E
-    reactions: {
-      red:    'shield_up',
-      blue:   'shield_up',
-      green:  'interrupt_swing',
-    },
-    reactionCooldown: 3,
-  },
-  void_wraith: {
-    hp: 20, hpMax: 20, speed: 200, r: 17,
-    family: 'ethereal',
-    resistances: _familyResist('ethereal'),
-    ai: 'teleport', attackPattern: 'touch',
-    teleportCooldown: 3.0, teleportRange: 80,
-    color: '#5a2e7a', icon: '👻',
-    loot: [
-      { color: 'purple', chance: 0.20, min: 1, max: 1 },
-      { color: 'black',  chance: 0.15, min: 1, max: 1 },
-      { kind: 'gold',    chance: 0.50, min: 1, max: 3 },
-      { kind: 'cheese',  chance: 0.16, min: 1, max: 1 },
-    ],
-    // PHASE A
-    affinityColors: ['purple', 'black', 'white'],
-    signature: 'phase_fade',        // Phase D
-    reactions: {
-      red:    'teleport_away',
-      green:  'teleport_away',
-      blue:   'teleport_away',
-      orange: 'teleport_away',
-    },
-    reactionCooldown: 2,            // highly reactive
-  },
-  // ── Bosses ─────────────────────────────────────────────────────────
-  // Boss kills drop a meaningful haul: bricks + reliable gold + likely cheese.
-  stone_colossus: {
-    hp: 80, hpMax: 80, speed: 90, r: 32,
-    family: 'physical',
-    resistances: _familyResist('physical'),
-    ai: 'heavy_melee', attackPattern: 'telegraph_swing',
-    swingTelegraph: 0.75, swingDmg: 10, swingRadius: 80,
-    color: '#565656', icon: '🗿',
-    loot: [
-      { color: 'gray',   chance: 0.60, min: 1, max: 3 },
-      { color: 'red',    chance: 0.30, min: 1, max: 1 },
-      { color: 'orange', chance: 0.35, min: 1, max: 2 },
-      { color: 'purple', chance: 0.15, min: 1, max: 1 },
-      { kind: 'gold',    chance: 1.00, min: 3, max: 6 },
-      { kind: 'cheese',  chance: 0.45, min: 1, max: 3 },
-    ],
-    // PHASE A
-    affinityColors: ['gray', 'red', 'orange', 'purple'],
-    signature: 'enrage_phase',      // Phase E — phase 2 at 50% HP
-    reactions: {
-      blue:  'close_fast',
-      green: 'interrupt_swing',
-      white: 'close_fast',
-    },
-    reactionCooldown: 3,
-  },
-  blight_worm: {
-    hp: 120, hpMax: 120, speed: 130, r: 28,
-    family: 'malady',
-    resistances: _familyResist('malady'),
-    ai: 'heavy_melee', attackPattern: 'telegraph_swing', // true_burrow replaces in Phase E
-    swingTelegraph: 0.6, swingDmg: 8, swingRadius: 70,
-    color: '#3e2a1a', icon: '🪱',
-    loot: [
-      { color: 'green',  chance: 0.60, min: 1, max: 3 },
-      { color: 'yellow', chance: 0.50, min: 1, max: 2 },
-      { color: 'purple', chance: 0.35, min: 1, max: 1 },
-      { color: 'black',  chance: 0.30, min: 1, max: 1 },
-      { kind: 'gold',    chance: 1.00, min: 4, max: 8 },
-      { kind: 'cheese',  chance: 0.50, min: 1, max: 5 },
-    ],
-    // PHASE A
-    affinityColors: ['green', 'yellow', 'purple', 'black'],
-    signature: 'true_burrow',       // Phase E + mitosis_split on death
-    // mitosis_split is a secondary death behavior. Treated as a tag, not
-    // a primary signature (primary drives AI, secondary fires at death).
-    deathSignature: 'mitosis_split',
-    splitMaxDepth: 1,
-    reactions: {
-      red:   'interrupt_swing',
-      white: 'burrow',              // heal-denial via disengagement
-    },
-    reactionCooldown: 4,
-  },
-};
+// Entity/monster data lives in bestiary.js (loaded before rumble.js).
+// ENTITY_REGISTRY and the _familyResist helper are exposed on window from
+// there; this IIFE reads them as globals. Adding a new entity: edit
+// bestiary.js — no change needed here.
+// UNITY: entity data lives with entity data, not in runtime.
+
 
 // ═══════════════════════════════════════════════════
 // ENTITY OBJECT
@@ -5567,22 +5292,8 @@ var FAMILY_OF_COLOR = {
   yellow: 'malady',   green:  'malady',   black:  'malady',
 };
 
-// Build a resistance profile for an entity of the given family.
-// Strict rock-paper-scissors cycle: physical > ethereal > malady > physical.
-// - Same family → 1.0 (neutral)
-// - Family this one BEATS → 0.5 (resistant — they hit me weakly)
-// - Family that beats THIS one → 1.5 (vulnerable — they hit me hard)
-// Used by ENTITY_REGISTRY templates so each enemy's family drives its
-// full resistance profile without manual bookkeeping.
-function _familyResist(family) {
-  var cycle = { physical: 'ethereal', ethereal: 'malady', malady: 'physical' };
-  var resistant = cycle[family];                  // this family RESISTS attacks from
-  var vulnerable = Object.keys(cycle).find(function(k) { return cycle[k] === family; });
-  var r = { physical: 1.0, ethereal: 1.0, malady: 1.0 };
-  r[resistant] = 0.5;
-  r[vulnerable] = 1.5;
-  return r;
-}
+// _familyResist(family) lives in bestiary.js — entity data helper, used
+// by ENTITY_REGISTRY entries at definition time. Kept out of runtime.
 
 // Lookup resistance multiplier for (entity, source-color or family).
 // Per-color overrides take priority over family default.
@@ -5686,46 +5397,53 @@ function _applyDamageInternal(g, dmg, aggro, source, opts) {
     showFloatingText(g.x, g.y - (g.r + 16), 'PHASED', '#9060C0', g);
     return { applied: 0, tier: 'none' };
   }
-  // PHASE E — front_shield signature (cursed knight): 50% damage reduction
-  // when hit from within the 120° arc the knight is facing. Knight's
-  // "facing" is the direction from knight → player (tracked continuously).
-  // For player-origin hits, the incoming angle is from knight → player.
-  // Shield absorbs frontal, ignores side/back.
-  // v0.16.51: piercing hits (SS pierce-dash) reduce shield effectiveness
-  // from 50% block to 25% block. Pierce is designed to pass through
-  // defenses but not ignore them entirely.
+  // PHASE E — front_shield signature. Damage reduction when the attacker
+  // is within the shield's frontal arc. All parameters come from the
+  // entity's bestiary.js schema — this runtime code is entity-agnostic:
+  //   g.shieldArcDeg          — arc width (e.g. 120 → ±60°)
+  //   g.shieldBlockPct        — normal-hit block (e.g. 0.5 = 50%)
+  //   g.shieldPierceBlockPct  — piercing-hit block (e.g. 0.25 = 25%)
+  //   g.shieldTurnRate        — used in updateEntity for smooth rotation
+  // Add a new shield-carrier by giving its bestiary entry `signature:
+  // 'front_shield'` + these fields. No code change here.
+  //
+  // Facing source (in order of precedence):
+  //   1. During swing wind-up → swingTargetX/Y (committed direction)
+  //   2. If shieldFacingX/Y initialized → tracked smooth-rotating vector
+  //   3. Fallback → instant knight → player (first tick / edge cases)
   var _shieldBlockedPct = 0;
   if (g.signature === 'front_shield' && player) {
-    // Knight's current facing vector (always points at player)
-    var fx = player.x - g.x, fy = player.y - g.y;
-    var fd = Math.hypot(fx, fy) || 1;
-    // Assume damage comes from player's direction (true for melee, overloads
-    // targeted at entity, and projectiles player fires). Incoming vector
-    // points FROM player TO knight (opposite of facing).
-    // If the knight is facing the player, any frontal hit is at angle 0
-    // from the facing vector. 120° arc = ±60° tolerance.
-    // cos(60°) = 0.5 — so if dot(incoming, facing) > 0.5 → inside arc.
-    // Incoming is -facing direction, so dot is -1 (fully behind facing).
-    // We want: is player WITHIN knight's front cone. Yes by construction,
-    // so always true for player-origin hits. The meaningful test is:
-    // was the knight actively facing when the hit landed? During a swing
-    // wind-up the knight is locked facing swingTargetX/Y — hits from the
-    // side should bypass the shield. That's the real skill-check.
-    var ffx, ffy;
+    var fx, fy;
     if (g.swingState === 'winding' || g.swingState === 'cooldown') {
-      ffx = g.swingTargetX - g.x;
-      ffy = g.swingTargetY - g.y;
+      fx = g.swingTargetX - g.x;
+      fy = g.swingTargetY - g.y;
+    } else if (typeof g.shieldFacingX === 'number') {
+      fx = g.shieldFacingX;
+      fy = g.shieldFacingY;
     } else {
-      ffx = fx; ffy = fy;
+      fx = player.x - g.x;
+      fy = player.y - g.y;
     }
-    var ffd = Math.hypot(ffx, ffy) || 1;
-    var toPlayerX = fx / fd, toPlayerY = fy / fd;
-    var facingX = ffx / ffd, facingY = ffy / ffd;
-    var dotFacing = facingX * toPlayerX + facingY * toPlayerY;
-    // dot > 0.5 ≡ within 60° of facing direction ≡ player in front arc
-    if (dotFacing > 0.5) {
-      // v0.16.51: piercing hits reduce shield block from 50% to 25%.
-      _shieldBlockedPct = opts.piercing ? 0.25 : 0.5;
+    var fd = Math.hypot(fx, fy) || 1;
+    var facingX = fx / fd, facingY = fy / fd;
+    // Attacker direction (knight → attacker). Host doesn't know each
+    // damage event's exact origin, so uses the nearest-player heuristic
+    // via `player` reference. Mirror-originated hits still land here
+    // routed through applyRemoteDamage on the host entity.
+    var attackerX = player.x - g.x;
+    var attackerY = player.y - g.y;
+    var attackerD = Math.hypot(attackerX, attackerY) || 1;
+    var toAttackerX = attackerX / attackerD, toAttackerY = attackerY / attackerD;
+    var dotFacing = facingX * toAttackerX + facingY * toAttackerY;
+    // Convert arc-degrees to a dot-product threshold. For a 120° arc
+    // (±60° from facing), the threshold is cos(60°) = 0.5.
+    // Formula: dotThreshold = cos((shieldArcDeg / 2) * π / 180)
+    var _arcDeg = (typeof g.shieldArcDeg === 'number') ? g.shieldArcDeg : 120;
+    var _dotThreshold = Math.cos((_arcDeg * 0.5) * Math.PI / 180);
+    if (dotFacing > _dotThreshold) {
+      var _blockNormal = (typeof g.shieldBlockPct === 'number') ? g.shieldBlockPct : 0.5;
+      var _blockPierce = (typeof g.shieldPierceBlockPct === 'number') ? g.shieldPierceBlockPct : 0.25;
+      _shieldBlockedPct = opts.piercing ? _blockPierce : _blockNormal;
     }
   }
   // BLUE MARK: target takes +50% damage from all sources while marked.
@@ -6154,6 +5872,54 @@ function updateEntity(g, dt, bounds) {
         targetDist = _tgAdist;
       }
     }
+  }
+
+  // v0.16.82 — Front-shield rotation. Shield facing follows current
+  // target at a bounded turn rate so fast strafing/circling can flank
+  // the knight. Previously the shield snapped instantly to the player
+  // direction, making backstabs impossible.
+  //
+  // Turn rate: SHIELD_TURN_RATE rad/sec. π rad/sec = 180°/sec — half a
+  // rotation per second. Fast enough to track a walking player, slow
+  // enough that a sprinting circle-strafe opens the flank/rear.
+  // Playtest-tune constant if needed.
+  //
+  // Init: on first tick, snap directly to the target (no artificial
+  // starting orientation). Subsequent ticks rotate at limited speed.
+  //
+  // During swing wind-up the shield doesn't rotate — the knight's
+  // whole body is committed to swingTargetX/Y and the shield uses
+  // that direction (canonical). This means starting a swing is a
+  // moment of commitment; if the player is already flanking, the
+  // swing bakes in that flank as the swing's shield direction.
+  if (g.signature === 'front_shield') {
+    var _desiredX = targetX - g.x;
+    var _desiredY = targetY - g.y;
+    var _desiredD = Math.hypot(_desiredX, _desiredY) || 1;
+    var _dnX = _desiredX / _desiredD;
+    var _dnY = _desiredY / _desiredD;
+    if (typeof g.shieldFacingX !== 'number') {
+      // First tick — snap.
+      g.shieldFacingX = _dnX;
+      g.shieldFacingY = _dnY;
+    } else if (g.swingState !== 'winding' && g.swingState !== 'cooldown') {
+      // Compute angular difference; rotate at most turnRate * dt.
+      // Turn rate comes from schema — tuning happens in bestiary.js, not here.
+      var _turnRate = (typeof g.shieldTurnRate === 'number') ? g.shieldTurnRate : Math.PI;
+      var _cur = Math.atan2(g.shieldFacingY, g.shieldFacingX);
+      var _des = Math.atan2(_dnY, _dnX);
+      var _diff = _des - _cur;
+      // Normalize to [-π, π]
+      while (_diff > Math.PI) _diff -= Math.PI * 2;
+      while (_diff < -Math.PI) _diff += Math.PI * 2;
+      var _maxStep = _turnRate * dt;
+      var _step = Math.max(-_maxStep, Math.min(_maxStep, _diff));
+      var _new = _cur + _step;
+      g.shieldFacingX = Math.cos(_new);
+      g.shieldFacingY = Math.sin(_new);
+    }
+    // (Wind-up/cooldown: shield facing frozen. swingTargetX/Y takes over
+    // in the damage-check + render blocks via the swingState branch.)
   }
 
   // ── State transitions ──
@@ -6992,11 +6758,16 @@ function drawEntity(g) {
   // PHASE E — front_shield: visible shield arc on the side the knight
   // is facing. Brightens briefly after absorbing a hit (reuse flashTimer
   // as the brighten signal).
+  // v0.16.82: render reads g.shieldFacingX/Y (smoothly rotating), same as
+  // damage check. Swing wind-up still uses swingTargetX/Y (locked facing).
   if (g.signature === 'front_shield' && player) {
     var sfx, sfy;
     if (g.swingState === 'winding' || g.swingState === 'cooldown') {
       sfx = g.swingTargetX - g.x;
       sfy = g.swingTargetY - g.y;
+    } else if (typeof g.shieldFacingX === 'number') {
+      sfx = g.shieldFacingX;
+      sfy = g.shieldFacingY;
     } else {
       sfx = player.x - g.x;
       sfy = player.y - g.y;
@@ -7004,6 +6775,10 @@ function drawEntity(g) {
     var sfd = Math.hypot(sfx, sfy) || 1;
     var ang = Math.atan2(sfy, sfx);
     var shieldR = g.r + 6;
+    // Arc width from schema (falls back to 120° if not defined on entity).
+    // Half-arc-radians drives the arc(...) start/end offsets from facing.
+    var _renderArcDeg = (typeof g.shieldArcDeg === 'number') ? g.shieldArcDeg : 120;
+    var _halfArcRad = (_renderArcDeg * 0.5) * Math.PI / 180;
     ctx.save();
     ctx.globalAlpha = g.flashTimer > 0 ? 0.9 : 0.55;
     ctx.strokeStyle = '#BBBBFF';
@@ -7011,8 +6786,8 @@ function drawEntity(g) {
     ctx.shadowBlur  = g.flashTimer > 0 ? 16 : 6;
     ctx.lineWidth   = 4;
     ctx.beginPath();
-    // 120° arc centered on facing direction (±60°)
-    ctx.arc(g.x, g.y, shieldR, ang - Math.PI/3, ang + Math.PI/3);
+    // Arc centered on facing direction, spans ±halfArc.
+    ctx.arc(g.x, g.y, shieldR, ang - _halfArcRad, ang + _halfArcRad);
     ctx.stroke();
     ctx.restore();
   }

@@ -11151,6 +11151,159 @@ UNTOUCHED: server.js, rumble_test.html.
 
 ---
 
+### v0.16.82 — Bestiary extraction + knight shield on schema
+
+> "lets clean it all up and do it right, entity information
+> should all live in its proper place"
+> "should this be characters.js? Perhaps this should be reserved
+> for player characters only, and entities need their own?"
+> "bestiary, lets do it"
+
+**UNITY pass on entity data.** Every entity template moves out
+of rumble.js into a new sibling file — `bestiary.js` — matching
+the shape of characters.js. Runtime code reads schema, doesn't
+define it inline.
+
+**Also: the knight shield now rotates at a bounded turn rate**
+so backstabs are possible. Slow-rotation was the seed request
+that turned into this cleanup.
+
+---
+
+**What moved:**
+
+- `ENTITY_REGISTRY` (11 entities, 267 lines): rumble.js → bestiary.js
+- `_familyResist(family)` helper: rumble.js → bestiary.js
+  (called by registry entries at definition time; belongs with
+  the data it serves)
+- rumble.js down from 13787 → 13502 lines
+
+**What's still in rumble.js (correctly):**
+
+- `resistMult`, `resistTier` — runtime resistance lookup during
+  combat, reads entity's `resistances` field
+- `_resolveEntityType`, `spawnEntity` — runtime spawning logic
+- Everything else that operates on entities at combat time
+
+**Load order:**
+
+- rumble_test.html, players.html, test_players.html:
+  `characters.js` → `bestiary.js` → `rumble.js`
+- dm_screen.html: untouched (doesn't run combat, doesn't need
+  bestiary)
+- Server side: `bestiary.js` require-able via CommonJS; not
+  yet required by server.js (future server-authoritative
+  simulation may need it)
+
+**Sibling shape:**
+
+- `characters.js` → player class data (Breaker, Wildcast, ...)
+- `bestiary.js`   → entity data (goblin, cursed_knight, ...)
+- Two files, two concerns. Both use identical dual-load
+  pattern (browser global + Node exports).
+
+---
+
+**Knight shield now schema-driven.**
+
+Cursed_knight gains four bestiary fields:
+
+    signature: 'front_shield',
+    shieldTurnRate: Math.PI,       // rad/sec — 180°/sec
+    shieldArcDeg: 120,             // ±60° from facing
+    shieldBlockPct: 0.5,           // normal-hit block
+    shieldPierceBlockPct: 0.25,    // piercing-hit block (weaker)
+
+rumble.js shield code reads all four. Zero hardcoded shield
+values remain in runtime code. To tune: edit one bestiary
+entry. To add a new shield-carrier: give it these fields, done.
+
+**Bounded-rotation behavior**
+
+The shield now tracks a smoothly-rotating `g.shieldFacingX/Y`
+vector instead of snapping instantly to `player.x/y - g.x/y`.
+Rotation rate = `shieldTurnRate` (schema). At Math.PI rad/sec
+(180°/sec), sprinting circle-strafing can flank the knight;
+walking cannot. During swing wind-up the shield freezes on
+`swingTargetX/Y` — a committed action, no live tracking.
+
+**Per-target aware.** In coop, the shield tracks the nearest
+player among {host, alive mirrors} — mirrors can flank too.
+Reuses the target-resolution variables from v0.16.81.
+
+---
+
+**Per memory rule #14 (UNITY):**
+- One file per data domain (players / entities).
+- Schema over conditionals: `if (g.signature === 'front_shield')`
+  is a schema check; the values inside are all schema reads.
+- No hardcoded shield behavior in rumble.js.
+
+**Per memory rule #28 (unify-at-choke-point):**
+- `shieldFacingX/Y` computed once per tick in updateEntity.
+- Damage check + render both READ from it. No duplication.
+- Schema fields (`shieldArcDeg`, `shieldBlockPct`) read at
+  the two callsites that use them, from the entity itself.
+
+**Per memory rule #29 (bug-from-duplication):**
+- One source of truth per entity type. Deleting rumble.js's
+  copy of ENTITY_REGISTRY prevents the "old value in one
+  file, new in another" drift.
+
+**Per memory rule #15 (handoff hygiene):**
+- Scanned all references, dependency (`_familyResist` called
+  at definition time), load order in all three HTML files,
+  and server.js's require statements before touching anything.
+- Rebuilt bestiary.js by extracting verbatim from rumble.js
+  rather than typing entity data from memory (which I nearly
+  did — first draft had entities that don't exist).
+
+---
+
+**Files changed:**
+- `bestiary.js` (new)
+- `rumble.js` (267-line registry + helper removed, shield
+  code reads schema)
+- `rumble_test.html`, `players.html`, `test_players.html`
+  (bestiary.js added before rumble.js)
+- `NOTES.md`
+
+UNTOUCHED: server.js, characters.js, rumbleEngine.js,
+dm_screen.html.
+
+---
+
+**Test focus:**
+
+1. **Solo regression:** wave 1-3 with mixed entities — all
+   entities spawn and behave identically to pre-push. Confirms
+   the ENTITY_REGISTRY move didn't lose or corrupt any data.
+2. **Cursed knight shield:** approach from the front → shield
+   blocks 50% damage as before. Walk fast around the knight
+   → shield lags → hit the flank/rear for full damage. This
+   is the new behavior.
+3. **Piercing shield:** SS pierce-dash on frontal shield hit
+   → 25% block (weaker than normal).
+4. **Swing wind-up shield freeze:** knight starts a swing →
+   shield locks in that direction; player can flank during
+   the wind-up.
+5. **Coop:** knight in coop session behaves same. Shield
+   tracks nearest player (host or mirror).
+
+---
+
+**Follow-ups this sets up:**
+
+- Adding a new entity is now data-only (edit bestiary.js).
+- Adding a new signature: add its schema fields to the bestiary
+  entry, add the runtime branch in rumble.js. Field naming
+  convention makes it clear which sig owns which fields.
+- Other hardcoded magic numbers in rumble.js are candidates
+  for the same treatment (touch cooldown, projectile speed,
+  bounce velocity). Not this push — a separate audit.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
