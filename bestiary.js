@@ -267,6 +267,12 @@ var ENTITY_REGISTRY = {
     shieldArcDeg: 120,              // shield covers ±60° from facing
     shieldBlockPct: 0.5,            // frontal hits take 50% damage
     shieldPierceBlockPct: 0.25,     // piercing frontal hits take 75% (weaker block)
+    // v0.16.85 — Shield is the weapon. During swing wind-up the shield
+    // pops out of defensive position to strike. Frontal block is
+    // eliminated (0) for that window — player gets a real attack
+    // opportunity. Set to e.g. 0.25 to keep partial block during
+    // wind-up if the swing feels too vulnerable.
+    shieldWindupBlockPct: 0,
     reactions: {
       red:    'shield_up',
       blue:   'shield_up',

@@ -5444,6 +5444,14 @@ function _applyDamageInternal(g, dmg, aggro, source, opts) {
       var _blockNormal = (typeof g.shieldBlockPct === 'number') ? g.shieldBlockPct : 0.5;
       var _blockPierce = (typeof g.shieldPierceBlockPct === 'number') ? g.shieldPierceBlockPct : 0.25;
       _shieldBlockedPct = opts.piercing ? _blockPierce : _blockNormal;
+      // v0.16.85 — During swing wind-up, the shield is popped out of
+      // defensive position to strike. Frontal block is reduced (or
+      // eliminated) for that window. Schema: shieldWindupBlockPct.
+      // Defaults to 0 (no block) if not set.
+      if (g.swingState === 'winding') {
+        var _windupBlock = (typeof g.shieldWindupBlockPct === 'number') ? g.shieldWindupBlockPct : 0;
+        _shieldBlockedPct = _windupBlock;
+      }
     }
   }
   // BLUE MARK: target takes +50% damage from all sources while marked.
@@ -6376,62 +6384,93 @@ function updateEntity(g, dt, bounds) {
         g._prevPlayerX = player.x;
         g._prevPlayerY = player.y;
 
-        if (g._sentinelState === 'standoff') {
-          // Standoff: knight holds position. Shield rotation (top of
-          // updateEntity) continues to track player smoothly. Player
-          // circling the knight tightly WILL open the flank because
-          // rotation is bounded by shieldTurnRate.
-          //
-          // If player is outside standoff range, close in a bit — but
-          // don't full-chase; sentinel isn't a chaser. Slow approach so
-          // player can lead the knight into arena hazards.
-          if (distToPlayer > _stdOff) {
-            g.x += (dx/distToPlayer) * effSpeed * 0.4 * dt;
-            g.y += (dy/distToPlayer) * effSpeed * 0.4 * dt;
-            // Reset still-timer while closing — no charging until in range.
-            g._playerStillTimer = 0;
-          } else {
-            // In range. Watch player stillness.
-            if (_playerStill) {
-              g._playerStillTimer = (g._playerStillTimer || 0) + dt;
+        // v0.16.85 — Swing state machine (reuses existing g.swingState
+        // and swingCooldown fields from heavy_melee code). If knight is
+        // mid-swing, that dominates — no movement, no charge start.
+        // Swing states:
+        //   'idle'     — ready to swing when player is close & cooldown 0
+        //   'winding'  — telegraph; shield frozen forward on swingTargetX/Y;
+        //                shield frontal block reduced (schema:
+        //                shieldWindupBlockPct, default 0). Player has a
+        //                real attack window here.
+        //   'cooldown' — resting; shield back to normal block; timer
+        //                counts down to zero.
+        var _swingR = scaleDist(g.swingRadius || 50);
+        g.swingCooldown = Math.max(0, (g.swingCooldown || 0) - dt);
+
+        if (g.swingState === 'winding') {
+          g.swingTimer -= dt;
+          if (g.swingTimer <= 0) {
+            var _sdx = player.x - g.swingTargetX;
+            var _sdy = player.y - g.swingTargetY;
+            var _sd  = Math.sqrt(_sdx*_sdx + _sdy*_sdy);
+            if (_sd < _swingR + player.r) {
+              if (!_arcWallBlocksAttack(g.swingTargetX, g.swingTargetY, player.x, player.y)) {
+                _applyEnemyMeleeDamage(g, g.swingDmg || 4, dx, dy, distToPlayer);
+              } else {
+                var _mX = (g.swingTargetX + player.x) / 2;
+                var _mY = (g.swingTargetY + player.y) / 2;
+                grayWalls.forEach(function(w) {
+                  if (w && w.hp > 0 && w.isArc && _pointInArc(w, _mX, _mY)) {
+                    w.flashTimer = Math.max(w.flashTimer || 0, 0.1);
+                  }
+                });
+              }
+            }
+            g.swingState = 'cooldown';
+            g.swingCooldown = 1.2;
+          }
+        } else if (g.swingState === 'cooldown') {
+          if (g.swingCooldown <= 0) g.swingState = 'idle';
+        } else {
+          // swingState is 'idle' — normal sentinel logic.
+          if (g._sentinelState === 'standoff') {
+            if (distToPlayer > _stdOff) {
+              g.x += (dx/distToPlayer) * effSpeed * 0.4 * dt;
+              g.y += (dy/distToPlayer) * effSpeed * 0.4 * dt;
+              g._playerStillTimer = 0;
             } else {
+              // Swing wins when player is close AND cooldown ready.
+              // Proximity response — faster than the still-timer charge.
+              var _inSwingRange = distToPlayer < (_swingR + player.r + 10);
+              if (_inSwingRange && g.swingCooldown <= 0 && (g.silencedTimer||0) <= 0) {
+                g.swingState = 'winding';
+                g.swingTimer = g.swingTelegraph || 0.45;
+                g.swingTargetX = player.x;
+                g.swingTargetY = player.y;
+                g._playerStillTimer = 0;
+              } else {
+                if (_playerStill) {
+                  g._playerStillTimer = (g._playerStillTimer || 0) + dt;
+                } else {
+                  g._playerStillTimer = 0;
+                }
+                if (g._playerStillTimer >= _chgDelay) {
+                  g._sentinelState = 'charging';
+                  g._chargeTimer = _chgMax;
+                  g._chargeTargetX = player.x;
+                  g._chargeTargetY = player.y;
+                  g._playerStillTimer = 0;
+                }
+              }
+            }
+          } else if (g._sentinelState === 'charging') {
+            g._chargeTimer -= dt;
+            var _cdx = g._chargeTargetX - g.x;
+            var _cdy = g._chargeTargetY - g.y;
+            var _cdist = Math.hypot(_cdx, _cdy);
+            if (_cdist > 2) {
+              g.x += (_cdx/_cdist) * _chgSpeed * dt;
+              g.y += (_cdy/_cdist) * _chgSpeed * dt;
+            }
+            if (g._chargeTimer <= 0 || _cdist < 5) {
+              g._sentinelState = 'standoff';
               g._playerStillTimer = 0;
             }
-            if (g._playerStillTimer >= _chgDelay) {
-              // Commit! Snapshot player position; enter charge.
-              g._sentinelState = 'charging';
-              g._chargeTimer = _chgMax;
-              g._chargeTargetX = player.x;
-              g._chargeTargetY = player.y;
-              g._playerStillTimer = 0;
-            }
-          }
-        } else if (g._sentinelState === 'charging') {
-          // Charge. Shield rotation is frozen (gate added in the shield-
-          // rotation block). Knight rushes at frozen target position.
-          // Existing touch-attack + bounce mechanic handles the contact.
-          g._chargeTimer -= dt;
-          var _cdx = g._chargeTargetX - g.x;
-          var _cdy = g._chargeTargetY - g.y;
-          var _cdist = Math.hypot(_cdx, _cdy);
-          if (_cdist > 2) {
-            g.x += (_cdx/_cdist) * _chgSpeed * dt;
-            g.y += (_cdy/_cdist) * _chgSpeed * dt;
-          }
-          // End charge on timeout OR arrival. Bounce-on-contact is handled
-          // by the touch-attack code, which sets state='bounce'; when
-          // bounce ends, we'll be back in this branch — reset to standoff.
-          if (g._chargeTimer <= 0 || _cdist < 5) {
-            g._sentinelState = 'standoff';
-            g._playerStillTimer = 0;
           }
         }
 
-        // If knight is currently bouncing (touch contact during charge),
-        // treat that as charge-terminated and go back to standoff on
-        // resume. This runs when bounce ends and state flips back to
-        // chase — the sentinel branch runs again with state='charging',
-        // and we reset.
+        // Bounce during charge → cancel charge; return to standoff on resume.
         if (g.state === 'bounce' && g._sentinelState === 'charging') {
           g._sentinelState = 'standoff';
           g._playerStillTimer = 0;

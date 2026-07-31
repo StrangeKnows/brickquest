@@ -11433,6 +11433,64 @@ inside standoff/contact deferred as separate tuning pass.
 
 ---
 
+### v0.16.85 — Sentinel swing (shield-as-weapon)
+
+> "swing wind up should be shield, pops out of position and
+> swings, touch damage would come from charge."
+
+**Complete the sentinel triangle: standoff / charge / swing.**
+
+- Standoff — hold, shield defends
+- Charge — commit to rush, contact = touch damage
+- Swing (new) — close-range strike where **shield pops out
+  of defensive position and arcs to hit**. During wind-up,
+  frontal block is eliminated. Player gets a real attack
+  window.
+
+**Trigger conditions:**
+- Player close AND swing cooldown ready → swing (immediate)
+- Player still at any range in standoff → charge (1.2s delay)
+- Both applicable → swing wins (no still-timer, hits first)
+- Player far AND moving → knight slow-follows
+
+Swing is proximity-response; charge is stillness-response.
+
+**Implementation:**
+- Sentinel reuses existing `g.swingState` machine
+  (`'idle' | 'winding' | 'cooldown'`) that heavy_melee already
+  uses. No new state fields.
+- Swing check runs FIRST — if mid-swing, dominates over
+  standoff/charge decisions.
+- Wind-up: knight stands still, shield freezes forward,
+  timer ticks.
+- Strike (timer 0): damage if in `swingRadius` from origin.
+  Same arc-wall block check as heavy_melee.
+- Cooldown: 1.2s idle.
+
+**Shield block during wind-up:** damage-check reads new
+schema field `shieldWindupBlockPct` (defaults 0). During
+`swingState === 'winding'`, that replaces the normal block %.
+Zero means shield offers no protection while swinging —
+the vulnerability window Ross's design calls for.
+
+Fixed as a bonus: the previously-dead `telegraph_swing`
+attackPattern on cursed_knight (set for months but never
+fired) is now live.
+
+**Files changed:** `bestiary.js`, `rumble.js`, `NOTES.md`.
+
+**Test focus:**
+1. Walk up to knight → swing wind-up fires immediately.
+   Shield freezes forward, then arcs to strike.
+2. Attack during wind-up → full damage lands on knight (no
+   frontal block).
+3. Stand back and still → charge triggers as before.
+4. Approach + retreat rhythm → knight alternates: swing
+   (approach) and charge (retreat + still).
+5. Swing cooldown ~1.2s between swings.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
