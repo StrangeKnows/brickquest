@@ -11579,6 +11579,59 @@ No changes this push — rebalance needs a design direction.
 
 ---
 
+### v0.16.88 — Advanced controls scroll + class-grid unstick
+
+> "advanced controls is not working, highlights and nothing
+> appears, after clicking through each mode on test, the
+> player selection options below are greyed out"
+
+Two UI bugs in rumble_test.html mode-select screen. Small
+targeted fixes, no engine changes.
+
+**Bug A: Advanced controls "nothing appears" on tap.**
+
+Diagnosis (per rule #6): button HAS been working — panel
+expands correctly via `.advanced-panel.open` class toggle.
+But `body { overflow:hidden }` combined with `touch-action:none`
+(needed for gameplay to prevent scroll-bounce) means the
+class-selection overlay only scrolls via its own
+`overflow-y:auto` on `#overlay`. On smaller viewports the
+expanded advanced panel sits below the fold; users don't
+realize the overlay is scrollable.
+
+Result: button "highlights" (touch/hover state fires), panel
+opens (invisibly below), user sees nothing change.
+
+Fix: after opening, wait for the max-height CSS transition
+(300ms) to finish, then `scrollIntoView({ block: 'nearest' })`
+on the panel. Panel comes into view; toggle button stays
+above it in scroll position.
+
+**Bug B: Class grid greyed after clicking through modes.**
+
+Diagnosis: `_refreshClassGridForParty()` correctly greys the
+grid when coop mode + no session — but only runs during
+`partyResetUI` which fires when ENTERING coop. Switching AWAY
+from coop never re-ran the check, so inline styles
+(opacity 0.4, pointer-events none) stuck. `renderClassGrid()`
+rebuilds the inner HTML but doesn't touch grid's own inline
+styles.
+
+Fix: `setMode()` now always calls `_refreshClassGridForParty()`
+after mode change. That function is idempotent — non-coop
+modes clear the inline styles.
+
+**Files changed:** `rumble_test.html`, `NOTES.md`.
+
+**Test focus:**
+1. Tap ADVANCED CONTROLS — panel expands AND scrolls into
+   view. Entity count/type/resistances become visible.
+2. Click sequence: sandbox → coop → sandbox → spec. Class
+   grid clickable in all three non-coop states.
+3. Coop mode + no session → grid greyed (unchanged).
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

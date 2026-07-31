@@ -1266,6 +1266,15 @@ function setMode(m) {
     if (m === 'coop') partyResetUI();
   }
   renderClassGrid();
+  // v0.16.88 — Refresh class-grid interactivity after every mode change.
+  // Bug: switching to coop calls partyResetUI → _refreshClassGridForParty
+  // which sets grid opacity 0.4 + pointerEvents 'none'. Switching AWAY
+  // from coop didn't re-run the check, so grid stayed greyed and
+  // unclickable. _refreshClassGridForParty is idempotent — non-coop
+  // modes clear the inline styles.
+  if (typeof _refreshClassGridForParty === 'function') {
+    _refreshClassGridForParty();
+  }
 }
 
 function toggleAdvanced() {
@@ -1273,6 +1282,19 @@ function toggleAdvanced() {
   var panel = document.getElementById('advanced-panel');
   var open = panel.classList.toggle('open');
   btn.classList.toggle('open', open);
+  // v0.16.88 — Scroll the panel into view when opened. Body is
+  // overflow:hidden and the class-selection overlay scrolls with
+  // overflow-y:auto; on smaller viewports the expanded advanced
+  // panel sits below the fold and users don't realize it opened
+  // (button highlights, "nothing appears"). Wait for the max-height
+  // transition to finish, then scroll the panel to the bottom of
+  // the visible area so its contents come into view without hiding
+  // the toggle button.
+  if (open) {
+    setTimeout(function() {
+      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 320);  // matches CSS transition duration (300ms) + small margin
+  }
 }
 
 // Class-themed colors used for accent stripe + hover glow on cards.
