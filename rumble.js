@@ -1111,6 +1111,7 @@ function update(dt) {
   updateCritShockwaves(dt);
   updateScreenShake(dt);
   updateConfuseParticles(dt);
+  updateTendrilParticles(dt);
   updateRegen(dt);
   updateBleedOut(dt);
   updateYellowDiag(dt);
@@ -1301,6 +1302,8 @@ function draw() {
   drawWhiteField();
   // ── Confuse particles ──
   drawConfuseParticles();
+  // ── Tendril particles (ambient vine aura) ──
+  drawTendrilParticles();
   // ── Green burst ──
   drawGreenSlowAuras();
   drawGreenBurst();
@@ -4494,10 +4497,14 @@ function _fireSlingerShot(g) {
 // expanding-ring animation and fadeout.
 function spawnEnemyPulseFX(g, r) {
   if (typeof armorBursts !== 'undefined') {
+    // v0.16.86 — Pulse color reads from entity schema (bestiary.js
+    // pulseColor field). Falls back to legacy red-ish so any entity
+    // that pulses without an override still visibly bursts.
+    var col = (g && typeof g.pulseColor === 'string') ? g.pulseColor : '#aa2030';
     armorBursts.push({
       x: g.x, y: g.y,
       r: 8, maxR: r,
-      color: '#aa2030',
+      color: col,
       age: 0, ttl: 0.6,
       _enemyPulse: true,
     });
@@ -5832,6 +5839,19 @@ function updateEntity(g, dt, bounds) {
   }
   // WITHER: decay shared timer. When it expires, all stacks drop.
   decayWither(g, dt);
+
+  // v0.16.86 — Ambient tendril aura. Any entity with `tendrilAura: true`
+  // in bestiary continuously sprouts tendril particles from its edges.
+  // Passive/lifelike; independent of pulse-attack timing.
+  //   tendrilAura        (bool)   — enables the aura
+  //   tendrilAuraColor   (string) — stroke color; defaults to '#3ea150'
+  //   tendrilAuraRate    (num)    — spawns/sec; defaults to ~4
+  if (g.tendrilAura) {
+    var _tRate = (typeof g.tendrilAuraRate === 'number') ? g.tendrilAuraRate : 4;
+    if (Math.random() < _tRate * dt) {
+      spawnTendrilParticle(g.x, g.y, g.r, g.tendrilAuraColor);
+    }
+  }
   // GREEN FIELD SLOW: decay every frame; refreshed while inside green burst.
   if ((g.greenSlowTimer || 0) > 0) {
     g.greenSlowTimer = Math.max(0, g.greenSlowTimer - dt);
@@ -9618,6 +9638,69 @@ function drawConfuseParticles() {
   });
 }
 
+// ═══════════════════════════════════════════════════
+// TENDRIL PARTICLES — ambient aura (v0.16.86)
+// ═══════════════════════════════════════════════════
+// Entities with `tendrilAura: true` in bestiary continuously sprout
+// small tendrils around their perimeter. Passive/lifelike; independent
+// of pulse-attack timing.
+//
+// Per-particle:
+//   x, y       — origin (near entity edge)
+//   tipX, tipY — final tip position (upward-biased for organic feel)
+//   age, ttl   — lifespan
+//   color      — from entity's tendrilAuraColor (schema)
+// Reach animates 0 → 1 over first third of life; alpha fades over full life.
+
+var tendrilParticles = [];
+
+function spawnTendrilParticle(gx, gy, r, color) {
+  var angle = Math.random() * Math.PI * 2;
+  var bx = gx + Math.cos(angle) * (r * 0.7);
+  var by = gy + Math.sin(angle) * (r * 0.7);
+  var tipDist = 14 + Math.random() * 14;
+  var tipAng = -Math.PI * 0.5 + (Math.random() - 0.5) * 1.0;  // upward-ish
+  var tx = bx + Math.cos(tipAng) * tipDist;
+  var ty = by + Math.sin(tipAng) * tipDist;
+  tendrilParticles.push({
+    x: bx, y: by,
+    tipX: tx, tipY: ty,
+    age: 0,
+    ttl: 1.0 + Math.random() * 0.4,
+    color: color || '#3ea150',
+  });
+}
+
+function updateTendrilParticles(dt) {
+  tendrilParticles = tendrilParticles.filter(function(p) { return p.age < p.ttl; });
+  tendrilParticles.forEach(function(p) { p.age += dt; });
+}
+
+function drawTendrilParticles() {
+  tendrilParticles.forEach(function(p) {
+    var t = p.age / p.ttl;
+    var growPhase = Math.min(1, t * 3);
+    var fadePhase = 1 - t;
+    var alpha = Math.min(growPhase, fadePhase) * 0.75;
+    var reach = growPhase;
+    var tx = p.x + (p.tipX - p.x) * reach;
+    var ty = p.y + (p.tipY - p.y) * reach;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur = 4;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    var midX = (p.x + tx) * 0.5 + (p.tipY - p.y) * 0.2;
+    var midY = (p.y + ty) * 0.5 - Math.abs(p.tipX - p.x) * 0.2;
+    ctx.quadraticCurveTo(midX, midY, tx, ty);
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
 var traps = [];
 var orangeAura = null;
 
@@ -10470,9 +10553,13 @@ function updateArmorBursts(dt) {
 
 function drawArmorBursts() {
   armorBursts.forEach(function(b) {
+    // v0.16.86 — Respect per-burst color if set (spawnEnemyPulseFX reads
+    // g.pulseColor from schema). Falls back to gray for the shared/legacy
+    // armor-burst path.
+    var col = b.color || '#AAAAAA';
     ctx.save();
     ctx.globalAlpha = b.alpha;
-    ctx.strokeStyle = '#AAAAAA'; ctx.shadowColor = '#AAAAAA'; ctx.shadowBlur = 12; ctx.lineWidth = 3;
+    ctx.strokeStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 12; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.stroke();
     ctx.restore();
   });

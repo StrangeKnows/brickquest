@@ -11491,6 +11491,94 @@ fired) is now live.
 
 ---
 
+### v0.16.86 — Creeping vine FX + diag toggle fix + answers
+
+Small polish push responding to a five-item observation from
+Ross. Three code changes, two answers-not-code.
+
+---
+
+**A. Creeping vines pulse color from schema (bestiary.js)**
+
+Previously the AoE pulse ring rendered in a fixed reddish
+tone regardless of entity. Now:
+- `spawnEnemyPulseFX` reads `g.pulseColor` from the entity
+- `drawArmorBursts` respects `b.color` on each burst
+- creeping_vines gets `pulseColor: '#3ea150'` — the vine's
+  pulses now visibly ring in green, matching its identity
+
+Runtime code is entity-agnostic. Any entity with a
+`pulseColor` schema field will pulse that color.
+
+**B. Ambient tendril particles (rumble.js)**
+
+New passive-ambient particle system. Entities with
+`tendrilAura: true` in bestiary continuously sprout small
+tendrils from their perimeter — the vine feels alive even
+when not attacking.
+
+Data-driven:
+- `tendrilAura` (bool) — enables the aura
+- `tendrilAuraColor` (string) — tendril stroke color
+- `tendrilAuraRate` (num) — spawns per second (default 4)
+
+Tendril lifecycle: base at ~70% of entity radius, tip 14-28
+px away with upward bias + slight lateral wobble. Shoots out
+over first third of life (fast grow), then wilts to zero
+alpha over full ~1.2s TTL. Rendered as a quadratic-bezier
+curve with slight sway — organic-looking, not straight-line.
+
+Applied to creeping_vines. Any future plant-like entity gets
+the same effect by opting in via schema.
+
+**C. WS diag toggle tied to wave debug icon (rumble_test.html)**
+
+The purple WS diagnostic box (top-left) used to render
+unconditionally on any page load. Now gated on the same
+control that toggles the wave debug panel:
+- Panel expanded (icon tapped ON) → both diag surfaces visible
+- Panel collapsed (default) → both hidden
+
+One click controls both.
+
+---
+
+**D. Question: "Is there a way to test each entity in battle
+individually?"**
+
+Yes — the ADVANCED PANEL toggle at the bottom of the mode
+select area opens ENTITY COUNT, ENTITY TYPE (dropdown of all
+11 entities), and ENTITY RESISTANCES. Set count to 1 and
+pick any entity from the dropdown.
+
+**E. Question: "More options tab at very bottom of screen —
+functioning?"**
+
+Yes — that's the advanced panel described above.
+
+**F. Design ponder: touch damage rebalance**
+
+Logged on the design table. Currently: most grunts damage on
+contact (goblin, skeleton, shadow_wolf, rot_grub, void_wraith,
+blight_worm). Exceptions: slinger (ranged), creeping_vines
+(pulse), stone_troll and stone_colossus (heavy_melee swing).
+No changes this push — rebalance needs a design direction.
+
+---
+
+**Files changed:** `bestiary.js`, `rumble.js`,
+`rumble_test.html`, `NOTES.md`.
+
+**Test focus:**
+1. Vine pulse is green — spawn creeping_vines, watch pulse ring.
+2. Vine has ambient tendrils — small green tendrils emerge/fade.
+3. Diag panels hide by default — start a waves run; both
+   hidden until you tap the lower-left icon.
+4. Individual entity test — advanced panel → count 1 +
+   creeping_vines → sandbox runs one vine.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

@@ -156,6 +156,17 @@ var ENTITY_REGISTRY = {
     ai: 'stationary', attackPattern: 'pulse',
     pulseCooldown: 2.0, pulseRadius: 90, pulseDmg: 2,
     color: '#2d5c2e', icon: '🌿',
+    // v0.16.86 — Visual identity fields.
+    // pulseColor: color of the expanding AoE ring on each pulse attack
+    //             (rumble.js spawnEnemyPulseFX reads this).
+    // tendrilAura*: passive ambient FX — small tendrils continuously
+    //               sprout around the vine, giving a lifelike feel
+    //               (rumble.js updateEntity spawns; drawTendrilParticles
+    //               renders). Applies to any entity that opts in.
+    pulseColor: '#3ea150',
+    tendrilAura: true,
+    tendrilAuraColor: '#3ea150',
+    tendrilAuraRate: 4,             // spawns per second
     loot: [
       { color: 'green',  chance: 0.15, min: 1, max: 2 },
       { color: 'yellow', chance: 0.10, min: 1, max: 1 },

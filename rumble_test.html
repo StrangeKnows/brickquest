@@ -2814,7 +2814,18 @@ var _wsDiag = {
 };
 
 function _wsDiagOverlay() {
+  // v0.16.86 — Visibility gate. The purple WS diag box is now hidden
+  // by default; it only shows when the lower-left wave-debug icon is
+  // toggled ON (waves-live-debug panel has .expanded class). Same
+  // button controls both diag surfaces — one click reveals or hides
+  // the full debug view.
+  var debugPanel = document.getElementById('waves-live-debug');
+  var shouldShow = debugPanel && debugPanel.classList.contains('expanded');
   var el = document.getElementById('ws-diag');
+  if (!shouldShow) {
+    if (el) el.style.display = 'none';
+    return;
+  }
   if (!el) {
     el = document.createElement('div');
     el.id = 'ws-diag';
@@ -2832,6 +2843,7 @@ function _wsDiagOverlay() {
     ].join(';');
     document.body.appendChild(el);
   }
+  el.style.display = '';
   var stateColor = ({
     'idle': '#888',
     'connecting': '#FFD700',
