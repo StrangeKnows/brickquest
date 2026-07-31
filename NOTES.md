@@ -11632,6 +11632,61 @@ modes clear the inline styles.
 
 ---
 
+### v0.16.89 — Advanced controls: diagnostic instrumentation
+
+> "advance controls still not doing anything. diag time"
+
+v0.16.88's scroll-into-view fix was based on the theory that
+the panel opened but sat below the fold. Ross reports still
+nothing happens on tap — theory was wrong. Per rule #6:
+diagnose before more speculative fixes.
+
+**Two hypotheses, one push tests both:**
+
+**H1: Click event isn't reaching toggleAdvanced (iOS touch-vs-
+click).** Memory rule already documents this pattern from
+waves-debug-icon: iOS Safari with `body { touch-action: none }`
+sometimes skips synthetic clicks on single taps. Same body
+style is in effect in mode-select overlay. If Ross is testing
+on iOS, taps may not fire click events.
+
+**H2: Click reaches toggleAdvanced but the class toggle or CSS
+doesn't take effect.** Would surface via computed styles diff.
+
+**What this push does (no fix, just diagnostic):**
+
+1. Instruments `toggleAdvanced` to log step-by-step to an
+   on-screen `#adv-diag` overlay (top-right, purple-bordered).
+   Shows: btn/panel presence, class before/after toggle,
+   computed maxHeight/display/opacity/visibility, bounding
+   rect. Post-scroll, logs updated rect + maxHeight.
+2. Binds `touchend` on advanced-toggle as parallel to onclick,
+   with `ev.preventDefault()` — same iOS-safety pattern as
+   waves-debug-icon. If H1 is right, touchend will fire on
+   tap even when synthesized click doesn't; user sees the
+   diag panel appear and the toggle work.
+
+**Interpreting results (what Ross should send back):**
+
+- **Diag panel appears on tap, panel opens** → H1 was it.
+  touchend binding fixed it as a side effect of the diagnostic.
+  Next push: remove diag panel, keep touchend binding.
+- **Diag panel appears but panel stays hidden** → H2. The diag
+  will show `maxH: 0px` after `open` class added, telling us
+  the CSS transition isn't taking. Investigate CSS specificity
+  / cascade override.
+- **Diag panel doesn't appear at all** → neither click nor
+  touchend fired. Deeper problem — maybe the button element
+  isn't reached by tap at all (parent pointer-events, overlay
+  above it, z-index). Escalate.
+
+**Files changed:** `rumble_test.html`, `NOTES.md`.
+
+Once we know the cause, real fix ships next push and diag
+comes out.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads

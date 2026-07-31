@@ -1278,24 +1278,93 @@ function setMode(m) {
 }
 
 function toggleAdvanced() {
+  // v0.16.89 diagnostic — surface what's happening step-by-step so we
+  // can see whether click reaches this function, whether class toggle
+  // takes, and what CSS computes. Ross reported "advanced controls
+  // still not doing anything" after v0.16.88's scroll fix; my theory
+  // was wrong. Real data needed.
+  var diag = document.getElementById('adv-diag');
+  if (!diag) {
+    diag = document.createElement('div');
+    diag.id = 'adv-diag';
+    diag.style.cssText = [
+      'position:fixed', 'top:6px', 'right:6px',
+      'background:rgba(20,15,40,0.94)', 'border:1px solid #6644aa',
+      'border-radius:5px', 'color:#e8e0ff',
+      'font-family:ui-monospace,monospace', 'font-size:11px',
+      'padding:6px 8px', 'z-index:99999', 'pointer-events:none',
+      'max-width:320px', 'line-height:1.4',
+      'box-shadow:0 2px 12px rgba(0,0,0,0.5)',
+      'white-space:pre-wrap',
+    ].join(';');
+    document.body.appendChild(diag);
+  }
   var btn = document.getElementById('advanced-toggle');
   var panel = document.getElementById('advanced-panel');
+  var lines = ['[ADV-DIAG ' + new Date().toLocaleTimeString() + ']'];
+  lines.push('btn: ' + (btn ? 'found' : 'MISSING'));
+  lines.push('panel: ' + (panel ? 'found' : 'MISSING'));
+  if (!btn || !panel) {
+    diag.innerHTML = lines.join('\n');
+    return;
+  }
+  var beforeClass = panel.className;
   var open = panel.classList.toggle('open');
   btn.classList.toggle('open', open);
-  // v0.16.88 — Scroll the panel into view when opened. Body is
-  // overflow:hidden and the class-selection overlay scrolls with
-  // overflow-y:auto; on smaller viewports the expanded advanced
-  // panel sits below the fold and users don't realize it opened
-  // (button highlights, "nothing appears"). Wait for the max-height
-  // transition to finish, then scroll the panel to the bottom of
-  // the visible area so its contents come into view without hiding
-  // the toggle button.
+  var afterClass = panel.className;
+  lines.push('before: ' + beforeClass);
+  lines.push('after: ' + afterClass);
+  lines.push('open=' + open);
+  // Computed styles — the real truth
+  try {
+    var cs = window.getComputedStyle(panel);
+    lines.push('maxH: ' + cs.maxHeight);
+    lines.push('display: ' + cs.display);
+    lines.push('opacity: ' + cs.opacity);
+    lines.push('vis: ' + cs.visibility);
+    var pr = panel.getBoundingClientRect();
+    lines.push('rect: ' + Math.round(pr.width) + 'x' + Math.round(pr.height) + ' @ ' + Math.round(pr.top) + ',' + Math.round(pr.left));
+  } catch (e) { lines.push('cs err: ' + e.message); }
+  diag.innerHTML = lines.join('\n');
   if (open) {
     setTimeout(function() {
-      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }, 320);  // matches CSS transition duration (300ms) + small margin
+      try {
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        var cs2 = window.getComputedStyle(panel);
+        var pr2 = panel.getBoundingClientRect();
+        lines.push('post-scroll: rect ' + Math.round(pr2.width) + 'x' + Math.round(pr2.height) + ' @ ' + Math.round(pr2.top) + ',' + Math.round(pr2.left));
+        lines.push('post-scroll: maxH ' + cs2.maxHeight);
+        diag.innerHTML = lines.join('\n');
+      } catch (e) {
+        lines.push('scroll err: ' + e.message);
+        diag.innerHTML = lines.join('\n');
+      }
+    }, 320);
   }
 }
+
+// v0.16.89 — Bind touchend on advanced-toggle as parallel to onclick.
+// Same pattern as waves-debug-icon (memory rule): iOS Safari with
+// touch-action:none body skips synthetic clicks on single taps. If
+// that's the reason Ross sees "nothing happens" on tap, touchend
+// will fire even when click doesn't. Runs after DOM ready.
+(function _bindAdvancedTouch() {
+  function bind() {
+    var btn = document.getElementById('advanced-toggle');
+    if (!btn) { setTimeout(bind, 100); return; }
+    if (btn._touchBound) return;
+    btn._touchBound = true;
+    btn.addEventListener('touchend', function(ev) {
+      ev.preventDefault();
+      toggleAdvanced();
+    }, { passive: false });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bind);
+  } else {
+    bind();
+  }
+})();
 
 // Class-themed colors used for accent stripe + hover glow on cards.
 // Brick color hex (used for pip dots).
