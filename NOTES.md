@@ -11587,6 +11587,164 @@ the seed idea + initial design unpacking so future sessions can pick up
 without starting cold. When an idea is ready to build, move it to a chunk
 in the relevant build's roadmap section.
 
+### Maze Mode — streaming procedural corridor (logged S016 v0.16.86)
+
+**Seed:** Ross at v0.16.86 close:
+
+> "start thinking about another game mode where there are walls
+> procedurally generated, player must find way through maze, with
+> increasingly difficult enemies that can use the terrain to their
+> advantage, long range behind nooks, use current arena setup and
+> draw walls across that will move as player moves toward them,
+> generated as player moves toward them"
+
+Follow-up decisions (same session):
+- Camera model: **test both** — fixed-viewport-with-scrolling-world
+  AND player-follows-arena-with-larger-world. Compare feel.
+- Topology: **hybrid** — mix of corridors (choke points, dead ends,
+  nooks) and open chambers (pillars for cover, room to maneuver).
+- Progression: **endless with increasing difficulty**. No fixed
+  goal; depth = challenge scaling.
+- Economy: deferred. Brick pickup / cheese / etc. behavior can be
+  ironed out when the space itself is proven.
+
+---
+
+**Core reframe.** Same combat physics, same entities, same abilities.
+The SPACE stops being a bounded arena and becomes a maze the player
+moves through. Exploration replaces confrontation as the primary
+verb. Enemies use terrain against the player: ranged campers in
+nooks, melee ambushes at choke points.
+
+---
+
+**Architecture sketch (streaming world):**
+
+- **Chunk-based generation.** World divided into cells (say 200x200
+  px). As player approaches a cell edge, cells beyond that edge are
+  generated. Cells that fall behind the trailing edge despawn. World
+  exists only where the player has been recently.
+- **Chunk templates:** each cell is one of a few weighted templates
+  — corridor (walls channeling movement), chamber (open with pillars),
+  dead-end nook (ambush pocket), junction (multi-exit choice).
+  Weighted-random per chunk; weights shift with depth.
+- **Wall geometry reuses gray-wall system.** Existing arc-wall block
+  system (`_arcWallBlocksAttack`, `_pointInArc`) already handles
+  line-of-sight blocking for ranged and pulse attacks. Maze walls
+  are just gray walls with different placement rules. Zero engine
+  work for LOS/blocking.
+- **Depth counter drives difficulty.** Chunks track depth from
+  origin. Entity spawn tables weight by depth: early = goblin/skeleton,
+  mid = slinger/wolf/knight, deep = colossus/worm/void_wraith, deepest
+  = bosses. Spawn density also scales.
+
+---
+
+**Camera options to prototype and compare:**
+
+**A. Fixed viewport, world scrolls under player.**
+Player stays centered (or slightly offset in movement direction).
+Viewport is the visible arena; world extends beyond. Feels like
+Zelda / classic top-down. Simple math for spawn/despawn. Best fit
+for endless mode.
+
+**B. Player-follows within larger arena.**
+Arena has fixed bounds larger than the visible screen. Camera
+lerps toward player position. Player can see farther in the
+direction they're going. More spatial awareness; less claustrophobic.
+Doesn't extend naturally to endless — is a "floor" model, better
+suited to finite dungeons.
+
+Since the requirement is endless, A is the natural default. B
+worth prototyping for feel comparison, but likely lives as a
+separate mode variant or floor-based interpretation.
+
+---
+
+**Terrain-aware enemy AI (biggest architectural lift):**
+
+Current AIs are terrain-blind — chase, ranged_kite, sentinel all
+navigate ignoring walls. Maze mode needs entities that USE walls.
+Two new AI shapes are natural:
+
+- **Camper** (variant of ranged_kite): find a spot with cover
+  between self and player-approach corridor. Stay there. Fire
+  when line-of-sight opens; retreat behind cover otherwise. Uses
+  the existing arc-wall LOS check to know when to fire.
+- **Stalker** (variant of chase or sentinel): move through the
+  maze via pathfinding, choose approach routes that stay hidden
+  until close. Ambush from adjacent corridor. State machine:
+  patrol → stalk → ambush.
+
+Both are sentinel-shape state machines with different triggers.
+Fits the schema-driven AI pattern from v0.16.84.
+
+Pathfinding: at first, entities can be dumb — attempt to move
+toward player, get blocked by walls, wander until unblocked.
+Real A* pathfinding is a larger add; deferrable.
+
+---
+
+**What already helps (existing systems that carry over):**
+
+- **Bestiary schema.** Creating "maze variants" of entities
+  (`slinger_camper`, `wolf_stalker`, `knight_gatekeeper`) is a
+  data-only add. Reuse behaviors + tune stats + add signature
+  fields for terrain-aware behavior.
+- **Arc-wall block system.** LOS gating for ranged/pulse already
+  respects walls. Free for maze mode.
+- **Per-target AI infrastructure.** Multi-player coop targeting
+  from v0.16.81 works for maze mode too — multiple mirrors moving
+  through the maze together, entities pick nearest.
+- **Sentinel state-machine pattern.** Camper and Stalker AIs
+  slot into the same shape: standoff / commit / recover.
+
+---
+
+**Prototype scope (first push, when ready):**
+
+Small, contained, proof-of-space first:
+
+1. New mode-select card ("MAZE" or "DEPTHS") in rumble_test.html
+2. Basic chunk generator — random rectangular gray walls, no
+   templates yet, just prove walls can spawn/despawn as player
+   moves
+3. One entity type placed at chunk spawns (start with goblin)
+4. Camera option A (fixed viewport, world scrolls)
+5. No terrain-aware AI — entities chase player through walls
+   (dumb, prove space works first)
+6. No streaming despawn yet — just spawn ahead, ignore behind
+
+That's a two-push scope: generator + camera + one entity in
+push one; templates + streaming + terrain AI in push two.
+Only start when sentinel/vine tuning is settled.
+
+---
+
+**Open questions parked (need decisions before build):**
+
+- **Death handling.** Restart from origin? Restart from
+  waypoint? Permadeath run-based? Score-based tracking?
+- **Goal state.** Truly endless (see how deep), or milestones
+  (reach depth N, unlock class variant)?
+- **Waves interplay.** Fifth top-level mode? Or maze IS a waves
+  variant with spatial progression instead of numerical waves?
+- **Coop in maze.** Split-screen? Shared viewport (players
+  can't separate too far)? Follow-camera on host, mirrors
+  restricted to same viewport?
+- **Level generator specifics.** Cell-based or corridor-graph?
+  How much variety per chunk? Aesthetic (dungeon stone vs
+  overgrown vs abstract)?
+
+---
+
+**Naming candidates (for later):**
+
+Maze, Depths, Delve, Descent, Warren, Corridor, Labyrinth,
+Sprawl. None decided. Placeholder: "maze mode."
+
+---
+
 ### White cast redesign — fixer-as-anchor, others-as-pulse (logged S016 v0.16.74)
 
 **Seed:** Ross at v0.16.74 close:
