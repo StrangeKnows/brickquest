@@ -11687,6 +11687,54 @@ comes out.
 
 ---
 
+### v0.16.90 — Advanced controls: deeper diag + force-open
+
+> Ross's v0.16.89 diag screenshot showed:
+> btn/panel found, class toggled correctly, display=block,
+> opacity=1, visibility=visible, maxH transitioned 0→1000,
+> but rect stayed 560x0 (rendered height zero).
+
+**Diagnosis so far:** the panel gets .open, all the "visible"
+CSS properties look right, max-height DOES transition to
+1000px — but rendered height is 0. That means content INSIDE
+the panel is somehow zero-height even though it has real
+children (h3s, buttons, select, resist-grid). Something about
+the layout is compressing the inner content.
+
+**Two possible causes:**
+- Flex-shrink squeezing children when total overlay content
+  exceeds viewport height
+- Some other CSS rule setting height:0 on inner or children
+
+**This push — data + workaround combined:**
+
+Diag now dumps INNER rect + computed style + child count, plus
+PARENT rect + computed style + flex direction + overflow. That
+should show us definitively whether:
+- Inner has non-zero height (parent problem) vs zero (child
+  problem)
+- Parent is flexbox that's compressing children
+- Some sibling is stealing space
+
+**Force-open workaround:** on click, panel gets inline styles
+overriding the CSS approach entirely — `display:block`,
+`maxHeight:none`, `overflow:visible`, `minHeight:200px`, plus
+a dashed purple border so we can see the element even if
+empty. If the panel appears visibly (even empty, with dashed
+outline), we know it was the max-height CSS approach that was
+failing and we can pick a different CSS strategy next push.
+If the panel STILL doesn't appear, the content-sizing issue
+is deeper.
+
+**Files changed:** `rumble_test.html`, `NOTES.md`.
+
+Ross's next report should show the fuller diag AND either
+the panel appearing (with dashed border) or still nothing.
+Either way, the real cause becomes clear and the real fix
+ships next.
+
+---
+
 ## Design Parking Lot
 
 Captured ideas, design provocations, and "ponder while we build" threads
